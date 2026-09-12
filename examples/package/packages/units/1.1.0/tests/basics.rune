@@ -1,0 +1,13 @@
+import std::testing
+import units
+
+fn main() -> i64 {
+    let a = units::kilometres(1.5)
+    testing::equal("kilometres to metres", a.asMetres(), 1500.0)
+    testing::equal("adds", (a + units::metres(500.0)).asKilometres(), 2.0)
+    testing::isTrue("compares", units::miles(1.0) > units::kilometres(1.0))
+    testing::equal("prints in km", units::kilometres(1.5).display(), "1.5 km")
+    testing::equal("prints in m", units::metres(250.0).display(), "250 m")
+    testing::equal("prints in cm", units::centimetres(12.5).display(), "12.5 cm")
+    testing::summary()
+}

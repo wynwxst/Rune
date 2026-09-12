@@ -1,0 +1,294 @@
+// A tour of Rune's syntax. Everything here compiles and runs:
+//
+//     runec -o kitchen_sink examples/kitchen_sink.rune && ./kitchen_sink
+
+import std::io
+import std::math
+import std::process
+
+//===--------------------------------------------------------------------===//
+// Foreign declarations
+//===--------------------------------------------------------------------===//
+
+extern "C" {
+    printf(content: CString, ...) -> i32
+    fn abs(value: i32) -> i32
+}
+
+//===--------------------------------------------------------------------===//
+// Globals, aliases and types
+//===--------------------------------------------------------------------===//
+
+global var counter: i64 = 0
+global GREETING: CString = "hello from Rune"
+
+type Pair = (i64, i64)
+type Predicate = @function(i64) -> bool
+
+struct Point {
+    pub x: f64
+    pub y: f64
+}
+
+struct Wrapper<T> {
+    value: T
+    count: i64 = 0
+}
+
+enum Shape {
+    Empty,
+    Circle(f64),
+    Rect { width: f64, height: f64 },
+}
+
+enum Status {
+    Ok = 0,
+    NotFound = 404,
+}
+
+//===--------------------------------------------------------------------===//
+// Classes, inheritance and reference counting
+//===--------------------------------------------------------------------===//
+
+class Animal {
+    pub name: String
+    var age: i64
+
+    fn init(self, name: String) {
+        self.name = name
+        self.age = 0
+    }
+
+    fn deinit(self) {
+        counter += 1
+    }
+
+    pub fn speak(&self) -> String { "..." }
+
+    pub fn describe(&self) -> String {
+        self.name + " says " + self.speak()
+    }
+}
+
+class Dog : Animal {
+    fn init(self, name: String) { super.init(name) }
+    pub fn speak(&self) -> String { "woof" }
+}
+
+//===--------------------------------------------------------------------===//
+// Marks (traits), binds and operator overloading
+//===--------------------------------------------------------------------===//
+
+mark Show {
+    fn show(&self) -> String
+    fn shout(&self) -> String {
+        self.show() + "!"
+    }
+}
+
+mark Measured: Show {
+    fn size(&self) -> f64
+}
+
+bind Show to Point {
+    fn show(&self) -> String {
+        "(" + self.x.$str() + ", " + self.y.$str() + ")"
+    }
+}
+
+bind Measured to Point {
+    fn size(&self) -> f64 {
+        math::squareRoot(self.x * self.x + self.y * self.y)
+    }
+}
+
+bind<T> Show to Wrapper<T> where T: Show {
+    fn show(&self) -> String {
+        "Wrapper(" + self.value.show() + ")"
+    }
+}
+
+bind operator::add to Point {
+    fn add(&self, rhs: &Point) -> Point {
+        Point { x: self.x + rhs.x, y: self.y + rhs.y }
+    }
+}
+
+bind operator::LeftSquareBracket to Wrapper<i64> {
+    fn index(&self, i: i64) -> i64 {
+        self.value + i
+    }
+}
+
+extend Point {
+    fn scaled(&self, factor: f64) -> Point {
+        Point { x: self.x * factor, y: self.y * factor }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Safety
+//===--------------------------------------------------------------------===//
+
+@unsafe
+fn pokeRaw(target: *var i64, value: i64) {
+    *target = value
+}
+
+@safe("the pointer comes from a live local in this same function")
+fn bumped(start: i64) -> i64 {
+    var slot = start
+    pokeRaw(&var slot as *var i64, start + 1)
+    slot
+}
+
+//===--------------------------------------------------------------------===//
+// Generics and first-order functions
+//===--------------------------------------------------------------------===//
+
+@inline
+pub fn describeAny<T: Show>(value: T) -> String {
+    value.shout()
+}
+
+fn apply(f: Predicate, value: i64) -> bool { f(value) }
+
+fn defaults(base: i64, scale: i64 = 2, label: CString = "x") -> i64 {
+    base * scale
+}
+
+//===--------------------------------------------------------------------===//
+// Control flow
+//===--------------------------------------------------------------------===//
+
+fn classify(n: i64) -> String {
+    match n {
+        0 => "zero",
+        1 | 2 | 3 => "small",
+        4..=9 => "medium",
+        x if x > 1000 => "huge",
+        _ => "large",
+    }
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Empty => 0.0,
+        Shape::Circle(r) => math::PI * r * r,
+        Shape::Rect { width, height } => width * height,
+    }
+}
+
+fn controlFlow(n: i64) -> i64 {
+    var total = 0
+    limit: i64 = 40
+
+    while total < limit {
+        total += n
+        if total % 2 == 0 {
+            continue
+        } elif total > 30 {
+            break
+        } else {
+            counter += 1
+        }
+    }
+
+    outer: loop {
+        for i in 0..10 {
+            if i == 5 {
+                break :outer
+            }
+        }
+    }
+
+    total
+}
+
+fn firstEven(values: [6:i64]) -> i64? {
+    for v in values {
+        if v % 2 == 0 { return v }
+    }
+    nil
+}
+
+//===--------------------------------------------------------------------===//
+// Data structures
+//===--------------------------------------------------------------------===//
+
+fn dataStructures() -> String {
+    arr: [5:i64] = [1, 2, 3, 4, 5]
+    var grid: [3:i64]
+    zeros = [0; 4]
+    first = arr[0]
+
+    tup: (i64, CString, bool) = (1, "two", true)
+    second = tup.1
+
+    p = Point { x: 1.0, y: 2.0 }
+    q = Point { x: 3.0, ..p }
+    sum = p + q
+
+    boxed = Wrapper<Point> { value: p }
+    numeric = Wrapper<i64> { value: 40 }
+    // Wrapper<i64> gets `index` but not `show`: i64 is not bound to Show,
+    // so the `where T: Show` bind above simply does not apply to it.
+
+    add = ||(a: i64, b: i64) -> i64 { a + b }
+    labelled = defaults(base: 10, scale: 3)
+    mixed = defaults(10, label: "y")
+
+    blockValue = {
+        t = 1 + 1
+        t * 2
+    }
+
+    borrowed = &p
+    optional: i64? = nil
+
+    chained = p
+        .scaled(2.0)
+
+    unsafe {
+        raw = &p.x as *f64
+    }
+
+    "first=" + first.$str() +
+        " second=" + second.$str() +
+        " sum=" + sum.show() +
+        " boxed=" + boxed.show() +
+        " indexed=" + numeric[2].$str() +
+        " add=" + add(3, 4).$str() +
+        " labelled=" + labelled.$str() +
+        " mixed=" + mixed.$str() +
+        " block=" + blockValue.$str() +
+        " scaled=" + chained.show() +
+        " size=" + p.size().$str()
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    unsafe { printf("%s\n", GREETING) }
+
+    io::println("classify(7)   = " + classify(7))
+    io::println("area(circle)  = " + area(Shape::Circle(2.0)).$str())
+    io::println("area(rect)    = " + area(Shape::Rect { width: 3.0, height: 4.0 }).$str())
+    io::println("controlFlow   = " + controlFlow(3).$str())
+    io::println("bumped(41)    = " + bumped(41).$str())
+    io::println("status        = " + (Status::NotFound as i64).$str())
+
+    d = Dog("Rex")
+    io::println("dog           = " + describeAny(Point { x: 3.0, y: 4.0 }))
+    io::println("polymorphism  = " + d.describe())
+
+    evens: [6:i64] = [7, 9, 11, 12, 15, 20]
+    io::println("firstEven     = " + firstEven(evens).or(-1).$str())
+
+    isPositive = ||(n: i64) -> bool { n > 0 }
+    io::println("apply         = " + apply(isPositive, 5).$str())
+
+    io::println(dataStructures())
+    io::println("deinit count  = " + counter.$str())
+    0
+}

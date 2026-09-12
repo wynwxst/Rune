@@ -1,0 +1,6 @@
+# A Rune package registry: static files, served by `rune pkg server --serve`
+# or by any web server, or read straight off a disk.
+
+[registry]
+name = "ecosystem"
+created = "2026-09-11T15:14:04Z"

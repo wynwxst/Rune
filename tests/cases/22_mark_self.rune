@@ -1,0 +1,77 @@
+// `Self` in a mark: a constructor requirement, a parameter, and a return.
+// The implementation is chosen by the type the result flows into.
+// EXPECT: dolly says baaaa?
+// EXPECT: sheared
+// EXPECT: dolly says baaaa!
+// EXPECT: 10
+// EXPECT: 11,22
+// EXPECT: zero of i64 is 0
+import std::io
+
+struct Sheep { naked: bool, name: String }
+
+extend Sheep {
+    pub fn isNaked(&self) -> bool { self.naked }
+    pub fn shear(&var self) {
+        (*self).naked = true
+        io::println("sheared")
+    }
+}
+
+mark Animal {
+    fn new(name: String) -> Self
+    fn name(&self) -> String
+    fn noise(&self) -> String
+    fn speak(&self) { io::println(self.name() + " says " + self.noise()) }
+}
+
+bind Animal to Sheep {
+    fn new(name: String) -> Self { Sheep { naked: false, name: name } }
+    fn name(&self) -> String { self.name }
+    fn noise(&self) -> String {
+        if self.isNaked() { "baaaa!" } else { "baaaa?" }
+    }
+}
+
+// `Self` also works as a parameter type, and marks bind to builtins.
+mark Monoid {
+    fn zero() -> Self
+    fn combine(&self, other: Self) -> Self
+}
+
+struct V2 { x: i64, y: i64 }
+
+bind Monoid to V2 {
+    fn zero() -> Self { V2 { x: 0, y: 0 } }
+    fn combine(&self, other: Self) -> Self {
+        V2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+bind Monoid to i64 {
+    fn zero() -> Self { 0 }
+    fn combine(&self, other: Self) -> Self { self + other }
+}
+
+fn total<T: Monoid>(values: [T]) -> T {
+    var acc: T = Monoid::zero()
+    for v in values { acc = acc.combine(v) }
+    acc
+}
+
+fn main() -> i64 {
+    var sheep: Sheep = Animal::new("dolly")
+    sheep.speak()
+    sheep.shear()
+    sheep.speak()
+
+    let ns: [4:i64] = [1, 2, 3, 4]
+    io::println(total(ns).$str())
+    let vs: [2:V2] = [V2 { x: 1, y: 2 }, V2 { x: 10, y: 20 }]
+    let sum = total(vs)
+    io::println(sum.x.$str() + "," + sum.y.$str())
+
+    let z: i64 = Monoid::zero()
+    io::println("zero of i64 is " + z.$str())
+    0
+}

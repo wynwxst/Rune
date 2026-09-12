@@ -1,0 +1,13 @@
+// Nothing in the arguments mentions `T`, so the call site has to say.
+// EXPECT-ERROR: cannot infer type argument 'T'
+import std::mem
+
+class Box {
+    pub tag: i64
+    fn init(self, tag: i64) { self.tag = tag }
+    pub fn width<T>(&self) -> i64 { mem::size_of<T>() as i64 }
+}
+
+fn main() -> i64 {
+    Box(1).width()
+}

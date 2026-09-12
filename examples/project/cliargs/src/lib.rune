@@ -1,0 +1,25 @@
+import std::{io,process}
+fn getLine(source: String, var needle: int) -> String {
+    var buffer = ""
+    while source.$at(needle) != '\n' {
+        buffer += source.$at(needle)
+        needle += 1
+    }
+    buffer
+}
+
+pub fn search(query: String, source: String) -> String? {
+    needle = source.$find(query)
+    if needle != -1 {
+        getLine(source, needle)
+    } else {
+        None
+    }
+}
+
+pub fn ReadFile(path: String) -> String {
+    match io::open(path) {
+        Ok(val) => {val.readAll()},
+        Err(err) => {process::panic(io::describe(err));""}
+    }
+}

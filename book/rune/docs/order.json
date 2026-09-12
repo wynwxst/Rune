@@ -1,0 +1,29 @@
+{
+    "folders":[
+        "Preface",
+        "Installation",
+        "Lexical_Structure",
+        "Basics",
+        "Operators",
+        "Strings_and_Characters",
+        "Arrays_Slices_Tuples",
+        "Pointers_Borrows_Slices",
+        "Types",
+        "Control_Flow",
+        "Functions",
+        "Anonymous_Functions",
+        "Loops_and_While",
+        "Pattern_Matching",
+        "Classes",
+        "Enumerations_and_Structures",
+        "Marks",
+        "Generics"
+    ],
+    "Basics":[
+        "variables.md",
+        "strnum.md"
+    ],
+    "Functions":[
+
+    ]
+}

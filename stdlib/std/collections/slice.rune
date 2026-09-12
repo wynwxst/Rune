@@ -1,0 +1,275 @@
+// Arrays and slices: what you can do with a run of values you did not
+// allocate.
+//
+// An array `[5:i64]` has its length in its type; a slice `[i64]` carries the
+// length alongside a pointer. An array converts to a slice on its own, so
+// every function here takes a slice and works for both:
+//
+//     let scores: [4:i64] = [3, 1, 4, 1]
+//     slice::maximumBy(scores, ||(a: i64, b: i64) -> bool { a < b })
+//
+// The compiler provides `$length` and `$isEmpty` on both, and `values[a..b]`
+// slices one. Everything else lives here.
+//
+// Nothing in this module allocates except where it says so in the return type:
+// a function handing back a `Vector` made one, and a function handing back an
+// `Option` did not.
+
+import std::collections::vector
+import std::io
+
+//===--------------------------------------------------------------------===//
+// Reading
+//===--------------------------------------------------------------------===//
+
+/// The element at `index`, or nothing when there is no such element.
+///
+/// `values[i]` is the direct form and aborts when the index is out of range at
+/// `--safety full`. This is the form to reach for when the index came from
+/// somewhere you do not control.
+pub fn at<T>(values: [T], index: i64) -> T? {
+    if index < 0 || index >= values.$length() { return nil }
+    values[index]
+}
+
+/// The first element, or nothing when empty.
+pub fn first<T>(values: [T]) -> T? { at(values, 0) }
+
+/// The last element, or nothing when empty.
+pub fn last<T>(values: [T]) -> T? { at(values, values.$length() - 1) }
+
+//===--------------------------------------------------------------------===//
+// Searching
+//
+// These take a predicate rather than a value to compare against, because two
+// values of an arbitrary `T` cannot be compared without knowing something
+// about `T`. The `Display`-based forms below cover the common case.
+//===--------------------------------------------------------------------===//
+
+/// The index of the first element `matches` says yes to, or nothing.
+pub fn indexWhere<T>(values: [T], matches: @function(T) -> bool) -> i64? {
+    var i = 0
+    while i < values.$length() {
+        if matches(values[i]) { return i }
+        i += 1
+    }
+    nil
+}
+
+/// The first element `matches` says yes to, or nothing.
+pub fn firstWhere<T>(values: [T], matches: @function(T) -> bool) -> T? {
+    match indexWhere(values, matches) {
+        Some(i) => values[i],
+        None => nil,
+    }
+}
+
+/// True when any element matches.
+pub fn anyOf<T>(values: [T], matches: @function(T) -> bool) -> bool {
+    indexWhere(values, matches).hasValue()
+}
+
+/// True when every element matches. Vacuously true when empty.
+pub fn allOf<T>(values: [T], matches: @function(T) -> bool) -> bool {
+    var i = 0
+    while i < values.$length() {
+        if !matches(values[i]) { return false }
+        i += 1
+    }
+    true
+}
+
+/// How many elements match.
+pub fn countWhere<T>(values: [T], matches: @function(T) -> bool) -> i64 {
+    var n = 0
+    var i = 0
+    while i < values.$length() {
+        if matches(values[i]) { n += 1 }
+        i += 1
+    }
+    n
+}
+
+/// The index of the first element that prints the same as `wanted`.
+///
+/// Comparison is by rendering, so a type only has to be bound to `Display` to
+/// be searchable — there is no separate equality bound to satisfy, and every
+/// builtin renders exactly.
+pub fn indexOf<T: io::Display>(values: [T], wanted: T) -> i64? {
+    let target = wanted.display()
+    var i = 0
+    while i < values.$length() {
+        if values[i].display() == target { return i }
+        i += 1
+    }
+    nil
+}
+
+/// True when some element prints the same as `wanted`.
+pub fn contains<T: io::Display>(values: [T], wanted: T) -> bool {
+    indexOf(values, wanted).hasValue()
+}
+
+//===--------------------------------------------------------------------===//
+// Extremes and folding
+//===--------------------------------------------------------------------===//
+
+/// The smallest element by `less`, or nothing when empty.
+///
+///     slice::minimumBy(scores, ||(a: i64, b: i64) -> bool { a < b })
+pub fn minimumBy<T>(values: [T], less: @function(T, T) -> bool) -> T? {
+    if values.$isEmpty() { return nil }
+    var best = values[0]
+    var i = 1
+    while i < values.$length() {
+        if less(values[i], best) { best = values[i] }
+        i += 1
+    }
+    best
+}
+
+/// The largest element by `less`, or nothing when empty.
+pub fn maximumBy<T>(values: [T], less: @function(T, T) -> bool) -> T? {
+    if values.$isEmpty() { return nil }
+    var best = values[0]
+    var i = 1
+    while i < values.$length() {
+        if less(best, values[i]) { best = values[i] }
+        i += 1
+    }
+    best
+}
+
+/// Combines every element into one, left to right.
+///
+///     let total = slice::fold(scores, 0, ||(acc: i64, n: i64) -> i64 { acc + n })
+pub fn fold<T, A>(values: [T], start: A, step: @function(A, T) -> A) -> A {
+    var acc = start
+    var i = 0
+    while i < values.$length() {
+        acc = step(acc, values[i])
+        i += 1
+    }
+    acc
+}
+
+//===--------------------------------------------------------------------===//
+// Producing
+//
+// These allocate, which is why each says `Vector` in its return type: a slice
+// has nowhere of its own to put a result.
+//===--------------------------------------------------------------------===//
+
+/// Every element, in a vector of its own.
+pub fn toVector<T>(values: [T]) -> vector::Vector<T> {
+    vector::from(values)
+}
+
+/// Every element in the opposite order.
+pub fn reversed<T>(values: [T]) -> vector::Vector<T> {
+    let out = vector::Vector<T>()
+    out.reserve(values.$length())
+    var i = values.$length() - 1
+    while i >= 0 {
+        out.push(values[i])
+        i -= 1
+    }
+    out
+}
+
+/// Every element `keep` says yes to, in order.
+pub fn filtered<T>(values: [T], keep: @function(T) -> bool) -> vector::Vector<T> {
+    let out = vector::Vector<T>()
+    var i = 0
+    while i < values.$length() {
+        if keep(values[i]) { out.push(values[i]) }
+        i += 1
+    }
+    out
+}
+
+/// Sorted by `less`, leaving the original untouched.
+///
+/// This is an insertion sort: it is stable, it is linear on input that is
+/// already ordered, and it is quadratic on input that is not. For the sizes a
+/// slice usually holds that is the right trade; sort a `Vector` you built
+/// yourself if it is not.
+pub fn sortedBy<T>(values: [T], less: @function(T, T) -> bool) -> vector::Vector<T> {
+    let out = vector::Vector<T>()
+    out.reserve(values.$length())
+    var i = 0
+    while i < values.$length() {
+        let value = values[i]
+        // Walk back over everything that should come after `value`.
+        var j = out.length()
+        out.push(value)
+        while j > 0 {
+            match out.at(j - 1) {
+                Some(prev) => {
+                    if !less(value, prev) { break }
+                    out.set(j, prev)
+                    out.set(j - 1, value)
+                    j -= 1
+                }
+                None => break,
+            }
+        }
+        i += 1
+    }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Iteration
+//
+// `for value in values` works on a slice without any of this — the loop knows
+// arrays and slices natively. What this adds is the `std::iter` adaptors:
+// `map`, `filter` and `zip` arrive through the `Iterator` mark, and a mark
+// cannot be bound to a builtin type, so the cursor is what carries them.
+//===--------------------------------------------------------------------===//
+
+/// A cursor over a slice.
+///
+/// It holds the slice, not a copy of the values, so it stays valid exactly as
+/// long as whatever the slice points at does.
+pub struct SliceIter<T> {
+    source: [T]
+    index: i64
+}
+
+bind<T> Iterator to SliceIter<T> {
+    type Item = T
+    fn next(&var self) -> T? {
+        if self.index >= self.source.$length() { return nil }
+        let value = self.source[self.index]
+        self.index += 1
+        value
+    }
+}
+
+/// A cursor at the first element, so the `std::iter` adaptors can be chained.
+///
+///     for n in slice::iterate(scores).map(||(n: i64) -> i64 { n * 2 }) { ... }
+///
+/// A plain `for n in scores` needs none of this.
+pub fn iterate<T>(values: [T]) -> SliceIter<T> {
+    SliceIter<T> { source: values, index: 0 }
+}
+
+//===--------------------------------------------------------------------===//
+// Rendering
+//===--------------------------------------------------------------------===//
+
+/// Every element rendered and joined with `separator` between them.
+///
+///     slice::join(["a", "b", "c"], ", ")      // "a, b, c"
+pub fn join<T: io::Display>(values: [T], separator: String) -> String {
+    var out = ""
+    var i = 0
+    while i < values.$length() {
+        if i > 0 { out += separator }
+        out += values[i].display()
+        i += 1
+    }
+    out
+}

@@ -1,0 +1,81 @@
+// The Rune side of the boundary.
+//
+// An `extern "C"` block declares what exists on the other side. Nothing is
+// generated and nothing is marshalled: Rune's scalars *are* C's scalars, and a
+// struct of them has the same layout C gives it.
+
+import std::io
+
+/// Two doubles, laid out exactly as the C `shim_Point` is.
+pub struct Point { x: f64, y: f64 }
+
+extern "C" {
+    // A struct crosses as a pointer. Passing one by value is not portable:
+    // Windows x64 puts an aggregate in a register only at 1, 2, 4 or 8 bytes
+    // and passes anything else indirectly, so a `Point` would be misread.
+    fn shim_length_sq(p: *Point) -> f64
+    fn shim_scale(p: *Point, k: f64, out: *var Point)
+    fn shim_sum(values: *i64, count: i64) -> i64
+    fn shim_divmod(a: i64, b: i64, quotient: *var i64, remainder: *var i64)
+    // `@cfunction` is a bare C function pointer. `@function` would be a Rune
+    // closure — two words, one of them an environment C has nowhere to put.
+    fn shim_apply(f: @cfunction(i64) -> i64, x: i64, times: i64) -> i64
+    fn shim_name() -> CString
+    fn shim_length(text: CString) -> u64
+}
+
+/// `@safe` records why a foreign call needs no `unsafe` at each use: the
+/// reason is written once, beside the function that knows it.
+@safe("the shim is total over every value these wrappers accept")
+pub fn lengthSquared(p: Point) -> f64 {
+    unsafe { shim_length_sq(&p as *Point) }
+}
+
+/// The wrapper keeps the pointers inside it, so callers see an ordinary
+/// function that takes a `Point` and returns one.
+pub fn scale(p: Point, factor: f64) -> Point {
+    var out = Point { x: 0.0, y: 0.0 }
+    unsafe { shim_scale(&p as *Point, factor, &var out as *var Point) }
+    out
+}
+
+/// A slice hands C a pointer and a count — the two halves C expects.
+pub fn sum(values: [i64]) -> i64 {
+    if values.$isEmpty() { return 0 }
+    unsafe { shim_sum(&values[0] as *i64, values.$length() as i64) }
+}
+
+/// C returns two results the only way it can: by writing through pointers.
+/// `&var x as *var i64` is how a Rune variable's address becomes one.
+pub fn divideWithRemainder(a: i64, b: i64) -> (i64, i64) {
+    var quotient: i64 = 0
+    var remainder: i64 = 0
+    unsafe {
+        shim_divmod(a, b, &var quotient as *var i64, &var remainder as *var i64)
+    }
+    (quotient, remainder)
+}
+
+/// A top-level `fn` has no captured state, so its address alone is a valid C
+/// function pointer and it converts where one is wanted.
+pub fn applyTimes(f: @cfunction(i64) -> i64, start: i64, times: i64) -> i64 {
+    unsafe { shim_apply(f, start, times) }
+}
+
+/// `CString` is a borrowed pointer to NUL-terminated bytes. `.$str()` copies
+/// it into a Rune `String`, which owns its own storage.
+@safe("the shim returns a string literal, which outlives every caller")
+pub fn shimName() -> String { shim_name().$str() }
+
+/// Going the other way: a Rune `String` is a counted buffer, so C gets its
+/// `.$cstr()` view — valid for the duration of the call and no longer.
+pub fn cLength(text: String) -> u64 { unsafe { shim_length(text.$cstr()) } }
+
+/// `@export` fixes the symbol name so C can find it. This one is called by
+/// `shim_apply` above, through the pointer `applyTimes` hands over.
+@export("ffi_triple")
+pub fn triple(x: i64) -> i64 { x * 3 }
+
+pub fn describe() {
+    io::println("linked against " + shimName())
+}

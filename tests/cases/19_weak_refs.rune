@@ -1,0 +1,96 @@
+// A weak field does not keep its target alive and reads as empty afterwards,
+// so a cycle built through one is fully destroyed. The harness fails the case
+// if anything is still live at exit.
+// EXPECT: parent of child = Ada
+// EXPECT: destroyed both = true
+// EXPECT: while alive = Dee
+// EXPECT: after release = (gone)
+// EXPECT: chain = 0 1 2 3
+// A doubly-linked list; `weak prev` is right, but `next` still closes it,
+// so it is compiled below `full`.
+// SAFETY: minimal
+import std::io
+import std::process
+
+global var destroyed: i64 = 0
+
+class Parent {
+    pub name: String
+    pub child: Child?
+    fn init(self, name: String) { self.name = name }
+    fn deinit(self) { destroyed += 1 }
+}
+
+class Child {
+    pub name: String
+    weak parent: Parent
+    fn init(self, name: String) { self.name = name }
+    fn deinit(self) { destroyed += 1 }
+}
+
+class Node {
+    pub value: i64
+    pub next: Node?
+    weak prev: Node
+    fn init(self, value: i64) { self.value = value }
+}
+
+fn parentName(c: Child) -> String {
+    match c.parent {
+        Some(p) => p.name,
+        None => "(gone)",
+    }
+}
+
+fn buildChain(count: i64) -> Node {
+    let head = Node(0)
+    var tail = head
+    for i in 1..count {
+        let node = Node(i)
+        tail.next = node
+        node.prev = tail
+        tail = node
+    }
+    head
+}
+
+fn walk(head: Node) -> String {
+    var out = ""
+    var current: Node? = head
+    loop {
+        match current {
+            Some(n) => {
+                out += n.value.$str()
+                current = n.next
+                match current {
+                    Some(x) => out += " ",
+                    None => out += "",
+                }
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+fn main() -> i64 {
+    {
+        let parent = Parent("Ada")
+        let child = Child("Bea")
+        parent.child = child
+        child.parent = parent
+        io::println("parent of child = " + parentName(child))
+    }
+    io::println("destroyed both = " + (destroyed == 2).$str())
+
+    let orphan = Child("Cal")
+    {
+        let temporary = Parent("Dee")
+        orphan.parent = temporary
+        io::println("while alive = " + parentName(orphan))
+    }
+    io::println("after release = " + parentName(orphan))
+
+    io::println("chain = " + walk(buildChain(4)))
+    0
+}

@@ -1,0 +1,114 @@
+// std::fmt — what a `format!` placeholder expands into.
+//
+// The macro parses the format string at compile time and emits one call from
+// this module per `{...}`. Nothing here is only for the macro's use, though:
+// each function is the plain answer to a question the macro happens to ask.
+
+import std::io
+
+extern "C" {
+    fn rune_string_from_f64_fixed(value: f64, places: i64) -> String
+}
+
+/// The text a value shows as. `format!("{}", x)` is this.
+///
+/// Every type that can be printed can be formatted, because both go through
+/// `io::Display` — so a type gains `{}` by being bound to it, and nothing else.
+pub fn show<T: io::Display>(value: T) -> String { value.display() }
+
+/// `{:.N}` — exactly `places` digits after the point, rounded.
+///
+///     fmt::fixed(3.14159, 2)   // "3.14"
+///     fmt::fixed(2.0, 3)       // "2.000"
+@safe("the runtime bounds the buffer and clamps the places asked for")
+pub fn fixed(value: f64, places: i64) -> String {
+    rune_string_from_f64_fixed(value, places)
+}
+
+/// `{:x}`, `{:b}`, `{:o}` — the digits of `value` in `base`.
+///
+/// `upper` picks `A`-`F` over `a`-`f`; `prefix` adds the `0x`, `0b` or `0o`
+/// that `{:#x}` asks for. A negative number keeps its sign rather than being
+/// shown as its two's complement, which is what a reader means by "-1 in hex".
+///
+///     fmt::radix(255, 16, false, false)   // "ff"
+///     fmt::radix(255, 16, true, true)     // "0xFF"
+pub fn radix(value: i64, base: i64, upper: bool, prefix: bool) -> String {
+    if base < 2 || base > 36 { return value.$str() }
+
+    let digits = if upper { "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" }
+                 else { "0123456789abcdefghijklmnopqrstuvwxyz" }
+
+    let negative = value < 0
+    // The magnitude is counted in `u64`, because the magnitude of the most
+    // negative `i64` is one larger than the largest positive one.
+    var n = if negative { ((0 - (value + 1)) as u64) + 1 } else { value as u64 }
+    let step = base as u64
+
+    var out = ""
+    if n == 0 as u64 {
+        out = "0"
+    } else {
+        while n > 0 as u64 {
+            let d = (n % step) as i64
+            out = digits.$substring(d, d + 1) + out
+            n = n / step
+        }
+    }
+
+    if prefix {
+        if base == 16 { out = "0x" + out }
+        else if base == 8 { out = "0o" + out }
+        else if base == 2 { out = "0b" + out }
+    }
+    if negative { out = "-" + out }
+    out
+}
+
+/// `{:+}` — a leading `+` on anything that has no sign of its own.
+pub fn plus(text: String) -> String {
+    if text.$isEmpty() { return "+" }
+    if text.$substring(0, 1) == "-" { return text }
+    "+" + text
+}
+
+/// `{:>8}`, `{:<8}`, `{:^8}`, `{:*>8}` — `text` widened to `width` with
+/// `fill`, held to whichever side `align` names.
+///
+/// Width counts characters, not bytes, so a padded column of accented text
+/// lines up. Text already at least that wide is returned untouched: padding
+/// only ever adds.
+pub fn pad(text: String, width: i64, align: Character, fill: Character) -> String {
+    let have = text.$charCount()
+    if have >= width { return text }
+
+    let short = width - have
+    let unit = fill.$str()
+    if align == '<' { return text + unit.$repeat(short) }
+    if align == '^' {
+        let left = short / 2
+        return unit.$repeat(left) + text + unit.$repeat(short - left)
+    }
+    // `>` and the default. Zeros go *inside* whatever announces the number —
+    // its sign, and the `0x` of `{:#06x}` — because `000xff` is not a number
+    // and `0x00ff` is. Anything else pads in front as usual.
+    if fill == '0' {
+        var head = 0
+        let bytes = text.$length()
+        if bytes > head {
+            let first = text.$substring(head, head + 1)
+            if first == "-" || first == "+" { head += 1 }
+        }
+        if bytes >= head + 2 && text.$substring(head, head + 1) == "0" {
+            let tag = text.$substring(head + 1, head + 2)
+            if tag == "x" || tag == "X" || tag == "b" || tag == "o" {
+                head += 2
+            }
+        }
+        if head > 0 {
+            return text.$substring(0, head) + unit.$repeat(short) +
+                   text.$substring(head, bytes)
+        }
+    }
+    unit.$repeat(short) + text
+}

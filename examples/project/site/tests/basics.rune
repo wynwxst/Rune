@@ -1,0 +1,27 @@
+// A test file is an ordinary program: it makes checks and hands the
+// tally back from `main`. `rune test` builds and runs each one.
+import std::testing
+import std::reflect
+import site::Bind
+import site::config::{config,Config}
+
+fn main() -> i64 {
+    config = Config {
+        port: 8080,
+        address: "127.0.0.1",
+        debug: true
+    }
+    var b: Bind::Bound
+    bres = Bind::bindToAddress()
+    testing::isTrue("Bound to address",bres.isOk())
+    match bres {
+        Ok(bound) => {
+            b = bound
+        },
+        Err(e) => {
+            std::io::println(reflect::describe(e))
+        }
+    }
+    testing::isTrue("Listen on 127.0.0.1:8080",Bind::Listen(b))
+    testing::summary()
+}

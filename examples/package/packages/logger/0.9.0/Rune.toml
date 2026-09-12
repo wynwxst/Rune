@@ -1,0 +1,12 @@
+[package]
+name = "logger"
+version = "0.9.0"
+edition = "2025"
+description = "A small leveled logger: a prefix, a threshold, and a count of what got through"
+authors = ["The Rune examples"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]

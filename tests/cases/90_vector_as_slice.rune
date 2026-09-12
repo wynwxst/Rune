@@ -1,0 +1,45 @@
+// A vector viewed as a slice: no copy, every slice API and pattern applies.
+import std::io
+import std::collections::vector
+import std::collections::slice
+
+fn total(values: [i64]) -> i64 {
+    var t = 0
+    for v in values { t += v }
+    t
+}
+
+fn main() -> i64 {
+    var v = vector::Vector<i64>()
+    v.push(3)
+    v.push(4)
+    v.push(5)
+    let view = v.asSlice()
+    io::println(view.$length())
+    io::println(total(view))
+    io::println(view[1])
+    match view {
+        [first, .., last] => io::println(first + last)
+        _ => io::println("short")
+    }
+    // Writes through the vector are visible through the view.
+    v[1] = 40
+    io::println(total(view))
+    let empty = vector::Vector<String>()
+    io::println(empty.asSlice().$length())
+    var names = vector::Vector<String>()
+    names.push("ada")
+    names.push("grace")
+    for n in names.asSlice() { io::println(n) }
+    io::println(slice::join(names.asSlice(), ", "))
+    0
+}
+// EXPECT: 3
+// EXPECT: 12
+// EXPECT: 4
+// EXPECT: 8
+// EXPECT: 48
+// EXPECT: 0
+// EXPECT: ada
+// EXPECT: grace
+// EXPECT: ada, grace

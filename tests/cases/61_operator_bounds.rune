@@ -1,0 +1,39 @@
+// An `operator::` bound asks whether the operator *works* on the type, not
+// whether someone wrote it out. A builtin type satisfies one without a
+// `bind`, because `3 < 9` needs nobody's permission.
+// EXPECT: 9 2.5 z cd
+// EXPECT: true false true
+// EXPECT: 7 ab
+// EXPECT: -5 -2.5
+// EXPECT: 8 16
+// EXPECT: 500 9
+import std::io
+
+fn maxOf<T: operator::cmp>(a: T, b: T) -> T { if a > b { a } else { b } }
+fn same<T: operator::eq>(a: T, b: T) -> bool { a == b }
+fn add2<T: operator::add>(a: T, b: T) -> T { a + b }
+fn negate<T: operator::neg>(v: T) -> T { -v }
+fn masked<T: operator::bitand>(a: T, b: T) -> T { a & b }
+fn shifted<T: operator::shl>(a: T, b: T) -> T { a << b }
+
+/// A type that does write it out is found the same way.
+struct Money { cents: i64 }
+bind operator::cmp to Money {
+    fn cmp(&self, other: Money) -> i64 {
+        if self.cents < other.cents { return -1 }
+        if self.cents > other.cents { return 1 }
+        0
+    }
+}
+
+fn main() -> i64 {
+    println!("{} {} {} {}", maxOf(3, 9), maxOf(2.5, 1.5), maxOf('a', 'z'),
+             maxOf("ab", "cd"))
+    println!("{} {} {}", same(1, 1), same(true, false), same("x", "x"))
+    println!("{} {}", add2(3, 4), add2("a", "b"))
+    println!("{} {}", negate(5), negate(2.5))
+    println!("{} {}", masked(12, 10), shifted(1, 4))
+    println!("{} {}", maxOf(Money { cents: 500 }, Money { cents: 250 }).cents,
+             maxOf(3, 9))
+    0
+}

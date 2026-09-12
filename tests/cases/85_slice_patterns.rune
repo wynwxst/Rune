@@ -1,0 +1,88 @@
+// `[a, b, c]` takes an array or a slice apart element by element; `..`
+// stands for a run in the middle, and `..rest` binds that run as a slice.
+// A fixed array with the right count is irrefutable, so it works in `let`
+// and `for`; a slice is matched by length.
+// EXPECT: 6
+// EXPECT: 6
+// EXPECT: 1
+// EXPECT: 2
+// EXPECT: empty
+// EXPECT: one: 7
+// EXPECT: two: 7 8
+// EXPECT: many: 1..3
+// EXPECT: 10
+// EXPECT: going north
+// EXPECT: saying 2 words
+// EXPECT: ends with end
+// EXPECT: unknown
+// EXPECT: 12
+// EXPECT: 34
+// EXPECT: starts with 1, then 2
+// EXPECT: last two: 8 9
+
+import std::io
+
+fn describe(xs: [i64]) -> String {
+    match xs {
+        [] => "empty",
+        [x] => "one: " + x.$str(),
+        [a, b] => "two: " + a.$str() + " " + b.$str(),
+        [first, .., last] => "many: " + first.$str() + ".." + last.$str(),
+    }
+}
+
+fn sum(xs: [i64]) -> i64 {
+    match xs {
+        [] => 0,
+        [head, ..tail] => head + sum(tail),
+    }
+}
+
+fn command(words: [String]) -> String {
+    match words {
+        ["go", dir] => "going " + dir,
+        ["say", ..rest] => "saying " + rest.$length().$str() + " words",
+        [.., "end"] => "ends with end",
+        _ => "unknown",
+    }
+}
+
+fn main() -> i64 {
+    let xs: [3:i64] = [1, 2, 3]
+    match xs {
+        [a, b, c] => io::println(a + b + c),
+    }
+    let [p, q, r] = xs
+    io::println(p * q * r)
+    let [head, ..tail] = xs
+    io::println(head)
+    io::println(tail.$length())
+
+    let empty: [0:i64] = []
+    io::println(describe(empty))
+    io::println(describe([7]))
+    io::println(describe([7, 8]))
+    io::println(describe(xs))
+    io::println(sum([1, 2, 3, 4]))
+
+    let words: [2:String] = ["go", "north"]
+    io::println(command(words))
+    let more: [3:String] = ["say", "a", "b"]
+    io::println(command(more))
+    let end: [2:String] = ["x", "end"]
+    io::println(command(end))
+    let odd: [1:String] = ["?"]
+    io::println(command(odd))
+
+    let pairs: [2:[2:i64]] = [[1, 2], [3, 4]]
+    for [a, b] in pairs { io::println(a * 10 + b) }
+
+    if xs is [1, ..rest] {
+        io::println("starts with 1, then " + rest.$length().$str())
+    }
+    let long: [4:i64] = [6, 7, 8, 9]
+    if long is [_, .., a, b] {
+        io::println("last two: " + a.$str() + " " + b.$str())
+    }
+    0
+}

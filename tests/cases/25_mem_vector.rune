@@ -1,0 +1,51 @@
+// std::mem, and the vector built on it. The counts at the end are the point:
+// a container holding reference-counted values must balance them itself.
+// EXPECT: size 8 align 8
+// EXPECT: handle 42
+// EXPECT: shared 7 7
+// EXPECT: len 10 cap 16
+// EXPECT: at3 9 last 81
+// EXPECT: pop 81 len 9
+// EXPECT: set 99 missing false
+// EXPECT: names 3 grace
+// EXPECT: popped edsger
+// EXPECT: balanced true
+import std::io
+import std::mem
+import std::process
+import std::collections::vector
+
+fn main() -> i64 {
+    io::println("size " + mem::size_of<i64>().$str() +
+                " align " + mem::align_of<i64>().$str())
+
+    var h = mem::Handle<i64>(41)
+    h.set(h.get() + 1)
+    io::println("handle " + h.get().$str())
+
+    // A handle is a class: two names, one value.
+    let a = mem::of(7)
+    let b = a
+    io::println("shared " + a.get().$str() + " " + b.get().$str())
+
+    var v = vector::Vector<i64>()
+    var i = 0
+    while i < 10 { v.push(i * i); i += 1 }
+    io::println("len " + v.length().$str() + " cap " + v.capacityOf().$str())
+    io::println("at3 " + v.get(3).$str() + " last " + v.last().unwrap().$str())
+    io::println("pop " + v.pop().unwrap().$str() + " len " + v.length().$str())
+    v.set(0, 99)
+    io::println("set " + v.get(0).$str() +
+                " missing " + v.at(100).hasValue().$str())
+
+    let before = process::liveObjectCount()
+    {
+        var names = vector::from(["ada", "grace", "alan"])
+        io::println("names " + names.length().$str() + " " + names.get(1))
+        names.push("edsger")
+        io::println("popped " + names.pop().unwrap())
+    }
+    let after = process::liveObjectCount()
+    io::println("balanced " + (before == after).$str())
+    0
+}

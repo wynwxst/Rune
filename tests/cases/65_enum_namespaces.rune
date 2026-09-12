@@ -1,0 +1,36 @@
+// Two enums may claim the same variant name, and so may a binding. A bare
+// mention is then ambiguous; qualifying it, or matching on a value whose type
+// says which enum is meant, is not.
+// EXPECT: 42
+// EXPECT: car wheel
+// EXPECT: ship wheel
+// EXPECT: bare Body still works
+// EXPECT: 7
+import std::io
+
+enum Car  { Body, Wheel, Door }
+enum Ship { Hull, Wheel, Sail }
+
+global Wheel: i64 = 42
+fn Door() -> i64 { 7 }
+
+fn describe(c: Car) -> String {
+    match c {
+        Wheel => "car wheel",
+        Body  => "car body",
+        Door  => "car door",
+    }
+}
+
+fn main() -> i64 {
+    io::println(Wheel.$str())
+    io::println(describe(Car::Wheel))
+    let s: Ship = Ship::Wheel
+    match s {
+        Wheel => io::println("ship wheel"),
+        _     => io::println("other"),
+    }
+    if Body == Car::Body { io::println("bare Body still works") }
+    io::println(Door().$str())
+    0
+}

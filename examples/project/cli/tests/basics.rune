@@ -1,0 +1,19 @@
+// A test file is an ordinary program: it makes checks and hands the
+// tally back from `main`. `rune test` builds and runs each one.
+import std::testing
+import std::collections::vector
+import std::io
+import cli::*
+
+@argument("name",0)
+pub fn name(arg: vector::Vector<String>){
+    io::println(arg.isEmpty())
+    //io::println(arg.length().$str())
+    io::println("Hello " + arg.at(2).unwrap())
+}
+
+fn main() -> i64 {
+    //cli::printArgs()
+    cli::run()
+    0
+}

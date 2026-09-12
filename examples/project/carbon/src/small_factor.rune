@@ -1,0 +1,38 @@
+@type(Executable)
+@link("m")
+
+extern "C" {
+    fn sqrt(num: f64) -> f64
+}
+// Returns the smallest factor of `n` > 1, and whether `n` itself is prime.
+@unsafe
+fn SmallestFactor(n: i32) -> (i32, bool) {
+  let limit: i32 = sqrt(num: n as f64) as i32;
+  var i: i32 = 2;
+  
+  while (i <= limit) {
+    let remainder: i32 = n % i;
+    if (remainder == 0) {
+      println!("{0} is a factor of {1}", i, n);
+      return (i, false)
+    }
+    if (i == 2) {
+      i = 3;
+    } else {
+      // Skip even numbers once past 2.
+      i += 2;
+    }
+  }
+  return (n, true)
+}
+
+@unsafe
+fn main() -> i64 {
+    let (val, res) = SmallestFactor(192940)
+    if !res {
+        println!("SmallestFactor({0}) = {1}",192940,val)
+    } else {
+        println!("It's it's own smallest factor!")
+    }
+    0
+}

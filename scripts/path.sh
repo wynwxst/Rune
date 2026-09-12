@@ -1,0 +1,1 @@
+export PATH="$PATH:/Users/dusk/Documents/Rune/build-release/bin/"

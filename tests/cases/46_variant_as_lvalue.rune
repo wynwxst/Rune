@@ -1,0 +1,41 @@
+// An enum variant used as a value is an rvalue with no storage of its own.
+// Borrowing one — passing it to a `&Self` parameter, which is what an operator
+// overload takes — has to materialise it first.
+//
+// This only showed up once the enum carried a payload somewhere: a plain
+// tagged enum lowers to an integer and never reached the borrowing path.
+// EXPECT: A == A: true
+// EXPECT: A == NIL: false
+// EXPECT: negated: not NIL
+// EXPECT: through a call: true
+// EXPECT: payload variants compare by tag: true
+import std::io
+
+pub enum V { A, B, ARR { content: [Any] }, NIL }
+
+bind operator::eq to V {
+    fn eq(self, other: &V) -> bool {
+        match (self, *other) {
+            (V::A, V::A) => true,
+            (V::B, V::B) => true,
+            (V::ARR, V::ARR) => true,
+            (V::NIL, V::NIL) => true,
+            _ => false,
+        }
+    }
+}
+
+fn pick() -> V { V::A }
+
+fn main() -> i64 {
+    let a = V::A
+    io::println("A == A: " + (a == V::A).$str())
+    io::println("A == NIL: " + (a == V::NIL).$str())
+    if !(a == V::NIL) { io::println("negated: not NIL") }
+    io::println("through a call: " + (pick() == V::A).$str())
+
+    let arr: [2:Any] = [1, 2]
+    let one = V::ARR { content: arr }
+    io::println("payload variants compare by tag: " + (one == V::ARR { content: arr }).$str())
+    0
+}

@@ -1,0 +1,8 @@
+import std::io
+import std::dictionary::*
+
+fn main() -> i64 {
+    foo = [1,2,3]
+    println!("Hello World!, {}",foo)
+    0
+}

@@ -1,0 +1,108 @@
+// A `bind` may supply one name more than once, so long as the versions differ
+// in what they take. Together they are an overload set, and the call site
+// picks by the arguments it hands over. This is the only place in the
+// language where one name has several bodies: a plain `fn` may not be
+// declared twice.
+// EXPECT: alpha
+// EXPECT: 1
+// EXPECT: gamma
+// EXPECT: named beta = 7
+// EXPECT: mark str a
+// EXPECT: mark int 7
+// EXPECT: mark str b
+// EXPECT: mark str dyn
+// EXPECT: count 3
+// EXPECT: name x
+// EXPECT: 20
+// EXPECT: hey!
+import std::io
+import std::collections::vector
+
+//=== Two ways to subscript one type =====================================//
+
+class Store {
+    var names: vector::Vector<String>
+    fn init(self) { self.names = vector::Vector<String>() }
+}
+
+bind operator::"[]" to Store {
+    fn index(&self, at: i64) -> String { self.names.at(at).unwrap() }
+    fn indexSet(&var self, at: i64, value: String) { self.names.set(at, value) }
+}
+
+// A second block for the same operator on the same type: the subscript's own
+// type is what tells the two apart, both reading and writing.
+bind operator::"[]" to Store {
+    fn index(&self, key: String) -> i64 {
+        var i: i64 = 0
+        while i < self.names.length() {
+            if self.names.at(i).unwrap() == key { return i }
+            i = i + 1
+        }
+        -1
+    }
+    fn indexSet(&var self, key: String, value: i64) {
+        io::println("named " + key + " = " + value.$str())
+    }
+}
+
+//=== Two ways to call one requirement ===================================//
+
+struct P { pub n: i64 }
+mark Show { fn show(&self, v: String) -> String }
+
+// The version whose signature is the one the mark asked for answers the
+// requirement — for `dyn Show` too. The other is an extra way to call it.
+bind Show to P { fn show(&self, v: String) -> String { "mark str " + v } }
+bind Show to P { fn show(&self, v: i64) -> String { "mark int " + v.$str() } }
+
+fn describe(d: dyn Show) -> String { d.show("dyn") }
+
+//=== On a generic type, through a conditional bind ======================//
+
+struct Box<T> { pub value: T }
+mark Fill { fn fill(&var self, v: i64) }
+
+bind<T> Fill to Box<T> where T: io::Display {
+    fn fill(&var self, v: i64) { io::println("count " + v.$str()) }
+}
+bind<T> Fill to Box<T> where T: io::Display {
+    fn fill(&var self, v: String) { io::println("name " + v) }
+}
+
+//=== And on a shape rather than a declaration ===========================//
+
+mark Pick { fn pick(&self, at: i64) -> String }
+
+bind<T> Pick to [T] where T: io::Display {
+    fn pick(&self, at: i64) -> String { self[at].$str() }
+}
+bind<T> Pick to [T] where T: io::Display {
+    fn pick(&self, label: String) -> String { label + "!" }
+}
+
+fn main() -> i64 {
+    s = Store()
+    s.names.push("alpha")
+    s.names.push("beta")
+    io::println(s[0])
+    io::println(s["beta"])
+    s[0] = "gamma"
+    io::println(s[0])
+    s["beta"] = 7
+
+    p = P { n: 1 }
+    io::println(p.show("a"))
+    io::println(p.show(7))
+    io::println(p::Show.show("b"))
+    io::println(describe(p))
+
+    var b = Box<i64> { value: 1 }
+    b.fill(3)
+    b.fill("x")
+
+    xs: [3:i64] = [10, 20, 30]
+    io::println(xs.pick(1))
+    io::println(xs.pick("hey"))
+    0
+}

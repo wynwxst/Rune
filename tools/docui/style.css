@@ -1,0 +1,536 @@
+/* The look of generated documentation.
+ *
+ * One rule underneath all of it: nothing is drawn that does not carry
+ * information. There are no cards, no filled panels, no badges and no
+ * shadows. Structure is shown with space and one hairline, emphasis with
+ * weight and one accent. What is left is the text.
+ *
+ * Colour is defined once, in tokens, and swapped whole for dark. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg:        #fbfbfa;
+  --bg-soft:   #f2f2f0;
+  --ink:       #16161a;
+  --ink-soft:  #5c5c66;
+  --ink-faint: #8c8c96;
+  --line:      #e3e3df;
+  --line-soft: #eeeeea;
+  --accent:    #2c5fd6;
+  --accent-dim:#8fa8e6;
+  --warn:      #b45309;
+
+  --code-kw:  #9a3f8c;
+  --code-typ: #1f6f5c;
+  --code-str: #a05a1f;
+  --code-num: #7a3fa8;
+  --code-com: #8c8c96;
+  --code-fn:  #2c5fd6;
+
+  --sidebar: 17rem;
+  --measure: 44rem;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #101013;
+    --bg-soft:   #17171b;
+    --ink:       #e8e8ea;
+    --ink-soft:  #a0a0aa;
+    --ink-faint: #6e6e78;
+    --line:      #26262c;
+    --line-soft: #1d1d22;
+    --accent:    #7aa2f7;
+    --accent-dim:#3d5488;
+    --warn:      #e0a44a;
+
+    --code-kw:  #d38bcd;
+    --code-typ: #6cc2a8;
+    --code-str: #d9a45f;
+    --code-num: #b98ce0;
+    --code-com: #6e6e78;
+    --code-fn:  #7aa2f7;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/*--- Frame ---------------------------------------------------------------*/
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.side {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.side-top {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  padding: 1.1rem .9rem .7rem .8rem;
+}
+
+.side-name {
+  flex: 1;
+  min-width: 0;
+  font-size: .95rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: .4rem;
+  background: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.icon:hover { color: var(--ink); background: var(--bg-soft); }
+.icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.icon[aria-pressed="true"] { color: var(--accent); }
+.icon svg { width: 15px; height: 15px; display: block; }
+
+/*--- Search --------------------------------------------------------------*/
+
+.finder { padding: 0 1rem .35rem 1.35rem; }
+.finder[hidden] { display: none; }
+
+.finder input {
+  width: 100%;
+  padding: .3rem 0 .45rem;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: .85rem;
+}
+.finder input::placeholder { color: var(--ink-faint); }
+.finder input:focus {
+  outline: none;
+  border-bottom-color: var(--accent);
+}
+
+/*--- Folded away ---------------------------------------------------------*/
+
+/* Everything but the one button that brings it back. The remaining column
+   is a centred reading measure, wider than beside the tree — the text stays
+   a column, not a strip down the left of an empty page. */
+.shell.folded {
+  --measure: 56rem;
+  grid-template-columns: 3rem minmax(0, 1fr);
+}
+.shell.folded .side-name,
+.shell.folded .finder,
+.shell.folded .empty,
+.shell.folded .tree,
+.shell.folded #collapse,
+.shell.folded #find { display: none; }
+.shell.folded .side { border-right: 0; }
+.shell.folded .side-top { padding-left: .55rem; padding-right: .55rem; }
+.shell.folded main {
+  justify-self: center;
+  width: min(100%, calc(var(--measure) + 10rem));
+  padding: 5rem clamp(2rem, 7vw, 5rem) 6rem;
+}
+
+.empty {
+  display: none;
+  padding: .6rem 1.35rem;
+  color: var(--ink-faint);
+  font-size: .82rem;
+}
+.searching .empty.on { display: block; }
+
+.searching li:not(.hit) > .row { color: var(--ink-faint); }
+.searching li.hit > .row { color: var(--ink); }
+.searching li.hit > .row.here { color: var(--accent); }
+
+.row mark.hit {
+  background: var(--accent-dim);
+  color: var(--ink);
+  padding: 0 .05em;
+  border-radius: .12em;
+}
+@supports (background: color-mix(in srgb, red 50%, transparent)) {
+  .row mark.hit {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    color: inherit;
+  }
+}
+
+/*--- Tree ----------------------------------------------------------------*/
+
+.tree {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: .35rem 0 2.5rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.tree::-webkit-scrollbar { width: 7px; }
+.tree::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+}
+
+.tree ul { list-style: none; margin: 0; padding: 0; }
+
+/* Children are indented by a hairline rather than by a wedge of space, so a
+   deep tree still reads as one column. */
+.tree li > ul {
+  margin-left: 1.6rem;
+  border-left: 1px solid var(--line-soft);
+}
+
+.tree li > ul[hidden] { display: none; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  padding: .16rem 1rem .16rem .35rem;
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: .855rem;
+  border-radius: 0 .3rem .3rem 0;
+}
+.tree > ul > li > .row { padding-left: 1.35rem; }
+.row:hover { color: var(--ink); background: var(--bg-soft); }
+.row.here { color: var(--accent); }
+.row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.row .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A module or a type reads as the heading of what is under it. */
+.row.parent .label { font-weight: 550; color: var(--ink); }
+.row.parent:hover .label,
+.row.parent.here .label { color: inherit; }
+
+.twist {
+  flex: none;
+  width: .85rem;
+  height: .85rem;
+  color: var(--ink-faint);
+  transition: transform .14s ease;
+}
+.twist svg { width: 100%; height: 100%; display: block; }
+.open > .row .twist { transform: rotate(90deg); }
+.row .spacer { flex: none; width: .85rem; }
+
+.kind {
+  flex: none;
+  font-family: var(--mono);
+  font-size: .66rem;
+  letter-spacing: .02em;
+  color: var(--ink-faint);
+  opacity: .75;
+}
+
+.tree li[hidden] { display: none; }
+
+/*--- Content -------------------------------------------------------------*/
+
+main {
+  padding: 4.5rem clamp(1.5rem, 6vw, 6rem) 5rem;
+  max-width: calc(var(--measure) + 12rem);
+}
+
+.page[hidden] { display: none; }
+
+/* The mark that tells two pages of the same name apart. It sits beside the
+   name rather than inside it, so the name stays the name. */
+.glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 1.05em;
+  height: 1.05em;
+  margin-left: .55rem;
+  vertical-align: -.1em;
+  color: var(--ink-faint);
+}
+.glyph svg { width: 100%; height: 100%; display: block; }
+h1 .glyph { width: .78em; height: .78em; margin-left: .7rem; }
+/* Beside the name, not at the far edge: it is part of what the entry is
+   called, and a column of glyphs across the gutter would read as a column. */
+.row .glyph { width: .92em; height: .92em; margin-left: .4rem; opacity: .75; }
+.row.top .label { flex: 0 1 auto; }
+
+/*--- Where to go next ----------------------------------------------------*/
+
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 4rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--line-soft);
+  font-size: .875rem;
+}
+.pager[hidden] { display: none; }
+.step { color: var(--ink-soft); }
+.step:hover { color: var(--accent); text-decoration: none; }
+.step.next { margin-left: auto; text-align: right; }
+
+section { scroll-margin-top: 2rem; }
+
+/* The rule between entries is what separates them: no box needed. */
+section + section {
+  margin-top: 3.5rem;
+  padding-top: 3.5rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+.eyebrow {
+  margin: 0 0 .3rem;
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+h1, h2, h3, h4, h5 {
+  letter-spacing: -.015em;
+  line-height: 1.25;
+  color: var(--ink);
+}
+
+h1 { margin: 0 0 1.1rem; font-size: 1.85rem; font-weight: 600; }
+h2 { margin: 2.4rem 0 .9rem; font-size: 1.3rem; font-weight: 600; }
+h3 { margin: 2rem 0 .5rem; font-size: 1.02rem; font-weight: 600; }
+h4 { margin: 1.4rem 0 .4rem; font-size: .93rem; font-weight: 600; }
+h5 { margin: 1.2rem 0 .35rem; font-size: .88rem; font-weight: 600; }
+
+p, li { max-width: var(--measure); }
+p { margin: 0 0 1rem; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+ul, ol { margin: 0 0 1rem; padding-left: 1.2rem; }
+li { margin: .2rem 0; }
+
+hr { border: 0; border-top: 1px solid var(--line-soft); margin: 2rem 0; }
+
+em { font-style: italic; color: var(--ink-soft); }
+
+/*--- Code ----------------------------------------------------------------*/
+
+code {
+  font-family: var(--mono);
+  font-size: .875em;
+}
+
+p code, li code, td code, .callout-label code,
+h1 code, h2 code, h3 code, h4 code, h5 code {
+  padding: .05em .3em;
+  border-radius: .25em;
+  background: var(--bg-soft);
+  color: var(--ink);
+}
+
+.row .label code {
+  padding: 0 .2em;
+  border-radius: .2em;
+  background: var(--bg-soft);
+  font-size: .92em;
+}
+
+pre {
+  margin: 0 0 1.2rem;
+  padding: 0 0 0 1rem;
+  overflow-x: auto;
+  border-left: 2px solid var(--line);
+  font-size: .875rem;
+  line-height: 1.6;
+  scrollbar-width: thin;
+}
+pre code { font-size: 1em; background: none; padding: 0; }
+
+/* A language tag is a fact about the block, in the same voice as `.group`. */
+pre[data-lang]::before {
+  content: attr(data-lang);
+  display: block;
+  margin: 0 0 .45rem;
+  font-family: var(--sans);
+  font-size: .66rem;
+  font-weight: 500;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+pre.lang-ebnf, pre.lang-text, pre.lang-toml { color: var(--ink-soft); }
+
+.c-kw  { color: var(--code-kw); }
+.c-typ { color: var(--code-typ); }
+.c-str { color: var(--code-str); }
+.c-num { color: var(--code-num); }
+.c-com { color: var(--code-com); font-style: italic; }
+.c-fn  { color: var(--code-fn); }
+
+/*--- Quotes and callouts ------------------------------------------------*/
+
+blockquote {
+  margin: 0 0 1.2rem;
+  padding: 0 0 0 1rem;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+}
+blockquote p:last-child { margin-bottom: 0; }
+
+.callout {
+  margin: 0 0 1.2rem;
+  padding: 0 0 0 1rem;
+  border-left: 2px solid var(--accent);
+}
+.callout-label {
+  display: block;
+  margin: 0 0 .35rem;
+  font-size: .8rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--accent);
+}
+.callout-body p:last-child { margin-bottom: 0; }
+.t-warn { border-left-color: var(--warn); }
+.t-warn .callout-label { color: var(--warn); }
+.t-tip, .t-important, .t-hint { border-left-color: var(--accent); }
+.t-tip .callout-label,
+.t-important .callout-label,
+.t-hint .callout-label { color: var(--accent); }
+
+/*--- Members -------------------------------------------------------------*/
+
+/* A member sits under its parent, told apart by an indent and a hairline —
+   the same device the tree uses, so the two read the same way. */
+.member {
+  margin: 1.6rem 0 0;
+  padding-left: 1.1rem;
+  border-left: 1px solid var(--line-soft);
+  scroll-margin-top: 2rem;
+}
+.member > h4 { margin-top: 0; }
+
+/* Nothing was written about this one, so its signature is the whole entry. */
+.member.terse { margin-top: .55rem; }
+.member.terse .sig { margin-bottom: 0; }
+
+.member .sig {
+  margin: 0 0 .5rem;
+  font-family: var(--mono);
+  font-size: .84rem;
+  color: var(--ink-soft);
+  overflow-x: auto;
+  white-space: pre;
+  scrollbar-width: thin;
+}
+
+.name { font-family: var(--mono); font-weight: 600; }
+.tag {
+  margin-left: .6rem;
+  font-family: var(--mono);
+  font-size: .68rem;
+  font-weight: 400;
+  letter-spacing: .03em;
+  color: var(--ink-faint);
+}
+
+.group {
+  margin: 2.2rem 0 .2rem;
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.lede { color: var(--ink-soft); }
+
+/*--- Tables --------------------------------------------------------------*/
+
+table {
+  width: 100%;
+  max-width: var(--measure);
+  margin: 0 0 1.2rem;
+  border-collapse: collapse;
+  font-size: .875rem;
+}
+th, td {
+  padding: .4rem .8rem .4rem 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line-soft);
+}
+th {
+  font-weight: 600;
+  font-size: .72rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/*--- Narrow --------------------------------------------------------------*/
+
+@media (max-width: 62rem) {
+  .shell, .shell.folded { grid-template-columns: 1fr; }
+  .side {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .tree { max-height: 55vh; }
+  main { padding: 2.5rem 1.4rem 5rem; }
+}
+
+@media print {
+  .side { display: none; }
+  .shell { display: block; }
+  main { padding: 0; max-width: none; }
+  section + section { border-top: 0; }
+}

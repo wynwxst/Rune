@@ -1,0 +1,250 @@
+// std::option — a value that may be absent.
+//
+// `Option` is an ordinary Rune enum. The compiler knows it by name so that the
+// shorthand `T?`, the literal `nil`, the `??` operator and the `?` early
+// return all lower onto it:
+//
+//     let found: i64? = firstEven(values)   // same as Option<i64>
+//     let n = found ?? -1
+//     match found {
+//         Option::Some(v) => io::println(v),
+//         Option::None => io::println("nothing"),
+//     }
+//
+// Nothing below is magic: every method here is one you could have written
+// yourself, and each is spelled out so that reading the source tells you
+// exactly what it costs. The sugar is only in the syntax.
+//
+// This module imports nothing. `Option` is what a failure is reported with
+// everywhere else in the library, so it has to be the one thing that can be
+// compiled on its own.
+
+extern "C" {
+    fn rune_panic_unwrap(what: CString, location: CString) -> Never
+}
+
+pub enum Option<T> {
+    None,
+    Some(T),
+
+    //=== Asking ===========================================================//
+
+    /// True when a value is present.
+    ///
+    ///     if found.hasValue() { ... }
+    pub fn hasValue(&self) -> bool {
+        match self {
+            Option::Some(v) => true,
+            Option::None => false,
+        }
+    }
+
+    /// True when the option is empty.
+    pub fn isNil(&self) -> bool {
+        !self.hasValue()
+    }
+
+    /// True when a value is present and `keep` says yes to it.
+    ///
+    /// Where `hasValue` asks whether there is anything at all, this asks
+    /// whether what is there is what you wanted — without unwrapping it.
+    ///
+    ///     if age.isSuchThat(||(n: i64) -> bool { n >= 18 }) { ... }
+    pub fn isSuchThat(&self, keep: @function(T) -> bool) -> bool {
+        match self {
+            Option::Some(v) => keep(v),
+            Option::None => false,
+        }
+    }
+
+    //=== Getting the value out ============================================//
+
+    /// The contained value, or `fallback` when empty.
+    ///
+    /// `fallback` is evaluated whether or not it is needed. Use `orElse` when
+    /// producing it is expensive.
+    pub fn or(&self, fallback: T) -> T {
+        match self {
+            Option::Some(v) => v,
+            Option::None => fallback,
+        }
+    }
+
+    /// The contained value, or what `produce` returns when empty.
+    ///
+    /// `produce` is called only when there is nothing here.
+    ///
+    ///     let name = cached.orElse(||() -> String { readFromDisk() })
+    pub fn orElse(&self, produce: @function() -> T) -> T {
+        match self {
+            Option::Some(v) => v,
+            Option::None => produce(),
+        }
+    }
+
+    /// The contained value. Aborts when empty.
+    @safe("the runtime prints the location and aborts; it never returns")
+    pub fn unwrap(&self) -> T {
+        match self {
+            Option::Some(v) => v,
+            Option::None => rune_panic_unwrap("Option", "Option::unwrap"),
+        }
+    }
+
+    /// The contained value, or `message` on the way out.
+    ///
+    /// Prefer this to `unwrap` wherever the reason it should not be empty can
+    /// be written down: the message is what the traceback leads with.
+    @safe("the runtime prints the message and aborts; it never returns")
+    pub fn expect(&self, message: CString) -> T {
+        match self {
+            Option::Some(v) => v,
+            Option::None => rune_panic_unwrap(message, "Option::expect"),
+        }
+    }
+
+    //=== Transforming =====================================================//
+
+    /// The value with `f` applied to it, or nothing.
+    ///
+    /// The empty case passes straight through, which is what makes a chain of
+    /// these read as one calculation rather than four nil checks.
+    ///
+    ///     let width = header.map(||(h: Row) -> i64 { h.columns })
+    pub fn map<U>(&self, f: @function(T) -> U) -> Option<U> {
+        match self {
+            Option::Some(v) => Option::<U>::Some(f(v)),
+            Option::None => Option::<U>::None,
+        }
+    }
+
+    /// `f` applied to the value, or `fallback` when there is none.
+    ///
+    /// `map` followed by `or`, in one step.
+    pub fn mapOr<U>(&self, fallback: U, f: @function(T) -> U) -> U {
+        match self {
+            Option::Some(v) => f(v),
+            Option::None => fallback,
+        }
+    }
+
+    /// `f` applied to the value, where `f` may itself come up empty.
+    ///
+    /// This is `map` for a function that already returns an `Option`, and is
+    /// what keeps a chain from nesting: `Option<Option<T>>` never appears.
+    ///
+    ///     let port = config.andThen(||(c: Config) -> i64? { c.port })
+    pub fn andThen<U>(&self, f: @function(T) -> Option<U>) -> Option<U> {
+        match self {
+            Option::Some(v) => f(v),
+            Option::None => Option::<U>::None,
+        }
+    }
+
+    /// The value, but only if `keep` says yes to it.
+    ///
+    ///     let positive = count.filter(||(n: i64) -> bool { n > 0 })
+    pub fn filter(&self, keep: @function(T) -> bool) -> Option<T> {
+        if self.isSuchThat(keep) { *self } else { Option::<T>::None }
+    }
+
+    /// This option if it holds a value, otherwise `other`.
+    ///
+    /// Where `or` hands back a bare `T`, this stays an `Option`, so several
+    /// can be tried in a row.
+    ///
+    ///     let found = fromFlag.otherwise(fromEnv).otherwise(fromFile)
+    pub fn otherwise(&self, other: Option<T>) -> Option<T> {
+        match self {
+            Option::Some(v) => Option::<T>::Some(v),
+            Option::None => other,
+        }
+    }
+
+    /// Both values as a pair, or nothing if either is missing.
+    ///
+    ///     match width.zip(height) {
+    ///         Option::Some(size) => area(size.0, size.1),
+    ///         Option::None => 0,
+    ///     }
+    pub fn zip<U>(&self, other: Option<U>) -> Option<(T, U)> {
+        match self {
+            Option::Some(a) => match other {
+                Option::Some(b) => Option::<(T, U)>::Some((a, b)),
+                Option::None => Option::<(T, U)>::None,
+            },
+            Option::None => Option::<(T, U)>::None,
+        }
+    }
+
+    //=== Changing one in place ============================================//
+
+    /// Hands the value over and leaves this one empty.
+    ///
+    /// The point is the emptying: a field that owns something can be moved
+    /// out of without the owner being left holding a copy.
+    ///
+    ///     match self.pending.take() {
+    ///         Option::Some(job) => run(job),
+    ///         Option::None => (),
+    ///     }
+    pub fn take(&var self) -> Option<T> {
+        held = *self
+        *self = Option::<T>::None
+        held
+    }
+
+    /// Stores `value` here and hands back whatever was here before.
+    pub fn replace(&var self, value: T) -> Option<T> {
+        held = *self
+        *self = Option::<T>::Some(value)
+        held
+    }
+
+    /// Empties this option, handing back what was in it.
+    ///
+    /// `take` under a name that says the result is the point rather than the
+    /// side effect is `take` itself; this is for when it is the other way
+    /// round and the result is ignored.
+    pub fn clear(&var self) {
+        *self = Option::<T>::None
+    }
+}
+
+//=== Constructing ========================================================//
+
+/// Wraps a value that is always present.
+///
+/// `nil` is the other half of this, and needs no function: it is `None` for
+/// whichever type the context asks for.
+pub fn some<T>(value: T) -> Option<T> {
+    Option::<T>::Some(value)
+}
+
+/// The empty option of a given type.
+///
+/// Rarely needed — `nil` says the same thing wherever the type is already
+/// known — but a type argument is sometimes clearer than an annotation.
+pub fn none<T>() -> Option<T> {
+    Option::<T>::None
+}
+
+/// `value` when `condition` holds, and nothing otherwise.
+///
+///     let name = option::when(user.named, user.name)
+pub fn when<T>(condition: bool, value: T) -> Option<T> {
+    if condition { Option::<T>::Some(value) } else { Option::<T>::None }
+}
+
+//=== Working with nested options =========================================//
+
+/// One option out of two.
+///
+/// `andThen` avoids ever building an `Option<Option<T>>`; this is for when
+/// one arrives anyway — from a container of options, say.
+pub fn flatten<T>(nested: Option<Option<T>>) -> Option<T> {
+    match nested {
+        Option::Some(inner) => inner,
+        Option::None => Option::<T>::None,
+    }
+}

@@ -1,0 +1,43 @@
+// Optionals: nil, ??, .or, .unwrap, .hasValue and the `?` early return.
+// EXPECT: present=4 missing=-1
+// EXPECT: coalesced=99
+// EXPECT: has=true none=false
+// EXPECT: chained=8
+// EXPECT: propagated=nothing
+import std::io
+
+fn firstEven(values: [5:i64]) -> i64? {
+    for v in values {
+        if v % 2 == 0 { return v }
+    }
+    nil
+}
+
+fn doubled(values: [5:i64]) -> i64? {
+    found = firstEven(values)?
+    found * 2
+}
+
+fn main() -> i64 {
+    evens: [5:i64] = [1, 3, 7, 4, 5]
+    odds: [5:i64] = [1, 3, 5, 7, 9]
+
+    io::println("present=" + firstEven(evens).or(-1).$str() +
+                " missing=" + firstEven(odds).or(-1).$str())
+
+    empty: i64? = nil
+    io::println("coalesced=" + (empty ?? 99).$str())
+
+    io::println("has=" + firstEven(evens).hasValue().$str() +
+                " none=" + firstEven(odds).hasValue().$str())
+
+    io::println("chained=" + doubled(evens).or(0).$str())
+
+    result = doubled(odds)
+    if result.hasValue() {
+        io::println("propagated=" + result.unwrap().$str())
+    } else {
+        io::println("propagated=nothing")
+    }
+    0
+}

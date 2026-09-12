@@ -1,0 +1,114 @@
+// A small, idiomatic Rune program: model some shapes, sort them by area, and
+// print a report.
+//
+//     runec -o shapes examples/shapes.rune && ./shapes
+
+import std::io
+import std::math
+
+//===--------------------------------------------------------------------===//
+
+enum Shape {
+    Circle(f64),
+    Rect { width: f64, height: f64 },
+    Triangle { base: f64, height: f64 },
+}
+
+mark Describe {
+    fn area(&self) -> f64
+    fn name(&self) -> String
+
+    /// Marks may supply defaults built from their own requirements.
+    fn line(&self) -> String {
+        pad(self.name(), 10) + " area " + round(self.area(), 2).$str()
+    }
+}
+
+bind Describe to Shape {
+    fn area(&self) -> f64 {
+        match self {
+            Shape::Circle(r) => math::PI * r * r,
+            Shape::Rect { width, height } => width * height,
+            Shape::Triangle { base, height } => 0.5 * base * height,
+        }
+    }
+
+    fn name(&self) -> String {
+        match self {
+            Shape::Circle(r) => "circle",
+            Shape::Rect { width, height } => "rectangle",
+            Shape::Triangle { base, height } => "triangle",
+        }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+
+fn pad(text: String, width: i64) -> String {
+    var out = text
+    while out.$length() < width {
+        out += " "
+    }
+    out
+}
+
+fn round(value: f64, places: i64) -> f64 {
+    var factor = 1.0
+    for i in 0..places {
+        factor *= 10.0
+    }
+    math::roundDown(value * factor + 0.5) / factor
+}
+
+/// Sorts in place. `shapes` is borrowed mutably so the caller sees the result.
+fn sortByArea(shapes: &var [4:Shape]) {
+    n: i64 = 4
+    for i in 0..n {
+        for j in 0..(n - 1) {
+            if (*shapes)[j].area() > (*shapes)[j + 1].area() {
+                keep = (*shapes)[j]
+                (*shapes)[j] = (*shapes)[j + 1]
+                (*shapes)[j + 1] = keep
+            }
+        }
+    }
+}
+
+fn totalArea(shapes: [Shape]) -> f64 {
+    var sum = 0.0
+    for s in shapes {
+        sum += s.area()
+    }
+    sum
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    var shapes: [4:Shape] = [
+        Shape::Rect { width: 3.0, height: 4.0 },
+        Shape::Circle(1.0),
+        Shape::Triangle { base: 6.0, height: 5.0 },
+        Shape::Circle(2.5),
+    ]
+
+    io::println("unsorted:")
+    for s in shapes {
+        io::println("  " + s.line())
+    }
+
+    sortByArea(&var shapes)
+
+    io::println("")
+    io::println("by area:")
+    for s in shapes {
+        io::println("  " + s.line())
+    }
+
+    io::println("")
+    io::println("total     " + round(totalArea(shapes), 2).$str())
+
+    largest = shapes[3]
+    io::println("largest   " + largest.name())
+    0
+}

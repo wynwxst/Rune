@@ -1,0 +1,50 @@
+// Two instantiations of one generic are two types, and their per-type globals
+// have to say so. A destructor, a descriptor and a vtable are all named after
+// the type, and a name that left the arguments out gave `Vector<i64>` and
+// `Vector<String>` the same one — which the linker then folded together.
+// EXPECT: std::collections::vector::Vector<i64>
+// EXPECT: std::collections::vector::Vector<String>
+// EXPECT: not the same type
+// EXPECT: 1 2 3 
+// EXPECT: a b 
+// EXPECT: destroyed 2
+import std::io
+import std::any
+import std::collections::vector
+
+global var destroyed: i64 = 0
+
+class Tracked<T> {
+    pub value: T
+    fn init(self, value: T) { self.value = value }
+    fn deinit(self) { destroyed += 1 }
+}
+
+fn main() -> i64 {
+    // The descriptor's name is the instantiation's, arguments included.
+    var numbers = vector::Vector<i64>()
+    numbers.push(1); numbers.push(2); numbers.push(3)
+    var words = vector::Vector<String>()
+    words.push("a"); words.push("b")
+
+    let a: Any = numbers
+    let b: Any = words
+    io::println(a.typeName())
+    io::println(b.typeName())
+    // Which is what lets `Any` tell them apart at all.
+    if a.holds::<vector::Vector<String>>() {
+        io::println("the same type")
+    } else {
+        io::println("not the same type")
+    }
+
+    for n in numbers { io::print(n.$str() + " ") }
+    io::newline()
+    for w in words { io::print(w + " ") }
+    io::newline()
+
+    // Two instantiations of one generic class, each with its own destructor.
+    { let x = Tracked<i64>(1); let y = Tracked<String>("s") }
+    io::println("destroyed " + destroyed.$str())
+    0
+}

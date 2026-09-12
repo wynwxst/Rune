@@ -1,0 +1,21 @@
+// A macro is private to its own file unless it is `pub`. Since expansion is a
+// whole-compilation pass, without that rule every helper macro anyone wrote
+// would be in scope everywhere at once.
+// EXPECT: local 8
+// EXPECT: from the standard library: 3
+// EXPECT: assertEq names itself
+import std::io
+import std::collections::vector
+
+// Private: nothing outside this file can see it.
+macro doubled {
+    ($x: expr) => { ($x) * 2 }
+}
+
+// The standard library's are `pub`, which is why `vec!` works here.
+fn main() -> i64 {
+    io::println("local " + doubled!(4).$str())
+    io::println("from the standard library: " + vec!(1, 2, 3).length().$str())
+    io::println("assertEq names itself")
+    0
+}

@@ -1,0 +1,61 @@
+{
+  "folders": [
+    "Orientation",
+    "The_Compiler",
+    "Extending_The_Language",
+    "The_Build",
+    "Performance",
+    "Testing_And_Documentation"
+  ],
+  "Orientation": [
+    "index.md",
+    "the_shape_of_the_toolchain.md",
+    "building_it.md",
+    "finding_your_way_around.md"
+  ],
+  "The_Compiler": [
+    "index.md",
+    "source_and_diagnostics.md",
+    "the_lexer.md",
+    "macros.md",
+    "the_parser_and_the_ast.md",
+    "conditional_compilation.md",
+    "semantic_analysis.md",
+    "the_type_system.md",
+    "generics_and_monomorphisation.md",
+    "ownership.md",
+    "code_generation.md",
+    "inline_assembly.md",
+    "what_comes_out.md"
+  ],
+  "Extending_The_Language": [
+    "index.md",
+    "adding_a_keyword.md",
+    "adding_syntax.md",
+    "adding_a_type_rule.md",
+    "adding_an_attribute.md",
+    "adding_an_intrinsic.md",
+    "adding_a_compiler_flag.md",
+    "adding_a_diagnostic.md",
+    "adding_to_the_standard_library.md"
+  ],
+  "The_Build": [
+    "index.md",
+    "the_package_manager.md",
+    "the_package_registry.md",
+    "incremental_builds.md",
+    "concurrency.md",
+    "cross_compilation.md"
+  ],
+  "Performance": [
+    "index.md",
+    "measuring.md",
+    "where_the_time_goes.md",
+    "the_invariants.md"
+  ],
+  "Testing_And_Documentation": [
+    "index.md",
+    "the_test_suite.md",
+    "the_language_reference.md"
+  ]
+}

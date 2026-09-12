@@ -1,0 +1,72 @@
+// What `Option` and `Result` can be asked, beyond unwrapping them. Each of
+// these is an ordinary method on an ordinary enum — the sugar is only in the
+// spellings `T?`, `nil`, `??` and `?`.
+// EXPECT: m7
+// EXPECT: 14
+// EXPECT: 7
+// EXPECT: -1
+// EXPECT: true
+// EXPECT: 7
+// EXPECT: 99
+// EXPECT: 7x
+// EXPECT: 7 -1
+// EXPECT: -1 5
+// EXPECT: -1
+// EXPECT: 3
+// EXPECT: 4
+// EXPECT: 24
+// EXPECT: bad: not a number
+// EXPECT: n=12
+// EXPECT: 12
+// EXPECT: 5
+// EXPECT: true
+// EXPECT: not a number
+// EXPECT: empty
+// EXPECT: 12
+import std::io
+import std::option
+import std::result
+
+fn parse(text: String) -> Result<i64, String> {
+    match text.$toInt() {
+        Option::Some(n) => n,
+        Option::None => "not a number",
+    }
+}
+
+fn main() -> i64 {
+    var a: i64? = 7
+    io::println(a.map(||(v: i64) -> String { "m" + v.$str() }) ?? "none")
+    io::println(a.mapOr(0, ||(v: i64) -> i64 { v * 2 }).$str())
+    io::println((a.andThen(||(v: i64) -> i64? { if v > 3 { v } else { nil } }) ?? -1).$str())
+    io::println((a.filter(||(v: i64) -> bool { v > 100 }) ?? -1).$str())
+    io::println(a.isSuchThat(||(v: i64) -> bool { v == 7 }).$str())
+    b: i64? = nil
+    io::println((b.otherwise(a) ?? -1).$str())
+    io::println(b.orElse(||() -> i64 { 99 }).$str())
+    match a.zip(option::some::<String>("x")) {
+        Option::Some(pair) => io::println(pair.0.$str() + pair.1),
+        Option::None => io::println("no pair"),
+    }
+    taken = a.take()
+    io::println((taken ?? -1).$str() + " " + (a ?? -1).$str())
+    var c: i64? = nil
+    io::println((c.replace(5) ?? -1).$str() + " " + (c ?? -1).$str())
+    c.clear()
+    io::println((c ?? -1).$str())
+    io::println((option::flatten(option::some::<i64?>(option::some::<i64>(3))) ?? -1).$str())
+    io::println((option::when(true, 4) ?? -1).$str())
+
+    ok = parse("12")
+    bad = parse("xy")
+    io::println(ok.map(||(v: i64) -> i64 { v * 2 }).or(-1).$str())
+    io::println(bad.mapErr(||(e: String) -> String { "bad: " + e }).error().unwrap())
+    io::println(ok.andThen(||(v: i64) -> Result<String, String> { "n=" + v.$str() }).or("?"))
+    io::println(bad.recover(||(e: String) -> i64 { e.$length() }).$str())
+    io::println(bad.orElse(||() -> i64 { 5 }).$str())
+    io::println(ok.isSuchThat(||(v: i64) -> bool { v > 10 }).$str())
+    io::println(bad.unwrapErr())
+    io::println(result::from::<i64, String>(option::none::<i64>(), "empty").unwrapErr())
+    io::println(result::flatten::<i64, String>(result::ok::<Result<i64, String>, String>(ok)).or(-1).$str())
+    0
+}

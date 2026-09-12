@@ -1,0 +1,65 @@
+// A branching expression whose value nobody wants does not have to make its
+// arms agree — there is no one type for them to agree *on*. The moment the
+// value is used, the rule comes back.
+// EXPECT: big
+// EXPECT: a
+// EXPECT: i = 3
+// EXPECT: one
+// EXPECT: seen 0
+// EXPECT: still checked when used: positive
+// EXPECT: balanced true
+import std::io
+import std::process
+
+enum E { A, B, C }
+
+fn classify(n: i64) -> String {
+    // Used as this function's result, so the arms must still agree.
+    if n > 0 { "positive" } else { "negative" }
+}
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        let n = 5
+
+        // A statement: the arms produce `()`, `i64` and `String`.
+        if n > 3 { io::println("big") }
+        elif n > 1 { 1 }
+        else { "small" }
+
+        let e = E::A
+        match e {
+            E::A => io::println("a"),
+            E::B => 42,
+            E::C => "c",
+        }
+
+        // A loop used as a statement, with a tail nobody reads.
+        var i = 0
+        loop {
+            i += 1
+            if i > 2 { break }
+            "ignored"
+        }
+        io::println("i = " + i.$str())
+
+        // A loop body's value is never read either, so a `match` at the end
+        // of one is in the same position as a statement.
+        var seen = 0
+        var k = 0
+        while k < 3 {
+            k += 1
+            match k {
+                1 => io::println("one"),
+                2 => seen,
+                _ => "rest",
+            }
+        }
+        io::println("seen " + seen.$str())
+
+        io::println("still checked when used: " + classify(1))
+    }
+    io::println("balanced " + (before == process::liveObjectCount()).$str())
+    0
+}

@@ -1,0 +1,22 @@
+// webserver — the library half.
+//
+// The server itself is `src/main.rune`; everything it is built out of lives
+// in modules of its own, so each can be tested without a socket:
+//
+//   * `webserver::http`   — requests, responses, and the text handling
+//   * `webserver::routes` — what the server says
+//   * `webserver::pool`   — the workers, and one connection's conversation
+//   * `webserver::server` — the command line, the listener, the accept loop
+//
+// This file is what makes those a library rather than four files only the
+// binary can see. `tests/basics.rune` imports them from here.
+
+import webserver::http
+import webserver::routes
+import webserver::pool
+import webserver::server
+
+/// What this package is, for anything that asks.
+pub fn about() -> String {
+    "rune-webserver/0.1 — a multi-threaded HTTP server over std::net"
+}

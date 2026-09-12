@@ -1,0 +1,10 @@
+// `Arc` shares what it holds, so what it holds has to be safe to share. A
+// class is not: any holder can write to it.
+// EXPECT-ERROR: cannot be shared between threads
+import std::thread
+class Counter { var n: i64
+    fn init(self, n: i64) { self.n = n } }
+fn main() -> i64 {
+    let a = thread::Arc<Counter>(Counter(1))
+    0
+}

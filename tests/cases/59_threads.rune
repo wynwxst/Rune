@@ -1,0 +1,76 @@
+// Threads, and the rule that keeps them safe: nothing crosses a thread
+// boundary unless the compiler can see that letting it cross is safe.
+// EXPECT: double: 42
+// EXPECT: parallel: 1000001000000
+// EXPECT: shout: hello world!
+// EXPECT: mutex after one: 5
+// EXPECT: mutex after 4000: 4005
+// EXPECT: send i64=true String=true struct=true class=false holder=false
+// EXPECT: sync i64=true tuple=true mutex=true
+// EXPECT: hardware >= 1: true
+import std::io
+import std::thread
+import std::reflect
+
+fn double(n: i64) -> i64 { n * 2 }
+fn shout(name: String) -> String { name + "!" }
+
+fn sumTo(upTo: i64) -> i64 {
+    var total = 0
+    var i = 1
+    while i <= upTo { total += i; i += 1 }
+    total
+}
+
+fn addFive(n: i64) -> i64 { n + 5 }
+fn addOne(n: i64) -> i64 { n + 1 }
+
+/// Four of these run at once against the same `Mutex`.
+fn bumpAThousand(shared: thread::Mutex<i64>) -> i64 {
+    var i = 0
+    while i < 1000 { shared.withLock(addOne); i += 1 }
+    0
+}
+
+class Counter { var n: i64
+    fn init(self, n: i64) { self.n = n } }
+struct Pair { a: i64, b: String }
+struct Holder { c: Counter }
+
+fn main() -> i64 {
+    var h = thread::spawn(double, 21)
+    println!("double: {}", h.join())
+
+    // Two threads, and the answer only comes out right if both ran.
+    var a = thread::spawn(sumTo, 1000000)
+    var b = thread::spawn(sumTo, 1000000)
+    println!("parallel: {}", a.join() + b.join())
+
+    // A String crosses in and another comes back.
+    var s = thread::spawn(shout, "hello" + " world")
+    println!("shout: {}", s.join())
+
+    // Shared mutable state, which is what `Mutex` is for.
+    let total = thread::Mutex<i64>(0)
+    total.withLock(addFive)
+    println!("mutex after one: {}", total.get())
+
+    var w = thread::spawn(bumpAThousand, total)
+    var x = thread::spawn(bumpAThousand, total)
+    var y = thread::spawn(bumpAThousand, total)
+    var z = thread::spawn(bumpAThousand, total)
+    w.join(); x.join(); y.join(); z.join()
+    println!("mutex after 4000: {}", total.get())
+
+    // `Send` and `Sync` are read off the type, and can be asked directly.
+    println!("send i64={} String={} struct={} class={} holder={}",
+             reflect::isSend<i64>(), reflect::isSend<String>(),
+             reflect::isSend<Pair>(), reflect::isSend<Counter>(),
+             reflect::isSend<Holder>())
+    println!("sync i64={} tuple={} mutex={}",
+             reflect::isSync<i64>(), reflect::isSync<(i64, String)>(),
+             reflect::isSync<thread::Mutex<i64>>())
+
+    println!("hardware >= 1: {}", thread::hardwareThreads() >= 1)
+    0
+}

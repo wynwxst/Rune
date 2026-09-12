@@ -1,0 +1,13 @@
+import std::testing
+import std::text
+import report
+import shapes
+import geometry
+
+fn main() -> i64 {
+    let c = shapes::circle(geometry::origin(), 1.0)
+    var r = report::report("t")
+    r.line(c.display())
+    testing::isTrue("the report sees the shape", text::contains(r.render(), "circle r=1.0"))
+    testing::summary()
+}

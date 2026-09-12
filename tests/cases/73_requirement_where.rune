@@ -1,0 +1,53 @@
+// A mark requirement may carry a `where` clause of its own, and so may a
+// mark's default method. The clause is enforced wherever the method is
+// called — through the type, and through the mark.
+// EXPECT: 7
+// EXPECT: 1
+// EXPECT: 5
+// EXPECT: 77
+import std::io
+
+mark Show { fn show(&self) -> String }
+bind Show to i64 { fn show(&self) -> String { self.$str() } }
+
+mark Sink {
+    /// A requirement with a type parameter and a bound of its own.
+    fn accept<T>(&var self, value: T) -> String where T: Show
+
+    /// A default may carry one too, and calls the requirement under it.
+    fn acceptTwice<T>(&var self, value: T) -> String where T: Show {
+        self.accept(value) + self.accept(value)
+    }
+}
+
+struct Log { var lines: i64 }
+
+bind Sink to Log {
+    fn accept<T>(&var self, value: T) -> String where T: Show {
+        self.lines += 1
+        value.show()
+    }
+}
+
+/// A clause on an associated type, rather than on a parameter.
+mark Holder {
+    type Item
+    fn render(&self) -> String where Self::Item: Show
+}
+struct Box { v: i64 }
+bind Holder to Box {
+    type Item = i64
+    fn render(&self) -> String where Self::Item: Show { self.v.show() }
+}
+
+/// Called through the mark, where only the requirement's clause is in view.
+fn record<S: Sink>(s: &var S, value: i64) -> String { s.accept(value) }
+
+fn main() -> i64 {
+    var l = Log { lines: 0 }
+    io::println(l.accept(7))
+    io::println(l.lines)
+    io::println(Box { v: 5 }.render())
+    io::println(record(&var l, 7) + l.accept(7))
+    0
+}

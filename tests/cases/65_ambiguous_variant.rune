@@ -1,0 +1,9 @@
+// A bare variant name two enums both claim has to say which one is meant.
+// EXPECT-ERROR: names a variant of more than one enum
+enum Car  { Body, Wheel }
+enum Ship { Hull, Wheel }
+
+fn main() -> i64 {
+    let c = Wheel
+    0
+}

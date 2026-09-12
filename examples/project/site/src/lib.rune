@@ -1,0 +1,70 @@
+import site
+import site::Bind::*
+import std::dictionary
+
+extern "C" {
+    fn accept(server_fd: i32, client_ptr: *var SocketAddress,len: *var socklen_t) -> i32
+    fn inet_ntop(addrfam: AddressFamily, addr: *var in_addr, ip_buf: *var u8, len: socklen_t)
+}
+
+/// Class to run webapps, abstracted
+class App {
+    pub var config: site::config::Config
+    pub var routes: dictionary::Map<String,@function() -> String>
+    var bound: site::Bind::Bound // don't expose to user
+    fn init(&self){
+
+    }
+    // No `deinit` here: `bound` is a struct that owns its descriptor and has
+    // a `deinit` of its own, so destroying this class destroys the field,
+    // which closes it.
+
+    /// Run and serve site based on configuration
+    pub fn run(&self){
+        bound = site::Bind::bindToAddress(self.config)
+        match bound {
+            Ok(b) => {
+                self.bound = b
+            },
+            Err(e) => {
+                std::process::panic(std::reflect::describe(e))
+            }
+        }
+        if site::Bind::Listen(&self.bound,self.config) == false {
+            std::process::panic("Failed to Listen")
+        }
+    }
+
+    fn handle_client(&self,client_fd: i32){
+        //buffer = 
+
+    }
+
+    @safe("Safe usage of C apis")
+    fn setup_client(&self){
+        var client_addr: SocketAddress
+        var client_len: socklen_t = std::mem::size_of<SocketAddress>() as u32
+        client_fd = accept(self.bound.server_fd,
+            &var client_addr as *var SocketAddress,
+            &var client_len as *var u32
+        )
+
+        if client_fd < 0 {
+            site::Bind::Perror("Accept",self.config)
+        }
+
+        var client_ip = [0u8;site::Bind::INET_ADDRSTRLEN]
+
+        inet_ntop(AF_INET,&client_addr.sin_addr as *var in_addr,&var client_ip[0] as *var u8, std::mem::size_of<[INET_ADDRSTRLEN:u8]>() as u32)
+
+        //println!("Connection from {}",client_ip)
+        self.handle_client(client_fd)
+
+    }
+
+    fn serve() {
+
+    }
+
+
+}

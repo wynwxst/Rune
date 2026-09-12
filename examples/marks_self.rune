@@ -1,0 +1,143 @@
+// Marks that build values, and marks bound to types that already have methods.
+//
+//     runec -o marks_self examples/marks_self.rune && ./marks_self
+
+import std::io
+
+//===--------------------------------------------------------------------===//
+// `Self`: a requirement that constructs
+//===--------------------------------------------------------------------===//
+//
+// A requirement with no `self` is a static one. `Self` in its signature means
+// the implementing type, so `Animal::new(...)` is a constructor whose result
+// type picks which implementation runs.
+
+struct Sheep { naked: bool, name: String }
+
+// The type's own methods. `bind` never displaces one of these.
+extend Sheep {
+    pub fn isNaked(&self) -> bool { self.naked }
+    pub fn shear(&var self) {
+        if self.isNaked() {
+            io::println("  once more??")
+        } else {
+            (*self).naked = true
+            io::println("  noooo!")
+        }
+    }
+}
+
+mark Animal {
+    fn new(name: String) -> Self
+
+    fn name(&self) -> String
+    fn noise(&self) -> String
+
+    // A default body may call the requirements it was written against.
+    fn speak(&self) { io::println("  " + self.name() + " says " + self.noise()) }
+}
+
+bind Animal to Sheep {
+    fn new(name: String) -> Self { Sheep { naked: false, name: name } }
+
+    // A field and a method may share a name: `self.name` is the field,
+    // `self.name()` is the method.
+    fn name(&self) -> String { self.name }
+
+    fn noise(&self) -> String {
+        if self.isNaked() { "baaaa!" } else { "baaaa?" }
+    }
+}
+
+struct Robot { id: i64 }
+
+bind Animal to Robot {
+    fn new(name: String) -> Self { Robot { id: name.$length() } }
+    fn name(&self) -> String { "unit-" + self.id.$str() }
+    fn noise(&self) -> String { "beep" }
+    // This one replaces the mark's default.
+    fn speak(&self) { io::println("  <" + self.name() + "> BEEP") }
+}
+
+//===--------------------------------------------------------------------===//
+// `Self` as a parameter, and marks on builtins
+//===--------------------------------------------------------------------===//
+
+mark Monoid {
+    fn zero() -> Self
+    fn combine(&self, other: Self) -> Self
+}
+
+struct V2 { x: i64, y: i64 }
+
+bind Monoid to V2 {
+    fn zero() -> Self { V2 { x: 0, y: 0 } }
+    fn combine(&self, other: Self) -> Self {
+        V2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+bind Monoid to i64 {
+    fn zero() -> Self { 0 }
+    fn combine(&self, other: Self) -> Self { self + other }
+}
+
+bind Monoid to String {
+    fn zero() -> Self { "" }
+    fn combine(&self, other: Self) -> Self { self + other }
+}
+
+/// Folds anything that knows how to start from nothing and add to itself.
+fn total<T: Monoid>(values: [T]) -> T {
+    var acc: T = Monoid::zero()
+    for v in values { acc = acc.combine(v) }
+    acc
+}
+
+//===--------------------------------------------------------------------===//
+// When a type and a mark disagree
+//===--------------------------------------------------------------------===//
+
+struct Ticket { number: i64 }
+
+extend Ticket {
+    // The type's own answer.
+    pub fn label(&self) -> String { "#" + self.number.$str() }
+}
+
+mark Formal {
+    fn label(&self) -> String
+    fn heading(&self) -> String { "-- " + self.label() + " --" }
+}
+
+bind Formal to Ticket {
+    // Shadowed for `ticket.label()`, still reachable as `ticket::Formal.label()`.
+    fn label(&self) -> String { "Ticket number " + self.number.$str() }
+}
+
+fn main() -> i64 {
+    io::println("constructed through the mark:")
+    var dolly: Sheep = Animal::new("dolly")
+    dolly.speak()
+    dolly.shear()
+    dolly.speak()
+
+    let bot: Robot = Animal::new("scrap")
+    bot.speak()
+
+    io::println("folded through the mark:")
+    let ns: [4:i64] = [1, 2, 3, 4]
+    io::println("  sum      " + total(ns).$str())
+    let words: [3:String] = ["a", "b", "c"]
+    io::println("  joined   " + total(words))
+    let vs: [3:V2] = [V2 { x: 1, y: 2 }, V2 { x: 10, y: 20 }, V2 { x: 100, y: 200 }]
+    let sum = total(vs)
+    io::println("  vectors  " + sum.x.$str() + "," + sum.y.$str())
+
+    io::println("inherent first, mark on request:")
+    let t = Ticket { number: 42 }
+    io::println("  t.label()          " + t.label())
+    io::println("  t::Formal.label()  " + t::Formal.label())
+    io::println("  t.heading()        " + t.heading())
+    0
+}

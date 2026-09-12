@@ -1,0 +1,67 @@
+// Subscripting and iterating the containers.
+//
+// `[]` is the direct form everywhere and aborts on a key or index that is not
+// there; `at` is the form that answers instead. A Set has nothing to store, so
+// it has no `indexSet` — `s[value]` asks whether it is a member.
+// EXPECT: vector 2 -> 20, 8
+// EXPECT: map ada 36 -> 37
+// EXPECT: map total 82
+// EXPECT: set holds b true, z false
+// EXPECT: set members 3
+// EXPECT: slice mapped 10 20 30 40 
+// EXPECT: slice filtered 3 4 
+// EXPECT: balanced true
+import std::io
+import std::process
+import std::dictionary
+import std::collections::slice
+import std::collections::vector
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        // Vector: read, write, and compound-assign through the subscript.
+        var v = vector::from([1, 2, 3])
+        let read = v[1]
+        v[1] = 20
+        v[2] += 5
+        io::println("vector " + read.$str() + " -> " + v[1].$str() +
+                    ", " + v[2].$str())
+
+        // Map: the same three, keyed.
+        var ages = dictionary::Map<String, i64>()
+        ages["ada"] = 36
+        ages["grace"] = 45
+        let was = ages["ada"]
+        ages["ada"] += 1
+        io::println("map ada " + was.$str() + " -> " + ages["ada"].$str())
+
+        // A map iterates as (key, value) pairs.
+        var total = 0
+        for (name, age) in ages { total += age }
+        io::println("map total " + total.$str())
+
+        // Set: the subscript asks about membership.
+        let seen = dictionary::setOf(["a", "b", "c"])
+        io::println("set holds b " + seen["b"].$str() +
+                    ", z " + seen["z"].$str())
+        var members = 0
+        for m in seen { members += 1 }
+        io::println("set members " + members.$str())
+
+        // Slices index natively; `iterate` is what carries the adaptors.
+        let ns: [4:i64] = [1, 2, 3, 4]
+        var mapped = ""
+        for n in slice::iterate(ns).map(||(n: i64) -> i64 { n * 10 }) {
+            mapped += n.$str() + " "
+        }
+        io::println("slice mapped " + mapped)
+        var kept = ""
+        for n in slice::iterate(ns).filter(||(n: i64) -> bool { n > 2 }) {
+            kept += n.$str() + " "
+        }
+        io::println("slice filtered " + kept)
+    }
+    io::println("balanced " + (before == process::liveObjectCount()).$str())
+    0
+}

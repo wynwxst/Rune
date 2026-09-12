@@ -1,0 +1,15 @@
+// What is behind a `some` is the function's own business: a caller cannot
+// name a field of it, treat it as the concrete type, or take it apart.
+// EXPECT-ERROR: 'some Shape' has no member named 's'
+
+mark Shape { fn area(&self) -> f64 }
+struct Sq { pub s: f64 }
+bind Shape to Sq { fn area(&self) -> f64 { self.s * self.s } }
+
+fn make(side: f64) -> some Shape { Sq { s: side } }
+
+fn main() -> i64 {
+    let s = make(3.0)
+    let side = s.s
+    0
+}

@@ -1,0 +1,9 @@
+// `some` is a result type and nothing else: a parameter has no body to
+// decide what it is.
+// EXPECT-ERROR: only allowed as a function's result
+
+mark Shape { fn area(&self) -> f64 }
+
+fn measure(s: some Shape) -> f64 { s.area() }
+
+fn main() -> i64 { 0 }

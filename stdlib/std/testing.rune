@@ -1,0 +1,148 @@
+// Unit testing: a handful of checks, a running tally, and an exit code.
+//
+// A test file is an ordinary program. It makes assertions, then hands the
+// tally back from `main`, which is what `rune test` reads:
+//
+//     import std::testing
+//     import std::mem
+//
+//     fn main() -> i64 {
+//         testing::equal("twice doubles", twice(21), 42)
+//         testing::isTrue("a fresh buffer holds its size", mem::Buffer<i64>(4).holds(3))
+//         testing::summary()
+//     }
+//
+// Every check prints its own line, so a failure names itself rather than
+// leaving you to work out which of twenty assertions went wrong.
+
+import std::io
+import std::process
+
+global var passed: i64 = 0
+global var failed: i64 = 0
+
+fn pass(name: String) {
+    passed += 1
+    io::println("  \x1b[32m✓\x1b[0m " + name)
+}
+
+fn fail(name: String, detail: String) {
+    failed += 1
+    io::println("  \x1b[31m✗\x1b[0m " + name)
+    if !detail.$isEmpty() { io::println("      " + detail) }
+}
+
+//===--------------------------------------------------------------------===//
+// Checks
+//===--------------------------------------------------------------------===//
+
+/// Passes when `condition` holds.
+pub fn isTrue(name: String, condition: bool) {
+    if condition { pass(name) } else { fail(name, "expected true, got false") }
+}
+
+/// Passes when `condition` does not hold.
+pub fn isFalse(name: String, condition: bool) {
+    if !condition { pass(name) } else { fail(name, "expected false, got true") }
+}
+
+/// Passes when `got` equals `want`. On failure both are printed, so the line
+/// says what went wrong rather than only that something did.
+///
+/// Values are compared as they print. That covers every builtin exactly, and
+/// it means a type only has to be bound to `Display` to be testable — there is
+/// no separate equality bound to satisfy.
+pub fn equal<T: io::Display>(name: String, got: T, want: T) {
+    if got.display() == want.display() {
+        pass(name)
+    } else {
+        fail(name, "expected " + want.display() + ", got " + got.display())
+    }
+}
+
+/// Passes when `got` differs from `want`.
+pub fn notEqual<T: io::Display>(name: String, got: T, want: T) {
+    if got.display() != want.display() { pass(name) } else { fail(name, "expected anything but " + want.display()) }
+}
+
+/// Passes when an Option holds something.
+pub fn isSome<T>(name: String, value: T?) {
+    match value {
+        Some(v) => pass(name),
+        None => fail(name, "expected a value, got nothing"),
+    }
+}
+
+/// Passes when an Option holds nothing.
+pub fn isNone<T>(name: String, value: T?) {
+    match value {
+        Some(v) => fail(name, "expected nothing, got a value"),
+        None => pass(name),
+    }
+}
+
+/// Fails unconditionally — for the branch that should not have been reached.
+pub fn unreachable(name: String) {
+    fail(name, "this line should not have run")
+}
+
+//===--------------------------------------------------------------------===//
+// Writing the check without naming it
+//
+// Every function above takes a name, because a failing line has to say what it
+// was testing. These macros take the name from the expression itself, so the
+// obvious cases need not be named twice.
+//===--------------------------------------------------------------------===//
+
+/// `assert!(x > 0)` — checks the expression and names it after itself.
+///
+///     assert!(buffer.holds(3))
+///     ✓ buffer.holds(3)
+///
+/// Give it a name of your own when the expression is not the explanation:
+/// `assert!(n % 2 == 0, "even after doubling")`.
+pub macro assert {
+    ($cond: expr) => { testing::isTrue(stringify!($cond), $cond) }
+    ($cond: expr, $name: expr) => { testing::isTrue($name, $cond) }
+}
+
+/// `assertEq!(got, want)` — compares, and names the check after the two sides.
+///
+///     assertEq!(twice(21), 42)
+///     ✓ twice(21) == 42
+pub macro assertEq {
+    ($got: expr, $want: expr) => {
+        testing::equal(stringify!($got) + " == " + stringify!($want),
+                       $got, $want)
+    }
+    ($got: expr, $want: expr, $name: expr) => {
+        testing::equal($name, $got, $want)
+    }
+}
+
+/// `assertNot!(x)` — the negative of `assert!`.
+pub macro assertNot {
+    ($cond: expr) => { testing::isFalse(stringify!($cond), $cond) }
+    ($cond: expr, $name: expr) => { testing::isFalse($name, $cond) }
+}
+
+//===--------------------------------------------------------------------===//
+// Result
+//===--------------------------------------------------------------------===//
+
+/// How many checks have run, and how many of those failed.
+pub fn counts() -> (i64, i64) { (passed, failed) }
+
+/// Prints the tally and returns what `main` should: zero when everything
+/// passed, one otherwise. `rune test` reports a file by this exit code.
+///
+///     fn main() -> i64 { ...checks...; testing::summary() }
+pub fn summary() -> i64 {
+    let total = passed + failed
+    if failed == 0 {
+        io::println("  " + total.$str() + " passed")
+        return 0
+    }
+    io::println("  " + failed.$str() + " of " + total.$str() + " failed")
+    1
+}

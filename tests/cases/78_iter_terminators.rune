@@ -1,0 +1,46 @@
+// Ending a chain: the four ways to walk one to its end and keep an answer,
+// and the two adaptors that change what goes past without changing it.
+// EXPECT: 14
+// EXPECT: 5
+// EXPECT: 5
+// EXPECT: 4
+// EXPECT: 2
+// EXPECT: 1
+// EXPECT: n3
+// EXPECT: n1
+// EXPECT: n4
+// EXPECT: n1
+// EXPECT: n5
+// EXPECT: 0
+// EXPECT: 5
+// EXPECT: 10
+// EXPECT: 15
+// EXPECT: saw 3
+// EXPECT: saw 1
+// EXPECT: 2
+import std::io
+import std::iter
+import std::collections::vector
+
+fn main() -> i64 {
+    var v = vector::Vector<i64>()
+    v.push(3)
+    v.push(1)
+    v.push(4)
+    v.push(1)
+    v.push(5)
+    io::println(v.as_iter().fold(0, ||(sum: i64, n: i64) -> i64 { sum + n }).$str())
+    io::println((v.as_iter().reduce(||(a: i64, b: i64) -> i64 { if a > b { a } else { b } }) ?? -1).$str())
+    io::println((v.as_iter().last() ?? -1).$str())
+    io::println((v.as_iter().nth(2) ?? -1).$str())
+    io::println((v.as_iter().position(||(n: i64) -> bool { n == 4 }) ?? -1).$str())
+    io::println((v.as_iter().best(||(a: i64, b: i64) -> bool { a < b }) ?? -1).$str())
+    v.as_iter().forEach(||(n: i64) { io::println("n" + n.$str()) })
+    for n in iter::counting(0).step_by(5).take(4) { io::println(n.$str()) }
+    // `inspect` is the chain's own print statement: lazy, so only the two
+    // values `take` asks for go past it.
+    io::println(v.as_iter().inspect(||(n: i64) -> () {
+        io::println("saw " + n.$str())
+    }).take(2).count().$str())
+    0
+}

@@ -1,0 +1,12 @@
+// Bounds checking is on at --safety=full, which is the default.
+// EXPECT-PANIC: index 9 is out of bounds for a collection of length 4
+import std::io
+
+fn main() -> i64 {
+    values: [4:i64] = [1, 2, 3, 4]
+    var idx = 0
+    // The index is computed so the check cannot be folded away.
+    for i in 0..10 { idx = i }
+    io::println("about to read " + idx.$str())
+    values[idx]
+}

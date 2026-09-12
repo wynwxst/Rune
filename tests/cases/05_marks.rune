@@ -1,0 +1,64 @@
+// Marks with defaults and super-marks, binds, generics and operator overloads.
+// EXPECT: (1.0, 2.0)!
+// EXPECT: magnitude=5.0
+// EXPECT: sum=(4.0, 6.0)
+// EXPECT: scaled=(2.0, 4.0)
+// EXPECT: wrapped=Wrapper((1.0, 2.0))
+// EXPECT: indexed=42
+// EXPECT: bigger=9
+import std::io
+import std::math
+
+struct Vec2 { pub x: f64, pub y: f64 }
+struct Wrapper<T> { value: T }
+
+mark Show {
+    fn show(&self) -> String
+    fn shout(&self) -> String { self.show() + "!" }
+}
+
+mark Measured: Show {
+    fn magnitude(&self) -> f64
+}
+
+bind Show to Vec2 {
+    fn show(&self) -> String { "(" + self.x.$str() + ", " + self.y.$str() + ")" }
+}
+
+bind Measured to Vec2 {
+    fn magnitude(&self) -> f64 { math::squareRoot(self.x * self.x + self.y * self.y) }
+}
+
+bind<T> Show to Wrapper<T> where T: Show {
+    fn show(&self) -> String { "Wrapper(" + self.value.show() + ")" }
+}
+
+bind operator::add to Vec2 {
+    fn add(&self, rhs: &Vec2) -> Vec2 { Vec2 { x: self.x + rhs.x, y: self.y + rhs.y } }
+}
+
+bind operator::LeftSquareBracket to Wrapper<i64> {
+    fn index(&self, i: i64) -> i64 { self.value + i }
+}
+
+extend Vec2 {
+    fn scaled(&self, k: f64) -> Vec2 { Vec2 { x: self.x * k, y: self.y * k } }
+}
+
+fn render<T: Show>(value: T) -> String { value.shout() }
+
+fn largest<T>(a: T, b: T, better: @function(T, T) -> bool) -> T {
+    if better(a, b) { a } else { b }
+}
+
+fn main() -> i64 {
+    v = Vec2 { x: 1.0, y: 2.0 }
+    io::println(render(v))
+    io::println("magnitude=" + Vec2 { x: 3.0, y: 4.0 }.magnitude().$str())
+    io::println("sum=" + (v + Vec2 { x: 3.0, y: 4.0 }).show())
+    io::println("scaled=" + v.scaled(2.0).show())
+    io::println("wrapped=" + Wrapper<Vec2> { value: v }.show())
+    io::println("indexed=" + Wrapper<i64> { value: 40 }[2].$str())
+    io::println("bigger=" + largest(4, 9, ||(a: i64, b: i64) -> bool { a > b }).$str())
+    0
+}

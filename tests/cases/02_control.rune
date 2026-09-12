@@ -1,0 +1,55 @@
+// while, for, loop, labelled break, match and block values.
+// EXPECT: sum=55 evens=5
+// EXPECT: countdown=5,4,3,2,1,
+// EXPECT: found at 3
+// EXPECT: small medium large zero
+// EXPECT: block=8
+import std::io
+
+fn classify(n: i64) -> String {
+    match n {
+        0 => "zero",
+        1 | 2 | 3 => "small",
+        4..=9 => "medium",
+        _ => "large",
+    }
+}
+
+fn main() -> i64 {
+    var sum = 0
+    var evens = 0
+    for i in 1..=10 {
+        sum += i
+        if i % 2 == 0 { evens += 1 }
+    }
+    io::println("sum=" + sum.$str() + " evens=" + evens.$str())
+
+    var n = 5
+    var out = ""
+    while n > 0 {
+        out += n.$str() + ","
+        n -= 1
+    }
+    io::println("countdown=" + out)
+
+    var found = -1
+    search: loop {
+        for i in 0..10 {
+            if i * i == 9 {
+                found = i
+                break :search
+            }
+        }
+        break
+    }
+    io::println("found at " + found.$str())
+
+    io::println(classify(2) + " " + classify(5) + " " + classify(99) + " " + classify(0))
+
+    value = {
+        t = 2 + 2
+        t * 2
+    }
+    io::println("block=" + value.$str())
+    0
+}

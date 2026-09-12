@@ -1,0 +1,280 @@
+// webserver::http — enough HTTP/1.1 to answer a browser.
+//
+// A request arrives as lines, so it is read as lines: `io::BufferedReader`
+// turns a socket into them, and the socket is the only thing here that knows
+// it is a socket. Everything below works on text.
+
+import std::io
+import std::net
+import std::collections::vector
+
+//===--------------------------------------------------------------------===//
+// Requests
+//===--------------------------------------------------------------------===//
+
+/// A request, parsed far enough to route it and read its body.
+pub struct Request {
+    method: String = "",
+    /// The path with any query string removed: `/search`.
+    path: String = "",
+    /// What followed the `?`, if anything.
+    query: String = "",
+    version: String = "",
+    /// The header lines as they arrived, `Name: value` each, in order.
+    ///
+    /// Raw lines rather than a parsed pair per header: a header may appear
+    /// more than once, order is sometimes what a reader wants, and the split
+    /// costs a `find` at the two places that need it.
+    headers: vector::Vector<String>,
+    body: String = ""
+}
+
+/// The name half of a header line, and the value half.
+pub fn headerName(line: String) -> String {
+    let colon = line.$find(":")
+    if colon < 0 { return line }
+    line.$substring(0, colon)
+}
+
+pub fn headerValue(line: String) -> String {
+    let colon = line.$find(":")
+    if colon < 0 { return "" }
+    trimmed(line.$substring(colon + 1, line.$length()))
+}
+
+extend Request {
+    /// The value of a header, matched without regard to case — HTTP names
+    /// are case-insensitive, and clients disagree about how to spell them.
+    pub fn header(&self, name: String) -> String? {
+        let wanted = lowered(name)
+        for line in self.headers {
+            if lowered(headerName(line)) == wanted { return headerValue(line) }
+        }
+        nil
+    }
+
+    /// True when the client asked to keep the connection open. HTTP/1.1
+    /// keeps it open unless told otherwise; HTTP/1.0 is the other way round.
+    pub fn wantsKeepAlive(&self) -> bool {
+        match self.header("Connection") {
+            Some(v) => lowered(v) != "close",
+            None => self.version == "HTTP/1.1",
+        }
+    }
+}
+
+/// ASCII lower case. Header names are ASCII by definition, so this needs
+/// none of `std::text`'s machinery — and a table beats a case conversion that
+/// would have to think about locales.
+pub fn lowered(text: String) -> String {
+    let small = "abcdefghijklmnopqrstuvwxyz"
+    var out = ""
+    var i = 0
+    let n = text.$length()
+    while i < n {
+        let b = text.$byteAt(i)
+        if b >= 65u8 && b <= 90u8 {
+            let at = (b - 65u8) as i64
+            out += small.$substring(at, at + 1)
+        } else {
+            out += text.$substring(i, i + 1)
+        }
+        i += 1
+    }
+    out
+}
+
+/// Why a request could not be read.
+pub enum RequestError {
+    /// The connection ended before a request arrived. On a kept-alive
+    /// connection this is the ordinary way a conversation finishes.
+    Ended,
+    /// The first line was not `METHOD PATH VERSION`.
+    BadRequestLine,
+    /// A header line had no colon in it.
+    BadHeader,
+    /// The body was longer than this server is willing to read.
+    TooLarge,
+}
+
+/// The largest body this server will read. A request that claims more is
+/// refused rather than allowed to fill memory.
+pub global BODY_LIMIT: i64 = 1048576
+
+/// Reads one request from `source`.
+///
+/// The reader is borrowed, not taken: on a kept-alive connection the next
+/// request is read from the same one, and whatever arrived early is still in
+/// its buffer.
+pub fn readRequest(
+        source: &var io::BufferedReader<net::TcpStream>
+    ) -> Result<Request, RequestError> {
+    // A kept-alive connection often has a blank line left over from the
+    // previous request; skip those rather than calling them malformed.
+    var first = ""
+    loop {
+        match source.readLine() {
+            Some(line) => {
+                if !line.$isEmpty() { first = line; break }
+            },
+            None => return Err(RequestError::Ended),
+        }
+    }
+
+    let parts = splitOn(first, ' ')
+    if parts.length() < 3 { return Err(RequestError::BadRequestLine) }
+
+    var request = Request {
+        method: parts.at(0).unwrap(),
+        path: parts.at(1).unwrap(),
+        query: "",
+        version: parts.at(2).unwrap(),
+        headers: vector::Vector<String>(),
+        body: ""
+    }
+
+    let question = request.path.$find("?")
+    if question >= 0 {
+        request.query =
+            request.path.$substring(question + 1, request.path.$length())
+        request.path = request.path.$substring(0, question)
+    }
+
+    loop {
+        match source.readLine() {
+            Some(line) => {
+                if line.$isEmpty() { break }
+                if line.$find(":") < 0 { return Err(RequestError::BadHeader) }
+                request.headers.push(line)
+            },
+            // A request with no blank line after its headers is truncated,
+            // but there is enough here to answer, so answer.
+            None => break,
+        }
+    }
+
+    match request.header("Content-Length") {
+        Some(text) => {
+            let length = text.$toInt().or(0)
+            if length > BODY_LIMIT { return Err(RequestError::TooLarge) }
+            if length > 0 {
+                var body = io::Bytes()
+                match source.inner().readExact(body, length) {
+                    Ok(n) => request.body = body.toString(),
+                    Err(e) => {},
+                }
+            }
+        },
+        None => {},
+    }
+
+    Ok(request)
+}
+
+//===--------------------------------------------------------------------===//
+// Responses
+//===--------------------------------------------------------------------===//
+
+/// What to send back.
+pub struct Response {
+    status: i64 = 200,
+    reason: String = "OK",
+    contentType: String = "text/plain; charset=utf-8",
+    body: String = "",
+    /// Sent as `Connection: close` when false, which tells the client this
+    /// is the last exchange on this socket.
+    keepAlive: bool = true
+}
+
+/// A 200 with a body of the given type.
+pub fn respond(contentType: String, body: String) -> Response {
+    Response {
+        status: 200, reason: "OK",
+        contentType: contentType, body: body, keepAlive: true
+    }
+}
+
+/// A 200 of HTML.
+pub fn html(body: String) -> Response {
+    respond("text/html; charset=utf-8", body)
+}
+
+/// A 200 of plain text.
+pub fn text(body: String) -> Response {
+    respond("text/plain; charset=utf-8", body)
+}
+
+/// A 200 of JSON. The body is passed through as it is written.
+pub fn json(body: String) -> Response {
+    respond("application/json; charset=utf-8", body)
+}
+
+/// An error page, with the status it says.
+pub fn failure(status: i64, reason: String) -> Response {
+    Response {
+        status: status,
+        reason: reason,
+        contentType: "text/html; charset=utf-8",
+        body: "<!doctype html><html><head><title>" + status.$str() + " " +
+              reason + "</title></head><body><h1>" + status.$str() + " " +
+              reason + "</h1></body></html>\n",
+        keepAlive: false
+    }
+}
+
+/// The response as bytes, headers and all.
+///
+/// `Content-Length` is always sent, so the client knows where the body ends
+/// without the connection having to close to tell it.
+pub fn render(response: Response) -> io::Bytes {
+    var out = io::Bytes()
+    out.appendText("HTTP/1.1 " + response.status.$str() + " " +
+                   response.reason + "\r\n")
+    out.appendText("Content-Type: " + response.contentType + "\r\n")
+    out.appendText("Content-Length: " + response.body.$length().$str() + "\r\n")
+    out.appendText("Server: rune-webserver/0.1\r\n")
+    if response.keepAlive {
+        out.appendText("Connection: keep-alive\r\n")
+    } else {
+        out.appendText("Connection: close\r\n")
+    }
+    out.appendText("\r\n")
+    out.appendText(response.body)
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Small text helpers
+//===--------------------------------------------------------------------===//
+
+/// `text` cut at every `separator`, with empty pieces dropped. Enough for a
+/// request line and a query string; not a general splitter.
+pub fn splitOn(text: String, separator: Character) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var start = 0
+    var i = 0
+    let n = text.$length()
+    let cut = separator.$str().$byteAt(0)
+    while i < n {
+        if text.$byteAt(i) == cut {
+            if i > start { out.push(text.$substring(start, i)) }
+            start = i + 1
+        }
+        i += 1
+    }
+    if n > start { out.push(text.$substring(start, n)) }
+    out
+}
+
+/// `text` without leading or trailing spaces, tabs or line endings.
+pub fn trimmed(text: String) -> String {
+    var from = 0
+    var stop = text.$length()
+    while from < stop && isSpace(text.$byteAt(from)) { from += 1 }
+    while stop > from && isSpace(text.$byteAt(stop - 1)) { stop -= 1 }
+    text.$substring(from, stop)
+}
+
+fn isSpace(b: u8) -> bool {
+    b == 32u8 || b == 9u8 || b == 13u8 || b == 10u8
+}

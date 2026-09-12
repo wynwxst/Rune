@@ -1,0 +1,52 @@
+// A user-defined decorator is a function whose last parameter is a function.
+// `@route("GET", "/health")` on `fn health()` means `route("GET", "/health",
+// health)`, called once before `main`.
+// EXPECT: registering GET /health
+// EXPECT: registering GET /version
+// EXPECT: registering POST /reload
+// EXPECT: --- main ---
+// EXPECT: 3 routes were registered before main ran
+// EXPECT:   200 healthy
+import std::io
+import std::collections::vector
+
+global var table: vector::Vector<String>? = nil
+global var calls: vector::Vector<@function() -> ()>? = nil
+
+fn routes() -> vector::Vector<String> {
+    if table is Some(t) { return t }
+    let made = vector::Vector<String>()
+    table = made
+    made
+}
+
+fn handlers() -> vector::Vector<@function() -> ()> {
+    if calls is Some(t) { return t }
+    let made = vector::Vector<@function() -> ()>()
+    calls = made
+    made
+}
+
+/// Two arguments of its own, then the function it decorates.
+fn route(method: String, path: String, handler: @function() -> ()) {
+    io::println("registering " + method + " " + path)
+    routes().push(method + " " + path)
+    handlers().push(handler)
+}
+
+@route("GET", "/health")
+fn health() { io::println("  200 healthy") }
+
+@route("GET", "/version")
+fn version() { io::println("  200 v1") }
+
+@route("POST", "/reload")
+fn reload() { io::println("  202 reloading") }
+
+fn main() -> i64 {
+    io::println("--- main ---")
+    io::println(routes().length().$str() +
+                " routes were registered before main ran")
+    handlers().get(0)()
+    0
+}

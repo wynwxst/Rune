@@ -1,0 +1,36 @@
+import std::io
+
+extern "C" {
+    fn srand(seed: u32) -> ()
+    fn rand() -> i32
+    fn time(time_t: i64) -> i64 
+}
+
+@safe("srand has been seeded properly with the current time, random is used properly as well")
+fn main() -> i64 {
+    srand(time(0) as u32)
+    toguess = rand() % 101
+    io::println("Hello from guess!")
+    var res = false
+    for i in 0..6 {
+        print!("Type in a number to guess (no. {}): ",i+1)
+        match io::readLine().$toInt() {
+            Some(num) => {
+                if num == toguess {
+                    res = true
+                    break
+                } else {
+                    println!("Wrong guess! Try going {}.", if num > toguess {"lower"} else {"higher"})
+                }
+            }
+            _ => {println!("Wrong guess!")}
+        }
+    }
+    if res {
+        println!("You got the number!")
+    } else {
+        println!("The number was {toguess}, better luck next time!")
+    }
+    
+    0
+}

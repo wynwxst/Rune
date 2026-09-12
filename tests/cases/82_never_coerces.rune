@@ -1,0 +1,43 @@
+// `process::panic`, `exit`, `fail` and `succeed` are declared `-> Never`, and
+// a `Never` converts to any type — so a call to one can stand at the end of a
+// function that promised a value, or in the branch of an `if` or `match`
+// that has nothing to produce.
+// EXPECT: 3
+// EXPECT: zero
+// EXPECT: one
+// EXPECT: 5
+// EXPECT: done
+
+import std::io
+import std::process
+
+fn pick(n: i64) -> i64 {
+    if n > 0 { return n }
+    process::panic("negative")
+}
+
+fn pick2(n: i64) -> String {
+    match n {
+        0 => "zero",
+        _ => process::panic("not zero"),
+    }
+}
+
+fn describe(n: i64) -> String {
+    let label: String = if n == 1 { "one" } else { process::fail() }
+    label
+}
+
+fn stop() -> Never {
+    io::println("done")
+    process::exit(0)
+}
+
+fn main() -> i64 {
+    io::println(pick(3))
+    io::println(pick2(0))
+    io::println(describe(1))
+    let x: i64 = if true { 5 } else { process::panic("no") }
+    io::println(x)
+    stop()
+}

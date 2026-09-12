@@ -1,0 +1,34 @@
+// Compiler-provided members carry a `$`, so they never collide with a
+// method a type declares for itself.
+// EXPECT: 5
+// EXPECT: 3
+// EXPECT: ell
+// EXPECT: 2
+// EXPECT: falsetrue
+// EXPECT: 42
+// EXPECT: mine
+// EXPECT: 11
+import std::io
+
+struct Tag { text: String }
+
+extend Tag {
+    // Same names as the compiler's; the sigil keeps them apart.
+    pub fn length(&self) -> String { "mine" }
+    pub fn str(&self) -> i64 { self.text.$length() + 6 }
+}
+
+fn main() -> i64 {
+    let s = "hello"
+    io::println(s.$length().$str())
+    io::println("abc".$charCount().$str())
+    io::println(s.$substring(1, 4))
+    io::println(s.$find("llo").$str())
+    io::println(s.$isEmpty().$str() + "" + (!s.$isEmpty()).$str())
+    io::println("42".$toInt().unwrap().$str())
+
+    let t = Tag { text: "hello" }
+    io::println(t.length())
+    io::println(t.str().$str())
+    0
+}

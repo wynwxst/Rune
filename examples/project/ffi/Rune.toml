@@ -1,0 +1,21 @@
+[package]
+name = "ffi"
+version = "0.1.0"
+description = "Calling C from Rune, and Rune from C."
+
+[build]
+safety = "full"
+# The C half is compiled with the same toolchain the rest of the build uses,
+# so this package cross-compiles like any other.
+c-sources = ["c/shim.c"]
+c-flags = ["-Wall", "-Wextra"]
+# libm is a system library, so it is asked for by name rather than built.
+link = ["m"]
+
+# Cross-compiling this package builds its C half with the same toolchain, so
+# nothing about the FFI has to change to target another machine.
+[target.mingw]
+triple = "x86_64-w64-mingw32"
+cc = "x86_64-w64-mingw32-gcc"
+runner = "wine"
+link = ["ws2_32"]

@@ -1,0 +1,51 @@
+// A mark default may return a type parameterised by `Self`. Every type
+// carrying the mark gets the method, and the wrapper carries the mark too, so
+// resolving the result everywhere would never finish — it is resolved where it
+// is called instead, and a chain is only as deep as the one written here.
+// EXPECT: 2
+// EXPECT: 2
+// EXPECT: 1
+// EXPECT: 0
+// EXPECT: nothing left
+// SAFETY: full
+import std::io
+
+struct Boxed<I> { pub inner: I }
+
+mark Wrapping {
+    fn step(&var self) -> i64?
+
+    /// No type parameter of its own, and the result wraps `Self`.
+    fn boxed(self) -> Boxed<Self> { Boxed<Self> { inner: self } }
+}
+
+bind<I: Wrapping> Wrapping to Boxed<I> {
+    fn step(&var self) -> i64? { self.inner.step() }
+}
+
+struct Ticks { pub left: i64 }
+
+bind Wrapping to Ticks {
+    fn step(&var self) -> i64? {
+        if self.left <= 0 { return nil }
+        self.left -= 1
+        self.left
+    }
+}
+
+fn main() -> i64 {
+    var once = (Ticks { left: 3 }).boxed()
+    io::println(once.step().or(-1).$str())
+
+    // Three deep: `Boxed<Boxed<Boxed<Ticks>>>` exists because this line asks
+    // for it, and no deeper.
+    var thrice = (Ticks { left: 3 }).boxed().boxed().boxed()
+    io::println(thrice.step().or(-1).$str())
+    io::println(thrice.step().or(-1).$str())
+    io::println(thrice.step().or(-1).$str())
+    match thrice.step() {
+        Option::Some(n) => io::println(n.$str()),
+        Option::None => io::println("nothing left"),
+    }
+    0
+}

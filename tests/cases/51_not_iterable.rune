@@ -1,0 +1,11 @@
+// Nothing says how to walk a bare struct, and the diagnostic says what would.
+// EXPECT-ERROR: cannot iterate over 'Bare'
+import std::io
+
+struct Bare { pub n: i64 }
+
+fn main() -> i64 {
+    let b = Bare { n: 1 }
+    for x in b { io::println(x.n.$str()) }
+    0
+}

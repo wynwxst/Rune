@@ -1,0 +1,19 @@
+# The packages this registry holds. Written by `rune pkg server --addPackage`;
+# every release is one entry, and the archive it names is under packages/.
+
+[registry]
+name = "lab"
+format = 1
+updated = "2026-09-11T15:14:04Z"
+
+[[release]]
+name = "logger"
+version = "1.0.0"
+description = "The leveled logger, as the lab ships it: a Trace level below Debug, and a summary of what got through"
+authors = ["The Rune examples (lab)"]
+license = "MIT"
+archive = "packages/logger/logger-1.0.0.tar"
+sha256 = "474da8c66a0e7bb49f338c418ea65a550fca04bce20dae34b5cfb2c3e6725123"
+size = 8704
+added = "2026-09-11T15:14:04Z"
+dependencies = []

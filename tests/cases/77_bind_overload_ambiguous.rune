@@ -1,0 +1,16 @@
+// Two versions that accept the arguments equally well are reported rather
+// than decided by declaration order.
+// EXPECT-ERROR: is ambiguous
+import std::io
+
+struct P { pub n: i64 }
+mark Show { fn show(&self, v: i32) -> String }
+
+bind Show to P { fn show(&self, v: i32) -> String { "i32" } }
+bind Show to P { fn show(&self, v: i64) -> String { "i64" } }
+
+fn main() -> i64 {
+    x: i16 = 3
+    io::println(P { n: 1 }.show(x))
+    0
+}

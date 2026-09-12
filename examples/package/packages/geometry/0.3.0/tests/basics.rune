@@ -1,0 +1,13 @@
+import std::testing
+import geometry
+
+fn main() -> i64 {
+    let a = geometry::origin()
+    let b = geometry::point(3.0, 4.0)
+    testing::equal("distance", geometry::distance(a, b), 5.0)
+    testing::equal("dot", (b - a).dot(geometry::vector(1.0, 0.0)), 3.0)
+    testing::equal("unit length", (b - a).unit().length(), 1.0)
+    testing::isTrue("moved", a.moved(geometry::vector(3.0, 4.0)) == b)
+    testing::equal("prints", b.display(), "(3.0, 4.0)")
+    testing::summary()
+}

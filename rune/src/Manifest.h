@@ -1,0 +1,141 @@
+//===- Manifest.h - Rune.toml, in memory -----------------------*- C++ -*-===//
+#ifndef RUNE_MANIFEST_H
+#define RUNE_MANIFEST_H
+
+#include <string>
+#include <vector>
+
+namespace rune {
+
+/// One `[dependencies]` entry. Only path dependencies are resolved today; a
+/// `version` is recorded so the manifest round-trips.
+struct Dependency {
+  std::string Name;
+  std::string Path;     ///< relative to the manifest's directory
+  std::string Version;
+  /// The registry it must come from, by the name `rune pkg server list`
+  /// shows; empty means whichever configured registry has it.
+  std::string Registry;
+};
+
+/// A cross-compilation target named in `[target.<name>]`.
+///
+/// Only `triple` is required. Everything else describes the toolchain that
+/// builds for it — which is the part that cannot be guessed, because a cross
+/// toolchain is installed wherever its owner put it.
+struct TargetSpec {
+  std::string Name;        ///< the table's key, e.g. "mingw"
+  std::string Triple;      ///< LLVM target triple
+  std::string Cc;          ///< link driver, e.g. "x86_64-w64-mingw32-gcc"
+  std::string Ar;          ///< archiver; derived from `cc` when not given
+  std::string Sysroot;
+  std::string RuntimeDir;  ///< where this target's libruneruntime.a lives
+  /// How to run a binary built for this target on this machine, e.g. "wine"
+  /// or "qemu-aarch64". Empty means it cannot be run here.
+  std::string Runner;
+  std::vector<std::string> LinkLibraries;
+  std::vector<std::string> LinkPaths;
+  std::vector<std::string> LinkArgs;
+};
+
+/// An extra executable declared with `[[bin]]`.
+struct BinaryTarget {
+  std::string Name;
+  std::string Path;
+};
+
+/// What a source file says it produces. A file that says nothing is a
+/// component: importable, compiled into whatever names it.
+enum class OutputKind { Component, Executable, Library, Object, Assembly, LLVM };
+
+const char *outputKindName(OutputKind k);
+/// The extension the kind's output carries, "" for an executable.
+const char *outputKindSuffix(OutputKind k);
+
+/// A file in `src/` that declares an output of its own, and so becomes a
+/// target rather than being folded into the package library.
+struct OutputRoot {
+  std::string Name;   ///< the file's stem
+  std::string Path;
+  OutputKind Kind = OutputKind::Component;
+};
+
+struct Manifest {
+  // [package]
+  std::string Name = "unnamed";
+  std::string Version = "0.1.0";
+  std::string Description;
+  std::string License;
+  std::string Edition = "2025";
+  std::vector<std::string> Authors;
+
+  // Layout, discovered from the package directory.
+  std::string Root;             ///< directory containing Rune.toml
+  std::string LibraryRoot;      ///< src/lib.rune, empty when absent
+  std::string BinaryRoot;       ///< src/main.rune, empty when absent
+  std::vector<std::string> Sources;   ///< every .rune under src/
+  std::vector<std::string> TestFiles; ///< every .rune under tests/
+  std::vector<BinaryTarget> Binaries;
+  /// Every file under `src/` that declares its own output, discovered by
+  /// reading what each file says. `main.rune` and `lib.rune` are here too.
+  std::vector<OutputRoot> Roots;
+
+  // [build]
+  std::string Safety = "full";  ///< none | minimal | full
+  /// [build] emit = "llvm-ir" — what `rune build` produces for this package
+  /// when the command line does not say. Empty means an executable.
+  std::string Emit;
+  unsigned OptLevel = 0;
+  bool Debug = true;
+  /// `overflow-checks`: 1 forces integer overflow to trap, 0 forces it to
+  /// wrap, and -1 (unset) leaves it to the profile — trap in a debug build,
+  /// wrap in a release one.
+  int OverflowChecks = -1;
+  bool WarningsAsErrors = false;
+  bool NoStdlib = false;
+  std::vector<std::string> LinkLibraries; ///< [build] link = ["m", "z"]
+  std::vector<std::string> LinkPaths;
+  /// [build] c-sources = ["c/shim.c"] — compiled with the same toolchain the
+  /// rest of the build uses, so a package with a C half cross-compiles too.
+  std::vector<std::string> CSources;
+  std::vector<std::string> CFlags;       ///< [build] c-flags
+  /// `[build] cfg = ["fast-math"]` — names `@Config(...)` should treat as set.
+  /// A dependency's name is set too, so a package can ask whether it has one.
+  std::vector<std::string> ConfigFlags;
+  std::vector<std::string> LinkArgs;     ///< [build] link-args
+
+  // [dependencies]
+  std::vector<Dependency> Dependencies;
+
+  // [target.<name>]
+  std::vector<TargetSpec> Targets;
+  /// The target named in `[build] target = "..."`, used when none is asked
+  /// for on the command line. Empty means the host.
+  std::string DefaultTarget;
+
+  /// Looks up a configured target by name; null when there is none.
+  const TargetSpec *findTarget(const std::string &name) const;
+
+  bool producesLibrary() const { return !LibraryRoot.empty(); }
+  bool producesBinary() const { return !BinaryRoot.empty() || !Binaries.empty(); }
+  /// Files with no output of their own: the package's shared code.
+  std::vector<std::string> componentSources() const;
+};
+
+/// Reads `<dir>/Rune.toml` and scans the package layout. `error` is filled in
+/// on failure.
+/// Reads `Rune.toml` from `dir`.
+///
+/// A package with nothing under `src/` is normally an error — there would be
+/// nothing to build. `requireSources = false` accepts one anyway, which is
+/// what documentation needs: `docs/` is written by hand, and a package that
+/// is only prose is a package worth documenting.
+bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
+                  bool requireSources = true);
+
+/// The text written by `rune new`.
+std::string defaultManifestText(const std::string &name, bool isLibrary);
+
+} // namespace rune
+
+#endif

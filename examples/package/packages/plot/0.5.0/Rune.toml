@@ -1,0 +1,14 @@
+[package]
+name = "plot"
+version = "0.5.0"
+edition = "2025"
+description = "Charts made of characters: bars, sparklines and scatter plots for a terminal"
+authors = ["The Rune examples"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]
+stats = "2.0"
+geometry = "0.3"

@@ -1,0 +1,104 @@
+// A guarded match arm must release the bindings its pattern made when the
+// guard says no; `while ... is` destructures each turn; bounds may name an
+// operator; marks may declare associated types.
+// EXPECT: 6
+// EXPECT: [ '1' '2' '3' ]
+// EXPECT: 4 3 2 1
+// EXPECT: 250 445
+// EXPECT: 7 ada
+// EXPECT: balanced true
+// A cons list: `cell` reaches itself through `list`,
+// so it is compiled below `full`.
+// SAFETY: minimal
+import std::io
+import std::process
+
+pub class Cell {
+    pub head: i64
+    pub tail: List
+    fn init(self, head: i64, tail: List) { self.head = head; self.tail = tail }
+}
+
+pub enum List {
+    Nil,
+    Cons(Cell),
+
+    pub fn sum(&self) -> i64 {
+        match self {
+            List::Nil => 0,
+            List::Cons(cell) => cell.head + cell.tail.sum(),
+        }
+    }
+    pub fn append(&var self, value: i64) {
+        match self {
+            List::Nil => { *self = List::Cons(Cell(value, List::Nil)) },
+            List::Cons(cell) => { cell.tail.append(value) }
+        }
+    }
+    // The guarded arm is the one that used to leak.
+    pub fn get(&self, index: i64) -> i64? {
+        match self {
+            List::Nil => nil,
+            List::Cons(cell) if index == 0 => cell.head,
+            List::Cons(cell) => cell.tail.get(index - 1)
+        }
+    }
+}
+
+bind io::Display to List {
+    fn display(&self) -> String {
+        var out: String = "[ "
+        var index: i64 = 0
+        while self.get(index) is Some(val) {
+            out += "'" + val.$str() + "' "
+            index += 1
+        }
+        out + "]"
+    }
+}
+
+// Bounds that name an operator rather than a mark.
+struct Money { cents: i64 }
+bind operator::cmp to Money { fn cmp(&self, o: Money) -> i64 { self.cents - o.cents } }
+bind operator::add to Money { fn add(&self, o: Money) -> Money { Money { cents: self.cents + o.cents } } }
+
+fn largest<T: operator::cmp>(a: T, b: T) -> T { if a > b { a } else { b } }
+fn total<T>(a: T, b: T) -> T where T: operator::add { a + b }
+
+// Associated types.
+mark Container {
+    type Item: io::Display
+    fn first(&self) -> Self::Item
+}
+struct Bag { v: [2:i64] }
+struct Names { v: [2:String] }
+bind Container to Bag   { type Item = i64     fn first(&self) -> Self::Item { self.v[0] } }
+bind Container to Names { type Item = String  fn first(&self) -> Self::Item { self.v[0] } }
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        var list = List::Nil
+        list.append(1); list.append(2); list.append(3)
+        io::println(list.sum())
+        io::println(list)
+
+        var n = 4
+        var out = ""
+        while (if n > 0 { n } else { nil }) is Some(v) {
+            out += v.$str() + " "
+            n -= 1
+        }
+        io::println(out.$substring(0, 7))
+
+        let a = Money { cents: 250 }
+        let b = Money { cents: 195 }
+        io::println(largest(a, b).cents.$str() + " " + total(a, b).cents.$str())
+
+        io::println(Bag { v: [7, 8] }.first().$str() + " " +
+                    Names { v: ["ada", "grace"] }.first())
+    }
+    let after = process::liveObjectCount()
+    io::println("balanced " + (before == after).$str())
+    0
+}

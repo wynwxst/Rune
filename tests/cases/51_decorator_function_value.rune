@@ -1,0 +1,49 @@
+// A decorator receives the function it is written on as a *value*, and a
+// callable value carries a leading environment parameter that a plain function
+// does not. The decorator has to hand over the thunk, not the function's own
+// address — passing the address shifted every argument by one, so the first
+// arrived as the null environment and any use of it was a null dereference.
+// EXPECT: directly: 1
+// EXPECT: through the table: 1
+// EXPECT: two arguments: a/b
+// EXPECT: balanced true
+import std::io
+import std::process
+import std::dictionary
+import std::collections::vector
+
+pub global var table = dictionary::Map<String, @function(vector::Vector<String>) -> ()>()
+pub global var pairs = dictionary::Map<String, @function(String, String) -> ()>()
+
+pub fn register(key: String, n: i32, f: @function(vector::Vector<String>) -> ()) {
+    table[key] = f
+}
+
+pub fn registerPair(key: String, f: @function(String, String) -> ()) {
+    pairs[key] = f
+}
+
+@register("greet", 0)
+pub fn greet(arg: vector::Vector<String>) {
+    io::println("through the table: " + arg.length().$str())
+}
+
+@registerPair("join")
+pub fn join(a: String, b: String) {
+    io::println("two arguments: " + a + "/" + b)
+}
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        var v = vector::Vector<String>()
+        v.push("x")
+        io::println("directly: " + v.length().$str())
+
+        // The same function, reached through the value the decorator stored.
+        table["greet"](v)
+        pairs["join"]("a", "b")
+    }
+    io::println("balanced " + (before == process::liveObjectCount()).$str())
+    0
+}

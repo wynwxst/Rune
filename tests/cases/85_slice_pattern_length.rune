@@ -1,0 +1,10 @@
+// A pattern against a fixed array has to account for every element: the
+// length is known, so a count that cannot line up is a mistake rather than
+// a test that fails.
+// EXPECT-ERROR: expected 3 element
+
+fn main() -> i64 {
+    let xs: [3:i64] = [1, 2, 3]
+    let [a, b] = xs
+    a + b
+}

@@ -1,0 +1,113 @@
+// shapes — figures on the plane, built on `geometry`.
+
+import std::io
+import std::math
+import geometry
+import std::collections::vector
+
+/// What every figure can answer.
+pub mark Shape {
+    fn area(&self) -> f64
+    fn perimeter(&self) -> f64
+    fn contains(&self, p: geometry::Point) -> bool
+    /// The smallest axis-aligned rectangle around it.
+    fn bounds(&self) -> Rect
+}
+
+pub struct Circle { pub centre: geometry::Point, pub radius: f64 }
+pub struct Rect { pub low: geometry::Point, pub high: geometry::Point }
+
+pub fn circle(centre: geometry::Point, radius: f64) -> Circle { Circle { centre: centre, radius: radius } }
+pub fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+    Rect { low: geometry::point(x, y), high: geometry::point(x + width, y + height) }
+}
+
+extend Rect {
+    pub fn width(&self) -> f64 { self.high.x - self.low.x }
+    pub fn height(&self) -> f64 { self.high.y - self.low.y }
+}
+
+bind Shape to Circle {
+    fn area(&self) -> f64 { math::PI * self.radius * self.radius }
+    fn perimeter(&self) -> f64 { 2.0 * math::PI * self.radius }
+    fn contains(&self, p: geometry::Point) -> bool { geometry::distance(self.centre, p) <= self.radius }
+    fn bounds(&self) -> Rect {
+        Rect { low: geometry::point(self.centre.x - self.radius, self.centre.y - self.radius),
+               high: geometry::point(self.centre.x + self.radius, self.centre.y + self.radius) }
+    }
+}
+
+bind Shape to Rect {
+    fn area(&self) -> f64 { self.width() * self.height() }
+    fn perimeter(&self) -> f64 { 2.0 * (self.width() + self.height()) }
+    fn contains(&self, p: geometry::Point) -> bool {
+        p.x >= self.low.x && p.x <= self.high.x && p.y >= self.low.y && p.y <= self.high.y
+    }
+    fn bounds(&self) -> Rect { *self }
+}
+
+/// A closed polygon, its corners in order.
+pub class Polygon {
+    pub corners: vector::Vector<geometry::Point>
+    fn init(&self) { self.corners = vector::Vector<geometry::Point>() }
+    pub fn add(&var self, p: geometry::Point) { self.corners.push(p) }
+}
+
+bind Shape to Polygon {
+    /// The shoelace formula; a polygon wound either way gives a positive area.
+    fn area(&self) -> f64 {
+        var twice = 0.0
+        let n = self.corners.length()
+        for i in 0..n {
+            let a = self.corners[i]
+            let b = self.corners[(i + 1) % n]
+            twice += a.x * b.y - b.x * a.y
+        }
+        math::absFloat(twice) / 2.0
+    }
+    fn perimeter(&self) -> f64 {
+        var total = 0.0
+        let n = self.corners.length()
+        for i in 0..n { total += geometry::distance(self.corners[i], self.corners[(i + 1) % n]) }
+        total
+    }
+    /// Ray casting: count the edges a ray to the right crosses.
+    fn contains(&self, p: geometry::Point) -> bool {
+        var inside = false
+        let n = self.corners.length()
+        for i in 0..n {
+            let a = self.corners[i]
+            let b = self.corners[(i + 1) % n]
+            if (a.y > p.y) != (b.y > p.y) {
+                let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y)
+                if p.x < x { inside = !inside }
+            }
+        }
+        inside
+    }
+    fn bounds(&self) -> Rect {
+        var low = self.corners[0]
+        var high = self.corners[0]
+        for c in self.corners {
+            if c.x < low.x { low.x = c.x }
+            if c.y < low.y { low.y = c.y }
+            if c.x > high.x { high.x = c.x }
+            if c.y > high.y { high.y = c.y }
+        }
+        Rect { low: low, high: high }
+    }
+}
+
+/// The total area of any run of shapes.
+pub fn totalArea<S: Shape>(items: [S]) -> f64 {
+    var total = 0.0
+    for s in items { total += s.area() }
+    total
+}
+
+bind io::Display to Circle {
+    fn display(&self) -> String { "circle r=" + self.radius.$str() + " at " + self.centre.display() }
+}
+bind io::Display to Rect {
+    fn display(&self) -> String { "rect " + self.width().$str() + "x" + self.height().$str() + " at " + self.low.display() }
+}

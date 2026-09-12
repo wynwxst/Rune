@@ -1,0 +1,63 @@
+// Safe file I/O: every operation that can fail says so in its type.
+// EXPECT: wrote 23
+// EXPECT: read 23
+// EXPECT: 1: first line
+// EXPECT: 2: second line
+// EXPECT: appended 11, now 34
+// EXPECT: missing file: no such file
+// EXPECT: exists true then false
+// EXPECT: closed write: the file is closed
+import std::io
+
+fn main() -> i64 {
+    let path = "/tmp/rune_case_39.txt"
+
+    match io::writeString(path, "first line\nsecond line\n") {
+        Ok(n) => io::println("wrote " + n.$str()),
+        Err(e) => io::println("write failed: " + io::describe(e)),
+    }
+    match io::readToString(path) {
+        Ok(text) => io::println("read " + text.$length().$str()),
+        Err(e) => io::println("read failed: " + io::describe(e)),
+    }
+
+    match io::open(path) {
+        Ok(f) => {
+            var n = 0
+            while f.readLine() is Some(line) {
+                n += 1
+                io::println(n.$str() + ": " + line)
+            }
+        },
+        Err(e) => io::println("open failed"),
+    }
+
+    var appended = 0
+    if io::appendString(path, "third line\n") is Ok(n) { appended = n }
+    var total = 0
+    if io::readToString(path) is Ok(text) { total = text.$length() }
+    io::println("appended " + appended.$str() + ", now " + total.$str())
+
+    match io::readToString("/tmp/rune_case_39_absent") {
+        Ok(t) => io::println("unexpected"),
+        Err(e) => io::println("missing file: " + io::describe(e)),
+    }
+
+    let was = io::exists(path)
+    if io::delete(path) is Some(e) { io::println("delete failed") }
+    io::println("exists " + was.$str() + " then " + io::exists(path).$str())
+
+    // A closed file reports rather than misbehaving.
+    match io::create("/tmp/rune_case_39b.txt") {
+        Ok(f) => {
+            f.close()
+            match f.write("after close") {
+                Ok(n) => io::println("unexpected write"),
+                Err(e) => io::println("closed write: " + io::describe(e)),
+            }
+        },
+        Err(e) => io::println("create failed"),
+    }
+    io::delete("/tmp/rune_case_39b.txt")
+    0
+}

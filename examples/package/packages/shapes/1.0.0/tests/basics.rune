@@ -1,0 +1,27 @@
+import std::testing
+import std::math
+import shapes
+import geometry
+
+fn main() -> i64 {
+    let c = shapes::circle(geometry::origin(), 2.0)
+    testing::isTrue("circle area", math::nearlyEqual(c.area(), 4.0 * math::PI, 1.0e-9))
+    testing::isTrue("circle contains", c.contains(geometry::point(1.0, 1.0)))
+    testing::isFalse("circle excludes", c.contains(geometry::point(3.0, 0.0)))
+    let r = shapes::rect(0.0, 0.0, 3.0, 4.0)
+    testing::equal("rect area", r.area(), 12.0)
+    testing::equal("rect perimeter", r.perimeter(), 14.0)
+    testing::equal("bounds of a circle", c.bounds().width(), 4.0)
+
+    var tri = shapes::Polygon()
+    tri.add(geometry::point(0.0, 0.0))
+    tri.add(geometry::point(4.0, 0.0))
+    tri.add(geometry::point(0.0, 3.0))
+    testing::equal("triangle area", tri.area(), 6.0)
+    testing::equal("triangle perimeter", tri.perimeter(), 12.0)
+    testing::isTrue("triangle contains", tri.contains(geometry::point(1.0, 1.0)))
+    testing::isFalse("triangle excludes", tri.contains(geometry::point(3.0, 3.0)))
+    let rects: [2:shapes::Rect] = [r, shapes::rect(0.0, 0.0, 1.0, 1.0)]
+    testing::equal("total area", shapes::totalArea(rects), 13.0)
+    testing::summary()
+}

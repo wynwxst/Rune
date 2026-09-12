@@ -1,0 +1,128 @@
+// Map and Set: open-addressed tables keyed structurally.
+//
+// A key needs nothing of its own — no `Hashable` mark, no `Display` — because
+// `mem::hash` and `mem::equals` work it out from the layout. The struct, enum
+// and class below are bound to nothing at all.
+// EXPECT: length 3, ada 36
+// EXPECT: holds grace true, missing -1
+// EXPECT: replaced 36, ada now 37
+// EXPECT: removed alan 41, length 2, holds alan false
+// EXPECT: grown 200, [7]=49 [199]=39601 [200] missing
+// EXPECT: probe chain survives removal: 1=one 3=three 2=gone
+// EXPECT: reinserted 2=second, length 3
+// EXPECT: set size 3, holds b true, re-add false
+// EXPECT: struct key corner, count 2
+// EXPECT: enum keys 3, door7=2, door8 missing true
+// EXPECT: tuple key true
+// EXPECT: class keys are identities: t1 true, t2 false
+// EXPECT: keys 3 values 3, sorted xyz
+// EXPECT: balanced true
+import std::io
+import std::process
+import std::dictionary
+import std::collections::slice
+
+// None of these is bound to any mark.
+struct Coord { x: i64, y: i64 }
+enum Kind { Wall, Door(i64), Room { w: i64, h: i64 } }
+class Token {
+    pub id: i64
+    fn init(self, id: i64) { self.id = id }
+}
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        var ages = dictionary::Map<String, i64>()
+        ages.put("ada", 36)
+        ages.put("grace", 45)
+        ages.put("alan", 41)
+        io::println("length " + ages.length().$str() +
+                    ", ada " + ages.at("ada").unwrap().$str())
+        io::println("holds grace " + ages.holds("grace").$str() +
+                    ", missing " + ages.atOr("nobody", -1).$str())
+
+        match ages.put("ada", 37) {
+            Some(old) => io::println("replaced " + old.$str() +
+                                     ", ada now " + ages.at("ada").unwrap().$str()),
+            None => io::println("unexpectedly new"),
+        }
+        match ages.remove("alan") {
+            Some(v) => io::println("removed alan " + v.$str() +
+                                   ", length " + ages.length().$str() +
+                                   ", holds alan " + ages.holds("alan").$str()),
+            None => io::println("unexpectedly absent"),
+        }
+
+        // Past the load factor the table doubles; everything must still be
+        // findable afterwards.
+        var many = dictionary::Map<i64, i64>()
+        var i = 0
+        while i < 200 { many.put(i, i * i); i += 1 }
+        io::println("grown " + many.length().$str() +
+                    ", [7]=" + many.at(7).unwrap().$str() +
+                    " [199]=" + many.at(199).unwrap().$str() +
+                    " [200] missing")
+
+        // A removed slot is a tombstone, not an empty one: anything that
+        // probed past it must still be reachable.
+        var t = dictionary::Map<i64, String>()
+        t.put(1, "one")
+        t.put(2, "two")
+        t.put(3, "three")
+        t.remove(2)
+        io::println("probe chain survives removal: 1=" + t.atOr(1, "?") +
+                    " 3=" + t.atOr(3, "?") + " 2=" + t.atOr(2, "gone"))
+        t.put(2, "second")
+        io::println("reinserted 2=" + t.atOr(2, "?") +
+                    ", length " + t.length().$str())
+
+        let seen = dictionary::setOf(["a", "b", "a", "c"])
+        io::println("set size " + seen.length().$str() +
+                    ", holds b " + seen.holds("b").$str() +
+                    ", re-add " + seen.add("b").$str())
+
+        // Keys bound to nothing: a struct, an enum with payloads, a tuple,
+        // and a class — which is keyed by identity, so two objects with equal
+        // fields are two different keys.
+        var grid = dictionary::Map<Coord, String>()
+        grid[Coord { x: 1, y: 2 }] = "corner"
+        grid[Coord { x: 3, y: 4 }] = "middle"
+        io::println("struct key " + grid[Coord { x: 1, y: 2 }] +
+                    ", count " + grid.length().$str())
+
+        var kinds = dictionary::Map<Kind, i64>()
+        kinds[Kind::Wall] = 1
+        kinds[Kind::Door(7)] = 2
+        kinds[Kind::Room { w: 3, h: 4 }] = 3
+        io::println("enum keys " + kinds.length().$str() +
+                    ", door7=" + kinds[Kind::Door(7)].$str() +
+                    ", door8 missing " +
+                    (!kinds.at(Kind::Door(8)).hasValue()).$str())
+
+        var pairs = dictionary::Map<(i64, String), bool>()
+        pairs[(1, "a")] = true
+        io::println("tuple key " + pairs[(1, "a")].$str())
+
+        let t1 = Token(1)
+        let t2 = Token(1)
+        var tokens = dictionary::Set<Token>()
+        tokens.add(t1)
+        io::println("class keys are identities: t1 " + tokens[t1].$str() +
+                    ", t2 " + tokens[t2].$str())
+
+        let m = dictionary::mapOf(["x", "y", "z"], [1, 2, 3])
+        var names: [3:String] = ["", "", ""]
+        var k = 0
+        for key in m.keysOf() { names[k] = key; k += 1 }
+        var joined = ""
+        for key in slice::sortedBy(names, ||(a: String, b: String) -> bool { a < b }) {
+            joined += key
+        }
+        io::println("keys " + m.keysOf().length().$str() +
+                    " values " + m.valuesOf().length().$str() +
+                    ", sorted " + joined)
+    }
+    io::println("balanced " + (before == process::liveObjectCount()).$str())
+    0
+}

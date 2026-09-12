@@ -1,0 +1,25 @@
+// A library whose API hands back `some` results: the concrete types stay
+// this file's business, and the program on the other side of the `.rul`
+// sees only the marks.
+import std::io
+import std::iter
+import std::collections::vector
+
+pub mark Shape: io::Display { fn area(&self) -> f64 }
+
+struct Sq { s: f64 }
+bind Shape to Sq { fn area(&self) -> f64 { self.s * self.s } }
+bind io::Display to Sq { fn display(&self) -> String { "square " + self.s.$str() } }
+
+pub fn square(side: f64) -> some Shape { Sq { s: side } }
+
+/// An iterator chain whose type nobody has to spell.
+pub fn evens(limit: i64) -> some iter::Iterator {
+    iter::counting(0).filter(||(n: i64) -> bool { n % 2 == 0 }).take(limit)
+}
+
+pub fn total<S: Shape>(shapes: vector::Vector<S>) -> f64 {
+    var sum = 0.0
+    for s in shapes { sum += s.area() }
+    sum
+}

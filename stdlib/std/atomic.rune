@@ -1,0 +1,192 @@
+// std::atomic — counters and flags several threads may change at once.
+//
+// An atomic operation happens all at once or not at all: no other thread can
+// see it half done, and no two threads can lose an update between them. That
+// is the whole of what these give you, and it is enough for the things a
+// `Mutex` would be too heavy for — a counter, a flag, a one-time hand-off.
+//
+// Everything here is sequentially consistent. A weaker ordering would be
+// faster and very much easier to get wrong, and nothing at this size is hot
+// enough to be worth that trade.
+//
+//     let served = atomic::Counter(0)
+//     served.increment()
+//
+// For anything bigger than one number, reach for `thread::Mutex`: two atomic
+// operations on two counters are still two separate moments, and code that
+// needs them to be one moment needs a lock.
+
+import std::io
+
+//===--------------------------------------------------------------------===//
+// The compiler's own
+//
+// Each is one instruction on every target Rune supports. They take the
+// address of the number rather than the number, because what they change has
+// to be the storage everyone shares, not a copy of it.
+//===--------------------------------------------------------------------===//
+
+@intrinsic("atomic_load")
+fn rawLoad(slot: *var i64) -> i64
+
+@intrinsic("atomic_store")
+fn rawStore(slot: *var i64, value: i64)
+
+/// Adds and hands back the value as it was *before* — which is what lets one
+/// caller out of many know which turn it took.
+@intrinsic("atomic_add")
+fn rawAdd(slot: *var i64, delta: i64) -> i64
+
+@intrinsic("atomic_sub")
+fn rawSub(slot: *var i64, delta: i64) -> i64
+
+/// Replaces, and hands back what was there.
+@intrinsic("atomic_exchange")
+fn rawExchange(slot: *var i64, value: i64) -> i64
+
+/// Stores `desired` only if the value is still `expected`, and says whether
+/// it did.
+@intrinsic("atomic_compare_exchange")
+fn rawCompareExchange(slot: *var i64, expected: i64, desired: i64) -> bool
+
+//===--------------------------------------------------------------------===//
+// Counter
+//===--------------------------------------------------------------------===//
+
+/// A number several threads may change at once.
+///
+/// Every method here is one indivisible step, so a thousand threads each
+/// calling `increment` a thousand times leave exactly a million behind — no
+/// lock, and no lost updates.
+///
+///     let served = atomic::Counter(0)
+///     served.increment()
+///     io::println(served.load().$str())
+@sync("every read and write is a single indivisible instruction")
+pub class Counter {
+    var value: i64
+
+    fn init(self, initial: i64) { self.value = initial }
+
+    /// The value now. Another thread may change it the instant after, so
+    /// what this is good for is reporting, not deciding — decide with
+    /// `compareExchange`.
+    @safe("an atomic read of a number this object owns")
+    pub fn load(&self) -> i64 {
+        unsafe { rawLoad(&var self.value as *var i64) }
+    }
+
+    @safe("an atomic write to a number this object owns")
+    pub fn store(&var self, next: i64) {
+        unsafe { rawStore(&var self.value as *var i64, next) }
+    }
+
+    /// Adds `delta` and hands back the value as it was **before**.
+    ///
+    /// Returning the old value is what makes this a hand-out rather than a
+    /// count: each caller gets a number nobody else got.
+    @safe("an atomic read-modify-write of a number this object owns")
+    pub fn add(&var self, delta: i64) -> i64 {
+        unsafe { rawAdd(&var self.value as *var i64, delta) }
+    }
+
+    @safe("an atomic read-modify-write of a number this object owns")
+    pub fn sub(&var self, delta: i64) -> i64 {
+        unsafe { rawSub(&var self.value as *var i64, delta) }
+    }
+
+    /// Adds one; hands back the value before. `next()` reads better where the
+    /// point is the number you were given.
+    pub fn increment(&var self) -> i64 { self.add(1) }
+    pub fn decrement(&var self) -> i64 { self.sub(1) }
+    pub fn next(&var self) -> i64 { self.add(1) }
+
+    /// Replaces the value, handing back what was there.
+    @safe("an atomic read-modify-write of a number this object owns")
+    pub fn exchange(&var self, next: i64) -> i64 {
+        unsafe { rawExchange(&var self.value as *var i64, next) }
+    }
+
+    /// Stores `desired`, but only while the value is still `expected`.
+    /// Returns whether it did.
+    ///
+    /// This is how anything more complicated than adding is built: read,
+    /// work out the new value, and swap it in only if nobody moved it
+    /// meanwhile. If somebody did, read again and retry — see `update`.
+    @safe("an atomic compare-and-swap of a number this object owns")
+    pub fn compareExchange(&var self, expected: i64, desired: i64) -> bool {
+        unsafe {
+            rawCompareExchange(&var self.value as *var i64, expected, desired)
+        }
+    }
+
+    /// Applies `change` to the value, retrying until it sticks.
+    ///
+    ///     total.update(double)
+    ///
+    /// `change` may run more than once — every time another thread gets in
+    /// first — so it has to be a plain calculation with nothing else to it.
+    pub fn update(&var self, change: @cfunction(i64) -> i64) -> i64 {
+        while true {
+            let seen = self.load()
+            let wanted = unsafe { change(seen) }
+            if self.compareExchange(seen, wanted) { return wanted }
+        }
+        0
+    }
+
+    /// Keeps the larger of the two, and hands back whichever won.
+    pub fn raiseTo(&var self, floor: i64) -> i64 {
+        while true {
+            let seen = self.load()
+            if seen >= floor { return seen }
+            if self.compareExchange(seen, floor) { return floor }
+        }
+        0
+    }
+}
+
+bind io::Display to Counter {
+    fn display(&self) -> String { self.load().$str() }
+}
+
+//===--------------------------------------------------------------------===//
+// Flag
+//===--------------------------------------------------------------------===//
+
+/// A `bool` several threads may set at once.
+///
+/// The one that matters is `raise`: it sets the flag and says whether *this*
+/// call was the one that did it, so exactly one caller out of any number gets
+/// `true`. That is how something is arranged to happen once.
+///
+///     if ready.raise() { io::println("mine to do") }
+@sync("every read and write is a single indivisible instruction")
+pub class Flag {
+    // Held as a number because that is what the instructions work on.
+    var raised: i64
+
+    fn init(self, initial: bool) { self.raised = if initial { 1 } else { 0 } }
+
+    @safe("an atomic read of a number this object owns")
+    pub fn isRaised(&self) -> bool {
+        unsafe { rawLoad(&var self.raised as *var i64) } != 0
+    }
+
+    /// Raises the flag, and says whether it was this call that raised it.
+    /// Exactly one caller ever gets `true`.
+    @safe("an atomic exchange of a number this object owns")
+    pub fn raise(&var self) -> bool {
+        unsafe { rawExchange(&var self.raised as *var i64, 1) } == 0
+    }
+
+    /// Lowers it, and says whether it had been raised.
+    @safe("an atomic exchange of a number this object owns")
+    pub fn lower(&var self) -> bool {
+        unsafe { rawExchange(&var self.raised as *var i64, 0) } != 0
+    }
+}
+
+bind io::Display to Flag {
+    fn display(&self) -> String { self.isRaised().$str() }
+}

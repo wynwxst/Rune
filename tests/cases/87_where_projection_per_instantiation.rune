@@ -1,0 +1,22 @@
+// A `where I::Item: Display` is answered for each instantiation on its own:
+// the first call satisfies it, and the second — whose items are not
+// printable — is refused rather than riding on the first's answer.
+// EXPECT-ERROR: 'Opaque' is not bound to mark 'Display'
+
+import std::io
+import std::iter
+import std::collections::vector
+
+struct Opaque { v: i64 }
+
+fn show<I: iter::Iterator>(it: I) -> String where I::Item: io::Display {
+    var s = ""
+    for v in it { s += v.display() + " " }
+    s
+}
+
+fn main() -> i64 {
+    io::println(show(vec!(1, 2).as_iter()))
+    io::println(show(vec!(Opaque { v: 1 }).as_iter()))
+    0
+}

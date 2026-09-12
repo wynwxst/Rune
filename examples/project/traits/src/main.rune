@@ -1,0 +1,97 @@
+import std::io
+import traits::opt_res as OR
+import traits::opt_res::{try_division}
+import traits::equate::*
+import traits::classes::*
+extern "C" {
+    printf(content: CString, ...) -> i32
+
+}
+
+struct Sheep {
+    naked: bool,
+    name: CString
+}
+
+extend Sheep {
+    pub fn is_naked(&self) -> bool {
+        self.naked
+    }
+
+    pub fn shear(&var self){
+        if self.is_naked() {
+            io::println("Once more??")
+        } else {
+            io::println("Noooo!")
+            self.naked = true
+        }
+    }
+}
+
+mark Animal {
+    fn new(name: CString) -> Self 
+
+    fn name(&self) -> CString
+    fn noise(&self) -> CString
+    
+    @safe("Type checked")
+    fn speak(&self){
+        printf("%s said %s\n",self.name(),self.noise())
+    }
+}
+
+
+
+bind Animal to Sheep {
+    fn new (name: CString) -> Sheep {
+        Sheep {name: name, naked: false}
+    }
+
+    fn name (&self) -> CString {
+        self.name
+    }
+
+    fn noise (&self) -> CString {
+        if self.is_naked() {
+            "baaaa!"
+        } else {
+            "baaaa?"
+        }
+    }
+
+    @safe("Type Checked")
+    fn speak(&self){
+        printf("Sheep go: %s\n",self.noise())
+    }
+}
+
+@safe("Type Checking")
+fn main() -> i64 {
+    io::println("Hello from traits!")
+    io::println(OR::checked_division(2,5).unwrap())
+    //io::println(OR::checked_division(2,0).unwrap())
+    try_division(4, 2);
+    try_division(1, 0);
+    var sheeple : Sheep = Animal::new("Dolly")
+    sheeple.speak()
+    sheeple.shear()
+    sheeple.speak()
+
+    let none: Option<i32> = None
+
+    let opt_float = Some(7f32)
+
+    printf("float optional is: %f\n",opt_float.unwrap())
+
+    //printf("None is: %d\n", none.unwrap())
+
+    io::println("Cmp is " + cmp(1,2).$str())
+
+    let list: List<i64> = List::Nil
+    list.append(1); list.append(2); list.append(3)
+    io::println(list)
+
+
+
+    0
+}

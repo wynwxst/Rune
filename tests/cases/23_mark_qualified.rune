@@ -1,0 +1,45 @@
+// An inherent method answers `value.name()`; the mark's version stays
+// reachable as `value::Mark.name()`. A mark default calls the mark's own.
+// EXPECT: card of rank 7
+// EXPECT: the 7 (via the mark)
+// EXPECT: the 7 (via the mark)!
+// EXPECT: the 7 (via the mark)!
+// EXPECT: 21 doubled is 42
+// EXPECT: ab doubled is abab
+import std::io
+
+struct Card { rank: i64 }
+
+extend Card {
+    pub fn describe(&self) -> String { "card of rank " + self.rank.$str() }
+}
+
+mark Described {
+    fn describe(&self) -> String
+    fn shout(&self) -> String { self.describe() + "!" }
+}
+
+bind Described to Card {
+    fn describe(&self) -> String { "the " + self.rank.$str() + " (via the mark)" }
+}
+
+// Marks bind to builtins, and their methods are callable directly.
+mark Doubled {
+    fn doubled(&self) -> String
+}
+
+bind Doubled to i64 { fn doubled(&self) -> String { (self * 2).$str() } }
+bind Doubled to String { fn doubled(&self) -> String { self + self } }
+
+fn main() -> i64 {
+    let c = Card { rank: 7 }
+    io::println(c.describe())
+    io::println(c::Described.describe())
+    io::println(c.shout())
+    io::println(c::Described.shout())
+
+    io::println("21 doubled is " + 21.doubled())
+    let s = "ab"
+    io::println("ab doubled is " + s::Doubled.doubled())
+    0
+}

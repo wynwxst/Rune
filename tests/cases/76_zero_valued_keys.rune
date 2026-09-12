@@ -1,0 +1,65 @@
+// A hash table decides whether a slot is live from its own state buffer, not
+// from the bytes in the slot. That distinction only shows up for a value whose
+// bytes are all zero — an empty `String`, or the first variant of a
+// reference-counted enum that carries nothing — which is otherwise
+// indistinguishable from a slot nobody has written.
+// EXPECT: empty key: true -> 7
+// EXPECT: empty value: true -> ''
+// EXPECT: null member: true -> null
+// EXPECT: two entries: 2
+// EXPECT: after growth: 40 of 40
+// EXPECT: removed: false, still there: true
+import std::io
+import std::dictionary
+
+/// A counted enum whose first variant carries nothing, so a value of it is
+/// all zero bytes and holds no reference.
+enum Shape {
+    Nothing,
+    Named(String),
+}
+
+fn describe(s: Shape) -> String {
+    match s {
+        Shape::Nothing => "null",
+        Shape::Named(n) => n,
+    }
+}
+
+fn main() -> i64 {
+    // A key that is the empty string.
+    var byName = dictionary::Map<String, i64>()
+    byName.put("", 7)
+    byName.put("x", 8)
+    io::println("empty key: " + byName.holds("").$str() + " -> " +
+                byName.at("").or(0).$str())
+
+    // A value that is the empty string.
+    var byKey = dictionary::Map<String, String>()
+    byKey.put("k", "")
+    io::println("empty value: " + byKey.holds("k").$str() + " -> '" +
+                byKey.at("k").or("?") + "'")
+
+    // A value that is a counted enum's empty first variant.
+    var shapes = dictionary::Map<String, Shape>()
+    shapes.put("a", Shape::Nothing)
+    shapes.put("b", Shape::Named("two"))
+    io::println("null member: " + shapes.holds("a").$str() + " -> " +
+                describe(shapes.at("a").or(Shape::Named("MISSING"))))
+    io::println("two entries: " + shapes.length().$str())
+
+    // They survive the rehash that doubling the table does.
+    var many = dictionary::Map<i64, Shape>()
+    var i = 0
+    while i < 40 { many.put(i, Shape::Nothing); i += 1 }
+    var found = 0
+    i = 0
+    while i < 40 { if many.holds(i) { found += 1 }; i += 1 }
+    io::println("after growth: " + found.$str() + " of 40")
+
+    // And removing one really removes it.
+    shapes.remove("a")
+    io::println("removed: " + shapes.holds("a").$str() +
+                ", still there: " + shapes.holds("b").$str())
+    0
+}

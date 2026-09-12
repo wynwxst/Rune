@@ -1,0 +1,61 @@
+// `io::Bytes`, and a file read through the `Reader` and `Writer` marks.
+// EXPECT: hello, world
+// EXPECT: 12
+// EXPECT: hello
+// EXPECT: 7
+// EXPECT: world
+// EXPECT: 1: alpha
+// EXPECT: 2: beta
+// EXPECT: 3: gamma
+// EXPECT: read 17 bytes
+import std::io
+
+fn main() -> i64 {
+    var b = io::Bytes()
+    b.appendText("hello, ")
+    b.appendText("world")
+    io::println(b)
+    io::println(b.length().$str())
+    io::println(b.slice(0, 5).toString())
+    io::println(b.find("world", 0).$str())
+    b.consume(7)
+    io::println(b)
+
+    let path = "/tmp/rune_case_68_stream.txt"
+    match io::create(path) {
+        Ok(f) => {
+            var out = f.asStream()
+            out.writeLine("alpha")
+            out.writeLine("beta")
+            out.writeText("gamma\n")
+            out.flush()
+        },
+        Err(e) => { io::println("create failed"); return 1 },
+    }
+
+    match io::open(path) {
+        Ok(f) => {
+            var lines = io::BufferedReader<io::FileStream>(f.asStream())
+            var n = 0
+            while lines.readLine() is Some(line) {
+                n += 1
+                io::println(n.$str() + ": " + line)
+            }
+        },
+        Err(e) => { io::println("open failed"); return 1 },
+    }
+
+    match io::open(path) {
+        Ok(f) => {
+            var s = f.asStream()
+            var all = io::Bytes()
+            match s.readAll(all) {
+                Ok(n) => io::println("read " + n.$str() + " bytes"),
+                Err(e) => io::println(io::describeStream(e)),
+            }
+        },
+        Err(e) => {},
+    }
+    io::delete(path)
+    0
+}

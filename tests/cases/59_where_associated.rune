@@ -1,0 +1,30 @@
+// The case `where` exists for: a bound on something reached through a
+// parameter rather than on the parameter itself.
+// EXPECT: 1
+// EXPECT: 2
+// EXPECT: 3
+import std::io
+import std::iter
+
+fn printAll<S>(seq: S) where S: iter::Sequence, S::Iter::Item: io::Display {
+    for item in seq { io::println(item.display()) }
+}
+
+struct Upto { at: i64 }
+bind iter::Iterator to Upto {
+    type Item = i64
+    fn next(&var self) -> i64? {
+        if self.at >= 3 { return nil }
+        self.at += 1
+        self.at
+    }
+}
+bind iter::Sequence to Upto {
+    type Iter = Upto
+    fn iterate(&self) -> Upto { Upto { at: self.at } }
+}
+
+fn main() -> i64 {
+    printAll(Upto { at: 0 })
+    0
+}

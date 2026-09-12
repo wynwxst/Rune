@@ -1,0 +1,20 @@
+import std::testing
+import std::text
+import plot
+import geometry
+
+fn main() -> i64 {
+    let labels: [3:String] = ["a", "bb", "c"]
+    let values: [3:f64] = [1.0, 4.0, 2.0]
+    let chart = plot::bar(labels, values, 8)
+    let lines = text::splitLines(chart)
+    testing::equal("one row per value", lines.length(), 3)
+    testing::isTrue("the largest fills the width", text::contains(lines[1], "########"))
+    testing::isTrue("labels are padded", text::startsWith(lines[0], "a  |"))
+    testing::equal("sparkline length", plot::sparkline(values).$charCount(), 3)
+    let pts: [2:geometry::Point] = [geometry::point(0.0, 0.0), geometry::point(1.0, 1.0)]
+    let grid = plot::scatter(pts, 3, 3)
+    testing::isTrue("top right is a point", text::startsWith(grid, "..*"))
+    testing::isTrue("bottom left is a point", text::endsWith(text::trim(grid), "*.."))
+    testing::summary()
+}

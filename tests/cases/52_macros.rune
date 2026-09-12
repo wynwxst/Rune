@@ -1,0 +1,80 @@
+// Declarative macros: a rewrite from one run of tokens to another, chosen by
+// pattern. Expansion happens before anything is parsed, so a macro can stand
+// for whatever the grammar accepts.
+// EXPECT: twice 6, and composes: 7
+// EXPECT: hello ada
+// EXPECT: hi bob
+// EXPECT: hi bob
+// EXPECT: repetition built 4, first 1, last 4
+// EXPECT: one
+// EXPECT: two
+// EXPECT: stringify: x > 0 && x != 3
+// EXPECT: from the standard library: 3
+// EXPECT: assertions name themselves
+// EXPECT: balanced true
+import std::io
+import std::process
+import std::collections::vector
+
+macro twice {
+    ($x: expr) => { ($x) + ($x) }
+}
+
+macro greet {
+    ($name: expr) => { io::println("hello " + $name) }
+    ($name: expr, $times: expr) => {
+        var i = 0
+        while i < $times { io::println("hi " + $name); i += 1 }
+    }
+}
+
+macro ints {
+    ($($item: expr),*) => {
+        {
+            let built = vector::Vector<i64>()
+            $( built.push($item); )*
+            built
+        }
+    }
+}
+
+macro say_all {
+    ($($line: expr);*) => {
+        $( io::println($line); )*
+    }
+}
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        // A single-expression macro splices as a unit, so it composes: without
+        // that, `twice!(3) + 1` would expand to `(3) + (3) + 1`.
+        io::println("twice " + twice!(3).$str() + ", and composes: " +
+                    (twice!(3) + 1).$str())
+
+        // Rules are tried in order; the arity picks one.
+        greet!("ada")
+        greet!("bob", 2)
+
+        // Repetition, with a comma separator and with a semicolon.
+        let v = ints!(1, 2, 3, 4)
+        io::println("repetition built " + v.length().$str() +
+                    ", first " + v.at(0).unwrap().$str() +
+                    ", last " + v.at(3).unwrap().$str())
+        say_all!("one"; "two")
+
+        // The compiler's own macro: the argument as the text it was written as.
+        let x = 5
+        io::println("stringify: " + stringify!(x > 0 && x != 3))
+
+        // A macro written in the standard library, used here.
+        io::println("from the standard library: " + vec!(7, 8, 9).length().$str())
+
+        // `assert!` and friends live in `std::testing` and print as they go,
+        // so they are exercised by the packages' own tests rather than here,
+        // where the output is compared byte for byte.
+        io::println("assertions name themselves")
+    }
+    io::println("balanced " + (before == process::liveObjectCount()).$str())
+    0
+}

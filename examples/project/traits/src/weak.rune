@@ -1,0 +1,132 @@
+@type(Exec)
+// Weak references, and the shapes reference counting can and cannot free.
+//
+// At `--safety full` a class that can reach itself through strong fields is
+// reported, because a ring of those never gets freed. It is a warning rather
+// than a refusal: the rule looks at *types*, and a type that can loop is not a
+// program that does — the chain below never actually closes one.
+//
+// Where a structure should be incapable of looping at all, own it through
+// `Unique` instead: a `Unique` reference can be moved or borrowed but never
+// copied, so no second reference exists to close a ring with.
+//
+//     runec -o weak_refs examples/weak_refs.rune && ./weak_refs
+
+import std::io
+import std::process
+
+//===--------------------------------------------------------------------===//
+// The problem: two strong references in a loop never reach zero
+//===--------------------------------------------------------------------===//
+
+class Parent {
+    pub name: String
+    pub child: Child?          // strong: the parent owns the child
+    fn init(self, name: String) { self.name = name }
+    fn deinit(self) { io::println("  releasing parent " + self.name) }
+}
+
+class Child {
+    pub name: String
+    weak parent: Parent        // weak: the child only observes the parent
+    fn init(self, name: String) { self.name = name }
+    fn deinit(self) { io::println("  releasing child " + self.name) }
+}
+
+/// Reading a weak field always produces an Option, because the target may
+/// already be gone.
+fn parentName(c: Child) -> String {
+    match c.parent {
+        Some(p) => p.name,
+        None => "(no parent)",
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// A chain that cannot cycle at all: `Unique` forward links
+//
+// `weak` above breaks a ring after the fact. `Unique` makes one impossible in
+// the first place: a `Unique` reference has exactly one owner, so it can be
+// moved or borrowed but never copied, and closing a ring needs a second
+// reference that no one can produce. Nothing here is reported, because there
+// is nothing to report.
+//===--------------------------------------------------------------------===//
+
+class Node {
+    pub value: i64
+    pub next: Unique<Node>?       // the one owner of the rest of the chain
+    weak prev: Node            // observed, never owned
+    fn init(self, value: i64) { self.value = value }
+    fn deinit(self) { io::println("  releasing node " + self.value.$str()) }
+}
+
+/// Built from the tail forwards, because each node takes ownership of the one
+/// after it: there is no way to hold a cursor onto the end and still hand the
+/// chain back.
+pub fn buildChain(count: i64) -> Unique<Node> {
+    var head: Unique<Node> = Node(count - 1)
+    var i = count - 2
+    while i >= 0 {
+        let node: Unique<Node> = Node(i)
+        node.next = head      // the new node takes the chain over
+        head = node           // and becomes the chain
+        i -= 1
+    }
+    head
+}
+
+/// Borrows each link rather than copying it, so no node ever gains a second
+/// owner just because someone read it.
+fn walkForwards(n: &Node) -> String {
+    var out = n.value.$str() + " "
+    match n.next {
+        Some(c) => out += walkForwards(&c),
+        None => {}
+    }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    let start = process::liveObjectCount()
+    {
+    io::println("-- parent and child --")
+    {
+        let parent = Parent("Ada")
+        let child = Child("Bea")
+        parent.child = child
+        child.parent = parent
+
+        io::println("child's parent = " + parentName(child))
+            // Bound first, on purpose: calling `liveObjectCount()` inside a
+        // concatenation counts the half-built string as well, which is a
+        // confusing way to learn what is alive.
+        let inside = process::liveObjectCount() - start
+        io::println("live inside    = " + inside.$str())
+    }
+    let after = process::liveObjectCount() - start
+    io::println("live after     = " + after.$str())
+
+    io::println("")
+    io::println("-- weak references empty out --")
+    let orphan = Child("Cal")
+    {
+        let temporary = Parent("Dee")
+        orphan.parent = temporary
+        io::println("while alive    = " + parentName(orphan))
+    }
+    io::println("after release  = " + parentName(orphan))
+
+    io::println("")
+    io::println("-- doubly linked list --")
+    {
+        let head = buildChain(4)
+        io::println("forwards       = " + walkForwards(&head))
+    }
+    }
+    // `orphan` and its name are still alive here — they go when `main` does.
+    let atEnd = process::liveObjectCount() - start
+    io::println("live at end    = " + atEnd.$str())
+    0
+}

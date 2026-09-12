@@ -1,0 +1,44 @@
+# What this project's registry dependencies resolved to.
+# Written by `rune add`, `rune update` and `rune build`; commit it so a build elsewhere gets the same versions.
+
+[[package]]
+name = "geometry"
+version = "0.3.0"
+registry = "http://localhost:7878"
+sha256 = "60177d7ea83c8a66403eb089a6e29657f99b6804c060b87c75825113995fdd9f"
+
+[[package]]
+name = "logger"
+version = "1.0.0"
+registry = "file:///Users/dusk/Documents/Rune/examples/package/registry-lab"
+sha256 = "474da8c66a0e7bb49f338c418ea65a550fca04bce20dae34b5cfb2c3e6725123"
+
+[[package]]
+name = "plot"
+version = "0.5.0"
+registry = "http://localhost:7878"
+sha256 = "289bfc3d70d3632f4bee46a97fa13052db3eb8788e9f33e2666ef52375da1baf"
+
+[[package]]
+name = "report"
+version = "1.2.0"
+registry = "http://localhost:7878"
+sha256 = "3860acae1957e1ec1ed15360e167cc9b184751423cd4a972680ebcc8aafde12f"
+
+[[package]]
+name = "shapes"
+version = "1.0.0"
+registry = "http://localhost:7878"
+sha256 = "c758ff2daf02c231b78165da7770dc62d7c31261077729965da8e440b32df58c"
+
+[[package]]
+name = "stats"
+version = "2.1.0"
+registry = "http://localhost:7878"
+sha256 = "2d65ac3547a5a218651d339eabf0c00d9bf7c279d3ac7191bc451e6750b67d6e"
+
+[[package]]
+name = "units"
+version = "1.1.0"
+registry = "http://localhost:7878"
+sha256 = "41945ead7d19bbf77cd08c0197c82c0c7c6f9b3d184a9086444817d70140724d"

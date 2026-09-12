@@ -1,0 +1,53 @@
+// Each file under tests/ is its own program. `rune test` builds and runs them,
+// and the exit status decides the verdict — which is what `testing::summary()`
+// hands back.
+
+import std::testing
+import statistics
+import statistics::spread
+
+// `sum!` is not declared here: it is `pub macro sum` in the library, and a
+// `pub macro` reaches everything that imports the package it was written in —
+// the same as a `pub fn`. A macro of the same name here would clash with it.
+
+// A macro can stand for declarations, not only expressions — expansion runs
+// over tokens before anything is parsed, so a body may be anything the grammar
+// accepts at the point it is called. That point matters: a type has to be
+// collected before any body is checked, so `Container!` belongs at file scope.
+macro Container {
+    ($name: ident, $res: ty) => {
+        struct $name { value: $res }
+        extend $name {
+            fn new(val: $res) -> Self { Self { value: val } }
+        }
+    }
+}
+
+Container!(Integer, i32)
+Container!(Str, String)
+
+fn main() -> i64 {
+    let values: [5:f64] = [2.0, 4.0, 4.0, 4.0, 6.0]
+
+    match statistics::summarise(values) {
+        Some(s) => {
+            // `assertEq!` names the check after the two sides, so the
+            // obvious ones need not be named twice.
+            assertEq!(s.count, 5)
+            assertEq!(s.total, 20.0)
+            assertEq!(s.mean, 4.0)
+            assertEq!(s.smallest, 2.0)
+            assertEq!(s.largest, 6.0)
+        }
+        None => testing::unreachable("summarise should accept five values"),
+    }
+
+    testing::isNone::<statistics::Summary>("an empty slice summarises to nothing",
+                                           statistics::summarise([]))
+    assert!(spread::standardDeviation(values, 4.0) > 1.26)
+    testing::isSome::<f64>("range of five values", spread::range(values))
+    assert!(sum!(1,2,3) == 6)
+    assertEq!(Integer::new(42).value, 42 as i32)
+    assertEq!(Str::new("Hello").value, "Hello")
+    testing::summary()
+}

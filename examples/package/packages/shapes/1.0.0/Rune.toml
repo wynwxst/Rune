@@ -1,0 +1,13 @@
+[package]
+name = "shapes"
+version = "1.0.0"
+edition = "2025"
+description = "Circles, rectangles and polygons over geometry: area, perimeter, containment and bounding boxes"
+authors = ["The Rune examples"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]
+geometry = "0.3"

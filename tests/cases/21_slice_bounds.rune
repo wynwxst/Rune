@@ -1,0 +1,12 @@
+// Slicing is bounds checked just like indexing.
+// EXPECT-PANIC: out of bounds
+import std::io
+
+fn main() -> i64 {
+    let a: [4:i64] = [1, 2, 3, 4]
+    var upper = 0
+    for i in 0..9 { upper = i }
+    io::println("slicing to " + upper.$str())
+    let bad = a[0..upper]
+    bad.$length()
+}

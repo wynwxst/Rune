@@ -1,0 +1,71 @@
+// Classes, inheritance, virtual dispatch and deterministic destruction.
+// EXPECT: Rex says woof
+// EXPECT: Momo says meow
+// EXPECT: generic Animal says ...
+// EXPECT: chain built: n2
+// EXPECT: alive during scope: 1
+// EXPECT: destroyed: 7
+// A forward-linked list: `next` alone closes the type graph,
+// so it is compiled below `full`.
+// SAFETY: minimal
+import std::io
+import std::process
+
+global var destroyed: i64 = 0
+
+class Animal {
+    pub name: String
+    fn init(self, name: String) { self.name = name }
+    fn deinit(self) { destroyed += 1 }
+    pub fn speak(&self) -> String { "..." }
+    pub fn describe(&self) -> String { self.name + " says " + self.speak() }
+}
+
+class Dog : Animal {
+    fn init(self, name: String) { super.init(name) }
+    pub fn speak(&self) -> String { "woof" }
+}
+
+class Cat : Animal {
+    fn init(self, name: String) { super.init(name) }
+    pub fn speak(&self) -> String { "meow" }
+}
+
+class Node {
+    pub label: String
+    pub next: Unique<Node>?
+    fn init(self, label: String) { self.label = label }
+    fn deinit(self) { destroyed += 1 }
+}
+
+fn describeAll() {
+    d = Dog("Rex")
+    c = Cat("Momo")
+    a = Animal("generic Animal")
+    io::println(d.describe())
+    io::println(c.describe())
+    io::println(a.describe())
+}
+
+fn buildChain() -> String {
+    var head: Unique<Node> = Node("n0")
+    for i in 1..3 {
+        let n: Unique<Node> = Node("n" + i.$str())
+        n.next = head
+        head = n
+    }
+    head.label
+}
+
+fn main() -> i64 {
+    describeAll()
+    io::println("chain built: " + buildChain())
+
+    before = process::liveObjectCount()
+    {
+        keep = Dog("Held")
+        io::println("alive during scope: " + (process::liveObjectCount() - before).$str())
+    }
+    io::println("destroyed: " + destroyed.$str())
+    0
+}

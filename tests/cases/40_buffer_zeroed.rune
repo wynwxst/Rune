@@ -1,0 +1,64 @@
+// A buffer made without a fill zeroes its storage. What a zeroed slot means
+// depends on the element type: a value for one, nothing at all for the other.
+// EXPECT: zeroed 0 0 0 0
+// EXPECT: occupied 2 true
+// EXPECT: 0.0 false
+// EXPECT: empty at 0 true
+// EXPECT: occupied 0 false
+// EXPECT: after write ada
+// EXPECT: occupied 0 true
+// EXPECT: after clear false
+// EXPECT: struct slot empty true
+// EXPECT: struct slot alpha 1
+// EXPECT: tuple slot occupied true
+// EXPECT: counted i64 false String true
+// EXPECT: balanced true
+import std::io
+import std::mem
+import std::process
+
+struct Entry { pub key: String, pub count: i64 }
+
+fn main() -> i64 {
+    // A value type: all-zero is a value, so every slot reads back as one.
+    let n = mem::Buffer<i64>(4)
+    io::println("zeroed " + n[0].$str() + " " + n[1].$str() + " " +
+                n[2].$str() + " " + n[3].$str())
+    io::println("occupied 2 " + n.occupied(2).$str())
+
+    let f = mem::Buffer<f64>(1)
+    let b = mem::Buffer<bool>(1)
+    io::println(f[0].$str() + " " + b[0].$str())
+
+    let before = process::liveObjectCount()
+    {
+        // A counted type: all-zero is not a reference, so a slot nothing has
+        // been written to reads as empty rather than as a broken value.
+        var s = mem::Buffer<String>(2)
+        io::println("empty at 0 " + (!s.at(0).hasValue()).$str())
+        io::println("occupied 0 " + s.occupied(0).$str())
+        s[0] = "ada"
+        io::println("after write " + s[0])
+        io::println("occupied 0 " + s.occupied(0).$str())
+        s.clear(0)
+        io::println("after clear " + s.occupied(0).$str())
+
+        // A struct counts as counted when any field is: a zeroed slot would
+        // hold a null String, so it is empty until written.
+        var e = mem::Buffer<Entry>(2)
+        io::println("struct slot empty " + (!e.occupied(0)).$str())
+        e[0] = Entry { key: "alpha", count: 1 }
+        // Reading a field straight off the subscript, without a binding.
+        io::println("struct slot " + e[0].key + " " + e[0].count.$str())
+
+        // A tuple of value types has no counted field, so zero is a value.
+        let t = mem::Buffer<(i64, i64)>(2)
+        io::println("tuple slot occupied " + t.occupied(1).$str())
+    }
+    let after = process::liveObjectCount()
+
+    io::println("counted i64 " + mem::is_counted<i64>().$str() +
+                " String " + mem::is_counted<String>().$str())
+    io::println("balanced " + (before == after).$str())
+    0
+}

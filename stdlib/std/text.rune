@@ -1,0 +1,609 @@
+// Unicode-aware text: normalisation, case folding, and a comparison that
+// sorts the way a reader expects rather than the way bytes happen to fall.
+//
+// The tables come from the Unicode Character Database; the algorithms are
+// here. Hangul is not in the tables — its composition and decomposition are
+// arithmetic, done below.
+
+import std::mem
+import std::collections::vector
+
+extern "C" {
+    fn rune_ucd_combining_class(cp: i64) -> i64
+    fn rune_ucd_fold_case(cp: i64) -> i64
+    fn rune_ucd_compose(first: i64, second: i64) -> i64
+    fn rune_ucd_decompose(cp: i64, first: *var i64, second: *var i64) -> i64
+}
+
+/// A growable run of code points. `std::text` sits below `std::collections`
+/// in the stack, so it keeps its own rather than borrowing `Vector`.
+pub class CodePoints {
+    block: *var u8
+    count: i64
+    capacity: i64
+
+    fn init(self) {
+        self.block = mem::noBlock()
+        self.count = 0
+        self.capacity = 0
+    }
+
+    fn deinit(self) { mem::allocator.deallocate(self.block) }
+
+    pub fn length(&self) -> i64 { self.count }
+    pub fn isEmpty(&self) -> bool { self.count == 0 }
+
+    @safe("every index below the count was written by `push`")
+    pub fn get(&self, index: i64) -> i64 {
+        if index < 0 || index >= self.count { return 0 }
+        unsafe { (self.block as *var i64)[index] }
+    }
+
+    @safe("the index is compared against the count before the write")
+    pub fn set(&var self, index: i64, value: i64) {
+        if index < 0 || index >= self.count { return }
+        unsafe { (self.block as *var i64)[index] = value }
+    }
+
+    @safe("the slot written is below the count that `reserve` has covered")
+    pub fn push(&var self, value: i64) {
+        if self.count == self.capacity {
+            var grown = self.capacity * 2
+            if grown < 8 { grown = 8 }
+            let bytes = grown as usize * mem::size_of<i64>()
+            let block = mem::allocator.reallocate(self.block, bytes)
+            if mem::isNull(block) { return }
+            self.block = block
+            self.capacity = grown
+        }
+        unsafe { (self.block as *var i64)[self.count] = value }
+        self.count += 1
+    }
+}
+
+/// Which normal form to produce.
+pub enum Form {
+    /// Fully decomposed: `é` becomes `e` + a combining acute.
+    Decomposed,
+    /// Fully composed: `e` + combining acute becomes `é`.
+    Composed,
+}
+
+//===--------------------------------------------------------------------===//
+// Hangul, which is arithmetic rather than tabular
+//===--------------------------------------------------------------------===//
+
+fn hangulBase() -> i64 { 44032 }        // U+AC00
+fn hangulCount() -> i64 { 11172 }
+fn jamoLBase() -> i64 { 4352 }          // U+1100
+fn jamoVBase() -> i64 { 4449 }          // U+1161
+fn jamoTBase() -> i64 { 4519 }          // U+11A7
+fn jamoVCount() -> i64 { 21 }
+fn jamoTCount() -> i64 { 28 }
+
+fn isHangulSyllable(cp: i64) -> bool {
+    let limit = hangulBase() + hangulCount()
+    cp >= hangulBase() && cp < limit
+}
+
+/// The canonical combining class of a code point. Zero means a starter.
+pub fn combiningClass(c: Character) -> i64 {
+    unsafe { rune_ucd_combining_class(c as i64) }
+}
+
+/// True for a mark that attaches to the character before it.
+pub fn isCombining(c: Character) -> bool { combiningClass(c) != 0 }
+
+/// Simple case folding: one code point to one. `ß` does not become `ss` here —
+/// that is full folding, which changes the length and is not done.
+pub fn foldCase(c: Character) -> Character {
+    unsafe { rune_ucd_fold_case(c as i64) } as Character
+}
+
+//===--------------------------------------------------------------------===//
+// Decomposition
+//===--------------------------------------------------------------------===//
+
+/// Appends the full canonical decomposition of `cp` to `out`.
+@safe("both out-parameters are locals of this function")
+fn decomposeInto(out: CodePoints, cp: i64) {
+    if isHangulSyllable(cp) {
+        let index = cp - hangulBase()
+        let block = jamoVCount() * jamoTCount()
+        let lead = jamoLBase() + index / block
+        let vowel = jamoVBase() + (index % block) / jamoTCount()
+        let trail = jamoTBase() + index % jamoTCount()
+        out.push(lead)
+        out.push(vowel)
+        if index % jamoTCount() != 0 { out.push(trail) }
+        return
+    }
+    var first = 0
+    var second = 0
+    let n = unsafe {
+        rune_ucd_decompose(cp, &var first as *var i64, &var second as *var i64)
+    }
+    if n == 0 {
+        out.push(cp)
+        return
+    }
+    // A decomposition may itself decompose, so keep going.
+    decomposeInto(out, first)
+    if n == 2 { decomposeInto(out, second) }
+}
+
+/// Puts combining marks into canonical order: a stable sort by combining
+/// class, which is exactly what the standard's reordering step asks for.
+fn canonicalOrder(cps: CodePoints) {
+    var i = 1
+    while i < cps.length() {
+        let here = cps.get(i)
+        let cls = unsafe { rune_ucd_combining_class(here) }
+        if cls == 0 {
+            i += 1
+            continue
+        }
+        var j = i
+        // Bubble it back over any mark with a higher class. Equal classes stay
+        // put, which is what makes the sort stable.
+        while j > 0 {
+            let prev = cps.get(j - 1)
+            let prevClass = unsafe { rune_ucd_combining_class(prev) }
+            if prevClass == 0 || prevClass <= cls { break }
+            cps.set(j, prev)
+            cps.set(j - 1, here)
+            j -= 1
+        }
+        i += 1
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Composition
+//===--------------------------------------------------------------------===//
+
+/// The canonical composition step: walk the decomposed sequence and fold each
+/// mark into the last starter it can combine with.
+fn composeInPlace(cps: CodePoints) -> CodePoints {
+    let out = CodePoints()
+    if cps.isEmpty() { return out }
+
+    var starter = cps.get(0)
+    var lastClass = -1
+    var i = 1
+    while i < cps.length() {
+        let here = cps.get(i)
+        let cls = unsafe { rune_ucd_combining_class(here) }
+        var joined = 0
+
+        // Hangul first, since it is not in the composition table.
+        let vLimit = jamoVBase() + jamoVCount()
+        let lLimit = jamoLBase() + 19
+        let tLimit = jamoTBase() + jamoTCount()
+        if here >= jamoVBase() && here < vLimit &&
+           starter >= jamoLBase() && starter < lLimit {
+            let l = starter - jamoLBase()
+            let v = here - jamoVBase()
+            joined = hangulBase() + (l * jamoVCount() + v) * jamoTCount()
+        } else if here > jamoTBase() && here < tLimit &&
+                  isHangulSyllable(starter) &&
+                  (starter - hangulBase()) % jamoTCount() == 0 {
+            joined = starter + (here - jamoTBase())
+        } else if lastClass < cls || lastClass == -1 {
+            joined = unsafe { rune_ucd_compose(starter, here) }
+        }
+
+        if joined != 0 {
+            starter = joined
+        } else {
+            if cls == 0 {
+                out.push(starter)
+                starter = here
+                lastClass = -1
+            } else {
+                out.push(here)
+                lastClass = cls
+            }
+        }
+        i += 1
+    }
+    out.push(starter)
+    // The marks that could not be folded in were pushed ahead of the starter
+    // they follow, so put the sequence back in order.
+    reorderAfterCompose(out)
+    out
+}
+
+/// `composeInPlace` emits unfoldable marks before the starter they belong to;
+/// this moves each starter back in front of them.
+fn reorderAfterCompose(cps: CodePoints) {
+    if cps.length() < 2 { return }
+    let last = cps.length() - 1
+    let starter = cps.get(last)
+    if unsafe { rune_ucd_combining_class(starter) } != 0 { return }
+    var runStart = last
+    while runStart > 0 {
+        let before = cps.get(runStart - 1)
+        if unsafe { rune_ucd_combining_class(before) } == 0 { break }
+        runStart -= 1
+    }
+    if runStart == last { return }
+    var i = last
+    while i > runStart {
+        cps.set(i, cps.get(i - 1))
+        i -= 1
+    }
+    cps.set(runStart, starter)
+}
+
+//===--------------------------------------------------------------------===//
+// The public surface
+//===--------------------------------------------------------------------===//
+
+/// The code points of `text`, in order.
+pub fn codePoints(text: String) -> CodePoints {
+    let out = CodePoints()
+    var i = 0
+    let n = text.$charCount()
+    while i < n {
+        out.push(text.$at(i) as i64)
+        i += 1
+    }
+    out
+}
+
+/// Rebuilds a String from code points.
+pub fn fromCodePoints(cps: CodePoints) -> String {
+    var out = ""
+    var i = 0
+    while i < cps.length() {
+        out += (cps.get(i) as Character).$str()
+        i += 1
+    }
+    out
+}
+
+/// `text` in the requested normal form.
+///
+///     let a = "e\u{301}"          // e + combining acute
+///     let b = "\u{e9}"            // é
+///     text::normalize(a, Form::Composed) == b     // true
+pub fn normalize(text: String, form: Form) -> String {
+    let decomposed = CodePoints()
+    let source = codePoints(text)
+    var i = 0
+    while i < source.length() {
+        decomposeInto(decomposed, source.get(i))
+        i += 1
+    }
+    canonicalOrder(decomposed)
+    match form {
+        Form::Decomposed => fromCodePoints(decomposed),
+        Form::Composed => fromCodePoints(composeInPlace(decomposed)),
+    }
+}
+
+/// True when two strings mean the same text, whatever form they are written
+/// in. This is what `==` cannot do: `==` compares bytes.
+pub fn equal(a: String, b: String) -> bool {
+    normalize(a, Form::Composed) == normalize(b, Form::Composed)
+}
+
+/// The same, ignoring case — so it stops at the level below case.
+pub fn equalIgnoringCase(a: String, b: String) -> bool {
+    let left = codePoints(normalize(a, Form::Decomposed))
+    let right = codePoints(normalize(b, Form::Decomposed))
+    compareLevel(left, right, 1) == 0 && compareLevel(left, right, 2) == 0
+}
+
+/// Orders two strings the way a reader would: base letters first, then
+/// accents, then case. Negative, zero or positive, like `cmp`.
+///
+/// This is a root ordering, not a locale-aware one: it does not know that
+/// Swedish sorts `ä` after `z`, and it is not the Unicode Collation
+/// Algorithm. What it does do is put `resume`, `résumé` and `RÉSUMÉ` next to
+/// each other instead of scattering them by byte value.
+pub fn compare(a: String, b: String) -> i64 {
+    let left = codePoints(normalize(a, Form::Decomposed))
+    let right = codePoints(normalize(b, Form::Decomposed))
+
+    // Primary: base letters, folded, marks ignored.
+    let p = compareLevel(left, right, 1)
+    if p != 0 { return p }
+    // Secondary: the marks themselves.
+    let s = compareLevel(left, right, 2)
+    if s != 0 { return s }
+    // Tertiary: case.
+    compareLevel(left, right, 3)
+}
+
+fn compareLevel(left: CodePoints, right: CodePoints, level: i64) -> i64 {
+    var i = 0
+    var j = 0
+    loop {
+        let a = nextAt(left, i, level)
+        let b = nextAt(right, j, level)
+        i = a.1
+        j = b.1
+        if a.0 == 0 && b.0 == 0 { break 0 }
+        if a.0 != b.0 { break if a.0 < b.0 { -1 } else { 1 } }
+    }
+}
+
+/// The next code point that matters at `level`, and where to look next.
+fn nextAt(cps: CodePoints, from: i64, level: i64) -> (i64, i64) {
+    var i = from
+    while i < cps.length() {
+        let cp = cps.get(i)
+        let combining = unsafe { rune_ucd_combining_class(cp) } != 0
+        i += 1
+        if level == 1 {
+            if combining { continue }
+            return (unsafe { rune_ucd_fold_case(cp) }, i)
+        }
+        if level == 2 {
+            if !combining { continue }
+            return (cp, i)
+        }
+        if combining { continue }
+        // Tertiary: only the case difference is left to look at.
+        let folded = unsafe { rune_ucd_fold_case(cp) }
+        return (if folded == cp { 0 } else { 1 }, i)
+    }
+    (0, i)
+}
+
+//===--------------------------------------------------------------------===//
+// Iteration
+//===--------------------------------------------------------------------===//
+
+/// A cursor over the characters of a `String`.
+///
+/// It walks bytes, so a whole pass is linear. `text.$at(i)` counts characters
+/// from the start every time, which makes the obvious index loop quadratic.
+pub struct Chars {
+    text: String
+    at: i64
+}
+
+/// The characters of `text`, in order.
+///
+///     for c in text::chars("héllo") { io::println(c.$str()) }
+///
+/// These are Unicode scalars, not grapheme clusters: `e` followed by a
+/// combining acute is two characters. `normalize(text, Form::NFC)` first if
+/// you want one.
+pub fn chars(text: String) -> Chars { Chars { text: text, at: 0 } }
+
+bind Iterator to Chars {
+    type Item = Character
+
+    fn next(&var self) -> Character? {
+        if self.at >= self.text.$length() { return nil }
+        // UTF-8: the lead byte says how many follow, and each continuation
+        // byte carries six more bits. `%` rather than a mask, which reads the
+        // same and needs no bitwise operator.
+        let lead = self.text.$byteAt(self.at) as i64
+        var width = 1
+        var code = lead
+        if lead >= 240 {
+            width = 4
+            code = lead % 8
+        } elif lead >= 224 {
+            width = 3
+            code = lead % 16
+        } elif lead >= 128 {
+            width = 2
+            code = lead % 32
+        }
+        var k = 1
+        while k < width {
+            if self.at + k >= self.text.$length() { break }
+            code = code * 64 + ((self.text.$byteAt(self.at + k) as i64) % 64)
+            k += 1
+        }
+        self.at += width
+        code as Character
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Everyday operations
+//
+// These work on bytes, not code points, and the compiler's own `$find`,
+// `$substring` and `$length` are what they are built from. That makes them
+// exact for ASCII delimiters — which is what a separator, a newline or a
+// piece of punctuation almost always is — and it makes them cheap. Anything
+// that has to be right about accents or case belongs above, where the
+// normalisation is.
+//===--------------------------------------------------------------------===//
+
+/// True when `text` begins with `prefix`. An empty prefix always matches.
+pub fn startsWith(text: String, prefix: String) -> bool {
+    n = prefix.$length()
+    if n == 0 { return true }
+    if n > text.$length() { return false }
+    text.$substring(0, n) == prefix
+}
+
+/// True when `text` ends with `suffix`. An empty suffix always matches.
+pub fn endsWith(text: String, suffix: String) -> bool {
+    n = suffix.$length()
+    if n == 0 { return true }
+    len = text.$length()
+    if n > len { return false }
+    text.$substring(len - n, len) == suffix
+}
+
+/// True when `needle` appears anywhere in `text`.
+pub fn contains(text: String, needle: String) -> bool {
+    needle.$length() == 0 || text.$find(needle) >= 0
+}
+
+/// Where `needle` first appears, or `nil`.
+///
+/// `$find` is the compiler's, and answers -1 when there is nothing; this is
+/// the same question with an answer that cannot be mistaken for a position.
+pub fn find(text: String, needle: String) -> i64? {
+    at = text.$find(needle)
+    if at < 0 { nil } else { at }
+}
+
+/// `text` with `prefix` removed if it was there, and unchanged if it was not.
+pub fn withoutPrefix(text: String, prefix: String) -> String {
+    if startsWith(text, prefix) {
+        text.$substring(prefix.$length(), text.$length())
+    } else {
+        text
+    }
+}
+
+/// `text` with `suffix` removed if it was there, and unchanged if it was not.
+pub fn withoutSuffix(text: String, suffix: String) -> String {
+    if endsWith(text, suffix) {
+        text.$substring(0, text.$length() - suffix.$length())
+    } else {
+        text
+    }
+}
+
+/// True for a space, tab, carriage return, newline or form feed.
+pub fn isSpace(byte: i64) -> bool {
+    byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 12
+}
+
+/// `text` without whitespace at either end.
+pub fn trim(text: String) -> String {
+    trimEnd(trimStart(text))
+}
+
+/// `text` without whitespace at the start.
+pub fn trimStart(text: String) -> String {
+    len = text.$length()
+    var at = 0
+    while at < len && isSpace(text.$byteAt(at) as i64) { at += 1 }
+    text.$substring(at, len)
+}
+
+/// `text` without whitespace at the end.
+pub fn trimEnd(text: String) -> String {
+    var end = text.$length()
+    while end > 0 && isSpace(text.$byteAt(end - 1) as i64) { end -= 1 }
+    text.$substring(0, end)
+}
+
+/// `text` cut at every occurrence of `separator`.
+///
+/// Adjacent separators produce empty pieces, and so do separators at either
+/// end: splitting `"a,,b"` on `","` gives three. An empty separator gives the
+/// whole string back as one piece, since there is nothing to cut at.
+///
+///     for field in text::split(line, ",") { ... }
+pub fn split(text: String, separator: String) -> vector::Vector<String> {
+    out = vector::Vector<String>()
+    step = separator.$length()
+    if step == 0 {
+        out.push(text)
+        return out
+    }
+    var at = 0
+    len = text.$length()
+    loop {
+        rest = text.$substring(at, len)
+        found = rest.$find(separator)
+        if found < 0 {
+            out.push(rest)
+            break
+        }
+        out.push(rest.$substring(0, found))
+        at += found + step
+    }
+    out
+}
+
+/// `text` cut into lines, at `\n`, with a trailing `\r` dropped from each.
+///
+/// A file that ends in a newline does not produce a final empty line, which
+/// is what reading one line at a time would have given.
+pub fn splitLines(text: String) -> vector::Vector<String> {
+    out = vector::Vector<String>()
+    len = text.$length()
+    if len == 0 { return out }
+    var at = 0
+    loop {
+        rest = text.$substring(at, len)
+        found = rest.$find("\n")
+        if found < 0 {
+            if rest.$length() > 0 { out.push(withoutSuffix(rest, "\r")) }
+            break
+        }
+        out.push(withoutSuffix(rest.$substring(0, found), "\r"))
+        at += found + 1
+        if at >= len { break }
+    }
+    out
+}
+
+/// `text` with every occurrence of `needle` replaced by `replacement`.
+///
+/// The replacement is not searched again, so replacing `"a"` with `"aa"`
+/// terminates. An empty `needle` changes nothing.
+pub fn replace(text: String, needle: String, replacement: String) -> String {
+    step = needle.$length()
+    if step == 0 { return text }
+    var out = ""
+    var at = 0
+    len = text.$length()
+    loop {
+        rest = text.$substring(at, len)
+        found = rest.$find(needle)
+        if found < 0 {
+            out = out + rest
+            break
+        }
+        out = out + rest.$substring(0, found) + replacement
+        at += found + step
+    }
+    out
+}
+
+/// Every piece with `separator` between them.
+///
+/// The other half of `split`: `join(split(s, ","), ",")` is `s`.
+pub fn join(pieces: vector::Vector<String>, separator: String) -> String {
+    var out = ""
+    var i = 0
+    while i < pieces.length() {
+        if i > 0 { out = out + separator }
+        out = out + pieces.get(i)
+        i += 1
+    }
+    out
+}
+
+/// `text` padded on the left with `fill` until it is `width` bytes long.
+/// Longer text is returned unchanged rather than cut.
+pub fn padStart(text: String, width: i64, fill: Character) -> String {
+    short = width - text.$length()
+    if short <= 0 { return text }
+    var out = ""
+    var i = 0
+    while i < short {
+        out += fill
+        i += 1
+    }
+    out + text
+}
+
+/// `text` padded on the right with `fill` until it is `width` bytes long.
+pub fn padEnd(text: String, width: i64, fill: Character) -> String {
+    short = width - text.$length()
+    if short <= 0 { return text }
+    var out = text
+    var i = 0
+    while i < short {
+        out += fill
+        i += 1
+    }
+    out
+}

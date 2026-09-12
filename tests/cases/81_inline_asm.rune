@@ -1,0 +1,38 @@
+// Inline assembly: the instructions reach the assembler as written, so what
+// is written has to be chosen per architecture.
+// EXPECT: 42
+// EXPECT: 12
+// EXPECT: ran
+import std::io
+import std::asm
+
+@Config(arch == "aarch64")
+fn addUp(a: i64, b: i64) -> i64 {
+    unsafe { asm::value<i64>("add $0, $1, $2", "=r,r,r", a, b) }
+}
+
+@Config(arch == "x86_64")
+fn addUp(a: i64, b: i64) -> i64 {
+    unsafe { asm::value<i64>("addq $2, $0", "=r,0,r", a, b) }
+}
+
+// Nothing to run the assembly on: fall back to arithmetic so the case still
+// says something on an architecture this file does not know.
+@Config(arch != "aarch64" && arch != "x86_64")
+fn addUp(a: i64, b: i64) -> i64 { a + b }
+
+// A no-result form, kept for its effects rather than its value. `@Config`
+// applies to declarations, so the condition goes on a function of its own.
+@Config(arch == "aarch64" || arch == "x86_64")
+fn barrier() { unsafe { asm::run("nop", "") } }
+
+@Config(arch != "aarch64" && arch != "x86_64")
+fn barrier() {}
+
+fn main() -> i64 {
+    io::println(addUp(2, 40).$str())
+    io::println(addUp(7, 5).$str())
+    barrier()
+    io::println("ran")
+    0
+}

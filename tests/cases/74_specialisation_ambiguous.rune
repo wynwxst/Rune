@@ -1,0 +1,22 @@
+// Two bindings of one mark that are equally specific are reported rather than
+// decided by the order they were reached in.
+// EXPECT-ERROR: are equally specific
+import std::io
+
+struct Wrapper<T> { value: T }
+mark Show { fn show(&self) -> String }
+mark Tag  { fn tag(&self) -> String }
+mark Mood { fn mood(&self) -> String }
+
+// `i64` is both, so both bindings apply to `Wrapper<i64>` and neither is
+// narrower than the other.
+bind Tag to i64  { fn tag(&self) -> String { "t" } }
+bind Mood to i64 { fn mood(&self) -> String { "m" } }
+
+bind<T> Show to Wrapper<T> where T: Tag  { fn show(&self) -> String { "tagged" } }
+bind<T> Show to Wrapper<T> where T: Mood { fn show(&self) -> String { "other" } }
+
+fn main() -> i64 {
+    io::println((Wrapper<i64> { value: 1 }).show())
+    0
+}

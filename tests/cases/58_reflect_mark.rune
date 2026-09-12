@@ -1,0 +1,9 @@
+// `conforms` asks whether a type binds a mark, so the second argument has to
+// be one.
+// EXPECT-ERROR: the second type argument of `conforms` has to be a mark
+import std::reflect
+struct Point { x: i64 }
+fn main() -> i64 {
+    let _ = reflect::conforms<Point, Point>()
+    0
+}

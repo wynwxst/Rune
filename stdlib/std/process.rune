@@ -1,0 +1,156 @@
+// std::process — the program as the operating system sees it: what it was
+// invoked with, how it stops, and how many objects it still holds.
+//
+// The argument list is captured by the runtime before `main` runs, so reading
+// it costs nothing and cannot fail. Index 0 is the program itself, exactly as
+// C hands it over:
+//
+//     for a in process::args() { io::println(a) }
+//
+// Stopping comes in two kinds. `exit` is an orderly end with a status the
+// shell can read; `panic` is the disorderly one, for a condition the program
+// has no answer to. Both leave immediately — neither runs a `deinit`, and
+// neither returns. Each is declared `-> Never`, and a `Never` converts to
+// any type, so a call to one can stand wherever a value was expected:
+//
+//     fn pick(n: i64) -> i64 {
+//         if n > 0 { return n }
+//         process::panic("negative")      // no `return` needed after this
+//     }
+
+import std::collections::vector
+import std::io
+
+extern "C" {
+    fn rune_exit(code: i32) -> Never
+    fn rune_arg_count() -> i64
+    fn rune_arg_at(index: i64) -> String
+    fn rune_panic(message: CString, location: CString) -> Never
+    fn rune_live_object_count() -> i64
+}
+
+//=== What the program was invoked with ===================================//
+
+/// How many command line arguments there are, counting the program name at
+/// index 0. A program run with no arguments of its own reports 1.
+@safe("reads a value the runtime captured at start-up")
+pub fn argCount() -> i64 {
+    rune_arg_count()
+}
+
+/// The argument at `index`, or an empty `String` when there is none there.
+///
+/// Out of range is empty rather than an abort, because a missing argument is
+/// an ordinary thing for a program to be run without. Use `argument` when the
+/// difference between absent and empty matters.
+@safe("the runtime range-checks the index and returns an empty String")
+pub fn arg(index: i64) -> String {
+    rune_arg_at(index)
+}
+
+/// The argument at `index`, or `nil` when there is none.
+///
+///     let path = process::argument(1) ?? "input.txt"
+@safe("the runtime range-checks the index and returns an empty String")
+pub fn argument(index: i64) -> String? {
+    if index < 0 || index >= rune_arg_count() { return nil }
+    rune_arg_at(index)
+}
+
+/// The program's own name, as it was invoked — argument 0.
+@safe("the runtime range-checks the index and returns an empty String")
+pub fn programName() -> String {
+    rune_arg_at(0)
+}
+
+/// Every argument, program name included.
+@safe("each index is checked against the count the runtime captured")
+pub fn args() -> vector::Vector<String> {
+    vec = vector::Vector<String>()
+    for i in 0..rune_arg_count() {
+        vec.push(rune_arg_at(i))
+    }
+    vec
+}
+
+/// Every argument except the program name — what a command line parser
+/// actually wants.
+///
+///     for flag in process::arguments() { ... }
+@safe("each index is checked against the count the runtime captured")
+pub fn arguments() -> vector::Vector<String> {
+    vec = vector::Vector<String>()
+    for i in 1..rune_arg_count() {
+        vec.push(rune_arg_at(i))
+    }
+    vec
+}
+
+//=== Stopping ============================================================//
+
+/// Ends the process immediately with `code`, which the shell reads as the
+/// exit status. Zero means success by convention.
+///
+/// Nothing is unwound: no `deinit` runs and no destructor is called. Return
+/// from `main` instead wherever that matters.
+@safe("flushing and exiting is the runtime's own responsibility")
+pub fn exit(code: i32) -> Never {
+    rune_exit(code)
+}
+
+/// Ends the process with status 0.
+@safe("flushing and exiting is the runtime's own responsibility")
+pub fn succeed() -> Never {
+    rune_exit(0)
+}
+
+/// Ends the process with status 1, the conventional "something went wrong".
+@safe("flushing and exiting is the runtime's own responsibility")
+pub fn fail() -> Never {
+    rune_exit(1)
+}
+
+/// Aborts with `message`. Never returns — and says so in its type, so a
+/// call to it can end a function that promised a value.
+///
+/// The message is anything printable, so a literal, a `String` built at run
+/// time and a `CString` from a foreign call all work:
+///
+///     process::panic("index out of range")
+///     process::panic("no such key: " + key)
+///
+/// This is the deliberate way to stop. A failed bounds check inside the
+/// library stops the same way, and prints the same shape of report: the
+/// message, then a traceback when the program was built with `-g`.
+@safe("the runtime prints the message and aborts")
+pub fn panic<M: io::Display>(message: M) -> Never {
+    rune_panic(message.display().$cstr(), "explicit call to std::process::panic")
+}
+
+/// Aborts with `message` unless `condition` holds.
+///
+/// The condition is evaluated either way, so keep it cheap — or use
+/// `testing::assert!`, which is a macro and names the check after the
+/// expression it was given.
+///
+///     process::assert(index < count, "index out of range")
+pub fn assert<M: io::Display>(condition: bool, message: M) {
+    if !condition {
+        panic(message)
+    }
+}
+
+/// How many reference-counted objects are currently alive.
+///
+/// Every class instance, `String` and closure environment is counted; value
+/// types are not, because there is nothing to count. `--safety full` prints
+/// this at exit, and a test that wants to prove something is released can
+/// read it directly:
+///
+///     before = process::liveObjectCount()
+///     { let held = Thing() }
+///     testing::equal("released", process::liveObjectCount(), before)
+@safe("reads a counter the runtime maintains")
+pub fn liveObjectCount() -> i64 {
+    rune_live_object_count()
+}

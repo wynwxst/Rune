@@ -1,0 +1,61 @@
+// Structs, tuples, arrays, slices and enums with payloads.
+// EXPECT: point=(1.5, 2.5) shifted=(3.5, 2.5)
+// EXPECT: tuple=42 second=hi
+// EXPECT: array=1,2,3,4,5, sum=15 repeat=7,7,7,
+// EXPECT: circle=12.5 rect=12.0 empty=0.0
+// EXPECT: named width=3.0
+import std::io
+
+struct Point { pub x: f64, pub y: f64 }
+
+enum Shape {
+    Empty,
+    Circle(f64),
+    Rect { width: f64, height: f64 },
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Empty => 0.0,
+        Shape::Circle(r) => 3.125 * r * r,
+        Shape::Rect { width, height } => width * height,
+    }
+}
+
+fn widthOf(s: Shape) -> f64 {
+    match s {
+        Shape::Rect { width, height } => width,
+        _ => 0.0,
+    }
+}
+
+fn show(p: Point) -> String { "(" + p.x.$str() + ", " + p.y.$str() + ")" }
+
+fn total(values: [i64]) -> i64 {
+    var sum = 0
+    for v in values { sum += v }
+    sum
+}
+
+fn main() -> i64 {
+    p = Point { x: 1.5, y: 2.5 }
+    q = Point { x: 3.5, ..p }
+    io::println("point=" + show(p) + " shifted=" + show(q))
+
+    t: (i64, String, bool) = (42, "hi", true)
+    io::println("tuple=" + t.0.$str() + " second=" + t.1)
+
+    arr: [5:i64] = [1, 2, 3, 4, 5]
+    var joined = ""
+    for v in arr { joined += v.$str() + "," }
+    rep = [7; 3]
+    var repJoined = ""
+    for v in rep { repJoined += v.$str() + "," }
+    io::println("array=" + joined + " sum=" + total(arr).$str() + " repeat=" + repJoined)
+
+    io::println("circle=" + area(Shape::Circle(2.0)).$str() +
+                " rect=" + area(Shape::Rect { width: 3.0, height: 4.0 }).$str() +
+                " empty=" + area(Shape::Empty).$str())
+    io::println("named width=" + widthOf(Shape::Rect { width: 3.0, height: 9.0 }).$str())
+    0
+}

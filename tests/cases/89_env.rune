@@ -1,0 +1,35 @@
+// std::env — variables read, written and listed, and where the process is.
+// A set-but-empty variable is an empty String, and an unset one is `nil`.
+// EXPECT: true
+// EXPECT: true
+// EXPECT: yes
+// EXPECT: empty:true
+// EXPECT: true
+// EXPECT: fallback
+// EXPECT: true
+// EXPECT: true
+
+import std::io
+import std::env
+
+fn main() -> i64 {
+    io::println(env::has("PATH"))
+    io::println(env::get("RUNE_TEST_DEFINITELY_UNSET").isNil())
+    env::set("RUNE_TEST_PROBE", "yes")
+    io::println(env::get("RUNE_TEST_PROBE") ?? "no")
+    env::set("RUNE_TEST_PROBE", "")
+    match env::get("RUNE_TEST_PROBE") {
+        Some(v) => io::println("empty:" + v.$isEmpty().$str()),
+        None => io::println("unset"),
+    }
+    env::remove("RUNE_TEST_PROBE")
+    io::println(env::get("RUNE_TEST_PROBE").isNil())
+    io::println(env::getOr("RUNE_TEST_PROBE", "fallback"))
+    var sawPath = false
+    for (name, value) in env::all() {
+        if name == "PATH" { sawPath = true }
+    }
+    io::println(sawPath)
+    io::println(env::currentDirectory().hasValue())
+    0
+}

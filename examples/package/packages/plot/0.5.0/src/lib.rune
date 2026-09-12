@@ -1,0 +1,72 @@
+// plot — charts made of characters.
+
+import std::io
+import std::text
+import std::collections::vector
+import stats
+import geometry
+
+/// One row per value: a label, then a bar scaled so the largest fills
+/// `width` characters.
+pub fn bar(labels: [String], values: [f64], width: i64) -> String {
+    let top = stats::maximum(values) ?? 0.0
+    var labelWidth = 0
+    for l in labels { if l.$length() > labelWidth { labelWidth = l.$length() } }
+    var out = ""
+    for i in 0..values.$length() {
+        let label = if i < labels.$length() { labels[i] } else { "" }
+        let n = if top > 0.0 { ((values[i] / top) * (width as f64) + 0.5) as i64 } else { 0 }
+        out += text::padEnd(label, labelWidth, ' ') + " |" + "#".$repeat(n) + " " + values[i].$str() + "\n"
+    }
+    out
+}
+
+/// The values as one line of block characters, lowest to highest.
+pub fn sparkline(values: [f64]) -> String {
+    let ticks: [8:String] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+    let low = stats::minimum(values) ?? 0.0
+    let high = stats::maximum(values) ?? 0.0
+    var out = ""
+    for v in values {
+        var index = 0
+        if high > low { index = (((v - low) / (high - low)) * 7.0 + 0.5) as i64 }
+        out += ticks[index]
+    }
+    out
+}
+
+/// Points on a `width` by `height` grid of characters, the origin bottom
+/// left, scaled to the points' bounding box.
+pub fn scatter(points: [geometry::Point], width: i64, height: i64) -> String {
+    var rows = vector::Vector<String>()
+    if points.$isEmpty() || width <= 0 || height <= 0 { return "" }
+    var lowX = points[0].x
+    var highX = points[0].x
+    var lowY = points[0].y
+    var highY = points[0].y
+    for p in points {
+        if p.x < lowX { lowX = p.x }
+        if p.x > highX { highX = p.x }
+        if p.y < lowY { lowY = p.y }
+        if p.y > highY { highY = p.y }
+    }
+    var grid = vector::Vector<vector::Vector<String>>()
+    for _ in 0..height {
+        var row = vector::Vector<String>()
+        for _ in 0..width { row.push(".") }
+        grid.push(row)
+    }
+    for p in points {
+        let fx = if highX > lowX { (p.x - lowX) / (highX - lowX) } else { 0.0 }
+        let fy = if highY > lowY { (p.y - lowY) / (highY - lowY) } else { 0.0 }
+        let col = (fx * ((width - 1) as f64) + 0.5) as i64
+        let row = (height - 1) - ((fy * ((height - 1) as f64) + 0.5) as i64)
+        grid[row][col] = "*"
+    }
+    var out = ""
+    for row in grid {
+        for cell in row { out += cell }
+        out += "\n"
+    }
+    out
+}

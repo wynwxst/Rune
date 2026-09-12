@@ -1,0 +1,10 @@
+import runegrep::*
+
+
+fn main() -> i64 {
+    line = search(query: "import",ReadFile("/Users/dusk/Documents/Rune/examples/project/cliargs/tests/basics.rune")).unwrap()
+    println!("Found {line}")
+    0
+}
+
+

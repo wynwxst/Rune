@@ -1,0 +1,68 @@
+// Atomics: one indivisible step each, so several threads can change the same
+// number without a lock and without losing an update.
+// EXPECT: load 10, add gives 10, now 15
+// EXPECT: exchange gives 15, now 100
+// EXPECT: swap 100->7: true, now 7
+// EXPECT: swap 100->9: false, now 7
+// EXPECT: update doubles to 14
+// EXPECT: raiseTo 50 then 50
+// EXPECT: flag: false true false true
+// EXPECT: 800000 increments -> 800000
+// EXPECT: exactly one winner: 1
+// EXPECT: display: 50 true
+import std::io
+import std::atomic
+import std::thread
+
+fn bump(c: atomic::Counter) -> i64 {
+    var i = 0
+    while i < 100000 { c.increment(); i += 1 }
+    0
+}
+
+fn double(n: i64) -> i64 { n * 2 }
+
+/// Only the thread that raises the flag returns 1.
+fn tryClaim(f: atomic::Flag) -> i64 {
+    if f.raise() { return 1 }
+    0
+}
+
+fn main() -> i64 {
+    let c = atomic::Counter(10)
+    println!("load {}, add gives {}, now {}", c.load(), c.add(5), c.load())
+    println!("exchange gives {}, now {}", c.exchange(100), c.load())
+    println!("swap 100->7: {}, now {}", c.compareExchange(100, 7), c.load())
+    println!("swap 100->9: {}, now {}", c.compareExchange(100, 9), c.load())
+    println!("update doubles to {}", c.update(double))
+    println!("raiseTo {} then {}", c.raiseTo(50), c.raiseTo(3))
+
+    let f = atomic::Flag(false)
+    println!("flag: {} {} {} {}", f.isRaised(), f.raise(), f.raise(),
+             f.isRaised())
+
+    // Eight threads, no lock, and every increment lands.
+    let shared = atomic::Counter(0)
+    var a = thread::spawn(bump, shared)
+    var b = thread::spawn(bump, shared)
+    var d = thread::spawn(bump, shared)
+    var e = thread::spawn(bump, shared)
+    var g = thread::spawn(bump, shared)
+    var h = thread::spawn(bump, shared)
+    var i2 = thread::spawn(bump, shared)
+    var j = thread::spawn(bump, shared)
+    a.join(); b.join(); d.join(); e.join()
+    g.join(); h.join(); i2.join(); j.join()
+    println!("800000 increments -> {}", shared.load())
+
+    // Four threads race for one flag; exactly one wins.
+    let once = atomic::Flag(false)
+    var w = thread::spawn(tryClaim, once)
+    var x = thread::spawn(tryClaim, once)
+    var y = thread::spawn(tryClaim, once)
+    var z = thread::spawn(tryClaim, once)
+    println!("exactly one winner: {}", w.join() + x.join() + y.join() + z.join())
+
+    println!("display: {} {}", c, f)
+    0
+}

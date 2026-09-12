@@ -1,0 +1,42 @@
+// The adaptors that end a chain, and the one that stops it early.
+// EXPECT: 200
+// EXPECT: [1, 2, 3]
+// EXPECT: [2, 3]
+// EXPECT: [1, 2, 3, 4, 5, 6, 7]
+// EXPECT: 5
+// EXPECT: [10, 4]
+// EXPECT: true
+// EXPECT: false
+// EXPECT: 3
+// EXPECT: 0=1 1=2 2=3 3=10 4=4
+import std::io
+import std::iter
+import std::collections::vector
+
+fn main() -> i64 {
+    let b: Byte = 200
+    io::println(b.$str())
+
+    var v = vector::Vector<i64>()
+    v.push(1); v.push(2); v.push(3); v.push(10); v.push(4)
+
+    // `take_while` stops at the first value that fails, and does not look
+    // past it: the 4 after the 10 is not taken.
+    io::println(v.take_while(||(n: i64) -> bool { n < 5 }).collect())
+    io::println(v.as_iter().skip(1).take(2).collect())
+
+    io::println(iter::counting(1).take_while(||(n: i64) -> bool { n * n < 50 }).collect())
+    io::println(v.as_iter().count().$str())
+    io::println(v.as_iter().skip_while(||(n: i64) -> bool { n < 4 }).take(2).collect())
+    io::println(v.as_iter().any(||(n: i64) -> bool { n == 10 }).$str())
+    io::println(v.as_iter().all(||(n: i64) -> bool { n < 5 }).$str())
+    match v.as_iter().find(||(n: i64) -> bool { n % 3 == 0 }) {
+        Some(x) => io::println(x.$str()),
+        None    => io::println("none"),
+    }
+
+    var line = ""
+    for (i, n) in v.enumerate() { line += i.$str() + "=" + n.$str() + " " }
+    io::println(line.$substring(0, line.$length() - 1))
+    0
+}

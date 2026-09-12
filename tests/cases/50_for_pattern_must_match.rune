@@ -1,0 +1,11 @@
+// A `for` pattern binds every turn, so it cannot be one that could fail.
+// EXPECT-ERROR: has to match every value
+import std::io
+
+enum Colour { Red, Green }
+
+fn main() -> i64 {
+    let cs: [2:Colour] = [Colour::Red, Colour::Green]
+    for Colour::Red in cs { io::println("red") }
+    0
+}

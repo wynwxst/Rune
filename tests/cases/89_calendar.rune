@@ -1,0 +1,63 @@
+// std::time's calendar: dates, weekdays, day arithmetic, moments on the wall
+// clock, and ISO 8601 both ways. The values are checked against Python's
+// datetime.
+// EXPECT: 2026-09-11
+// EXPECT: Friday
+// EXPECT: 20707
+// EXPECT: 2026-10-11
+// EXPECT: 2027-02-11
+// EXPECT: 2024-02-29
+// EXPECT: 254
+// EXPECT: true
+// EXPECT: 1969-12-31
+// EXPECT: 1970-01-01T00:00:00Z
+// EXPECT: 2023-11-14T22:13:20Z
+// EXPECT: Tuesday
+// EXPECT: 1969-12-30T23:59:59Z
+// EXPECT: 1789122030
+// EXPECT: 2026-09-12T11:20:30Z
+// EXPECT: 2026-09-11T11:20:30+01:00
+// EXPECT: 2026-09-11T11:20:30.5+01:00
+// EXPECT: 1789122030
+// EXPECT: true
+// EXPECT: 2026-09-14
+// EXPECT: 10
+// EXPECT: true
+// EXPECT: true
+// EXPECT: true
+
+import std::io
+import std::time
+
+fn main() -> i64 {
+    let d = time::date(2026, 9, 11) ?? time::dateFromDays(0)
+    io::println(d)
+    io::println(d.weekday())
+    io::println(d.toDays())
+    io::println(d.plusDays(30))
+    io::println(d.plusMonths(5))
+    io::println((time::date(2024, 1, 31) ?? d).plusMonths(1))
+    io::println(d.dayOfYear())
+    io::println(time::date(2023, 2, 29).isNil())
+    io::println(time::dateFromDays(-1))
+    io::println(time::fromUnix(0))
+    io::println(time::fromUnix(1700000000))
+    io::println(time::fromUnix(1700000000).date.weekday())
+    io::println(time::fromUnix(-86401))
+    let dt = time::parseDateTime("2026-09-11T10:20:30Z") ?? time::fromUnix(0)
+    io::println(dt.toUnix())
+    io::println(dt.plus(time::hours(25)))
+    io::println(dt.toOffset(3600))
+    let zoned = time::parseDateTime("2026-09-11T11:20:30.5+01:00") ?? time::fromUnix(0)
+    io::println(zoned)
+    io::println(zoned.toUnix())
+    io::println(time::parseDate("2026-13-01").isNil())
+    io::println(d.next(time::Weekday::Monday))
+    io::println(d.daysUntil(d.plusDays(10)))
+    let now = time::utcNow()
+    io::println(now.date.year >= 2026)
+    // Local and UTC name the same moment.
+    io::println(time::localNow().inUtc().toUnix() - now.toUnix() < 5)
+    io::println(d < d.plusDays(1))
+    0
+}

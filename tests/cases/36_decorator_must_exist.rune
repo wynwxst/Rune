@@ -1,0 +1,6 @@
+// A decorator that is neither built in nor declared is an error, not a
+// comment that the compiler ignores.
+// EXPECT-ERROR: no decorator named 'memoise'
+@memoise
+fn slow(n: i64) -> i64 { n * 2 }
+fn main() -> i64 { slow(21) }

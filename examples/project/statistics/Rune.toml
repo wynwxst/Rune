@@ -1,0 +1,16 @@
+[package]
+name = "statistics"
+version = "0.1.0"
+edition = "2025"
+description = "Summary statistics over a slice of numbers"
+authors = []
+
+[build]
+safety = "full"
+optimize = 0
+debug = true
+warnings-as-errors = false
+# libm is needed by src/spread.rune; dependents inherit this automatically.
+link = ["m"]
+
+[dependencies]

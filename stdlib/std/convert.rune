@@ -1,0 +1,49 @@
+// std::convert — conversions the program supplies, as opposed to the ones the
+// compiler already knows.
+//
+// `as` is the compiler's. It covers numbers, enums and pointers, with fixed
+// meanings that a program cannot change or add to: `n as f64`, `flag as i32`,
+// `p as *var u8`. Nothing you write ever alters what `as` means.
+//
+// `into` is yours. It dispatches through the `As` mark below, so a conversion
+// between two of your own types reads the same way as a builtin one:
+//
+//     struct Celsius    { pub degrees: f64 }
+//     struct Fahrenheit { pub degrees: f64 }
+//
+//     bind Celsius into Fahrenheit {
+//         fn convert(&self) -> Fahrenheit {
+//             Fahrenheit { degrees: self.degrees * 9.0 / 5.0 + 32.0 }
+//         }
+//     }
+//
+//     let f = c into Fahrenheit
+//
+// That binding is the same as `bind As<Fahrenheit> to Celsius`. The mark
+// carries the destination as a type argument rather than fixing one, so a
+// type may convert into as many others as it likes — each binding names its
+// own target and they never collide:
+//
+//     bind Celsius into Kelvin { fn convert(&self) -> Kelvin { ... } }
+//
+// It works as a bound, too, which is how a function takes anything that can
+// become what it needs:
+//
+//     fn report<T: convert::As<Fahrenheit>>(reading: T) {
+//         io::println((reading into Fahrenheit).degrees)
+//     }
+//
+// A conversion that can fail is not this. `As` promises an answer, so a
+// parse, a narrowing or a lookup belongs in a function returning
+// `Result<T, E>` — where the failure has somewhere to go.
+
+/// How one type becomes another.
+///
+/// A binding names the destination, so one type may convert into as many
+/// others as it likes. `bind Source into Target` is how it is written;
+/// `value into Target` is the way to call it. `convert` can be called
+/// directly, but the operator says what is happening.
+pub mark As<Target> {
+    /// This value, as a `Target`. Total: every input has an answer.
+    fn convert(&self) -> Target
+}

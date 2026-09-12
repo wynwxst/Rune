@@ -1,0 +1,37 @@
+// Choosing between overloads is the same question an ordinary call asks about
+// its arguments, so it is asked the same way: a labelled argument goes to the
+// parameter of that name, the positional ones fill what is left in order, and
+// a parameter nothing filled has to have brought its own default.
+// EXPECT: int 5
+// EXPECT: abab
+// EXPECT: ababab
+// EXPECT: cdcd
+// EXPECT: zzzz
+import std::io
+
+struct S { pub n: i64 }
+mark Do { fn go(&self, v: i64) -> String }
+
+bind Do to S { fn go(&self, v: i64) -> String { "int " + v.$str() } }
+
+bind Do to S {
+    fn go(&self, name: String, times: i64 = 2) -> String {
+        var out = ""
+        var i = 0
+        while i < times {
+            out += name
+            i += 1
+        }
+        out
+    }
+}
+
+fn main() -> i64 {
+    s = S { n: 0 }
+    io::println(s.go(5))
+    io::println(s.go("ab"))              // `times` defaults
+    io::println(s.go("ab", 3))
+    io::println(s.go(name: "cd", times: 2))
+    io::println(s.go(times: 4, name: "z"))
+    0
+}

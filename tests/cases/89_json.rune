@@ -1,0 +1,53 @@
+// std::json — parse, reach in, write back, build with `json!`, and refuse
+// what is not JSON, saying where.
+// EXPECT: {"name":"ada","age":36,"tags":["a","b"],"nested":{"x":1.5}}
+// EXPECT: "ada"
+// EXPECT: "b"
+// EXPECT: 1.5
+// EXPECT: null
+// EXPECT: 36
+// EXPECT: json: unexpected character: an array may not end with a comma at line 1, column 7
+// EXPECT: {"name":"ada","n":3,"list":[1,2,null],"ok":true}
+// EXPECT: 42
+// EXPECT: ["x","y"]
+// EXPECT: {"next":2026}
+// EXPECT: "é😀"
+// EXPECT: 3
+// EXPECT: 3.0
+// EXPECT: {
+// EXPECT:   "a": {
+// EXPECT:     "b": 1
+// EXPECT:   }
+// EXPECT: }
+
+import std::io
+import std::json
+
+fn main() -> i64 {
+    match json::parse("{\"name\": \"ada\", \"age\": 36, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1.5}}") {
+        Ok(doc) => {
+            io::println(doc)
+            io::println(doc["name"])
+            io::println(doc["tags"][1])
+            io::println(doc["nested"]["x"])
+            io::println(doc["missing"]["deeper"])
+            io::println(doc.get("age").unwrap().asInt() ?? 0)
+        },
+        Err(e) => io::println(e),
+    }
+    match json::parse("[1, 2,]") {
+        Ok(doc) => io::println("accepted?!"),
+        Err(e) => io::println(e),
+    }
+    let built = json!{ "name": "ada", "n": 3, "list": [1, 2, null], "ok": true }
+    io::println(built)
+    io::println(json!(42))
+    io::println(json!["x", "y"])
+    let year = 2025
+    io::println(json!{ "next": year + 1 })
+    io::println(json::parse("\"\\u00e9\\ud83d\\ude00\"").unwrap())
+    io::println(json::parse("3").unwrap())
+    io::println(json::parse("3.0").unwrap())
+    io::println(json::pretty(json::parse("{\"a\":{\"b\":1}}").unwrap()))
+    0
+}

@@ -1,0 +1,34 @@
+// std::hash — hashes with a name. Every value here is the one the reference
+// implementation of that algorithm produces.
+// EXPECT: a430d84680aabd0b
+// EXPECT: 4f9f2cab
+// EXPECT: 907060870
+// EXPECT: 414fa339
+// EXPECT: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+// EXPECT: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+// EXPECT: d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592
+// EXPECT: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+// EXPECT: c84e5648e5bd3dd9e37b57ecb80fc505e3324f53487e07532c9020e5b9e4e76d
+
+import std::io
+import std::hash
+
+fn main() -> i64 {
+    io::println(hash::hex64(hash::fnv1a64("hello")))
+    io::println(hash::hex32(hash::fnv1a32("hello")))
+    io::println(hash::crc32("hello"))
+    io::println(hash::hex32(hash::crc32("The quick brown fox jumps over the lazy dog")))
+    io::println(hash::sha256(""))
+    io::println(hash::sha256("hello"))
+    io::println(hash::sha256("The quick brown fox jumps over the lazy dog"))
+    // Fed in pieces, the digest is the same.
+    var h = hash::Sha256 {}
+    h.feedText("hel")
+    h.feedText("lo")
+    io::println(h.finishHex())
+    // Longer than one 64-byte block.
+    var long = ""
+    for _ in 0..10 { long += "0123456789abcdef" }
+    io::println(hash::sha256(long))
+    0
+}

@@ -1,0 +1,16 @@
+// A `some` stands for exactly one type, fixed by the first value the body
+// returns; a second, different one is an error.
+// EXPECT-ERROR: every value 'either' returns has to be the same type
+
+mark Shape { fn area(&self) -> f64 }
+struct Sq { pub s: f64 }
+struct Circle { pub r: f64 }
+bind Shape to Sq { fn area(&self) -> f64 { self.s * self.s } }
+bind Shape to Circle { fn area(&self) -> f64 { 3.0 * self.r * self.r } }
+
+fn either(c: bool) -> some Shape {
+    if c { return Sq { s: 1.0 } }
+    Circle { r: 1.0 }
+}
+
+fn main() -> i64 { 0 }

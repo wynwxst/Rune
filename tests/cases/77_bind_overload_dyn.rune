@@ -1,0 +1,28 @@
+// A mark bound to one type more than once has exactly one version answering
+// its requirement — the one whose signature matches. That is what a
+// `dyn Mark` calls, whatever order the bindings were written in; the plain
+// method table holds whichever claimed the name first, which is why the
+// vtable reads the per-mark table instead.
+// EXPECT: mark str a
+// EXPECT: mark int 7
+// EXPECT: mark str b
+// EXPECT: mark str dyn
+import std::io
+
+struct P { pub n: i64 }
+mark Show { fn show(&self, v: String) -> String }
+
+// The extra overload is declared FIRST; the conforming one second.
+bind Show to P { fn show(&self, v: i64) -> String { "mark int " + v.$str() } }
+bind Show to P { fn show(&self, v: String) -> String { "mark str " + v } }
+
+fn describe(d: dyn Show) -> String { d.show("dyn") }
+
+fn main() -> i64 {
+    p = P { n: 1 }
+    io::println(p.show("a"))
+    io::println(p.show(7))
+    io::println(p::Show.show("b"))
+    io::println(describe(p))
+    0
+}

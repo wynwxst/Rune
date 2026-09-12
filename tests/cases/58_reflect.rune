@@ -1,0 +1,105 @@
+// Compile-time reflection: what the compiler knows, asked from inside the
+// program. Every answer here is a constant by the time the program runs.
+// EXPECT: i64 String Point [3:f64] (i64, String)
+// EXPECT: size=16 align=8 stride=16 fields=2
+// EXPECT: x:f64 y:i32 offsets 0 8
+// EXPECT: typeId stable=true distinct=true
+// EXPECT: int float string struct enum class tuple array other
+// EXPECT: conforms Named=true Plain=false
+// EXPECT: 42 2.5 true "hi" z
+// EXPECT: Shown { x: 1, y: 2.5 }
+// EXPECT: (1, "a", false) [1, 2, 3]
+// EXPECT: Wrap { name: "w", at: Shown { x: 0, y: 0.0 }, flags: [true, false] }
+// EXPECT: Dot Circle(1.5) Rect { w: 3, h: 4 } Some(5) None
+// EXPECT: Named#7 Holder { inner: Named#7, other: 1 }
+// EXPECT: specialised: displayable | Plain { n: 2 }
+import std::reflect
+import std::io
+
+struct Point { x: f64, y: i32 }
+struct Shown { x: i64, y: f64 }
+struct Wrap { name: String, at: Shown, flags: [2:bool] }
+enum Shape { Dot, Circle(f64), Rect { w: i64, h: i64 } }
+
+struct Named { n: i64 }
+bind io::Display to Named {
+    fn display(&self) -> String { "Named#" + self.n.$str() }
+}
+struct Plain { n: i64 }
+struct Holder { inner: Named, other: i64 }
+
+class Node {
+    var value: i64
+    fn init(self, v: i64) { self.value = v }
+}
+
+fn kindName<T>() -> String {
+    match reflect::kindOf<T>() {
+        reflect::Kind::Int => "int",
+        reflect::Kind::Float => "float",
+        reflect::Kind::String => "string",
+        reflect::Kind::Struct => "struct",
+        reflect::Kind::Enum => "enum",
+        reflect::Kind::Class => "class",
+        reflect::Kind::Tuple => "tuple",
+        reflect::Kind::Array => "array",
+        _ => "other",
+    }
+}
+
+/// `conforms` is a constant, so each instantiation keeps only its own arm.
+fn render<T>(value: T) -> String {
+    if reflect::conforms<T, io::Display>() { return "displayable" }
+    reflect::describe(value)
+}
+
+fn main() -> i64 {
+    println!("{} {} {} {} {}",
+             reflect::typeName<i64>(), reflect::typeName<String>(),
+             reflect::typeName<Point>(), reflect::typeName<[3:f64]>(),
+             reflect::typeName<(i64, String)>())
+    println!("size={} align={} stride={} fields={}",
+             reflect::sizeOf<Point>(), reflect::alignOf<Point>(),
+             reflect::strideOf<Point>(), reflect::fieldCount<Point>())
+    println!("{}:{} {}:{} offsets {} {}",
+             reflect::fieldName<Point>(0), reflect::fieldType<Point>(0),
+             reflect::fieldName<Point>(1), reflect::fieldType<Point>(1),
+             offset_of!(Point, x), offset_of!(Point, y))
+    println!("typeId stable={} distinct={}",
+             reflect::typeId<i64>() == reflect::typeId<i64>(),
+             reflect::typeId<i64>() != reflect::typeId<u64>())
+
+    println!("{} {} {} {} {} {} {} {} {}",
+             kindName<i64>(), kindName<f64>(), kindName<String>(),
+             kindName<Point>(), kindName<Shape>(), kindName<Node>(),
+             kindName<(i64, i64)>(), kindName<[2:i64]>(), kindName<bool>())
+    println!("conforms Named={} Plain={}",
+             reflect::conforms<Named, io::Display>(),
+             reflect::conforms<Plain, io::Display>())
+
+    // `describe` renders from the layout, asking nothing of the type.
+    println!("{} {} {} {} {}",
+             reflect::describe(42), reflect::describe(2.5),
+             reflect::describe(true), reflect::describe("hi"),
+             reflect::describe('z'))
+    println!("{}", reflect::describe(Shown { x: 1, y: 2.5 }))
+    println!("{} {}", reflect::describe((1, "a", false)),
+             reflect::describe([1, 2, 3]))
+    println!("{}", reflect::describe(Wrap { name: "w",
+                                            at: Shown { x: 0, y: 0.0 },
+                                            flags: [true, false] }))
+    let some: i64? = 5
+    let none: i64? = nil
+    println!("{} {} {} {} {}",
+             reflect::describe(Shape::Dot), reflect::describe(Shape::Circle(1.5)),
+             reflect::describe(Shape::Rect { w: 3, h: 4 }),
+             reflect::describe(some), reflect::describe(none))
+
+    // A type that says how it prints keeps that decision, nested as well.
+    println!("{} {}", reflect::describe(Named { n: 7 }),
+             reflect::describe(Holder { inner: Named { n: 7 }, other: 1 }))
+
+    println!("specialised: {} | {}",
+             render(Named { n: 1 }), render(Plain { n: 2 }))
+    0
+}

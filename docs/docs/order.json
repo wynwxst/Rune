@@ -1,0 +1,428 @@
+{
+ "folders": [
+  "Getting_Started",
+  "Lexical_Structure",
+  "Bindings_And_Scope",
+  "Types",
+  "Operators",
+  "Conditionals",
+  "Loops",
+  "Iterators",
+  "Pattern_Matching",
+  "Functions",
+  "Closures_And_Function_Values",
+  "Structs",
+  "Enums",
+  "Classes",
+  "Marks",
+  "Any",
+  "Compile_Time_Reflection",
+  "Operator_Overloading",
+  "Generics",
+  "Option_And_Result",
+  "Arrays_Slices_And_Tuples",
+  "Strings_And_Characters",
+  "Formatting_And_Printing",
+  "Memory_And_Reference_Counting",
+  "Pointers_Borrows_And_Slices",
+  "Safety_Levels",
+  "Modules_Imports_And_Visibility",
+  "Decorators",
+  "Calling_C",
+  "The_Standard_Library",
+  "Testing",
+  "Documentation",
+  "Macros",
+  "Reading_A_Diagnostic",
+  "The_Toolchain",
+  "Packages_And_Registries",
+  "Threads_And_Sharing",
+  "Cross_Compilation",
+  "Conditional_Compilation",
+  "Inline_Assembly",
+  "Grammar_And_Limits"
+ ],
+ "Getting_Started": [
+  "building_the_toolchain.md",
+  "your_first_program.md",
+  "using_the_package_manager.md",
+  "how_to_read_this_reference.md"
+ ],
+ "Lexical_Structure": [
+  "statements_and_line_breaks.md",
+  "comments.md",
+  "integer_literals.md",
+  "float_literals.md",
+  "characters_and_escapes.md",
+  "string_literals.md",
+  "dot_and_coloncolon.md",
+  "reserved_words.md"
+ ],
+ "Bindings_And_Scope": [
+  "declaring_a_binding.md",
+  "immutability_is_checked.md",
+  "destructuring.md",
+  "scope_and_shadowing.md",
+  "globals.md",
+  "blocks_are_expressions.md"
+ ],
+ "Types": [
+  "the_full_set.md",
+  "function_types.md",
+  "type_aliases.md",
+  "conversions_that_happen_on_their_own.md",
+  "into_conversions_you_write_yourself.md",
+  "conversions_you_have_to_ask_for.md",
+  "there_is_no_truthiness.md"
+ ],
+ "Operators": [
+  "precedence.md",
+  "arithmetic.md",
+  "bitwise_and_shifts.md",
+  "comparison.md",
+  "logical_operators.md",
+  "nil_coalescing.md",
+  "assignment.md",
+  "ranges.md",
+  "as_and_is.md"
+ ],
+ "Conditionals": [
+  "if_as_a_statement.md",
+  "if_as_an_expression.md",
+  "testing_and_binding_at_once.md",
+  "when_the_arms_need_not_agree.md",
+  "an_if_with_no_else_produces_nothing.md"
+ ],
+ "Loops": [
+  "while.md",
+  "loop_and_break_with_a_value.md",
+  "for.md",
+  "break_and_continue.md",
+  "labelled_loops.md",
+  "defer.md"
+ ],
+ "Iterators": [
+  "the_two_marks.md",
+  "writing_one.md",
+  "writing_a_sequence.md",
+  "what_the_loop_advances.md",
+  "destructuring.md",
+  "reshaping_one.md",
+  "ending_a_chain.md",
+  "stopping_early.md",
+  "numbering.md",
+  "returning_a_type_parameterised_by_self.md",
+  "from_the_library.md",
+  "iterating_generically.md"
+ ],
+ "Pattern_Matching": [
+  "every_kind_of_pattern.md",
+  "slice_and_array_patterns.md",
+  "bindings_in_alternatives.md",
+  "exhaustiveness.md",
+  "matching_through_a_borrow.md",
+  "match_produces_a_value.md"
+ ],
+ "Functions": [
+  "declaring_a_function.md",
+  "never_a_function_that_does_not_return.md",
+  "default_arguments.md",
+  "labelled_arguments.md",
+  "recursion_and_nesting.md",
+  "mutable_parameters.md"
+ ],
+ "Closures_And_Function_Values": [
+  "writing_a_closure.md",
+  "captures.md",
+  "passing_functions_around.md",
+  "closures_over_reference_types.md"
+ ],
+ "Structs": [
+  "declaring_and_building.md",
+  "update_syntax.md",
+  "methods.md",
+  "structs_are_copied.md",
+  "privacy.md",
+  "destroying_a_value.md",
+  "handing_an_owning_value_on.md",
+  "resource_a_field_that_has_to_be_released.md"
+ ],
+ "Enums": [
+  "the_three_variant_shapes.md",
+  "explicit_discriminants.md",
+  "methods_on_an_enum.md",
+  "generic_enums.md",
+  "recursive_shapes_need_a_class.md",
+  "variant_names_are_a_convenience_not_a_declaration.md"
+ ],
+ "Classes": [
+  "declaring_a_class.md",
+  "classes_are_shared_not_copied.md",
+  "inheritance_and_super.md",
+  "destruction_order.md",
+  "asking_what_a_value_really_is.md",
+  "static_methods.md"
+ ],
+ "Marks": [
+  "declaring_a_mark.md",
+  "unimplemented_requirements_are_caught.md",
+  "super_marks.md",
+  "binding_to_builtin_types.md",
+  "conditional_bindings.md",
+  "self_requirements_that_build.md",
+  "when_a_type_answers_for_itself.md",
+  "one_name_several_parameter_lists.md",
+  "associated_types.md",
+  "extend_methods_without_a_mark.md",
+  "mark_objects_dyn_mark.md",
+  "opaque_results_some_mark.md",
+  "a_requirement_with_a_where_clause.md"
+ ],
+ "Any": [
+  "putting_a_value_in.md",
+  "getting_it_back_out.md",
+  "what_the_answer_is_based_on.md",
+  "ownership.md",
+  "when_it_aborts.md",
+  "printing_one.md",
+  "which_of_the_three_to_reach_for.md"
+ ],
+ "Compile_Time_Reflection": [
+  "asking_about_a_type.md",
+  "it_really_is_compile_time.md",
+  "reading_a_value.md",
+  "what_is_not_here.md"
+ ],
+ "Operator_Overloading": [
+  "the_mapping.md",
+  "arithmetic.md",
+  "equality_and_ordering.md",
+  "subscripting.md",
+  "dereference_making_a_value_behave_like_a_pointer.md",
+  "one_operator_several_right_hand_types.md",
+  "extending_a_builtin_without_overriding_it.md",
+  "what_cannot_be_overloaded.md"
+ ],
+ "Generics": [
+  "generic_functions.md",
+  "generic_methods.md",
+  "bounds.md",
+  "generic_types.md",
+  "generic_methods_2.md",
+  "how_instantiation_is_reported.md",
+  "specialisation.md",
+  "binding_a_shape.md"
+ ],
+ "Option_And_Result": [
+  "what_they_are.md",
+  "producing_an_option.md",
+  "consuming_an_option.md",
+  "result.md",
+  "question_on_both.md",
+  "question_converts_the_error.md",
+  "options_of_reference_types.md"
+ ],
+ "Arrays_Slices_And_Tuples": [
+  "arrays.md",
+  "bounds_checking.md",
+  "slices.md",
+  "tuples.md",
+  "arrays_of_aggregates.md"
+ ],
+ "Strings_And_Characters": [
+  "the_three_text_types.md",
+  "building_strings.md",
+  "inspecting_a_string.md",
+  "parsing.md",
+  "characters.md",
+  "normalisation_and_collation.md",
+  "splitting_trimming_and_replacing.md",
+  "comparison_and_sorting.md"
+ ],
+ "Formatting_And_Printing": [
+  "placeholders.md",
+  "format_options.md",
+  "what_can_be_formatted.md",
+  "when_arguments_are_evaluated.md",
+  "the_pieces_underneath.md"
+ ],
+ "Memory_And_Reference_Counting": [
+  "what_is_counted_and_what_is_not.md",
+  "sharing_an_object.md",
+  "deinitialisers.md",
+  "values_have_destructors_too.md",
+  "counting_that_is_not_emitted.md",
+  "cycles_are_refused_not_collected.md",
+  "unique_one_owner_so_no_ring.md",
+  "weak_in_detail.md",
+  "leak_reporting.md",
+  "where_the_counting_happens.md"
+ ],
+ "Pointers_Borrows_And_Slices": [
+  "shared_and_mutable_borrows.md",
+  "slices.md",
+  "raw_pointers.md"
+ ],
+ "Safety_Levels": [
+  "the_three_levels.md",
+  "integer_overflow.md",
+  "unsafe_and_unsafe_block.md",
+  "safe_reason.md",
+  "borrows_and_ownership.md",
+  "what_it_buys_at_run_time.md",
+  "what_is_still_your_responsibility.md"
+ ],
+ "Modules_Imports_And_Visibility": [
+  "declaration_order_does_not_matter.md",
+  "pub.md",
+  "importing.md",
+  "namespaces_and_names_that_collide.md",
+  "packages_and_rul_libraries.md"
+ ],
+ "Decorators": [
+  "safety_decorators.md",
+  "alias_and_as.md",
+  "code_generation_decorators.md",
+  "decorators_you_write_yourself.md",
+  "alias_a_second_name.md",
+  "type_what_a_file_produces.md",
+  "link_and_linkpath_what_a_file_needs.md",
+  "exporting_to_c.md"
+ ],
+ "Calling_C": [
+  "declaring_foreign_functions.md",
+  "structs.md",
+  "pointers_and_out_parameters.md",
+  "callbacks.md",
+  "strings_across_the_boundary.md",
+  "when_c_s_name_is_one_you_want.md",
+  "wrapping_a_descriptor.md",
+  "linking.md",
+  "packaging_a_c_half.md",
+  "being_called_from_c.md"
+ ],
+ "The_Standard_Library": [
+  "std_thread.md",
+  "std_atomic.md",
+  "std_time.md",
+  "std_reflect.md",
+  "std_fmt.md",
+  "std_io.md",
+  "std_testing.md",
+  "std_io_files.md",
+  "std_io_bytes_and_streams.md",
+  "std_net.md",
+  "std_option.md",
+  "std_result.md",
+  "std_iter.md",
+  "std_any.md",
+  "std_math.md",
+  "std_process.md",
+  "std_env.md",
+  "std_random.md",
+  "std_hash.md",
+  "std_json.md",
+  "std_cli.md",
+  "std_mem.md",
+  "std_mem_2.md",
+  "std_dictionary.md",
+  "std_collections.md",
+  "std_collections_slice.md",
+  "std_collections_vector.md",
+  "writing_an_allocator.md",
+  "built_in_methods_and_the_dollar_sigil.md"
+ ],
+ "Testing": [
+  "the_checks.md",
+  "running_them.md"
+ ],
+ "Documentation": [
+  "the_two_halves.md",
+  "what_the_reference_reports.md",
+  "reading_it.md",
+  "running_it.md"
+ ],
+ "Macros": [
+  "patterns.md",
+  "folding_a_repetition.md",
+  "how_an_expansion_is_spliced.md",
+  "the_macros_the_compiler_supplies.md",
+  "stringify.md",
+  "macros_that_declare.md",
+  "when_an_expansion_is_wrong.md",
+  "visibility.md",
+  "the_macros_the_standard_library_provides.md",
+  "what_is_reported.md"
+ ],
+ "Reading_A_Diagnostic": [
+  "the_parts.md",
+  "warnings.md",
+  "error_codes.md"
+ ],
+ "The_Toolchain": [
+  "runec.md",
+  "where_the_time_goes.md",
+  "what_ends_up_in_the_artefact.md",
+  "debug_builds.md",
+  "rune.md",
+  "how_a_build_decides_what_to_do.md",
+  "producing_something_other_than_a_program.md",
+  "package_layout.md",
+  "rune_toml.md",
+  "dependencies.md",
+  "packages_from_a_registry.md"
+ ],
+ "Packages_And_Registries": [
+  "making_a_package.md",
+  "what_a_version_promises.md",
+  "using_a_package.md",
+  "which_registry.md",
+  "making_a_registry.md",
+  "releasing_a_new_version.md",
+  "the_example_ecosystem.md"
+ ],
+ "Threads_And_Sharing": [
+  "two_questions.md",
+  "running_something.md",
+  "when_it_will_not_compile.md",
+  "shared_mutable_state.md",
+  "asking_directly.md",
+  "sharing_a_value.md",
+  "channels.md",
+  "counters_and_flags.md",
+  "waiting.md",
+  "what_reference_counting_costs.md",
+  "where_this_works.md",
+  "what_is_not_here.md"
+ ],
+ "Cross_Compilation": [
+  "a_target_triple.md",
+  "naming_a_target_in_the_manifest.md",
+  "where_the_output_goes.md",
+  "the_runtime.md",
+  "running_what_you_built.md",
+  "c_sources.md",
+  "what_does_not_cross.md",
+  "32_bit_targets.md"
+ ],
+ "Conditional_Compilation": [
+  "config.md",
+  "what_a_condition_can_ask.md",
+  "conditions_on_members.md",
+  "features_and_dependencies.md"
+ ],
+ "Inline_Assembly": [
+  "two_calls.md",
+  "operands_and_constraints.md",
+  "which_one_to_reach_for.md"
+ ],
+ "Grammar_And_Limits": [
+  "declarations.md",
+  "statements.md",
+  "patterns.md",
+  "types.md",
+  "operator_precedence.md",
+  "keywords.md",
+  "not_implemented_yet.md"
+ ]
+}

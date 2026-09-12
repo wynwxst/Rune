@@ -1,0 +1,105 @@
+// `Any` holds a value whose type the program only learns at run time, and
+// gives it back only as the type it really is.
+//
+//     runec -o any examples/any.rune && ./any
+//
+// Three tools overlap here, and they are not interchangeable:
+//
+//   * an **enum** when the set of types is closed — `match` then makes the
+//     compiler check you covered it;
+//   * **`dyn Mark`** when the types differ but the behaviour does not — the
+//     call dispatches without anyone asking what the type is;
+//   * **`Any`** when neither holds: a value arriving from outside the type
+//     system, or a container that has to take whatever it is given.
+
+import std::io
+
+//===--------------------------------------------------------------------===//
+// Anything at all goes in, and the conversion is implicit.
+//===--------------------------------------------------------------------===//
+
+struct Point { pub x: f64, pub y: f64 }
+
+class Session {
+    pub user: String
+    fn init(self, user: String) { self.user = user }
+    fn deinit(self) { io::println("  session for " + self.user + " closed") }
+}
+
+fn main() -> i64 {
+    let values: [5:Any] = [
+        7i64,
+        1.5,
+        "a string",
+        Point { x: 3.0, y: 4.0 },
+        (1i64, true),
+    ]
+
+    // `typeName` is the fully qualified name of what is actually inside.
+    io::println("what is in there:")
+    for v in values {
+        io::println("  " + v.typeName())
+    }
+
+    //===----------------------------------------------------------------===//
+    // Getting the value back out
+    //===----------------------------------------------------------------===//
+
+    io::println("")
+    io::println("reading them back:")
+    for v in values {
+        io::println("  " + render(v))
+    }
+
+    //===----------------------------------------------------------------===//
+    // `get` is the safe one: the test and the read happen together, so there
+    // is no way to read the value as a type it does not have.
+    //===----------------------------------------------------------------===//
+
+    io::println("")
+    let boxed: Any = 41i64
+    io::println("get::<i64>   " + (boxed.get::<i64>() ?? -1).$str())
+    io::println("get::<f64>   " + (boxed.get::<f64>() ?? -1.0).$str())
+    io::println("holds::<i64> " + boxed.holds::<i64>().$str())
+    io::println("is i64       " + (boxed is i64).$str())
+
+    // `expect` is for the case where the type is an invariant of the program
+    // rather than something to be checked. It aborts, naming both types, if
+    // that invariant turns out to be false.
+    io::println("expect::<i64> " + boxed.expect::<i64>().$str())
+
+    //===----------------------------------------------------------------===//
+    // A class keeps its hierarchy, and its lifetime.
+    //===----------------------------------------------------------------===//
+
+    io::println("")
+    io::println("classes:")
+    open()
+    io::println("  and we are past it")
+    0
+}
+
+/// `is T` inside an `if` is the same question `holds::<T>()` asks — write
+/// whichever reads better. Types you cannot spell as a bare name — `[3:f64]`,
+/// `(i64, String)` — go through `holds` and `get`.
+fn render(v: Any) -> String {
+    if v is i64 { return "i64    " + v.expect::<i64>().$str() }
+    if v is f64 { return "f64    " + v.expect::<f64>().$str() }
+    if v is String { return "String " + v.expect::<String>() }
+    if v is Point {
+        let p = v.expect::<Point>()
+        return "Point  " + p.x.$str() + ", " + p.y.$str()
+    }
+    match v.get::<(i64, bool)>() {
+        Option::Some(pair) => "tuple  " + pair.0.$str() + ", " + pair.1.$str(),
+        Option::None => "?      " + v.typeName(),
+    }
+}
+
+/// An `Any` owns what it holds. The session closes when the `Any` does, not
+/// when this function happens to stop mentioning it.
+fn open() {
+    let held: Any = Session("ada")
+    io::println("  holding a " + held.typeName())
+    io::println("  user is " + held.expect::<Session>().user)
+}

@@ -1,0 +1,23 @@
+import std::testing
+import logger
+
+fn main() -> i64 {
+    var log = logger::Logger("test", logger::Level::Info)
+    log.toStdout = true
+    log.debug("too quiet")
+    log.info("hello")
+    log.warn("careful")
+    testing::equal("printed", log.printed, 2)
+    testing::equal("dropped", log.dropped, 1)
+    log.quieter()
+    log.info("now dropped")
+    testing::equal("quieter drops info", log.dropped, 2)
+    testing::equal("level names", logger::levelName(logger::Level::Error), "error")
+    log.louder()
+    log.louder()
+    log.louder()
+    log.trace("now printed")
+    testing::equal("louder reaches trace", log.printed, 3)
+    testing::equal("summary", log.summary(), "3 printed, 2 dropped")
+    testing::summary()
+}

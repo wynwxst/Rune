@@ -1,0 +1,13 @@
+// A match over a slice is exhaustive when every length has an arm: here
+// nothing accepts exactly two elements.
+// EXPECT-ERROR: a slice of 2 element
+
+fn first(xs: [i64]) -> i64 {
+    match xs {
+        [] => 0,
+        [a] => a,
+        [a, b, c, ..] => a,
+    }
+}
+
+fn main() -> i64 { first([1]) }

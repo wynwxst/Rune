@@ -1,0 +1,46 @@
+// std::math: the generic comparisons, the integer helpers that have exact
+// answers where the float ones would not, and the questions a float can be
+// asked about itself.
+// EXPECT: 7
+// EXPECT: 243
+// EXPECT: 6
+// EXPECT: 12
+// EXPECT: -4
+// EXPECT: 1
+// EXPECT: 3
+// EXPECT: 2.5
+// EXPECT: a
+// EXPECT: 5
+// EXPECT: true
+// EXPECT: true
+// EXPECT: true
+// EXPECT: 180.0
+// EXPECT: true
+// EXPECT: -3.0
+// EXPECT: 5.0
+// EXPECT: -1
+import std::io
+import std::math
+
+fn main() -> i64 {
+    io::println(math::squareRootInt(50).$str())
+    io::println(math::powerInt(3, 5).$str())
+    io::println(math::gcd(12, 18).$str())
+    io::println(math::lcm(4, 6).$str())
+    io::println(math::divFloor(-7, 2).$str())
+    io::println(math::modFloor(-7, 2).$str())
+    // The bound is an operator, so anything `<` works on can be compared.
+    io::println(math::least(3, 5).$str())
+    io::println(math::greatest(2.5, 1.5).$str())
+    io::println(math::least("a", "b"))
+    io::println(math::clamp(9, 0, 5).$str())
+    io::println(math::isNan(math::nan()).$str())
+    io::println(math::isInfinite(math::infinity()).$str())
+    io::println(math::isFinite(1.0).$str())
+    io::println(math::degrees(math::PI).$str())
+    io::println(math::nearlyEqual(0.1 + 0.2, 0.3, 1.0e-9).$str())
+    io::println(math::cubeRoot(-27.0).$str())
+    io::println(math::lengthOf(3.0, 4.0).$str())
+    io::println(math::signInt(-4).$str())
+    0
+}

@@ -1,0 +1,10 @@
+// What goes into a channel comes out on another thread, so it has to be
+// `Send`.
+// EXPECT-ERROR: cannot cross between threads
+import std::thread
+class Counter { var n: i64
+    fn init(self, n: i64) { self.n = n } }
+fn main() -> i64 {
+    let line = thread::Channel<Counter>()
+    0
+}

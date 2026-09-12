@@ -1,0 +1,123 @@
+// A small tool over `std::json`: read a document, write it back.
+//
+//     rune run -- config.json              # laid out
+//     rune run -- --compact config.json    # on one line
+//     rune run -- --get user.name config.json
+//     echo '{"a":1}' | rune run --          # from standard input
+//
+// It exists to be run against a real file, which is the quickest way to see
+// whether the parser and the writer agree with each other.
+
+import std::io
+import std::process
+import std::json
+
+fn usage() {
+    io::println("usage: json [--compact] [--get PATH] [FILE]")
+    io::println("")
+    io::println("  --compact      write it on one line instead of laid out")
+    io::println("  --get PATH     print one member: dotted names, [n] for an index")
+    io::println("  FILE           the document; standard input when absent")
+}
+
+/// Everything on standard input, as one string.
+fn readInput() -> String {
+    var all = ""
+    while io::readLineOrEnd() is Some(line) { all += line + "\n" }
+    all
+}
+
+/// Follows a path like `user.tags[0].name` into a document.
+///
+/// A step that is not there ends the walk, so a path into the wrong shape
+/// says "no such member" rather than aborting.
+fn follow(doc: json::Value, path: String) -> json::Value? {
+    var here = doc
+    var i = 0
+    let n = path.$length()
+    while i < n {
+        if path.$byteAt(i) == 46u8 { i += 1; continue }        // .
+
+        if path.$byteAt(i) == 91u8 {                            // [
+            i += 1
+            var digits = ""
+            while i < n && path.$byteAt(i) != 93u8 {
+                digits += path.$substring(i, i + 1)
+                i += 1
+            }
+            if i < n { i += 1 }                                 // ]
+            match here.index(digits.$toInt().or(-1)) {
+                Some(next) => here = next,
+                None => return nil,
+            }
+            continue
+        }
+
+        var name = ""
+        while i < n && path.$byteAt(i) != 46u8 && path.$byteAt(i) != 91u8 {
+            name += path.$substring(i, i + 1)
+            i += 1
+        }
+        match here.get(name) {
+            Some(next) => here = next,
+            None => return nil,
+        }
+    }
+    here
+}
+
+fn main() -> i64 {
+    var compact = false
+    var path = ""
+    var file = ""
+
+    var i = 1
+    let argc = process::argCount()
+    while i < argc {
+        let arg = process::arg(i)
+        if arg == "--compact" { compact = true }
+        else if arg == "--get" {
+            if i + 1 >= argc {
+                io::eprintln("json: --get needs a path")
+                return 2
+            }
+            path = process::arg(i + 1)
+            i += 1
+        }
+        else if arg == "--help" { usage(); return 0 }
+        else if arg == "--" { }
+        else if file.$isEmpty() { file = arg }
+        else {
+            io::eprintln("json: unexpected argument '" + arg + "'")
+            return 2
+        }
+        i += 1
+    }
+
+    let document = if file.$isEmpty() {
+        json::parse(readInput())
+    } else {
+        json::load(file)
+    }
+
+    var doc = match document {
+        Ok(v) => v,
+        Err(e) => {
+            io::eprintln(e.describe())
+            return 1
+        },
+    }
+
+    if !path.$isEmpty() {
+        match follow(doc, path) {
+            Some(found) => doc = found,
+            None => {
+                io::eprintln("json: no member at '" + path + "'")
+                return 1
+            },
+        }
+    }
+
+    io::println(if compact { json::write(doc) } else { json::pretty(doc) })
+    0
+}

@@ -1,0 +1,42 @@
+// `bind Celsius into Fahrenheit` is the same as `bind As<Fahrenheit> to Celsius`.
+// EXPECT: 212.0 373.15
+// EXPECT: 100.0
+// EXPECT: boxed 7
+// EXPECT: mixed 212.0 212.0
+
+import std::io
+
+struct Celsius { v: f64 }
+struct Fahrenheit { v: f64 }
+struct Kelvin { v: f64 }
+struct Box<T> { v: T }
+
+bind Celsius into Fahrenheit {
+    fn convert(&self) -> Fahrenheit { Fahrenheit { v: self.v * 1.8 + 32.0 } }
+}
+bind Celsius into Kelvin {
+    fn convert(&self) -> Kelvin { Kelvin { v: self.v + 273.15 } }
+}
+bind Fahrenheit into Celsius {
+    fn convert(&self) -> Celsius { Celsius { v: (self.v - 32.0) / 1.8 } }
+}
+bind Box<i64> into i64 {
+    fn convert(&self) -> i64 { self.v }
+}
+
+// The explicit mark form still works, and the two can sit side by side.
+bind As<Fahrenheit> to Kelvin {
+    fn convert(&self) -> Fahrenheit {
+        Fahrenheit { v: (self.v - 273.15) * 1.8 + 32.0 }
+    }
+}
+
+fn main() -> i64 {
+    let c = Celsius { v: 100.0 }
+    io::println((c into Fahrenheit).v.$str() + " " + (c into Kelvin).v.$str())
+    io::println((Fahrenheit { v: 212.0 } into Celsius).v.$str())
+    io::println("boxed " + (Box<i64> { v: 7 } into i64).$str())
+    io::println("mixed " + (c into Fahrenheit).v.$str() + " " +
+                (Kelvin { v: 373.15 } into Fahrenheit).v.$str())
+    0
+}

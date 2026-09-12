@@ -1,0 +1,102 @@
+// `Display` is how a value renders as text. `io::print` and `io::println`
+// accept anything bound to it, including the builtin types.
+//
+//     runec -o display examples/display.rune && ./display
+
+import std::io
+
+//===--------------------------------------------------------------------===//
+// Implementing Display for your own types
+//===--------------------------------------------------------------------===//
+
+struct Money { amount: i64, currency: String }
+
+bind io::Display to Money {
+    fn display(&self) -> String {
+        let whole = self.amount / 100
+        let cents = self.amount % 100
+        let padded = if cents < 10 { "0" + cents.$str() } else { cents.$str() }
+        self.currency + whole.$str() + "." + padded
+    }
+
+    // `describe` defaults to `display`; override it when the debugging form
+    // should carry more detail.
+    fn describe(&self) -> String {
+        "Money(" + self.amount.$str() + " minor units, " + self.currency + ")"
+    }
+}
+
+enum Status { Draft, Sent, Paid }
+
+bind io::Display to Status {
+    fn display(&self) -> String {
+        match self {
+            Status::Draft => "draft",
+            Status::Sent => "sent",
+            Status::Paid => "paid",
+        }
+    }
+}
+
+class Invoice {
+    pub number: i64
+    pub total: Money
+    pub status: Status
+    fn init(self, number: i64, total: Money) {
+        self.number = number
+        self.total = total
+        self.status = Status::Draft
+    }
+}
+
+bind io::Display to Invoice {
+    fn display(&self) -> String {
+        "#" + self.number.$str() + "  " + self.total.display() +
+            "  [" + self.status.display() + "]"
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Display composes with generics
+//===--------------------------------------------------------------------===//
+
+/// Any two displayable values, side by side.
+fn pair<A: io::Display, B: io::Display>(left: A, right: B) -> String {
+    left.display() + " | " + right.display()
+}
+
+/// A heading built from anything displayable.
+fn banner<T: io::Display>(value: T) -> String {
+    let text = value.display()
+    let rule = "-".$repeat(text.$length())
+    text + "\n" + rule
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    // Every builtin is bound to Display, so these need no conversion.
+    io::println(42)
+    io::println(2.5)
+    io::println(true)
+    io::println('R')
+    io::println("a plain String")
+
+    let price = Money { amount: 129_99, currency: "$" }
+    io::println(price)
+    io::debug(price)
+
+    let invoice = Invoice(1042, price)
+    io::println(invoice)
+    invoice.status = Status::Paid
+    io::println(invoice)
+
+    io::println(pair(7, price))
+    io::println(pair(Status::Sent, "and text"))
+    io::println(banner(invoice))
+
+    // `describe` on a String quotes it, which is what makes debug output
+    // distinguishable from ordinary printing.
+    io::debug("quoted")
+    0
+}

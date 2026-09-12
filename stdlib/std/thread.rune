@@ -1,0 +1,389 @@
+// std::thread — running more than one thing at once, safely.
+//
+// The rule the whole module rests on: **threads share nothing they can
+// change.** A value crosses a thread boundary only if the compiler can see
+// that letting it cross is safe, and the two questions it asks are the ones
+// Rust and Swift settled on:
+//
+//   * `Send` — may a value of this type move to another thread?
+//   * `Sync` — may one be reached from several threads at once?
+//
+// Neither is something you declare. The compiler reads them off the type, the
+// way it reads whether a type is reference counted, so they stay true as a
+// program changes rather than drifting out of date. A struct of numbers is
+// `Send` because of what it is; adding a class field takes that away.
+//
+// Mutable shared state goes through `Mutex`, which is the one thing here that
+// is `Sync` while holding something that is not — because it is the one thing
+// that synchronises access to what it holds.
+
+import std::mem
+import std::process
+import std::time
+import std::collections::vector
+
+extern "C" {
+    fn rune_thread_start(entry: @cfunction(*var u8) -> *var u8,
+                         argument: *var u8) -> *var u8
+    fn rune_thread_join(handle: *var u8) -> *var u8
+    fn rune_thread_dispose(handle: *var u8)
+    fn rune_hardware_threads() -> i64
+    fn rune_thread_yield()
+    fn rune_thread_sleep_ns(nanos: i64)
+    fn rune_mutex_new() -> *var u8
+    fn rune_mutex_lock(m: *var u8)
+    fn rune_mutex_unlock(m: *var u8)
+    fn rune_mutex_dispose(m: *var u8)
+    fn rune_cond_new() -> *var u8
+    fn rune_cond_wait(c: *var u8, m: *var u8)
+    fn rune_cond_signal(c: *var u8)
+    fn rune_cond_broadcast(c: *var u8)
+    fn rune_cond_dispose(c: *var u8)
+}
+
+//===--------------------------------------------------------------------===//
+// What may cross
+//===--------------------------------------------------------------------===//
+
+/// A value of this type may move to another thread.
+///
+/// Nobody binds this mark: the compiler decides from what the type is made
+/// of. Scalars and `String` are `Send`; so is any struct, tuple, array or
+/// enum whose parts all are. A class is not, because passing one shares it
+/// rather than handing it over, and a closure is not, because it carries an
+/// environment the other thread would reach into.
+///
+/// Use it as a bound, and the ordinary "not bound to mark" error explains
+/// what went wrong at the call that tried it.
+pub mark Send {}
+
+/// A value of this type may be reached from several threads at once.
+///
+/// Same rules, one step stricter, and derived the same way. `Mutex` is the
+/// way to make something mutable `Sync`.
+pub mark Sync {}
+
+//===--------------------------------------------------------------------===//
+// Threads
+//===--------------------------------------------------------------------===//
+
+/// What a spawned thread is handed and what it leaves behind. Raw memory, so
+/// the compiler's reference counting never sees two threads touching one
+/// object without knowing it.
+/// The result comes first on purpose: `Handle` knows `R` but not `A`, and a
+/// field at offset zero can be read without knowing what follows it.
+struct Task<A, R> {
+    result: R
+    entry: @cfunction(A) -> R
+    argument: A
+}
+
+/// Runs on the new thread: unpack, call, park the result, and hand the box
+/// back for `join` to read.
+fn trampoline<A, R>(raw: *var u8) -> *var u8 {
+    let task = unsafe { raw as *var Task<A, R> }
+    let entry = unsafe { task[0].entry }
+    let argument = unsafe { task[0].argument }
+    unsafe { task[0].result = entry(argument) }
+    // The argument was retained for this thread when the task was built.
+    unsafe { mem::release(argument) }
+    raw
+}
+
+/// A thread that is running, and the value it will leave behind.
+///
+/// Joining is what collects that value. A handle that is dropped without
+/// being joined detaches the thread: it keeps running, and its result is
+/// discarded.
+pub class Handle<R> {
+    thread: *var u8
+    box: *var u8
+    joined: bool
+
+    fn init(self, thread: *var u8, box: *var u8) {
+        self.thread = thread
+        self.box = box
+        self.joined = false
+    }
+
+    /// Waits for the thread to finish, and hands back what it returned.
+    ///
+    /// Joining twice returns the same value again rather than aborting; the
+    /// second call has nothing left to wait for.
+    @safe("the box outlives the thread, and is freed in deinit")
+    pub fn join(&var self) -> R {
+        unsafe { rune_thread_join(self.thread) }
+        self.joined = true
+        // The box holds the one reference the thread left behind; this hands
+        // out one of its own, so joining twice is not a double free.
+        // Reading the slot claims a reference of its own, so joining twice
+        // hands out two live values rather than one shared twice.
+        let slot = unsafe { self.box as *var R }
+        unsafe { slot[0] }
+    }
+
+    /// A handle that goes out of scope waits for its thread and discards the
+    /// result. Detaching instead would leave the task's memory with nobody to
+    /// free it, and a leak is a worse default than a wait.
+    fn deinit(self) {
+        unsafe { rune_thread_join(self.thread) }
+        unsafe { rune_thread_dispose(self.thread) }
+        let slot = unsafe { self.box as *var R }
+        unsafe { mem::release(slot[0]) }
+        mem::allocator.deallocate(self.box)
+    }
+}
+
+/// Runs `entry(argument)` on a thread of its own.
+///
+///     fn double(n: i64) -> i64 { n * 2 }
+///
+///     var handle = thread::spawn(double, 21)
+///     io::println(handle.join().$str())        // 42
+///
+/// `entry` is a top-level `fn`, not a closure: a closure carries captured
+/// state, and sharing that is the thing this module exists to prevent. What
+/// the thread needs, it is given — as `argument`, which has to be `Send`.
+@safe("the box outlives the thread; the handle owns it and frees it")
+pub fn spawn<A: Send, R: Send>(entry: @cfunction(A) -> R,
+                               argument: A) -> Handle<R> {
+    let raw = mem::allocator.allocate(mem::size_of::<Task<A, R>>())
+    if mem::isNull(raw) { process::panic("cannot allocate a thread's task") }
+    let task = unsafe { raw as *var Task<A, R> }
+    // Storing into the task claims a reference of its own, which is what
+    // keeps the argument alive for as long as the thread runs; the caller
+    // keeps theirs. `trampoline` gives this one back when it is done.
+    unsafe {
+        task[0].entry = entry
+        task[0].argument = argument
+    }
+    let started = unsafe { rune_thread_start(trampoline::<A, R>, raw) }
+    if mem::isNull(started) {
+        unsafe { mem::release(argument) }
+        mem::allocator.deallocate(raw)
+        process::panic("cannot start a thread")
+    }
+    Handle::<R>(started, raw)
+}
+
+/// How many threads this machine runs at once. One when it cannot be found —
+/// never zero, so it is always safe to divide work by.
+@safe("reads a number from the operating system")
+pub fn hardwareThreads() -> i64 { rune_hardware_threads() }
+
+/// Offers the rest of this thread's turn to whatever else is waiting.
+@safe("a scheduling hint with no effect on memory")
+pub fn yieldNow() { rune_thread_yield() }
+
+/// Stops this thread for at least `duration`.
+///
+///     thread::sleep(time::milliseconds(250))
+///
+/// At least, not exactly: the operating system decides when to wake a thread,
+/// and it will not be early. A duration of zero or less returns at once.
+@safe("suspends the calling thread and touches no memory")
+pub fn sleep(duration: time::Time) {
+    rune_thread_sleep_ns(duration.asNanoseconds())
+}
+
+//===--------------------------------------------------------------------===//
+// Shared mutable state
+//===--------------------------------------------------------------------===//
+
+/// Something shared between threads, reachable only while locked.
+///
+/// `Mutex` is the one type here that is `Sync` while holding something that
+/// is not, and `@sync` is where it says so. That claim is what the lock pays
+/// for: whatever is inside is reached through `withLock`, and `withLock`
+/// holds the lock for exactly as long as the body runs.
+///
+///     let total = thread::Mutex<i64>(0)
+///     total.withLock(addOne)
+///     io::println(total.get().$str())
+@sync("every read and write of `value` happens with the lock held")
+pub class Mutex<T> {
+    var value: T
+    handle: *var u8
+
+    fn init(self, initial: T) {
+        self.value = initial
+        self.handle = unsafe { rune_mutex_new() }
+        if mem::isNull(self.handle) {
+            process::panic("cannot create a mutex")
+        }
+    }
+
+    /// Runs `body` on what is inside, with the lock held, and stores what it
+    /// hands back.
+    ///
+    /// The body is a top-level `fn` taking the value and returning the value
+    /// it should become — so there is no way to keep a reference to what is
+    /// inside past the moment the lock is released.
+    @safe("the lock is taken before the body runs and released after")
+    pub fn withLock(&var self, body: @cfunction(T) -> T) {
+        unsafe { rune_mutex_lock(self.handle) }
+        defer unsafe { rune_mutex_unlock(self.handle) }
+        self.value = unsafe { body(self.value) }
+    }
+
+    /// A copy of what is inside, taken with the lock held.
+    @safe("the lock is taken before the read and released after")
+    pub fn get(&self) -> T {
+        unsafe { rune_mutex_lock(self.handle) }
+        defer unsafe { rune_mutex_unlock(self.handle) }
+        self.value
+    }
+
+    /// Replaces what is inside, with the lock held.
+    @safe("the lock is taken before the write and released after")
+    pub fn set(&var self, next: T) {
+        unsafe { rune_mutex_lock(self.handle) }
+        defer unsafe { rune_mutex_unlock(self.handle) }
+        self.value = next
+    }
+
+    fn deinit(self) {
+        unsafe { rune_mutex_dispose(self.handle) }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Arc: one value, shared
+//===--------------------------------------------------------------------===//
+
+/// A value several threads may read at once.
+///
+/// A class already is a shared reference, but a *mutable* one, which is why
+/// no class is `Send`. `Arc` is the immutable counterpart: what it holds is
+/// set once, when it is made, and everything afterwards is a read. That is
+/// what makes handing one to a thread safe, and it is the whole difference.
+///
+///     let table = thread::Arc<[4:i64]>([2, 3, 5, 7])
+///     var h = thread::spawn(sumTable, table)
+///
+/// For something that has to *change* while shared, reach for `Mutex`.
+///
+/// `Arc<T>` is `Send` and `Sync` when `T` is `Sync` — an `Arc` around
+/// something that could itself be written through would only move the
+/// problem one level down.
+@sync("the value is written once, when the Arc is made, and only read after")
+pub class Arc<T: Sync> {
+    value: T
+
+    fn init(self, value: T) { self.value = value }
+
+    /// What is inside. A copy, so nothing that outlives this call can point
+    /// back into the `Arc`.
+    pub fn get(&self) -> T { self.value }
+}
+
+//===--------------------------------------------------------------------===//
+// Channels
+//===--------------------------------------------------------------------===//
+
+/// A queue one thread puts values into and another takes them out of.
+///
+///     let line = thread::Channel<i64>()
+///     var worker = thread::spawn(consume, line)
+///     line.send(1)
+///     line.send(2)
+///     line.close()
+///
+/// `receive` blocks until there is something to take, or until the channel is
+/// closed and empty — which is how a consumer knows to stop. The queue grows
+/// as needed, so `send` never blocks.
+///
+/// A `Channel<T>` is shared, so `T` has to be `Send`: what goes in comes out
+/// on another thread.
+@sync("every touch of the queue happens with the lock held")
+pub class Channel<T: Send> {
+    // A ring would be tidier; a vector kept simple is easier to be sure of,
+    // and a channel's cost is dominated by waking the other thread anyway.
+    var items: vector::Vector<T>
+    var taken: i64
+    var closed: bool
+    lock: *var u8
+    ready: *var u8
+
+    fn init(self) {
+        self.items = vector::Vector<T>()
+        self.taken = 0
+        self.closed = false
+        self.lock = unsafe { rune_mutex_new() }
+        self.ready = unsafe { rune_cond_new() }
+        if mem::isNull(self.lock) || mem::isNull(self.ready) {
+            process::panic("cannot create a channel")
+        }
+    }
+
+    /// Puts `value` at the back of the queue and wakes a waiting receiver.
+    ///
+    /// Sending to a closed channel is a mistake worth hearing about rather
+    /// than a value that quietly vanishes.
+    @safe("the queue is only ever touched with the lock held")
+    pub fn send(&var self, value: T) {
+        unsafe { rune_mutex_lock(self.lock) }
+        defer unsafe { rune_mutex_unlock(self.lock) }
+        if self.closed { process::panic("send on a closed channel") }
+        self.items.push(value)
+        unsafe { rune_cond_signal(self.ready) }
+    }
+
+    /// The next value, waiting until there is one.
+    ///
+    /// `nil` means the channel is closed and empty: there will never be
+    /// another, so a `while let` over this ends by itself.
+    @safe("the queue is only ever touched with the lock held")
+    pub fn receive(&var self) -> T? {
+        unsafe { rune_mutex_lock(self.lock) }
+        defer unsafe { rune_mutex_unlock(self.lock) }
+        // A wait can wake for no reason, so the condition is a loop rather
+        // than an `if`: what matters is the queue, not the wake-up.
+        while self.taken >= self.items.length() && !self.closed {
+            unsafe { rune_cond_wait(self.ready, self.lock) }
+        }
+        if self.taken >= self.items.length() { return nil }
+        let value = self.items.at(self.taken).unwrap()
+        self.taken += 1
+        value
+    }
+
+    /// Takes a value if one is already there, without waiting.
+    @safe("the queue is only ever touched with the lock held")
+    pub fn tryReceive(&var self) -> T? {
+        unsafe { rune_mutex_lock(self.lock) }
+        defer unsafe { rune_mutex_unlock(self.lock) }
+        if self.taken >= self.items.length() { return nil }
+        let value = self.items.at(self.taken).unwrap()
+        self.taken += 1
+        value
+    }
+
+    /// Says no more will be sent. Every receiver waiting is woken, and each
+    /// gets `nil` once what is left has been taken.
+    ///
+    /// Closing twice is harmless; the second says nothing new.
+    @safe("the flag is only ever touched with the lock held")
+    pub fn close(&var self) {
+        unsafe { rune_mutex_lock(self.lock) }
+        defer unsafe { rune_mutex_unlock(self.lock) }
+        self.closed = true
+        unsafe { rune_cond_broadcast(self.ready) }
+    }
+
+    /// How many values are waiting to be taken.
+    @safe("the queue is only ever touched with the lock held")
+    pub fn pending(&self) -> i64 {
+        unsafe { rune_mutex_lock(self.lock) }
+        defer unsafe { rune_mutex_unlock(self.lock) }
+        self.items.length() - self.taken
+    }
+
+    @safe("nothing else can be holding the lock: the channel is going away")
+    pub fn isClosed(&self) -> bool { self.closed }
+
+    fn deinit(self) {
+        unsafe { rune_cond_dispose(self.ready) }
+        unsafe { rune_mutex_dispose(self.lock) }
+    }
+}

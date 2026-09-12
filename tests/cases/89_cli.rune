@@ -1,0 +1,58 @@
+// std::cli — the usual spellings, defaults, repeatable options, positionals
+// and the rest, and each mistake named.
+// EXPECT: loud=false verbose=false name=world extra=0 times=3 rest=0
+// EXPECT: loud=true verbose=true name=ada extra=0 times=3 rest=2
+// EXPECT: loud=false verbose=false name=bob extra=3 times=3 rest=0
+// EXPECT: loud=true verbose=false name=world extra=0 times=-3 rest=1
+// EXPECT: error: unknown option '--bogus'
+// EXPECT: error: option '--name' needs a value
+// EXPECT: error: '--loud' is a flag and takes no value
+// EXPECT: error: missing argument <times>
+// EXPECT: error: help requested
+// EXPECT: error: version requested
+// EXPECT: usage: greet [options] <times> [files...]
+
+import std::io
+import std::cli
+import std::collections::vector
+
+fn build() -> cli::Parser {
+    var app = cli::Parser("greet", "Prints a greeting.")
+    app.flag("loud", "l", "shout it")
+    app.flag("verbose", "v", "say more")
+    app.option("name", "n", "who to greet", "world")
+    app.optionMany("extra", "x", "more names")
+    app.positional("times", "how many times")
+    app.rest("files", "files to read afterwards")
+    app.setVersion("1.2")
+    app
+}
+
+fn show(line: vector::Vector<String>) {
+    match build().parseList(line) {
+        Ok(a) => {
+            var s = "loud=" + a.has("loud").$str() + " verbose=" + a.has("verbose").$str()
+            s += " name=" + (a.value("name") ?? "-")
+            s += " extra=" + a.values("extra").length().$str()
+            s += " times=" + (a.positional(0) ?? "-")
+            s += " rest=" + a.rest().length().$str()
+            io::println(s)
+        },
+        Err(e) => io::println("error: " + cli::describe(e)),
+    }
+}
+
+fn main() -> i64 {
+    show(vec!("3"))
+    show(vec!("-lv", "--name=ada", "3", "a.txt", "b.txt"))
+    show(vec!("-n", "bob", "-x", "p", "-xq", "--extra", "r", "3"))
+    show(vec!("--loud", "--", "-3", "--not-an-option"))
+    show(vec!("--bogus", "3"))
+    show(vec!("--name"))
+    show(vec!("--loud=yes", "3"))
+    show(vector::Vector<String>())
+    show(vec!("--help"))
+    show(vec!("--version"))
+    io::println(build().usageLine())
+    0
+}

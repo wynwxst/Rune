@@ -1,0 +1,15 @@
+[package]
+name = "report"
+version = "1.2.0"
+edition = "2025"
+description = "Text reports with a title, sections, summary statistics and charts, rendered for a terminal"
+authors = ["The Rune examples"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]
+stats = "2.1"
+units = "1.1"
+plot = "0.5"

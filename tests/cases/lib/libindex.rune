@@ -1,0 +1,36 @@
+// A library whose bindings overload, so an importer picks between versions
+// that arrived through a `.rul` rather than from its own source.
+@type(Library)
+import std::io
+
+pub struct Grid { pub w: i64, pub h: i64 }
+
+pub bind operator::"[]" to Grid {
+    fn index(&self, at: i64) -> i64 { self.w * at }
+}
+
+pub bind operator::"[]" to Grid {
+    fn index(&self, name: String) -> i64 {
+        if name == "w" { self.w } else { self.h }
+    }
+}
+
+pub mark Describe { fn describe(&self, label: String) -> String }
+
+pub bind Describe to Grid {
+    fn describe(&self, label: String) -> String {
+        label + ": " + self.w.$str() + "x" + self.h.$str()
+    }
+}
+
+pub bind Describe to Grid {
+    fn describe(&self, times: i64) -> String {
+        var out = ""
+        var i: i64 = 0
+        while i < times {
+            out = out + "*"
+            i = i + 1
+        }
+        out
+    }
+}

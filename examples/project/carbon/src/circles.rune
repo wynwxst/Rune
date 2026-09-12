@@ -1,0 +1,24 @@
+@type(Executable)
+
+class Circle {
+  // Member variable
+  var radius: f64;
+  fn init(self, rad: f64 = 13.4) {
+    self.radius = rad
+  }
+  // Instance method (requires explicit 'self')
+  fn Area(self) -> f64 {
+    return 3.14159 * self.radius * self.radius
+  }
+
+  // Static factory method (acts like a constructor)
+  fn Create(r: f64) -> Self {
+    return Circle(r)
+  }
+}
+
+fn main() {
+    c = Circle()
+    d = Circle::Create(r: 12.3)
+    println!("c = {},d = {}",c.Area(),d.Area())
+}

@@ -1,0 +1,37 @@
+// `"""` opens a string that runs to the matching `"""`. The indentation it
+// shares with the code around it is removed, so the text reads at the margin,
+// while indentation beyond that is part of the text.
+// EXPECT: Rune is a low-level language.
+// EXPECT: 
+// EXPECT:   this line keeps its extra indent
+// EXPECT: this one does not
+// EXPECT: one line
+// EXPECT: tab:	here
+// EXPECT: newline inside: true
+import std::io
+
+fn blurb() -> String {
+    """
+    Rune is a low-level language.
+
+      this line keeps its extra indent
+    this one does not
+    """
+}
+
+fn hasNewline(text: String) -> bool {
+    var i = 0
+    while i < text.$length() {
+        if text.$byteAt(i) == 10 { return true }
+        i += 1
+    }
+    false
+}
+
+fn main() -> i64 {
+    io::println(blurb())
+    io::println("""one line""")
+    io::println("""tab:\there""")
+    io::println("newline inside: " + hasNewline(blurb()).$str())
+    0
+}

@@ -1,0 +1,21 @@
+@type(Executable)
+struct Circle {
+    var r: f32
+}
+fn PrintTotalArea(circles: [Circle]) {
+    var area: f32 = 0;
+    for c in circles {
+        area += 3.141 * c.r * c.r;
+    }
+    println!("Total area: {0}", area);
+}
+fn main() -> i64 {
+    // A dynamically sized array, like 'std::vector'.
+    var circles: [Circle] = [
+        Circle{r: 1.0},
+        Circle{r: 2.0},
+    ]
+    // Implicitly constructs a slice from the array.
+    PrintTotalArea(circles);
+    return 0
+}

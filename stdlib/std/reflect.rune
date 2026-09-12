@@ -1,0 +1,175 @@
+// std::reflect — what the compiler knows about a type, asked from inside the
+// program being compiled.
+//
+// Every question here is answered while compiling, from the same information
+// the code generator is already using to lay values out. `sizeOf<i64>()` is
+// the constant 8 by the time the program runs; `kindOf<T>()` has already
+// chosen its branch. Nothing is looked up, and there is no descriptor to
+// carry around: a call costs what its answer costs, which is usually nothing.
+//
+// This is reflection in the sense Rust and Swift mean it — `size_of`,
+// `type_name`, `offset_of!`, `MemoryLayout` — rather than the sense where a
+// program discovers types it was not compiled against. Rune has no such
+// facility and is not trying to have one. `Any` is the runtime half, and
+// answers a narrower question: what is *this value*?
+
+/// What kind of thing a type is. Enough to tell the shapes apart without
+/// asking about any of them in particular.
+pub enum Kind {
+    Void, Bool, Int, Float, Character, String, CString,
+    Pointer, Array, Slice, Tuple, Function,
+    Struct, Enum, Class, Mark, Any, Unknown
+}
+
+//===--------------------------------------------------------------------===//
+// Identity
+//===--------------------------------------------------------------------===//
+
+/// The fully qualified name of `T`: `"i64"`, `"String"`, `"app::Point"`,
+/// `"[3:f64]"`, `"vector::Vector<String>"`.
+///
+/// Two types share this name only when they are the same type — the module
+/// path and every generic argument are part of it. It is the same spelling
+/// `Any::typeName` reports, so the static and the runtime answer agree.
+///
+///     reflect::typeName<i64>()          // "i64"
+///     reflect::typeName<Point>()        // "app::Point"
+@intrinsic("type_name")
+pub fn typeName<T>() -> String
+
+/// A number standing for `T`, equal for the same type and different for
+/// different ones.
+///
+/// Derived from the name, so it is stable across separate compilations of the
+/// same program and usable as a map key. It is not a memory address and says
+/// nothing about layout.
+///
+///     if reflect::typeId<T>() == reflect::typeId<String>() { ... }
+@intrinsic("type_id")
+pub fn typeId<T>() -> u64
+
+/// Which of the shapes in `Kind` the type `T` is.
+///
+/// The value is known while compiling, so a `match` on it costs nothing: the
+/// arms that cannot be reached are never emitted.
+///
+///     match reflect::kindOf<T>() {
+///         Kind::Class => ...,   // only this arm survives for a class
+///         _ => ...,
+///     }
+@intrinsic("kind_of")
+pub fn kindOf<T>() -> Kind
+
+//===--------------------------------------------------------------------===//
+// Layout
+//===--------------------------------------------------------------------===//
+
+/// Bytes a value of `T` occupies. The same answer as `mem::size_of`, which is
+/// where code that is managing storage rather than reflecting should ask.
+@intrinsic("size_of")
+pub fn sizeOf<T>() -> usize
+
+/// The alignment `T` requires, in bytes.
+@intrinsic("align_of")
+pub fn alignOf<T>() -> usize
+
+/// The distance between neighbouring elements of an array of `T` — the size
+/// rounded up to the alignment.
+///
+/// For every type Rune lays out this equals `sizeOf`, because the size
+/// already includes tail padding. It is here because the two are different
+/// questions, and code that means the stride should say so.
+@intrinsic("stride_of")
+pub fn strideOf<T>() -> usize
+
+/// Where `field` begins inside `T`, in bytes.
+///
+///     offset_of!(Point, y)      // 8
+///
+/// The field has to exist and be reachable from where you ask; a name that is
+/// not a field of `T` is an error at the `offset_of!`.
+@intrinsic("offset_of")
+pub fn offsetOf<T>(field: String) -> usize
+
+/// `offset_of!(Type, field)` — the offset of a named field.
+///
+/// A macro because the field is a *name*, not a value: there is nothing to
+/// pass. `stringify!` carries the name through to the intrinsic, which
+/// resolves it while compiling.
+pub macro offset_of {
+    ($T: ty, $field: ident) => {
+        std::reflect::offsetOf::<$T>(stringify!($field))
+    }
+}
+
+/// How many fields `T` has: struct fields, tuple elements, array elements,
+/// enum variants. Zero for everything else.
+@intrinsic("field_count")
+pub fn fieldCount<T>() -> usize
+
+/// The name of field `index` of `T`, or `""` when there is no such field.
+///
+/// `index` has to be a literal, because the answer is chosen while compiling.
+///
+///     reflect::fieldName<Point>(0)      // "x"
+@intrinsic("field_name")
+pub fn fieldName<T>(index: usize) -> String
+
+/// The name of the type of field `index` of `T`, or `""`.
+///
+///     reflect::fieldType<Point>(1)      // "f64"
+@intrinsic("field_type")
+pub fn fieldType<T>(index: usize) -> String
+
+//===--------------------------------------------------------------------===//
+// Conformance
+//===--------------------------------------------------------------------===//
+
+/// True when `T` binds the mark `M`.
+///
+/// The answer is a constant, so this is how generic code takes a better path
+/// for types that offer one without demanding it of every type:
+///
+///     fn render<T>(value: T) -> String {
+///         if reflect::conforms<T, io::Display>() { ... }
+///         reflect::describe(value)
+///     }
+@intrinsic("conforms")
+pub fn conforms<T, M>() -> bool
+
+/// True when a value of `T` may move to another thread — `std::thread::Send`,
+/// asked as a question rather than used as a bound.
+///
+/// The bound is what you want in a signature, because it explains itself when
+/// it fails. This is for code that takes a different path instead of refusing:
+///
+///     if reflect::isSend<T>() { ... } else { ... }
+@intrinsic("is_send")
+pub fn isSend<T>() -> bool
+
+/// True when a value of `T` may be reached from several threads at once —
+/// `std::thread::Sync`, asked the same way.
+@intrinsic("is_sync")
+pub fn isSync<T>() -> bool
+
+//===--------------------------------------------------------------------===//
+// Rendering
+//===--------------------------------------------------------------------===//
+
+/// A structural rendering of `value`, worked out from its layout.
+///
+///     Point { x: 1, y: 2 }
+///     Some(3)
+///     [1, 2, 3]
+///     (1, "a")
+///
+/// This asks nothing of `T`: no mark to bind, and no `display` to write. It
+/// is the reading half of the same idea as `mem::hash` and `mem::equals` —
+/// the compiler already knows what a value is made of, so the program may as
+/// well be able to say it.
+///
+/// It is for looking at values: logs, tests, a debugger's `dump`. A type that
+/// wants to control how it prints binds `io::Display`, and `describe` will
+/// use it wherever it finds it.
+@intrinsic("describe")
+pub fn describe<T>(value: T) -> String

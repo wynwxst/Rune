@@ -1,0 +1,40 @@
+// Matching and `is`-binding through a borrow reads the referent in place.
+// EXPECT: circle 12.5
+// EXPECT: rect 12.0
+// EXPECT: bound 7.0
+import std::io
+
+enum Shape { Circle(f64), Rect { width: f64, height: f64 } }
+
+mark Area { fn area(&self) -> f64 }
+
+bind Area to Shape {
+    fn area(&self) -> f64 {
+        match self {
+            Shape::Circle(r) => 3.125 * r * r,
+            Shape::Rect { width, height } => width * height,
+        }
+    }
+}
+
+fn label(s: &Shape) -> String {
+    match s {
+        Shape::Circle(r) => "circle",
+        Shape::Rect { width, height } => "rect",
+    }
+}
+
+fn main() -> i64 {
+    c = Shape::Circle(2.0)
+    r = Shape::Rect { width: 3.0, height: 4.0 }
+    io::println(label(&c) + " " + c.area().$str())
+    io::println(label(&r) + " " + r.area().$str())
+
+    boxed = Shape::Circle(7.0)
+    if boxed is Shape::Circle(radius) {
+        io::println("bound " + radius.$str())
+    } else {
+        io::println("no match")
+    }
+    0
+}

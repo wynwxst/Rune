@@ -1,0 +1,36 @@
+import std::{process,iter,io,dictionary}
+import std::collections::vector
+
+pub type Arguments = vector::Vector<String>
+
+pub fn printArgs(){
+    for i in iter::counting(0) {
+        if i >= process::argCount() {break}
+        io::println(process::arg(i))
+    }
+}
+
+/// if a global is in a public function, the global must be marked public or otherwise error
+pub global var argMap = dictionary::Map<String,@function(Arguments) -> ()>() 
+
+
+pub fn argument(arg: String, subargs: i32,func: @function(Arguments) -> ()) {
+    argMap[arg] = func
+}
+
+pub fn display(args: Arguments) {
+    var out = ""
+    for string in args {
+        out += string + ", "
+    }
+    io::println(out)
+}
+
+pub fn run(){
+    vec = vector::Vector<String>()
+    for i in 0..process::argCount() {
+        vec.push(process::arg(i))
+    }
+    display(vec)
+    argMap[process::arg(1)](vec)
+}

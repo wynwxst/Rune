@@ -1,0 +1,98 @@
+// An `Any` answers for the type it was built from, whatever that was.
+// EXPECT: i64 true false 42
+// EXPECT: f64 false true 2.5
+// EXPECT: String true text
+// EXPECT: 43_any::Point 3.0 4.0
+// EXPECT: 43_any::Colour true
+// EXPECT: (i64, String) 1 two
+// EXPECT: [3:i64] true
+// EXPECT: dyn 43_any::Shape 12.0
+// EXPECT: dog true true woof
+// EXPECT: animal false true
+// EXPECT: nothing
+// EXPECT: freed rex
+// EXPECT: int 7
+// EXPECT: text via a generic
+// EXPECT: other f64
+// EXPECT: done
+// EXPECT: freed fido
+// SAFETY: full
+import std::io
+
+struct Point { pub x: f64, pub y: f64 }
+enum Colour { Red, Green }
+
+mark Shape { fn area(&self) -> f64 }
+struct Rect { pub w: f64, pub h: f64 }
+bind Shape to Rect { fn area(&self) -> f64 { self.w * self.h } }
+
+class Animal {
+    pub name: String
+    fn init(self, name: String) { self.name = name }
+    pub fn speak(&self) -> String { "..." }
+}
+class Dog : Animal {
+    fn init(self, name: String) { super.init(name) }
+    fn deinit(self) { io::println("freed " + self.name) }
+    pub fn speak(&self) -> String { "woof" }
+}
+
+fn describe(v: Any) -> String {
+    if v is i64 { return "int " + v.expect::<i64>().$str() }
+    if v is String { return "text " + v.expect::<String>() }
+    "other " + v.typeName()
+}
+
+fn boxUp<T>(v: T) -> Any { v }
+
+fn scoped() {
+    let held: Any = Dog("rex")
+    io::println("nothing")
+}
+
+fn main() -> i64 {
+    let n: Any = 42i64
+    io::println(n.typeName() + " " + n.holds::<i64>().$str() + " " +
+                n.holds::<u64>().$str() + " " + n.expect::<i64>().$str())
+
+    let f: Any = 2.5
+    io::println(f.typeName() + " " + (f is i64).$str() + " " +
+                (f is f64).$str() + " " + (f.get::<f64>() ?? 0.0).$str())
+
+    let s: Any = "text"
+    io::println(s.typeName() + " " + s.holds::<String>().$str() + " " +
+                (s.get::<String>() ?? "?"))
+
+    let p: Any = Point { x: 3.0, y: 4.0 }
+    let back = p.expect::<Point>()
+    io::println(p.typeName() + " " + back.x.$str() + " " + back.y.$str())
+
+    let c: Any = Colour::Green
+    io::println(c.typeName() + " " + (c is Colour).$str())
+
+    let t: Any = (1i64, "two")
+    let (a, b) = t.expect::<(i64, String)>()
+    io::println(t.typeName() + " " + a.$str() + " " + b)
+
+    let arr: Any = [1i64, 2i64, 3i64]
+    io::println(arr.typeName() + " " + arr.holds::<[3:i64]>().$str())
+
+    let sh: Any = Rect { w: 3.0, h: 4.0 } as dyn Shape
+    io::println(sh.typeName() + " " + sh.expect::<dyn Shape>().area().$str())
+
+    // A class keeps its hierarchy: a Dog holds as an Animal, not the reverse.
+    let d: Any = Dog("fido")
+    io::println("dog " + (d is Dog).$str() + " " + (d is Animal).$str() + " " +
+                d.expect::<Animal>().speak())
+    let g: Any = Animal("generic")
+    io::println("animal " + (g is Dog).$str() + " " + (g is Animal).$str())
+
+    // What goes in is released when the `Any` holding it is.
+    scoped()
+
+    io::println(describe(boxUp(7i64)))
+    io::println(describe(boxUp("via a generic")))
+    io::println(describe(boxUp(2.5)))
+    io::println("done")
+    0
+}

@@ -1,0 +1,12 @@
+[package]
+name = "logger"
+version = "1.0.0"
+edition = "2025"
+description = "The leveled logger, as the lab ships it: a Trace level below Debug, and a summary of what got through"
+authors = ["The Rune examples (lab)"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]

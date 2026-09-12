@@ -1,0 +1,42 @@
+// `I::Item::Item` — an associated type projected off another — is what
+// `flatten` needs: its item is the item of its source's item. The bind that
+// supplies it is conditional on `I::Item: Iterator`, a `where` clause whose
+// subject is itself a projection, and it applies only where that holds.
+// EXPECT: 1
+// EXPECT: 2
+// EXPECT: 3
+// EXPECT: 4
+// EXPECT: a.b.c.d.
+// EXPECT: 10
+// EXPECT: 6
+
+import std::io
+import std::iter
+import std::text
+import std::collections::vector
+
+fn main() -> i64 {
+    let a = vec!(1, 2)
+    let b = vec!(3, 4)
+    let outer = vec!(a.as_iter(), b.as_iter())
+    for v in outer.as_iter().flatten() { io::println(v) }
+
+    let names = vec!("ab", "cd")
+    var s = ""
+    for c in names.flatMap(||(n: String) -> text::Chars { text::chars(n) }) {
+        s += c.$str() + "."
+    }
+    io::println(s)
+
+    let nested = vec!(vec!(1, 2, 3), vec!(), vec!(4))
+    let total = nested
+        .flatMap(||(v: vector::Vector<i64>) -> vector::VectorIter<i64> { v.as_iter() })
+        .fold(0, ||(acc: i64, x: i64) -> i64 { acc + x })
+    io::println(total)
+
+    // 1 + 2 + 3 values: each n becomes a run of n.
+    let runs = iter::counting(1).take(3)
+        .map(||(n: i64) -> iter::Take<iter::Counter> { iter::counting(n).take(n) })
+    io::println(runs.flatten().count())
+    0
+}

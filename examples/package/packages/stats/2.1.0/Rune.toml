@@ -1,0 +1,12 @@
+[package]
+name = "stats"
+version = "2.1.0"
+edition = "2025"
+description = "Summary statistics over a slice of numbers: mean, median, spread, extremes, percentiles and histograms"
+authors = ["The Rune examples"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]

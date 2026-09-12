@@ -1,0 +1,17 @@
+// An `if` with no `else` produces nothing when the condition is false. Where
+// the value is thrown away that is fine; where something wants it, the `if`
+// itself is what is wrong — not whatever asked.
+// EXPECT-ERROR: this `if` has no `else`
+fn wants(b: bool) -> bool { b }
+
+fn main() -> i64 {
+    let v: i64? = 42
+    // The block is an argument, so its value is required — and the inner `if`
+    // cannot supply one on the false path.
+    wants({
+        if v is Some(n) {
+            if n > 0 { n == 42 } else { false }
+        }
+    })
+    0
+}

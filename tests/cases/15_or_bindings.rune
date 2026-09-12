@@ -1,0 +1,36 @@
+// Alternatives in a `|` pattern may bind, as long as they bind the same names.
+// EXPECT: 7 9 4 0
+// EXPECT: true false
+// EXPECT: pair 3
+import std::io
+
+enum Token { Int(i64), Nat(i64), Word(String), Blank }
+
+fn value(t: Token) -> i64 {
+    match t {
+        Token::Int(n) | Token::Nat(n) => n,
+        Token::Word(w) => w.$length(),
+        Token::Blank => 0,
+    }
+}
+
+fn small(n: i64) -> bool {
+    match n { 1 | 2 | 3 => true, _ => false }
+}
+
+enum Shape { A { size: i64 }, B { size: i64 } }
+
+fn size(s: Shape) -> i64 {
+    match s {
+        Shape::A { size } | Shape::B { size } => size,
+    }
+}
+
+fn main() -> i64 {
+    io::println(value(Token::Int(7)).$str() + " " + value(Token::Nat(9)).$str() +
+                " " + value(Token::Word("abcd")).$str() + " " +
+                value(Token::Blank).$str())
+    io::println(small(2).$str() + " " + small(8).$str())
+    io::println("pair " + size(Shape::B { size: 3 }).$str())
+    0
+}

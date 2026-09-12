@@ -1,0 +1,27 @@
+// A tuple converts element by element, so a literal becomes the shape the
+// context asked for — and a member of one is reached with `.`, like any other.
+// EXPECT: element 1 is bussin
+// EXPECT: compares equal: true
+// EXPECT: from a call: 7 / ok
+// EXPECT: balanced true
+import std::io
+import std::process
+
+fn pair() -> (i64, Any) { (7, "ok") }
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        // `(i64, String)` becomes `(i64, Any)`: the String is boxed in place.
+        let tup: (i64, Any) = (1, "bussin")
+        io::println("element 1 is " + tup.1.expect::<String>())
+        io::println("compares equal: " +
+                    (tup.1.expect::<String>() == "bussin").$str())
+
+        let p = pair()
+        io::println("from a call: " + p.0.$str() + " / " +
+                    p.1.expect::<String>())
+    }
+    io::println("balanced " + (before == process::liveObjectCount()).$str())
+    0
+}

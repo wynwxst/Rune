@@ -1,0 +1,146 @@
+// Raw memory, and the layers that make it unnecessary.
+//
+//     runec -o memory examples/memory.rune && ./memory
+
+import std::io
+import std::mem
+import std::process
+import std::collections::vector
+
+//===--------------------------------------------------------------------===//
+// Layout
+//===--------------------------------------------------------------------===//
+
+struct Pixel { r: u8, g: u8, b: u8, a: u8 }
+
+fn layout() {
+    io::println("layout:")
+    io::println("  i64    size " + mem::size_of<i64>().$str() +
+                "  align " + mem::align_of<i64>().$str())
+    io::println("  f32    size " + mem::size_of<f32>().$str() +
+                "  align " + mem::align_of<f32>().$str())
+    io::println("  Pixel  size " + mem::size_of<Pixel>().$str() +
+                "  align " + mem::align_of<Pixel>().$str())
+}
+
+//===--------------------------------------------------------------------===//
+// Handle: the safe one
+//===--------------------------------------------------------------------===//
+//
+// A Handle owns one value on the heap. It is a class, so it is reference
+// counted: nothing here is unsafe, and nothing has to be freed by hand.
+
+class Node {
+    label: String
+    fn init(self, label: String) { self.label = label }
+    fn deinit(self) { io::println("  releasing " + self.label) }
+}
+
+fn handles() {
+    io::println("handles:")
+    var counter = mem::Handle<i64>(41)
+    counter.set(counter.get() + 1)
+    io::println("  counter " + counter.get().$str())
+
+    // A handle behaves like a pointer: `*h` reads, `*h = v` writes, and
+    // compound assignment reads and writes in one step.
+    var total = mem::Handle<i64>(10)
+    *total += 5
+    *total *= 2
+    io::println("  deref   " + (*total).$str())
+
+    // Two names, one value: writing through either is visible in both.
+    let shared = mem::of("first")
+    let alias = shared
+    alias.set("second")
+    io::println("  shared  " + shared.get())
+
+    {
+        let held = mem::Handle<Node>(Node("held node"))
+        io::println("  holding " + held.get().label)
+    }
+    io::println("  handle gone")
+}
+
+//===--------------------------------------------------------------------===//
+// The allocator: the unsafe one
+//===--------------------------------------------------------------------===//
+//
+// Everything below is what `Vector` does for you. Reach for it only when you
+// are building something like `Vector`.
+
+@safe("the block is sized for four i64 and every index written is below four")
+fn allocator() {
+    io::println("allocator:")
+    let count = 4
+    let block = mem::allocator.allocate(count as usize * mem::size_of<i64>())
+    if mem::isNull(block) {
+        process::panic("out of memory")
+        return
+    }
+
+    let cells = unsafe { block as *var i64 }
+    var i = 0
+    while i < count {
+        unsafe { cells[i] = (i + 1) * 100 }
+        i += 1
+    }
+
+    var total = 0
+    i = 0
+    while i < count {
+        total += unsafe { cells[i] }
+        i += 1
+    }
+    io::println("  four cells total " + total.$str())
+
+    // Growing keeps what fits.
+    let bigger = mem::allocator.reallocate(block, 8 * mem::size_of<i64>())
+    let grown = unsafe { bigger as *var i64 }
+    let kept = unsafe { grown[0] }
+    io::println("  after growing, cell 0 is still " + kept.$str())
+    mem::allocator.deallocate(bigger)
+}
+
+//===--------------------------------------------------------------------===//
+// Vector: the allocator, wrapped
+//===--------------------------------------------------------------------===//
+
+fn vectors() {
+    io::println("vector:")
+    var squares = vector::Vector<i64>()
+    var i = 1
+    while i <= 6 {
+        squares.push(i * i)
+        i += 1
+    }
+    io::println("  length   " + squares.length().$str())
+    io::println("  capacity " + squares.capacityOf().$str())
+    io::println("  at 2     " + squares.get(2).$str())
+    io::println("  popped   " + squares.pop().unwrap().$str())
+
+    // Out of range is an Option, not a crash.
+    match squares.at(99) {
+        Some(v) => io::println("  at 99    " + v.$str())
+        None => io::println("  at 99    nothing there")
+    }
+
+    // A vector of counted values keeps the books itself.
+    let before = process::liveObjectCount()
+    {
+        var names = vector::from(["ada", "grace", "alan"])
+        names.push("edsger")
+        io::println("  names    " + names.length().$str() + ", last " +
+                    names.last().unwrap())
+    }
+    let after = process::liveObjectCount()
+    io::println("  balanced " + (before == after).$str())
+}
+
+fn main() -> i64 {
+    layout()
+    handles()
+    allocator()
+    vectors()
+    0
+}

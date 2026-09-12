@@ -1,0 +1,77 @@
+// Option and Result are ordinary enums; `T?`, `nil`, `??` and `?` lower onto
+// them, and their variants are in scope without an import.
+// EXPECT: found 8 / nothing
+// EXPECT: -1 -2 8 true true
+// EXPECT: found 4 / nothing
+// EXPECT: ok: 6
+// EXPECT: error: 'nope' is not a number
+// EXPECT: true true -1
+// EXPECT: found 15 / nothing
+import std::io
+import std::option
+import std::result
+
+fn firstEven(values: [6:i64]) -> i64? {
+    for v in values {
+        if v % 2 == 0 { return v }
+    }
+    nil
+}
+
+fn halfOfFirstEven(values: [6:i64]) -> i64? {
+    let found = firstEven(values)?
+    found / 2
+}
+
+fn describe(value: i64?) -> String {
+    match value {
+        Some(v) => "found " + v.$str(),
+        None => "nothing",
+    }
+}
+
+type Parsed = result::Result<i64, String>
+
+fn parse(text: String) -> Parsed {
+    match text.$toInt() {
+        Some(n) => Ok(n),
+        None => Err("'" + text + "' is not a number"),
+    }
+}
+
+fn addAll(a: String, b: String, c: String) -> Parsed {
+    let x = parse(a)?
+    let y = parse(b)?
+    let z = parse(c)?
+    Ok(x + y + z)
+}
+
+fn report(r: Parsed) -> String {
+    match r {
+        Ok(v) => "ok: " + v.$str(),
+        Err(e) => "error: " + e,
+    }
+}
+
+fn main() -> i64 {
+    let evens: [6:i64] = [1, 3, 8, 5, 7, 9]
+    let odds: [6:i64] = [1, 3, 5, 7, 9, 11]
+
+    io::println(describe(firstEven(evens)) + " / " + describe(firstEven(odds)))
+    io::println(firstEven(odds).or(-1).$str() + " " +
+                (firstEven(odds) ?? -2).$str() + " " +
+                firstEven(evens).unwrap().$str() + " " +
+                firstEven(evens).hasValue().$str() + " " +
+                firstEven(odds).isNil().$str())
+    io::println(describe(halfOfFirstEven(evens)) + " / " +
+                describe(halfOfFirstEven(odds)))
+
+    io::println(report(addAll("1", "2", "3")))
+    io::println(report(addAll("1", "nope", "3")))
+    io::println(addAll("1", "2", "3").isOk().$str() + " " +
+                addAll("x", "2", "3").isErr().$str() + " " +
+                addAll("x", "2", "3").or(-1).$str())
+    io::println(describe(addAll("4", "5", "6").ok()) + " / " +
+                describe(addAll("x", "5", "6").ok()))
+    0
+}

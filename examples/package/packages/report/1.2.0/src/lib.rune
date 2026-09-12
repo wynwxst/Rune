@@ -1,0 +1,76 @@
+// report — a document assembled a piece at a time, then rendered.
+
+import std::io
+import std::collections::vector
+import stats
+import units
+import plot
+
+/// A report under construction. A class, so builder calls share one.
+pub class Report {
+    pub title: String
+    var lines: vector::Vector<String>
+    var sections: i64
+
+    fn init(&self, title: String) {
+        self.title = title
+        self.lines = vector::Vector<String>()
+        self.sections = 0
+    }
+
+    /// A heading, numbered.
+    pub fn section(&var self, name: String) {
+        self.sections += 1
+        self.lines.push("")
+        self.lines.push(self.sections.$str() + ". " + name)
+    }
+
+    pub fn line(&var self, text: String) { self.lines.push("   " + text) }
+
+    /// A summary of `values`: count, mean, median, spread, extremes, and a
+    /// histogram sketched as a sparkline.
+    pub fn statistic(&var self, name: String, values: [f64]) {
+        match stats::summarise(values) {
+            Some(s) => {
+                self.line(name + ": n=" + s.count.$str() + " mean=" + round(s.mean) +
+                          " median=" + round(s.median) + " sd=" + round(s.stddev) +
+                          " [" + round(s.minimum) + ", " + round(s.maximum) + "]")
+                // Eight bins; `sparkline` takes a slice, and a vector
+                // views itself as one without copying.
+                let counts = stats::histogram(values, 8)
+                    .map(||(c: i64) -> f64 { c as f64 })
+                    .collect()
+                self.line("   " + plot::sparkline(counts.asSlice()))
+            },
+            None => self.line(name + ": no data"),
+        }
+    }
+
+    /// A length, printed in a sensible unit.
+    pub fn distance(&var self, name: String, length: units::Length) {
+        self.line(name + ": " + length.display())
+    }
+
+    /// A temperature.
+    pub fn temperature(&var self, name: String, t: units::Temperature) {
+        self.line(name + ": " + t.display())
+    }
+
+    /// A bar chart.
+    pub fn chart(&var self, labels: [String], values: [f64]) {
+        for row in std::text::splitLines(plot::bar(labels, values, 24)) { self.line(row) }
+    }
+
+    pub fn render(&self) -> String {
+        var out = self.title + "\n" + "=".$repeat(self.title.$length()) + "\n"
+        for l in self.lines { out += l + "\n" }
+        out
+    }
+}
+
+pub fn report(title: String) -> Report { Report(title) }
+
+fn round(value: f64) -> String {
+    let scaled = ((value * 100.0) + 0.5) as i64
+    (scaled / 100).$str() + "." + (if scaled % 100 < 10 { "0" } else { "" }) + (scaled % 100).$str()
+}

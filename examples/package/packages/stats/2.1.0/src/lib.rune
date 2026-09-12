@@ -1,0 +1,105 @@
+// stats — what a run of numbers adds up to.
+//
+// Every function takes a slice, so an array, a slice of one, or a vector's
+// contents all work. An empty slice has no mean and no median, and those
+// say so with `nil` rather than a NaN that surfaces three calls later.
+
+import std::math
+import std::collections::slice
+import std::collections::vector
+
+pub fn sum(values: [f64]) -> f64 {
+    var total = 0.0
+    for v in values { total += v }
+    total
+}
+
+pub fn mean(values: [f64]) -> f64? {
+    if values.$isEmpty() { return nil }
+    sum(values) / (values.$length() as f64)
+}
+
+/// The middle value, or the mean of the middle two.
+pub fn median(values: [f64]) -> f64? {
+    if values.$isEmpty() { return nil }
+    let sorted = slice::sortedBy(values, ||(a: f64, b: f64) -> bool { a < b })
+    let n = sorted.length()
+    if n % 2 == 1 { return sorted[n / 2] }
+    (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+}
+
+/// The population variance: the mean squared distance from the mean.
+pub fn variance(values: [f64]) -> f64? {
+    let m = mean(values)?
+    var total = 0.0
+    for v in values { total += (v - m) * (v - m) }
+    total / (values.$length() as f64)
+}
+
+pub fn stddev(values: [f64]) -> f64? {
+    let v = variance(values)?
+    math::squareRoot(v)
+}
+
+pub fn minimum(values: [f64]) -> f64? {
+    slice::minimumBy(values, ||(a: f64, b: f64) -> bool { a < b })
+}
+
+pub fn maximum(values: [f64]) -> f64? {
+    slice::maximumBy(values, ||(a: f64, b: f64) -> bool { a < b })
+}
+
+/// Everything at once, for a summary line.
+pub struct Summary {
+    pub count: i64,
+    pub mean: f64,
+    pub median: f64,
+    pub stddev: f64,
+    pub minimum: f64,
+    pub maximum: f64
+}
+
+pub fn summarise(values: [f64]) -> Summary? {
+    if values.$isEmpty() { return nil }
+    Summary {
+        count: values.$length(),
+        mean: mean(values) ?? 0.0,
+        median: median(values) ?? 0.0,
+        stddev: stddev(values) ?? 0.0,
+        minimum: minimum(values) ?? 0.0,
+        maximum: maximum(values) ?? 0.0
+    }
+}
+
+//=== Since 2.1.0 ========================================================//
+
+/// The value below which `fraction` of the values fall, by nearest rank:
+/// `percentile(values, 0.5)` is the median, `0.9` the ninetieth.
+pub fn percentile(values: [f64], fraction: f64) -> f64? {
+    if values.$isEmpty() { return nil }
+    let sorted = slice::sortedBy(values, ||(a: f64, b: f64) -> bool { a < b })
+    let clamped = math::clamp(fraction, 0.0, 1.0)
+    var rank = ((clamped * (sorted.length() as f64)) + 0.5) as i64 - 1
+    if rank < 0 { rank = 0 }
+    if rank >= sorted.length() { rank = sorted.length() - 1 }
+    sorted[rank]
+}
+
+/// How many values fall into each of `bins` equal-width bins between the
+/// minimum and the maximum. The maximum lands in the last bin.
+pub fn histogram(values: [f64], bins: i64) -> vector::Vector<i64> {
+    var counts = vector::Vector<i64>()
+    if bins <= 0 { return counts }
+    for _ in 0..bins { counts.push(0) }
+    if values.$isEmpty() { return counts }
+    let low = minimum(values) ?? 0.0
+    let high = maximum(values) ?? 0.0
+    let width = if high > low { (high - low) / (bins as f64) } else { 1.0 }
+    for v in values {
+        var index = ((v - low) / width) as i64
+        if index >= bins { index = bins - 1 }
+        if index < 0 { index = 0 }
+        counts[index] = counts[index] + 1
+    }
+    counts
+}

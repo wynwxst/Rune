@@ -1,0 +1,36 @@
+// A library whose public names are spelled with modules it imported itself.
+//
+// `pub type Names = vector::Vector<String>` means something only in this
+// file's scope: `vector` is short for `std::collections::vector` because of
+// the import above it. A package that imports this library and nothing else
+// still has to be able to write `libalias::Names`, so what the alias stands
+// for has to be worked out here rather than wherever it is first mentioned.
+
+import std::collections::vector
+
+/// The names, as a type a consumer can write without knowing where `Vector`
+/// comes from.
+pub type Names = vector::Vector<String>
+
+/// One name and how long it is.
+pub struct Sized {
+    name: String = "",
+    length: i64 = 0
+}
+
+pub type Measured = vector::Vector<Sized>
+
+pub fn names() -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    out.push("ada")
+    out.push("grace")
+    out
+}
+
+pub fn measure(names: vector::Vector<String>) -> vector::Vector<Sized> {
+    var out = vector::Vector<Sized>()
+    for name in names {
+        out.push(Sized { name: name, length: name.$length() })
+    }
+    out
+}

@@ -1,0 +1,9 @@
+// A function declared `-> Never` has to end in something that does not come
+// back; falling off the end with a value is a type error.
+// EXPECT-ERROR: expected 'Never'
+
+import std::io
+
+fn bad() -> Never { io::println("x") }
+
+fn main() -> i64 { bad() }

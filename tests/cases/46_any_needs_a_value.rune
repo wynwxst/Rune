@@ -1,0 +1,8 @@
+// Only something with a run-time representation can go into an `Any`.
+// EXPECT-ERROR: cannot be stored in an `Any`
+fn nothing() {}
+
+fn main() -> i64 {
+    let boxed: Any = nothing()
+    0
+}

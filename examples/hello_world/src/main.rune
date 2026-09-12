@@ -1,0 +1,19 @@
+// Picks a greeting from the first argument.
+import std::io
+import std::process
+import hello_world
+
+fn main() -> i64 {
+    let who = if process::argCount() > 2 { process::arg(2) } else { "world" }
+    let g = hello_world::hello(who)
+    var lang = "english"
+    if process::argCount() > 1 { lang = process::arg(1) }
+
+    if lang == "spanish" { io::println(g.spanish()) }
+    elif lang == "french" { io::println(g.french()) }
+    elif lang == "chinese" { io::println(g.chinese()) }
+    elif lang == "korean" { io::println(g.korean()) }
+    elif lang == "italian" { io::println(g.italian()) }
+    else { io::println(g.english()) }
+    0
+}

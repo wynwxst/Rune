@@ -1,0 +1,9 @@
+// `offset_of!` resolves the field while compiling, so a name that is not one
+// is caught there — under `rune check` as much as `rune build`.
+// EXPECT-ERROR: has no field named 'z'
+import std::reflect
+struct Point { x: i64, y: i64 }
+fn main() -> i64 {
+    let _ = offset_of!(Point, z)
+    0
+}

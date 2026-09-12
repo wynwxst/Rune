@@ -1,0 +1,33 @@
+// A type alias declared in a library, used by a package that imported the
+// library and nothing else.
+//
+// The right-hand side of an alias is written in the module that declares it,
+// and names what that module imported. Resolving it in whichever module
+// happens to mention the alias first asked the wrong scope, so a consumer that
+// had not itself imported `std::collections::vector` was told that
+// `vector::Vector` is not a type — pointing inside the library it had just
+// imported.
+// LIB: libalias lib/libalias.rune
+// EXPECT: two names
+// EXPECT: ada 3
+// EXPECT: grace 5
+// EXPECT: still two
+import std::io
+import libalias
+
+/// The parameter is the library's alias, spelled the short way.
+fn count(names: libalias::Names) -> i64 { names.length() }
+
+fn show(rows: libalias::Measured) {
+    for row in rows { io::println(row.name + " " + row.length.$str()) }
+}
+
+fn main() -> i64 {
+    let names = libalias::names()
+    if count(names) == 2 { io::println("two names") }
+    show(libalias::measure(names))
+    // The alias is the type it stands for, not a new one.
+    let same: libalias::Names = names
+    if same.length() == 2 { io::println("still two") }
+    0
+}

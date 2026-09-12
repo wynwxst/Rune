@@ -1,0 +1,77 @@
+// `format!`, `println!` and `print!` — placeholders, specs and evaluation.
+// EXPECT: hello world
+// EXPECT: 1 + 2 = 3
+// EXPECT: bare
+// EXPECT: {braces}
+// EXPECT: 42 and world
+// EXPECT: b then a
+// EXPECT: [      ab][ab      ][   ab   ][***ab****]
+// EXPECT: [-0000042][       7][ 000042]
+// EXPECT: pi=3.1416 [      3.14] [-0003.14]
+// EXPECT: ff FF 0xff 1010 0b1010 100 0x00ff
+// EXPECT: +5 -5 +1.50
+// EXPECT: -8000000000000000 0
+// EXPECT: $19.99 [    $19.99]
+// EXPECT: 1 1 1 called=1
+// EXPECT: 2 1 order=ab
+import std::io
+
+struct Money { cents: i64 }
+bind io::Display to Money {
+    // A `Display` body may itself use `format!`.
+    fn display(&self) -> String {
+        format!("${}.{:02}", self.cents / 100, self.cents % 100)
+    }
+}
+
+global var calls = 0
+fn tick() -> i64 { calls += 1; calls }
+
+global var log = ""
+fn tag(name: String, value: i64) -> i64 { log += name; value }
+
+fn main() -> i64 {
+    let name = "world"
+    let n = 42
+
+    // The macros need no import: their bodies name `std::io` in full.
+    println!("hello {}", name)
+    println!("{} + {} = {}", 1, 2, 1 + 2)
+    println!("bare")
+    println!("{{braces}}")
+
+    // A placeholder may name a variable, or an argument's position.
+    println!("{n} and {name}")
+    println!("{1} then {0}", "a", "b")
+
+    // Width and alignment, with a fill of its own.
+    println!("[{:>8}][{:<8}][{:^8}][{:*^9}]", "ab", "ab", "ab", "ab")
+    println!("[{:08}][{:8}][{:7}]", -42, 7, format!("{:06}", 42))
+
+    // Places after the point, alone and with a width.
+    println!("pi={:.4} [{:10.2}] [{:08.2}]", 3.14159265, 3.14159, -3.14159)
+
+    // Radix, upper case, and the `0x` that `#` asks for — which keeps its
+    // place in front when the number is zero-padded.
+    println!("{:x} {:X} {:#x} {:b} {:#b} {:o} {:#06x}",
+             255, 255, 255, 10, 10, 64, 255)
+    println!("{:+} {:+} {:+.2}", 5, -5, 1.5)
+
+    // The most negative i64 has no positive counterpart; its magnitude is
+    // still counted correctly.
+    println!("{:x} {:x}", -9223372036854775807 - 1, 0)
+
+    // A user type formats through `io::Display`, padding included.
+    let price = Money { cents: 1999 }
+    println!("{} [{:>10}]", price, price)
+
+    // An argument used more than once is evaluated once.
+    print!("{0} {0} {0} ", tick())
+    println!("called={}", calls)
+
+    // Arguments are evaluated in the order they are written, whatever order
+    // the placeholders read them in.
+    print!("{1} {0} ", tag("a", 1), tag("b", 2))
+    println!("order={}", log)
+    0
+}

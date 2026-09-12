@@ -1,0 +1,7 @@
+// The placeholders live inside the literal, so the literal has to be there.
+// EXPECT-ERROR: the first argument to `format!` has to be a string literal
+fn main() -> i64 {
+    let message = "already a string"
+    println!(message)
+    0
+}

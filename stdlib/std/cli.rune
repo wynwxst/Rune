@@ -1,0 +1,423 @@
+// std::cli — the command line, read the way the user wrote it.
+//
+// Say what the program takes, then ask what it was given:
+//
+//     var app = cli::Parser("greet", "Prints a greeting.")
+//     app.flag("loud", "l", "shout it")
+//     app.option("name", "n", "who to greet", "world")
+//     app.optionMany("extra", "x", "more names, repeatable")
+//     app.positional("times", "how many times")
+//     app.rest("files", "files to read afterwards")
+//
+//     let args = app.parseOrExit()
+//     let name = args.value("name") ?? "world"
+//     if args.has("loud") { ... }
+//     let times = args.positional(0) ?? "1"
+//     for f in args.rest() { ... }
+//
+// `--help` and `-h` print a usage page built from those descriptions and
+// exit; a mistake — an unknown option, a missing value, a positional that
+// was not given — prints what went wrong and the usage line, and exits 2.
+// `parse` is the same with the outcome handed back as a `Result`, for a
+// program that wants to decide for itself, or a test.
+//
+// The spellings accepted are the usual ones: `--name value`, `--name=value`,
+// `-n value`, `-nvalue`, flags combined as `-lv`, and `--` to say that
+// everything after it is positional however it looks.
+
+import std::io
+import std::process
+import std::text
+import std::collections::vector
+import std::dictionary
+
+/// One thing the program accepts, as declared.
+struct Spec {
+    /// The long name, without the dashes: `name` for `--name`.
+    name: String,
+    /// The one-letter short name, or empty.
+    short: String,
+    help: String,
+    /// True for `--verbose`: no value follows.
+    isFlag: bool,
+    /// True when the option may be given more than once and every value is kept.
+    many: bool,
+    /// The value when the option is absent; empty for none.
+    fallback: String
+}
+
+/// A positional argument, as declared.
+struct Positional {
+    name: String,
+    help: String
+}
+
+/// What a program takes: built up with the methods below, then handed the
+/// command line.
+pub class Parser {
+    var program: String
+    var summary: String
+    var version: String
+    var options: vector::Vector<Spec>
+    var positionals: vector::Vector<Positional>
+    var restName: String
+    var restHelp: String
+    var restAllowed: bool
+
+    fn init(&self, program: String, summary: String) {
+        self.program = program
+        self.summary = summary
+        self.version = ""
+        self.options = vector::Vector<Spec>()
+        self.positionals = vector::Vector<Positional>()
+        self.restName = ""
+        self.restHelp = ""
+        self.restAllowed = false
+    }
+
+    //=== Declaring ======================================================//
+
+    /// A flag: present or not, no value. `short` may be empty.
+    pub fn flag(&var self, name: String, short: String, help: String) {
+        self.options.push(Spec { name: name, short: short, help: help,
+                                 isFlag: true, many: false, fallback: "" })
+    }
+
+    /// An option that takes a value. `fallback` is the value when it is not
+    /// given; an empty fallback means "no default".
+    pub fn option(&var self, name: String, short: String, help: String, fallback: String) {
+        self.options.push(Spec { name: name, short: short, help: help,
+                                 isFlag: false, many: false, fallback: fallback })
+    }
+
+    /// An option that may be repeated, every value kept in order:
+    /// `-I a -I b` gives `values("include")` of `["a", "b"]`.
+    pub fn optionMany(&var self, name: String, short: String, help: String) {
+        self.options.push(Spec { name: name, short: short, help: help,
+                                 isFlag: false, many: true, fallback: "" })
+    }
+
+    /// A required positional argument, in the order they are declared.
+    pub fn positional(&var self, name: String, help: String) {
+        self.positionals.push(Positional { name: name, help: help })
+    }
+
+    /// Any number of further positionals after the declared ones.
+    pub fn rest(&var self, name: String, help: String) {
+        self.restName = name
+        self.restHelp = help
+        self.restAllowed = true
+    }
+
+    /// What `--version` prints. Without one, `--version` is not an option.
+    pub fn setVersion(&var self, version: String) { self.version = version }
+
+    //=== Parsing ========================================================//
+
+    /// Reads the program's own command line — everything after the program
+    /// name — and reports a mistake as an `Error`.
+    pub fn parse(&self) -> Result<Arguments, Error> {
+        self.parseList(process::arguments())
+    }
+
+    /// The same, over a list of one's own. `--help` and `--version` come
+    /// back as `Error::Help` and `Error::Version` rather than printing
+    /// anything, so a test can see them.
+    pub fn parseList(&self, given: vector::Vector<String>) -> Result<Arguments, Error> {
+        var args = Arguments()
+        var i = 0
+        var onlyPositional = false
+        let n = given.length()
+        while i < n {
+            let arg = given.get(i)
+            i += 1
+            if onlyPositional || arg == "-" || !text::startsWith(arg, "-") {
+                args.positionalsGiven.push(arg)
+                continue
+            }
+            if arg == "--" { onlyPositional = true; continue }
+            if arg == "--help" || arg == "-h" { return Error::Help }
+            if arg == "--version" && !self.version.$isEmpty() { return Error::Version }
+
+            if text::startsWith(arg, "--") {
+                // `--name` or `--name=value`.
+                var name = arg.$substring(2, arg.$length())
+                var inline: String? = nil
+                if text::find(name, "=") is Some(eq) {
+                    inline = name.$substring(eq + 1, name.$length())
+                    name = name.$substring(0, eq)
+                }
+                let spec = self.findLong(name)?
+                if spec.isFlag {
+                    if inline.hasValue() { return Error::FlagGivenValue(name) }
+                    args.flags.put(spec.name, true)
+                    continue
+                }
+                var value = ""
+                match inline {
+                    Some(v) => value = v,
+                    None => {
+                        if i >= n { return Error::MissingValue(name) }
+                        value = given.get(i)
+                        i += 1
+                    },
+                }
+                args.record(spec, value)
+                continue
+            }
+
+            // `-l`, `-lv`, `-n value`, `-nvalue`.
+            let letters = arg.$substring(1, arg.$length())
+            var j = 0
+            while j < letters.$length() {
+                let letter = letters.$substring(j, j + 1)
+                let spec = self.findShort(letter)?
+                j += 1
+                if spec.isFlag {
+                    args.flags.put(spec.name, true)
+                    continue
+                }
+                var value = ""
+                if j < letters.$length() {
+                    value = letters.$substring(j, letters.$length())
+                    j = letters.$length()
+                } else {
+                    if i >= n { return Error::MissingValue(spec.name) }
+                    value = given.get(i)
+                    i += 1
+                }
+                args.record(spec, value)
+            }
+        }
+
+        // Defaults for what was not given.
+        for spec in self.options {
+            if !spec.isFlag && !spec.many && !spec.fallback.$isEmpty() &&
+                !args.values.holds(spec.name) {
+                var one = vector::Vector<String>()
+                one.push(spec.fallback)
+                args.values.put(spec.name, one)
+            }
+        }
+
+        // The positionals have to line up with what was declared.
+        let wanted = self.positionals.length()
+        let got = args.positionalsGiven.length()
+        if got < wanted {
+            return Error::MissingPositional(self.positionals.get(got).name)
+        }
+        if got > wanted && !self.restAllowed {
+            return Error::TooManyPositionals(args.positionalsGiven.get(wanted))
+        }
+        args.declaredCount = wanted
+        Ok(args)
+    }
+
+    /// Parses the program's command line, and on anything but success says
+    /// why and stops: `--help` prints the usage page and exits 0, a mistake
+    /// prints it and the usage line and exits 2.
+    pub fn parseOrExit(&self) -> Arguments {
+        match self.parse() {
+            Ok(args) => args,
+            Err(Error::Help) => {
+                io::print(self.usage())
+                process::exit(0)
+            },
+            Err(Error::Version) => {
+                io::println(self.program + " " + self.version)
+                process::exit(0)
+            },
+            Err(e) => {
+                io::eprintln(self.program + ": " + describe(e))
+                io::eprintln(self.usageLine())
+                io::eprintln("try '" + self.program + " --help' for more")
+                process::exit(2)
+            },
+        }
+    }
+
+    fn findLong(&self, name: String) -> Result<Spec, Error> {
+        for spec in self.options {
+            if spec.name == name { return Ok(spec) }
+        }
+        Err(Error::UnknownOption("--" + name))
+    }
+
+    fn findShort(&self, letter: String) -> Result<Spec, Error> {
+        for spec in self.options {
+            if spec.short == letter { return Ok(spec) }
+        }
+        Err(Error::UnknownOption("-" + letter))
+    }
+
+    //=== Help ===========================================================//
+
+    /// The one-line synopsis: `usage: greet [options] <times> [files...]`.
+    pub fn usageLine(&self) -> String {
+        var line = "usage: " + self.program
+        if !self.options.isEmpty() { line += " [options]" }
+        for p in self.positionals { line += " <" + p.name + ">" }
+        if self.restAllowed { line += " [" + self.restName + "...]" }
+        line
+    }
+
+    /// The whole usage page, as `--help` prints it.
+    pub fn usage(&self) -> String {
+        var out = self.usageLine() + "\n"
+        if !self.summary.$isEmpty() { out += "\n" + self.summary + "\n" }
+
+        // Left column wide enough for the longest entry, then two spaces.
+        var width = 0
+        var lefts = vector::Vector<String>()
+        for spec in self.options {
+            var left = if spec.short.$isEmpty() { "    " } else { "-" + spec.short + ", " }
+            left += "--" + spec.name
+            if !spec.isFlag { left += " <" + spec.name + ">" }
+            lefts.push(left)
+            if left.$length() > width { width = left.$length() }
+        }
+        for p in self.positionals {
+            if p.name.$length() + 2 > width { width = p.name.$length() + 2 }
+        }
+        if self.restAllowed && self.restName.$length() + 5 > width {
+            width = self.restName.$length() + 5
+        }
+
+        if !self.positionals.isEmpty() || self.restAllowed {
+            out += "\narguments:\n"
+            for p in self.positionals {
+                out += "  " + text::padEnd("<" + p.name + ">", width, ' ') + "  " + p.help + "\n"
+            }
+            if self.restAllowed {
+                out += "  " + text::padEnd("[" + self.restName + "...]", width, ' ') +
+                       "  " + self.restHelp + "\n"
+            }
+        }
+        if !self.options.isEmpty() {
+            out += "\noptions:\n"
+            var k = 0
+            for spec in self.options {
+                var help = spec.help
+                if !spec.isFlag && !spec.fallback.$isEmpty() {
+                    help += " (default: " + spec.fallback + ")"
+                }
+                if spec.many { help += " (repeatable)" }
+                out += "  " + text::padEnd(lefts.get(k), width, ' ') + "  " + help + "\n"
+                k += 1
+            }
+            out += "  " + text::padEnd("-h, --help", width, ' ') + "  show this help\n"
+            if !self.version.$isEmpty() {
+                out += "  " + text::padEnd("    --version", width, ' ') + "  show the version\n"
+            }
+        }
+        out
+    }
+}
+
+/// What the command line turned out to hold.
+pub class Arguments {
+    var flags: dictionary::Map<String, bool>
+    var values: dictionary::Map<String, vector::Vector<String>>
+    var positionalsGiven: vector::Vector<String>
+    var declaredCount: i64
+
+    fn init(&self) {
+        self.flags = dictionary::Map<String, bool>()
+        self.values = dictionary::Map<String, vector::Vector<String>>()
+        self.positionalsGiven = vector::Vector<String>()
+        self.declaredCount = 0
+    }
+
+    fn record(&var self, spec: Spec, value: String) {
+        if spec.many {
+            var list = self.values.at(spec.name) ?? vector::Vector<String>()
+            list.push(value)
+            self.values.put(spec.name, list)
+        } else {
+            var one = vector::Vector<String>()
+            one.push(value)
+            self.values.put(spec.name, one)
+        }
+    }
+
+    /// True when the flag was given.
+    pub fn has(&self, name: String) -> bool { self.flags.at(name) ?? false }
+
+    /// The option's value — the last one, if it was given more than once —
+    /// or its default, or `nil`.
+    pub fn value(&self, name: String) -> String? {
+        match self.values.at(name) {
+            Some(list) => list.last(),
+            None => nil,
+        }
+    }
+
+    /// The option's value as a whole number, or `nil` when absent or not one.
+    pub fn intValue(&self, name: String) -> i64? {
+        let v = self.value(name)?
+        v.$toInt()
+    }
+
+    /// Every value a repeatable option was given, in order. Empty if none.
+    pub fn values(&self, name: String) -> vector::Vector<String> {
+        self.values.at(name) ?? vector::Vector<String>()
+    }
+
+    /// True when the option was given at all (or has a default).
+    pub fn given(&self, name: String) -> bool { self.values.holds(name) }
+
+    /// The declared positional at `index`, or `nil` past the end.
+    pub fn positional(&self, index: i64) -> String? {
+        if index < 0 || index >= self.declaredCount { return nil }
+        self.positionalsGiven.at(index)
+    }
+
+    /// Whatever came after the declared positionals.
+    pub fn rest(&self) -> vector::Vector<String> {
+        var out = vector::Vector<String>()
+        var i = self.declaredCount
+        while i < self.positionalsGiven.length() {
+            out.push(self.positionalsGiven.get(i))
+            i += 1
+        }
+        out
+    }
+
+    /// Every positional, declared and rest alike.
+    pub fn allPositionals(&self) -> vector::Vector<String> { self.positionalsGiven }
+}
+
+/// Why a command line was not accepted — or that it asked for help.
+pub enum Error {
+    /// `--help` or `-h` was given.
+    Help,
+    /// `--version` was given.
+    Version,
+    /// An option nobody declared, with the dashes as written.
+    UnknownOption(String),
+    /// An option that takes a value was the last thing on the line.
+    MissingValue(String),
+    /// A flag was written `--flag=value`.
+    FlagGivenValue(String),
+    /// A declared positional was not given; this is its name.
+    MissingPositional(String),
+    /// More positionals than were declared; this is the first extra one.
+    TooManyPositionals(String),
+}
+
+/// The error as a sentence.
+pub fn describe(e: Error) -> String {
+    match e {
+        Error::Help => "help requested",
+        Error::Version => "version requested",
+        Error::UnknownOption(o) => "unknown option '" + o + "'",
+        Error::MissingValue(o) => "option '--" + o + "' needs a value",
+        Error::FlagGivenValue(o) => "'--" + o + "' is a flag and takes no value",
+        Error::MissingPositional(p) => "missing argument <" + p + ">",
+        Error::TooManyPositionals(p) => "unexpected argument '" + p + "'",
+    }
+}
+
+bind io::Display to Error {
+    fn display(&self) -> String { describe(*self) }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "carbon"
+version = "0.1.0"
+edition = "2025"
+description = ""
+authors = []
+
+[build]
+# none | minimal | full — how much checking the compiler inserts.
+safety = "full"
+optimize = 0
+debug = true
+warnings-as-errors = false
+
+[dependencies]
+
+# This package builds src/main.rune into an executable.

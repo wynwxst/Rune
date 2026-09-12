@@ -1,0 +1,55 @@
+// More than one `bind` may apply to one type. The narrower one wins, and
+// which is narrower does not depend on the order they were written in.
+// EXPECT: a wrapped i64
+// EXPECT: some wrapper
+// EXPECT: a tagged wrapper
+// EXPECT: some wrapper
+// EXPECT: plain
+// EXPECT: nested
+// EXPECT: tagged
+// EXPECT: other
+import std::io
+
+struct Wrapper<T> { value: T }
+mark Show { fn show(&self) -> String }
+mark Tag  { fn tag(&self) -> String }
+mark Mood { fn mood(&self) -> String }
+
+bind Tag to i64 { fn tag(&self) -> String { "t" } }
+bind Mood to String { fn mood(&self) -> String { "m" } }
+
+//=== A written-out target beats a parameterised one =====================//
+// Declared *after* the general case, and still the one that applies.
+bind<T> Show to Wrapper<T> { fn show(&self) -> String { "some wrapper" } }
+bind Show to Wrapper<i64> { fn show(&self) -> String { "a wrapped i64" } }
+
+//=== More of the shape pinned down beats less ===========================//
+struct Boxed<T> { inner: T }
+mark Depth { fn depth(&self) -> String }
+bind<T> Depth to Boxed<T> { fn depth(&self) -> String { "plain" } }
+bind<T> Depth to Boxed<Boxed<T>> { fn depth(&self) -> String { "nested" } }
+
+//=== More asked of the parameters beats less ============================//
+mark Kind { fn kind(&self) -> String }
+bind<T> Kind to Wrapper<T> { fn kind(&self) -> String { "some wrapper" } }
+bind<T> Kind to Wrapper<T> where T: Tag { fn kind(&self) -> String { "a tagged wrapper" } }
+
+//=== Disjoint clauses are not a clash ===================================//
+mark Which { fn which(&self) -> String }
+bind<T> Which to Wrapper<T> where T: Tag  { fn which(&self) -> String { "tagged" } }
+bind<T> Which to Wrapper<T> where T: Mood { fn which(&self) -> String { "other" } }
+
+fn main() -> i64 {
+    io::println((Wrapper<i64> { value: 1 }).show())
+    io::println((Wrapper<f64> { value: 1.0 }).show())
+
+    io::println((Wrapper<i64> { value: 1 }).kind())
+    io::println((Wrapper<f64> { value: 1.0 }).kind())
+
+    io::println((Boxed<i64> { inner: 1 }).depth())
+    io::println((Boxed<Boxed<i64>> { inner: Boxed<i64> { inner: 1 } }).depth())
+
+    io::println((Wrapper<i64> { value: 1 }).which())
+    io::println((Wrapper<String> { value: "s" }).which())
+    0
+}

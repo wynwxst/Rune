@@ -1,0 +1,102 @@
+// Channels, Arc, durations and sleeping.
+// EXPECT: arc sum: 17, original intact: 4
+// EXPECT: channel sum: 5050
+// EXPECT: three workers: 500500
+// EXPECT: blocking receive: hello world
+// EXPECT: pending after two sends: 2
+// EXPECT: tryReceive on empty: true
+// EXPECT: 1500ms 1500 1 1.5
+// EXPECT: 2s 3m 5us 0s
+// EXPECT: 250ms + 750ms = 1s
+// EXPECT: slept at least 60ms: true
+import std::io
+import std::thread
+import std::time
+
+fn consume(line: thread::Channel<i64>) -> i64 {
+    var total = 0
+    while true {
+        match line.receive() {
+            Some(v) => total += v,
+            None => break,
+        }
+    }
+    total
+}
+
+fn drain(line: thread::Channel<String>) -> String {
+    var out = ""
+    while true {
+        match line.receive() {
+            Some(s) => out += s,
+            None => break,
+        }
+    }
+    out
+}
+
+fn readTable(shared: thread::Arc<[4:i64]>) -> i64 {
+    var total = 0
+    for v in shared.get() { total += v }
+    total
+}
+
+fn main() -> i64 {
+    // `Arc`: one value, read from another thread, the original untouched.
+    let table = thread::Arc<[4:i64]>([2, 3, 5, 7])
+    var r = thread::spawn(readTable, table)
+    println!("arc sum: {}, original intact: {}",
+             r.join(), table.get().$length())
+
+    // One producer, one consumer.
+    let line = thread::Channel<i64>()
+    var worker = thread::spawn(consume, line)
+    var i = 1
+    while i <= 100 { line.send(i); i += 1 }
+    line.close()
+    println!("channel sum: {}", worker.join())
+
+    // Three consumers sharing one queue: the totals add up to the whole.
+    let jobs = thread::Channel<i64>()
+    var a = thread::spawn(consume, jobs)
+    var b = thread::spawn(consume, jobs)
+    var c = thread::spawn(consume, jobs)
+    var j = 1
+    while j <= 1000 { jobs.send(j); j += 1 }
+    jobs.close()
+    println!("three workers: {}", a.join() + b.join() + c.join())
+
+    // The consumer starts first and waits for each value.
+    let words = thread::Channel<String>()
+    var reader = thread::spawn(drain, words)
+    thread::sleep(time::milliseconds(20))
+    words.send("hello")
+    thread::sleep(time::milliseconds(20))
+    words.send(" ")
+    words.send("world")
+    words.close()
+    println!("blocking receive: {}", reader.join())
+
+    // Taking without waiting.
+    let idle = thread::Channel<i64>()
+    idle.send(1)
+    idle.send(2)
+    println!("pending after two sends: {}", idle.pending())
+    idle.tryReceive()
+    idle.tryReceive()
+    println!("tryReceive on empty: {}", idle.tryReceive() == nil)
+
+    // Durations name their unit, and print in the largest that fits.
+    let d = time::milliseconds(1500)
+    println!("{} {} {} {}", d, d.asMilliseconds(), d.asSeconds(),
+             d.asSecondsFloat())
+    println!("{} {} {} {}", time::seconds(2), time::minutes(3),
+             time::microseconds(5), time::zero())
+    println!("250ms + 750ms = {}",
+             time::milliseconds(250) + time::milliseconds(750))
+
+    let start = time::now()
+    thread::sleep(time::milliseconds(60))
+    println!("slept at least 60ms: {}", start.elapsed().asMilliseconds() >= 60)
+    0
+}

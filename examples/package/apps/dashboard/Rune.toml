@@ -1,0 +1,15 @@
+[package]
+name = "dashboard"
+version = "0.1.0"
+edition = "2025"
+description = "A program that pulls the whole ecosystem together: shapes measured, statistics reported, a logger watching"
+authors = ["The Rune examples"]
+
+[build]
+safety = "full"
+
+[dependencies]
+report = "1.2.0"
+geometry = "0.3.0"
+shapes = "1.0.0"
+logger = { version = "1.0.0", registry = "lab" }

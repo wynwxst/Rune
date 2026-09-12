@@ -1,0 +1,33 @@
+// statistics::spread — dispersion measures, kept apart from the main module.
+
+extern "C" {
+    fn sqrt(value: f64) -> f64
+}
+
+@safe("sqrt of a sum of squares is always in libm's domain")
+fn squareRoot(value: f64) -> f64 {
+    sqrt(value)
+}
+
+/// Population standard deviation about a known `mean`.
+pub fn standardDeviation(values: [f64], mean: f64) -> f64 {
+    if values.$isEmpty() { return 0.0 }
+    var sumSquares = 0.0
+    for v in values {
+        let delta = v - mean
+        sumSquares += delta * delta
+    }
+    squareRoot(sumSquares / (values.$length() as f64))
+}
+
+/// Largest minus smallest, or `None` when there is nothing to measure.
+pub fn range(values: [f64]) -> f64? {
+    if values.$isEmpty() { return nil }
+    var smallest = values[0]
+    var largest = values[0]
+    for v in values {
+        if v < smallest { smallest = v }
+        if v > largest { largest = v }
+    }
+    largest - smallest
+}

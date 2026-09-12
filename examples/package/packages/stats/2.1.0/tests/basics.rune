@@ -1,0 +1,19 @@
+import std::testing
+import stats
+
+fn main() -> i64 {
+    let values: [5:f64] = [2.0, 4.0, 4.0, 4.0, 6.0]
+    testing::equal("sum", stats::sum(values), 20.0)
+    testing::equal("mean", stats::mean(values) ?? 0.0, 4.0)
+    testing::equal("median", stats::median(values) ?? 0.0, 4.0)
+    testing::equal("variance", stats::variance(values) ?? 0.0, 1.6)
+    testing::equal("minimum", stats::minimum(values) ?? 0.0, 2.0)
+    testing::equal("maximum", stats::maximum(values) ?? 0.0, 6.0)
+    let even: [4:f64] = [1.0, 2.0, 3.0, 4.0]
+    testing::equal("median of an even count", stats::median(even) ?? 0.0, 2.5)
+    let none: [0:f64] = []
+    testing::isNone("no mean of nothing", stats::mean(none))
+    testing::isNone("no summary of nothing", stats::summarise(none))
+    testing::equal("summary count", (stats::summarise(values) ?? stats::summarise(even).unwrap()).count, 5)
+    testing::summary()
+}

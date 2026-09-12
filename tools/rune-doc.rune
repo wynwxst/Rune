@@ -1,0 +1,2011 @@
+@type(Executable)
+// The documentation generator, written in Rune.
+//
+//     rune-doc <input.rdoc|-> <docs-dir> <out-dir> [style.css] [app.js]
+//
+// Two inputs, and they are independent of each other:
+//
+//   * the sidecar `runec --emit-docs` writes, which is every public
+//     declaration the compiler saw, with the comments that were on it;
+//   * the `docs/` directory itself, which is the author's — every Markdown
+//     file under it is a page of hand-written prose. `order.json`, if present,
+//     names the order those pages appear in; it is not itself a page.
+//
+// Either may be missing. A package with no source still has its guide built,
+// and a package with no guide still has its API built.
+//
+// The output is one file, `<out-dir>/index.html`, and nothing else is
+// written. The two directories are given separately and deliberately: `docs/`
+// is yours and is only ever read, and what is generated goes under `target/`
+// with the rest of the build, where deleting it costs nothing.
+//
+// Everything about an entity is in one place. A type's fields, variants and
+// methods are rendered beneath it rather than given pages of their own,
+// because that is where a reader looks for them.
+
+import std::io
+import std::process
+import std::text
+import std::collections::vector
+import std::dictionary
+
+//===--------------------------------------------------------------------===//
+// What the compiler reported
+//===--------------------------------------------------------------------===//
+
+/// One record out of the sidecar: a declaration, and what was written above
+/// it. `kind` is what it is; `owner` is the type it belongs to, when it
+/// belongs to one.
+class Entry {
+    pub kind: String
+    pub module: String
+    pub name: String
+    pub owner: String
+    pub sig: String
+    pub base: String
+    pub isPublic: bool
+    pub doc: String
+    pub decl: String
+
+    fn init(self) {
+        self.kind = ""
+        self.module = ""
+        self.name = ""
+        self.owner = ""
+        self.sig = ""
+        self.base = ""
+        self.isPublic = false
+        self.doc = ""
+        self.decl = ""
+    }
+}
+
+/// One hand-written page found under `docs/`.
+class Page {
+    pub path: String        ///< relative to the docs directory
+    pub folder: String      ///< the directory it sits in, "" at the root
+    pub title: String
+    pub body: String
+    pub isIndex: bool
+    /// The module this page is *about*, when its path spells one:
+    /// `std/io.md` is the prose for `std::io`, and is rendered at the top
+    /// of that module's page rather than as a page of its own.
+    pub module: String
+
+    fn init(self) {
+        self.path = ""
+        self.folder = ""
+        self.title = ""
+        self.body = ""
+        self.isIndex = false
+        self.module = ""
+    }
+}
+
+/// A `##` / `###` / `####` heading, for the tree under a page.
+class OutlineHeading {
+    pub level: i64
+    pub text: String
+
+    fn init(self) {
+        self.level = 0
+        self.text = ""
+    }
+}
+
+/// `\n` inside a sidecar value stands for a real line break.
+fn unescape(src: String) -> String {
+    var out = ""
+    var i = 0
+    while i < src.$length() {
+        let c = src.$substring(i, i + 1)
+        if c == "\\" && i + 1 < src.$length() {
+            let n = src.$substring(i + 1, i + 2)
+            if n == "n" { out += "\n"; i += 2; continue }
+            if n == "\\" { out += "\\"; i += 2; continue }
+        }
+        out += c
+        i += 1
+    }
+    out
+}
+
+fn keyOf(line: String) -> String {
+    var i = 0
+    while i < line.$length() {
+        if line.$byteAt(i) == 32 { return line.$substring(0, i) }
+        i += 1
+    }
+    line
+}
+
+fn valueOf(line: String) -> String {
+    var i = 0
+    while i < line.$length() {
+        if line.$byteAt(i) == 32 { return line.$substring(i + 1, line.$length()) }
+        i += 1
+    }
+    ""
+}
+
+/// Every record in the sidecar, in the order the compiler wrote them.
+fn readSidecar(src: String) -> vector::Vector<Entry> {
+    var out = vector::Vector<Entry>()
+    var cur = Entry()
+    var seen = false
+    for line in text::splitLines(src) {
+        if line.$isEmpty() {
+            if seen { out.push(cur) }
+            cur = Entry()
+            seen = false
+            continue
+        }
+        let k = keyOf(line)
+        let v = valueOf(line)
+        if k == "kind" { cur.kind = v; seen = true }
+        elif k == "module" { cur.module = v }
+        elif k == "name" { cur.name = v }
+        elif k == "owner" { cur.owner = v }
+        elif k == "sig" { cur.sig = unescape(v) }
+        elif k == "base" { cur.base = v }
+        elif k == "public" { cur.isPublic = v == "1" }
+        elif k == "doc" { cur.doc = unescape(v) }
+        elif k == "decl" { cur.decl = unescape(v) }
+    }
+    if seen { out.push(cur) }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// What the author wrote
+//===--------------------------------------------------------------------===//
+
+/// The directory part of a relative path, or "" when it has none.
+fn folderOf(path: String) -> String {
+    var cut = -1
+    var i = 0
+    while i < path.$length() {
+        if path.$byteAt(i) == 47 { cut = i }
+        i += 1
+    }
+    if cut < 0 { return "" }
+    path.$substring(0, cut)
+}
+
+fn fileOf(path: String) -> String {
+    let dir = folderOf(path)
+    if dir.$isEmpty() { return path }
+    path.$substring(dir.$length() + 1, path.$length())
+}
+
+/// Optional `docs/order.json`. Listed folders (and, under them, listed files)
+/// come first, in the order they were written; anything unlisted follows,
+/// alphabetically. Missing or unreadable is not an error — the guide still
+/// builds, in filesystem order as before.
+///
+/// Two shapes, both JSON:
+///
+///     ["intro", "guide"]
+///
+///     {
+///       "folders": ["intro", "guide"],
+///       "guide": ["usage.md", "examples.md"]
+///     }
+///
+/// The array is folder order only. The object names folders in `"folders"`
+/// (or, without that key, in the order the other keys appear) and may name
+/// the files inside each one.
+global var orderFolders: vector::Vector<String> = vector::Vector<String>()
+global var orderPages: vector::Vector<String> = vector::Vector<String>()
+
+class JsonCursor {
+    pub src: String
+    pub at: i64
+
+    fn init(self) {
+        self.src = ""
+        self.at = 0
+    }
+}
+
+fn jsonAtEnd(c: JsonCursor) -> bool {
+    c.at >= c.src.$length()
+}
+
+fn jsonPeek(c: JsonCursor) -> i64 {
+    if jsonAtEnd(c) { return -1 }
+    c.src.$byteAt(c.at) as i64
+}
+
+fn jsonSkipWs(c: JsonCursor) {
+    loop {
+        let b = jsonPeek(c)
+        if b != 32 && b != 9 && b != 10 && b != 13 { return }
+        c.at += 1
+    }
+}
+
+fn jsonSkipString(c: JsonCursor) {
+    if jsonPeek(c) != 34 { return }
+    c.at += 1
+    while !jsonAtEnd(c) {
+        let b = jsonPeek(c)
+        c.at += 1
+        if b == 92 && !jsonAtEnd(c) { c.at += 1; continue }
+        if b == 34 { return }
+    }
+}
+
+/// Walks one JSON value without keeping it, so an unknown key does not stall
+/// the rest of the object.
+fn jsonSkipValue(c: JsonCursor) {
+    jsonSkipWs(c)
+    let b = jsonPeek(c)
+    if b == 34 { jsonSkipString(c); return }
+    if b == 91 || b == 123 {
+        let open = b
+        let close = if b == 91 { 93 } else { 125 }
+        c.at += 1
+        var depth = 1
+        while !jsonAtEnd(c) && depth > 0 {
+            let n = jsonPeek(c)
+            if n == 34 { jsonSkipString(c); continue }
+            c.at += 1
+            if n == open { depth += 1 }
+            elif n == close { depth -= 1 }
+        }
+        return
+    }
+    while !jsonAtEnd(c) {
+        let n = jsonPeek(c)
+        if n == 44 || n == 93 || n == 125 { return }
+        c.at += 1
+    }
+}
+
+fn jsonParseString(c: JsonCursor) -> String {
+    jsonSkipWs(c)
+    if jsonPeek(c) != 34 { return "" }
+    c.at += 1
+    var out = ""
+    while !jsonAtEnd(c) {
+        let b = jsonPeek(c)
+        c.at += 1
+        if b == 34 { return out }
+        if b == 92 {
+            let n = jsonPeek(c)
+            c.at += 1
+            if n == 110 { out += "\n" }
+            elif n == 116 { out += "\t" }
+            elif n == 34 { out += "\"" }
+            elif n == 92 { out += "\\" }
+            elif n >= 0 { out += (n as Character).$str() }
+            continue
+        }
+        out += (b as Character).$str()
+    }
+    out
+}
+
+fn jsonParseStringArray(c: JsonCursor) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    jsonSkipWs(c)
+    if jsonPeek(c) != 91 { jsonSkipValue(c); return out }
+    c.at += 1
+    loop {
+        jsonSkipWs(c)
+        let b = jsonPeek(c)
+        if b == 93 { c.at += 1; return out }
+        if b < 0 { return out }
+        if b == 44 { c.at += 1; continue }
+        if b == 34 { out.push(jsonParseString(c)); continue }
+        jsonSkipValue(c)
+    }
+}
+
+fn jsonIndexOf(list: vector::Vector<String>, name: String) -> i64 {
+    var i = 0
+    while i < list.length() {
+        if list.get(i) == name { return i }
+        i += 1
+    }
+    -1
+}
+
+/// Where `name` sits in `list`. Unlisted names sort after every listed one.
+fn jsonRank(list: vector::Vector<String>, name: String) -> i64 {
+    let at = jsonIndexOf(list, name)
+    if at >= 0 { return at }
+    1000000
+}
+
+fn loadOrder(root: String) {
+    orderFolders = vector::Vector<String>()
+    orderPages = vector::Vector<String>()
+    let path = io::joinPath(root, "order.json")
+    let src = match io::readToString(path) {
+        Ok(t) => t,
+        Err(e) => return,
+    }
+    var c = JsonCursor()
+    c.src = src
+    c.at = 0
+    jsonSkipWs(c)
+    let start = jsonPeek(c)
+    if start == 91 {
+        orderFolders = jsonParseStringArray(c)
+        return
+    }
+    if start != 123 { return }
+    c.at += 1
+    var fromKeys = vector::Vector<String>()
+    var explicit = vector::Vector<String>()
+    var hasExplicit = false
+    loop {
+        jsonSkipWs(c)
+        let b = jsonPeek(c)
+        if b == 125 { c.at += 1; break }
+        if b < 0 { break }
+        if b == 44 { c.at += 1; continue }
+        if b != 34 { jsonSkipValue(c); continue }
+        let key = jsonParseString(c)
+        jsonSkipWs(c)
+        if jsonPeek(c) == 58 { c.at += 1 }
+        jsonSkipWs(c)
+        if jsonPeek(c) != 91 {
+            jsonSkipValue(c)
+            continue
+        }
+        let names = jsonParseStringArray(c)
+        if key == "folders" {
+            explicit = names
+            hasExplicit = true
+            continue
+        }
+        fromKeys.push(key)
+        for name in names {
+            orderPages.push(key + "/" + name)
+        }
+    }
+    if hasExplicit { orderFolders = explicit } else { orderFolders = fromKeys }
+}
+
+/// A file stem read as a title: `getting-started.md` becomes
+/// `Getting started`. Only used when the page has no heading of its own.
+fn titleFromName(name: String) -> String {
+    var stem = text::withoutSuffix(name, ".md")
+    var out = ""
+    var start = true
+    var i = 0
+    while i < stem.$length() {
+        let b = stem.$byteAt(i)
+        if b == 45 || b == 95 { out += " "; i += 1; continue }
+        var c = stem.$substring(i, i + 1)
+        if start && b >= 97 && b <= 122 { c = ((b - 32) as Character).$str() }
+        out += c
+        start = false
+        i += 1
+    }
+    out
+}
+
+/// The first `# ` heading in a page, which is what it calls itself.
+fn titleOf(body: String, fallback: String) -> String {
+    for line in text::splitLines(body) {
+        let t = text::trim(line)
+        if text::startsWith(t, "# ") {
+            return text::trim(t.$substring(2, t.$length()))
+        }
+    }
+    fallback
+}
+
+/// The module a guide page's path spells: `std/io.md` is `std::io`, and
+/// `index.md` or a page in no folder spells nothing.
+fn moduleOfPath(rel: String) -> String {
+    if !text::endsWith(rel, ".md") { return "" }
+    let bare = rel.$substring(0, rel.$length() - 3)
+    if fileOf(bare) == "index" || fileOf(bare) == "README" { return "" }
+    text::replace(bare, "/", "::")
+}
+
+/// The guide page written for `module`, when there is one.
+fn guideFor(pages: vector::Vector<Page>, module: String) -> Page? {
+    for p in pages {
+        if p.module == module { return p }
+    }
+    nil
+}
+
+/// True when a folder holds a page that is not a module's prose — one that
+/// has to be shown as a written page, and so needs the folder to hang from.
+fn folderHasOwnPages(pages: vector::Vector<Page>, folder: String) -> bool {
+    for p in pages {
+        if p.folder == folder && p.module.$isEmpty() { return true }
+    }
+    false
+}
+
+/// Every Markdown page under `root`, except the build output.
+///
+/// `docs/` belongs to whoever writes it: there is no naming convention to
+/// follow and no front matter to add. A file is a page because it is there.
+/// `order.json`, when present, is the one file that is not a page — it names
+/// the order the others appear in.
+fn readGuide(root: String) -> vector::Vector<Page> {
+    loadOrder(root)
+    var pages = vector::Vector<Page>()
+    for rel in io::walkDirectory(root, 8) {
+        if !text::endsWith(rel, ".md") { continue }
+        // Older trees kept the generated page under `docs/target/`; it is
+        // written beside the build now, but one left over from before is not
+        // a page of anybody's guide.
+        if text::startsWith(rel, "target/") { continue }
+        let body = match io::readToString(io::joinPath(root, rel)) {
+            Ok(t) => t,
+            Err(e) => continue,
+        }
+        var p = Page()
+        p.path = rel
+        p.folder = folderOf(rel)
+        p.isIndex = fileOf(rel) == "index.md" || fileOf(rel) == "README.md"
+        p.body = body
+        p.title = titleOf(body, titleFromName(fileOf(rel)))
+        pages.push(p)
+    }
+    sortPages(pages)
+    pages
+}
+
+/// Reading order: the root before its folders, a folder's `index.md` (or
+/// `README.md`) before the rest of it, and everything else by `order.json`
+/// when that file is there, otherwise by name.
+fn sortPages(pages: vector::Vector<Page>) {
+    var i = 1
+    while i < pages.length() {
+        var j = i
+        while j > 0 && pageBefore(pages.get(j), pages.get(j - 1)) {
+            let hold = pages.get(j)
+            pages.set(j, pages.get(j - 1))
+            pages.set(j - 1, hold)
+            j -= 1
+        }
+        i += 1
+    }
+}
+
+fn pageBefore(a: Page, b: Page) -> bool {
+    if a.folder != b.folder {
+        if a.folder.$isEmpty() { return true }
+        if b.folder.$isEmpty() { return false }
+        let fa = jsonRank(orderFolders, a.folder)
+        let fb = jsonRank(orderFolders, b.folder)
+        if fa != fb { return fa < fb }
+        return a.folder < b.folder
+    }
+    if a.isIndex != b.isIndex { return a.isIndex }
+    let pa = jsonRank(orderPages, a.folder + "/" + fileOf(a.path))
+    let pb = jsonRank(orderPages, b.folder + "/" + fileOf(b.path))
+    if pa != pb { return pa < pb }
+    a.path < b.path
+}
+
+//===--------------------------------------------------------------------===//
+// The page, as it is put together
+//
+// Two things are built side by side: the tree on the left and the sections on
+// the right. A node in the tree names a section or an anchor inside one, and
+// carries the words a search should find it by.
+//===--------------------------------------------------------------------===//
+
+global var body: String = ""
+global var tree: String = ""
+global var pkgName: String = ""
+global var entryCount: i64 = 0
+/// The page currently being rendered. Relative `.md` links are resolved
+/// against its folder so they match the section ids.
+global var linkFrom: String = ""
+/// The id of the page whose headings are being rendered. A heading's own id
+/// is prefixed with it, so two pages that both say `## Examples` do not
+/// fight over one anchor. Empty while rendering a doc comment.
+global var headingScope: String = ""
+
+/// Guide pages that stand for a module, by path: `std/io.md` -> `std::io`.
+/// A link to one of them goes to the module's page, not to a page of its
+/// own, since that is where the prose ended up.
+global var moduleGuides: dictionary::Map<String, String> = dictionary::Map<String, String>()
+
+/// The id a heading gets, in the page it is on.
+fn headingId(title: String) -> String {
+    if headingScope.$isEmpty() { return slug(title) }
+    headingScope + "-" + slug(title)
+}
+
+/// An id that is safe in a URL and unique for the thing it names.
+fn slug(src: String) -> String {
+    var out = ""
+    var lastDash = true
+    var i = 0
+    while i < src.$length() {
+        let b = src.$byteAt(i)
+        if (b >= 97 && b <= 122) || (b >= 48 && b <= 57) {
+            out += src.$substring(i, i + 1)
+            lastDash = false
+        } elif b >= 65 && b <= 90 {
+            out += ((b + 32) as Character).$str()
+            lastDash = false
+        } elif !lastDash {
+            out += "-"
+            lastDash = true
+        }
+        i += 1
+    }
+    if !out.$isEmpty() && out.$byteAt(out.$length() - 1) == 45 {
+        out = out.$substring(0, out.$length() - 1)
+    }
+    if out.$isEmpty() { return "x" }
+    out
+}
+
+/// The words in some HTML, with the tags taken out — what the filter reads.
+/// Fenced examples (`<pre>…</pre>`) are skipped: searching for a word that
+/// only appears in a sample should not light up every page that happens to
+/// demonstrate it.
+fn plainWords(html: String) -> String {
+    var out = ""
+    var skip = 0
+    var i = 0
+    let n = html.$length()
+    while i < n {
+        if html.$byteAt(i) == 60 {
+            var j = i + 1
+            var closing = false
+            if j < n && html.$byteAt(j) == 47 { closing = true; j += 1 }
+            var name = ""
+            while j < n {
+                let b = html.$byteAt(j) as i64
+                if b >= 65 && b <= 90 { name += ((b + 32) as Character).$str(); j += 1 }
+                elif b >= 97 && b <= 122 { name += html.$substring(j, j + 1); j += 1 }
+                else { break }
+            }
+            while j < n && html.$byteAt(j) != 62 { j += 1 }
+            if j < n { j += 1 }
+            if name == "pre" {
+                if closing { if skip > 0 { skip -= 1 } } else { skip += 1 }
+            }
+            if skip == 0 { out += " " }
+            i = j
+            continue
+        }
+        if skip > 0 { i += 1; continue }
+        let b = html.$byteAt(i)
+        if b == 34 || b == 38 { out += " " }
+        else { out += html.$substring(i, i + 1) }
+        i += 1
+    }
+    out
+}
+
+fn attr(src: String) -> String {
+    var out = ""
+    var i = 0
+    while i < src.$length() {
+        let c = src.$substring(i, i + 1)
+        if c == "&" { out += "&amp;" }
+        elif c == "<" { out += "&lt;" }
+        elif c == ">" { out += "&gt;" }
+        elif c == "\"" { out += "&quot;" }
+        else { out += c }
+        i += 1
+    }
+    out
+}
+
+let TWIST = "<span class=\"twist\"><svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M6 4l4 4-4 4\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></span>"
+let SPACER = "<span class=\"spacer\"></span>"
+
+//===--------------------------------------------------------------------===//
+// What each page is
+//
+// Two pages can be called the same thing — a package's library and the
+// program it builds are both `json` — so what tells them apart is a mark
+// beside the name rather than a suffix bolted onto it. One glyph per kind,
+// in the tree and beside the heading, and the two `json`s read as two things
+// instead of as one with a mangled name.
+//===--------------------------------------------------------------------===//
+
+/// A document someone wrote.
+let ICON_PAGE = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 2.5h5l3 3v8h-8z\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linejoin=\"round\"/><path d=\"M9 2.5v3h3\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linejoin=\"round\"/></svg>"
+/// A folder of them.
+let ICON_FOLDER = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M2.5 4.5h4l1.2 1.5h5.8v7h-11z\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linejoin=\"round\"/></svg>"
+/// The library a package builds.
+let ICON_LIB = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M8 2.2l5.2 2.6L8 7.4 2.8 4.8z\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linejoin=\"round\"/><path d=\"M2.8 8L8 10.6 13.2 8M2.8 11.2L8 13.8l5.2-2.6\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+/// The program it builds.
+let ICON_BIN = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><rect x=\"2.2\" y=\"3.2\" width=\"11.6\" height=\"9.6\" rx=\"1.4\" stroke=\"currentColor\" stroke-width=\"1.2\"/><path d=\"M4.8 6.6l2 1.6-2 1.6M8.4 10h3\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+/// A module inside one.
+let ICON_MOD = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M6.2 2.8H4.4a1.2 1.2 0 00-1.2 1.2v8a1.2 1.2 0 001.2 1.2h1.8M9.8 2.8h1.8a1.2 1.2 0 011.2 1.2v8a1.2 1.2 0 01-1.2 1.2H9.8\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\"/></svg>"
+
+fn iconFor(kind: String) -> String {
+    if kind == "page" { return ICON_PAGE }
+    if kind == "folder" { return ICON_FOLDER }
+    if kind == "library" { return ICON_LIB }
+    if kind == "binary" { return ICON_BIN }
+    ICON_MOD
+}
+
+fn glyph(kind: String, what: String) -> String {
+    "<span class=\"glyph\" title=\"" + attr(what) + "\" aria-label=\"" +
+        attr(what) + "\">" + iconFor(kind) + "</span>"
+}
+
+//===--------------------------------------------------------------------===//
+// Pages
+//
+// One page per top-level entry, and one on screen at a time. A package's
+// whole reference in one scroll is a wall; split at the seams the tree
+// already has, it is a set of pages a reader can hold in their head.
+//===--------------------------------------------------------------------===//
+
+global var pageCount: i64 = 0
+global var pageIndex: String = ""
+
+fn openPage(id: String, label: String, kind: String, what: String) {
+    pageCount += 1
+    body += "<article class=\"page\" id=\"pg-" + id + "\" data-title=\"" +
+            attr(stripInline(label)) + "\" hidden>\n"
+    if !pageIndex.$isEmpty() { pageIndex += "," }
+    pageIndex += "pg-" + id
+}
+
+fn closePage() {
+    body += "</article>\n"
+}
+
+/// The tree entry that opens a page, with the mark that says what it is.
+/// `parent` is whether anything hangs beneath it; without children there is
+/// no arrow, because there is nothing to unfold.
+fn openPageNodeAt(id: String, label: String, kind: String, what: String,
+                  terms: String, parent: bool) {
+    tree += "<li class=\"" + (if parent { "has" } else { "leaf" }) +
+            "\" data-terms=\"" +
+            attr(stripInline(label) + " " + what + " " + terms) + "\">"
+    tree += "<a class=\"row" + (if parent { " parent" } else { "" }) +
+            " top\" href=\"#" + id + "\""
+    if parent { tree += " aria-expanded=\"false\"" }
+    tree += ">" + (if parent { TWIST } else { SPACER })
+    tree += "<span class=\"label\">" + inline(label) + "</span>"
+    tree += glyph(kind, what) + "</a>"
+    if parent { tree += "<ul hidden>" }
+}
+
+/// One line in the tree. `kind` is the small tag on the right; empty for the
+/// nodes that are headings rather than entries.
+fn node(id: String, label: String, kind: String, terms: String,
+        parent: bool) -> String {
+    var out = "<li class=\"" + (if parent { "has" } else { "leaf" }) +
+              "\" data-terms=\"" +
+              attr(stripInline(label) + " " + kind + " " + terms) + "\">"
+    out += "<a class=\"row" + (if parent { " parent" } else { "" }) +
+           "\" href=\"#" + id + "\""
+    if parent { out += " aria-expanded=\"false\"" }
+    out += ">" + (if parent { TWIST } else { SPACER })
+    out += "<span class=\"label\">" + inline(label) + "</span>"
+    if !kind.$isEmpty() { out += "<span class=\"kind\">" + attr(kind) + "</span>" }
+    out += "</a>"
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Sections
+//===--------------------------------------------------------------------===//
+
+/// Opens a section. Everything added until `endSection` lands inside it.
+///
+/// The mark beside the title is what tells two pages of the same name apart,
+/// so it goes where the name is rather than into the name.
+fn startSection(id: String, eyebrow: String, title: String, kind: String,
+                what: String) {
+    entryCount += 1
+    body += "<section id=\"" + id + "\">\n"
+    if !eyebrow.$isEmpty() {
+        body += "<p class=\"eyebrow\">" + attr(eyebrow) + "</p>\n"
+    }
+    body += "<h1>" + attr(title) + glyph(kind, what) + "</h1>\n"
+}
+
+fn endSection() {
+    body += "</section>\n"
+}
+
+/// A member: rendered under its parent in the page, and listed under it in
+/// the tree. Nothing here gets a page of its own.
+///
+/// A member with nothing written about it is one line — its signature already
+/// names it, and a heading above that would say the same word twice. One with
+/// prose gets the heading, because that is what a reader scans for.
+fn member(id: String, name: String, kind: String, sig: String, doc: String) {
+    entryCount += 1
+    let bare = doc.$isEmpty()
+    body += "<div class=\"member" + (if bare { " terse" } else { "" }) +
+            "\" id=\"" + id + "\">\n"
+    if !bare {
+        body += "<h4><span class=\"name\">" + attr(name) + "</span>"
+        if !kind.$isEmpty() {
+            body += "<span class=\"tag\">" + attr(kind) + "</span>"
+        }
+        body += "</h4>\n"
+    }
+    if !sig.$isEmpty() {
+        body += "<p class=\"sig\">" + highlightRune(sig)
+        if bare && !kind.$isEmpty() {
+            body += "<span class=\"tag\">" + attr(kind) + "</span>"
+        }
+        body += "</p>\n"
+    } elif bare {
+        body += "<p class=\"sig\"><span class=\"name\">" + attr(name) +
+                "</span>"
+        if !kind.$isEmpty() {
+            body += "<span class=\"tag\">" + attr(kind) + "</span>"
+        }
+        body += "</p>\n"
+    }
+    if !bare { body += renderMarkdown(doc) }
+    body += "</div>\n"
+    tree += node(id, name, kind, plainWords(doc), false) + "</li>"
+}
+
+/// The label above a run of members. Light enough to skim past.
+fn groupLabel(name: String) {
+    body += "<p class=\"group\">" + attr(name) + "</p>\n"
+}
+
+//===--------------------------------------------------------------------===//
+// Rendering the API
+//===--------------------------------------------------------------------===//
+
+fn isType(kind: String) -> bool {
+    kind == "class" || kind == "struct" || kind == "enum" || kind == "mark"
+}
+
+/// Everything in `entries` of one kind, belonging to one module or owner.
+fn selectBy(entries: vector::Vector<Entry>, kind: String, module: String,
+            owner: String) -> vector::Vector<Entry> {
+    var out = vector::Vector<Entry>()
+    for e in entries {
+        if e.kind != kind { continue }
+        if !module.$isEmpty() && e.module != module { continue }
+        if e.owner != owner { continue }
+        out.push(e)
+    }
+    out
+}
+
+/// A run of members under one label, skipping anything not public.
+fn renderMembers(list: vector::Vector<Entry>, label: String, tag: String,
+                 prefix: String, needsPublic: bool) {
+    var any = false
+    var seen = 0
+    for e in list {
+        if needsPublic && !e.isPublic { continue }
+        if !any { groupLabel(label); any = true }
+        seen += 1
+        // A binding is named after the pair, not after the mark: `As` alone
+        // would be the same entry a dozen times over.
+        var shown = e.name
+        if e.kind == "bind" && !e.owner.$isEmpty() {
+            shown = e.name + " to " + e.owner
+        }
+        member(prefix + "-" + seen.$str() + "-" + slug(shown), shown, tag,
+               e.sig, e.doc)
+    }
+}
+
+/// One type, with everything that belongs to it beneath it.
+fn renderType(entries: vector::Vector<Entry>, t: Entry, prefix: String) {
+    let id = prefix + "-" + slug(t.name)
+    entryCount += 1
+    body += "<h2 id=\"" + id + "\">" + attr(t.name) +
+            "<span class=\"tag\">" + attr(t.kind) + "</span></h2>\n"
+    if !t.base.$isEmpty() {
+        body += "<p class=\"lede\">Extends <code>" + attr(t.base) + "</code>.</p>\n"
+    }
+    if !t.doc.$isEmpty() { body += renderMarkdown(t.doc) }
+    // The shape is not repeated as a block of code: every variant, field and
+    // method is written out below, and saying it twice is what makes a
+    // reference page tiring to read.
+
+    // The tree entry for the type opens onto its own members.
+    var kids = false
+    for e in entries {
+        if e.owner != t.name { continue }
+        if e.kind == "variant" || e.kind == "assoc" || e.kind == "bind" {
+            kids = true
+        } elif (e.kind == "field" || e.kind == "method") && e.isPublic {
+            kids = true
+        }
+    }
+    tree += node(id, t.name, t.kind, plainWords(t.doc), kids)
+    if kids { tree += "<ul hidden>" }
+
+    renderMembers(selectBy(entries, "variant", "", t.name), "Variants",
+                  "variant", id, false)
+    renderMembers(selectBy(entries, "field", "", t.name), "Fields",
+                  "field", id, true)
+    renderMembers(selectBy(entries, "assoc", "", t.name), "Associated types",
+                  "type", id, false)
+    renderMembers(selectBy(entries, "method", "", t.name), "Methods",
+                  "fn", id, true)
+
+    var binds = vector::Vector<Entry>()
+    for e in entries {
+        if e.kind == "bind" && e.owner == t.name { binds.push(e) }
+    }
+    // A binding is never `pub` in the source — it cannot be hidden — so it is
+    // always reported: what a type carries is part of what it is.
+    renderMembers(binds, "Bindings", "bind", id + "-bind", false)
+
+    if kids { tree += "</ul>" }
+    tree += "</li>"
+}
+
+/// One module: its prose, its types, and everything it declares outright.
+/// True when a module has anything worth a section: prose of its own, or a
+/// public declaration. A binary's module usually has neither, and an empty
+/// heading in the tree is a promise the page does not keep.
+fn moduleHasContent(entries: vector::Vector<Entry>, module: String) -> bool {
+    for e in entries {
+        if e.module != module { continue }
+        if e.kind == "module" {
+            if !e.doc.$isEmpty() { return true }
+            continue
+        }
+        if e.kind == "method" || e.kind == "field" || e.kind == "variant" ||
+           e.kind == "assoc" || e.kind == "bind" { continue }
+        if e.isPublic { return true }
+    }
+    false
+}
+
+/// What a module is, from its name. The build names a binary's module
+/// `<package>__bin_<file>`, which is a fact about linking rather than
+/// something a reader should have to read.
+fn moduleKind(name: String, pkg: String) -> String {
+    if name.$find("__bin_") >= 0 { return "binary" }
+    if name == pkg { return "library" }
+    "module"
+}
+
+fn moduleWhat(kind: String) -> String {
+    if kind == "binary" { return "program" }
+    if kind == "library" { return "library" }
+    "module"
+}
+
+/// What a module is called on the page: the package for its own two modules,
+/// and the tail alone for everything inside it.
+fn moduleLabel(name: String, pkg: String) -> String {
+    let cut = name.$find("__bin_")
+    if cut >= 0 { return name.$substring(0, cut) }
+    if name == pkg { return name }
+    if text::startsWith(name, pkg + "::") {
+        return name.$substring(pkg.$length() + 2, name.$length())
+    }
+    name
+}
+
+fn renderModule(entries: vector::Vector<Entry>, pages: vector::Vector<Page>,
+                m: Entry) {
+    let id = "m-" + slug(m.name)
+    let kind = moduleKind(m.name, pkgName)
+    let what = moduleWhat(kind)
+    let label = moduleLabel(m.name, pkgName)
+    let guide = guideFor(pages, m.name)
+    var terms = plainWords(m.doc)
+    if guide is Some(g) { terms += " " + plainWords(g.body) }
+    openPage(id, label, kind, what)
+    openPageNodeAt(id, label, kind, what, terms, true)
+    startSection(id, what + " " + m.name, label, kind, what)
+    if !m.doc.$isEmpty() { body += renderMarkdown(m.doc) }
+    // The page written for this module, with its own headings navigable
+    // from the tree, then the reference below it.
+    if guide is Some(g) {
+        let saved = linkFrom
+        linkFrom = g.path
+        headingScope = id
+        body += "<div class=\"guide\">" +
+                renderMarkdown(stripFirstHeading(g.body)) + "</div>\n"
+        let kids = headingNodes(g.body)
+        headingScope = ""
+        linkFrom = saved
+        entryCount += 1
+        if !kids.$isEmpty() { tree += kids }
+    }
+    if m.doc.$isEmpty() && kind == "binary" {
+        body += "<p class=\"lede\">The program this package builds. "
+        body += "Everything public in it is below; the rest is its own.</p>\n"
+    }
+
+    var types = vector::Vector<Entry>()
+    for e in entries {
+        if isType(e.kind) && e.module == m.name && e.isPublic { types.push(e) }
+    }
+    if types.length() > 0 {
+        for t in types { renderType(entries, t, id) }
+    }
+
+    // A binding whose target is not a type this module documents — `bind
+    // As<Value> to i64`, say — still belongs somewhere: it is how a builtin
+    // learns to become one of these.
+    var loose = vector::Vector<Entry>()
+    for e in entries {
+        if e.kind != "bind" || e.module != m.name { continue }
+        var owned = false
+        for t in types { if t.name == e.owner { owned = true } }
+        if !owned { loose.push(e) }
+    }
+    renderMembers(loose, "Bindings", "bind", id + "-bind", false)
+
+    renderMembers(selectBy(entries, "fn", m.name, ""), "Functions",
+                  "fn", id + "-fn", true)
+    renderMembers(selectBy(entries, "macro", m.name, ""), "Macros",
+                  "macro", id + "-macro", true)
+    renderMembers(selectBy(entries, "alias", m.name, ""), "Type aliases",
+                  "type", id + "-alias", true)
+    renderMembers(selectBy(entries, "global", m.name, ""), "Globals",
+                  "global", id + "-global", true)
+
+    endSection()
+    closePage()
+    tree += "</ul></li>"
+}
+
+//===--------------------------------------------------------------------===//
+// Rendering the guide
+//===--------------------------------------------------------------------===//
+
+/// A hand-written page, as a section. The tree entry is separate, so a page
+/// can be the node that a folder's other pages hang beneath.
+fn renderPageBody(p: Page, kind: String, what: String) -> String {
+    let id = "p-" + slug(p.path)
+    entryCount += 1
+    let saved = linkFrom
+    let savedScope = headingScope
+    linkFrom = p.path
+    headingScope = id
+    body += "<section id=\"" + id + "\">\n"
+    body += "<h1>" + inline(p.title) + glyph(kind, what) + "</h1>\n"
+    let html = renderMarkdown(stripFirstHeading(p.body))
+    body += html
+    body += "</section>\n"
+    linkFrom = saved
+    headingScope = savedScope
+    html
+}
+
+/// A page of prose, on its own. Its `##` `###` and `####` headings become
+/// the entries beneath it, nested as they nest in the page, so a long page
+/// is navigable without being cut into files.
+fn renderPage(p: Page) {
+    openPage("p-" + slug(p.path), p.title, "page", "written")
+    let html = renderPageBody(p, "page", "written")
+    headingScope = "p-" + slug(p.path)
+    let kids = headingNodes(p.body)
+    headingScope = ""
+    openPageNodeAt("p-" + slug(p.path), p.title, "page", "written",
+                   plainWords(html), !kids.$isEmpty())
+    if !kids.$isEmpty() {
+        tree += kids
+        tree += "</ul></li>"
+    } else {
+        tree += "</li>"
+    }
+    closePage()
+}
+
+/// A page inside a folder: a section and a tree entry, but no page of its
+/// own — the folder is the page, and its members sit beneath it.
+fn renderNestedPage(p: Page) {
+    let id = "p-" + slug(p.path)
+    let html = renderPageBody(p, "page", "written")
+    headingScope = id
+    let kids = headingNodes(p.body)
+    headingScope = ""
+    if kids.$isEmpty() {
+        tree += node(id, p.title, "", plainWords(html), false) + "</li>"
+        return
+    }
+    tree += "<li class=\"has\" data-terms=\"" +
+            attr(stripInline(p.title) + " " + plainWords(html)) + "\">"
+    tree += "<a class=\"row parent\" href=\"#" + id +
+            "\" aria-expanded=\"false\">"
+    tree += TWIST + "<span class=\"label\">" + inline(p.title) + "</span></a>"
+    tree += "<ul hidden>" + kids + "</ul></li>"
+}
+
+/// A folder of hand-written pages, as one page.
+///
+/// Its `index.md` or `README.md`, when there is one, opens it; the rest
+/// follow underneath, in `order.json` order when that file names them.
+/// Without an index the folder is named after itself.
+fn renderFolder(pages: vector::Vector<Page>, folder: String) {
+    var label = titleFromName(fileOf(folder))
+    var id = "f-" + slug(folder)
+    for p in pages {
+        if p.folder == folder && p.isIndex {
+            label = p.title
+            id = "p-" + slug(p.path)
+        }
+    }
+    var hasKids = false
+    for p in pages {
+        if p.folder == folder && !p.isIndex { hasKids = true }
+    }
+    openPage(id, label, "folder", "guide")
+    var opened = false
+    for p in pages {
+        if p.folder != folder || !p.isIndex { continue }
+        let html = renderPageBody(p, "folder", "guide")
+        openPageNodeAt(id, label, "folder", "guide", plainWords(html), hasKids)
+        opened = true
+    }
+    if !opened {
+        body += "<section id=\"" + id + "\"><h1>" + inline(label) +
+                glyph("folder", "guide") + "</h1></section>\n"
+        openPageNodeAt(id, label, "folder", "guide", "", hasKids)
+    }
+    for p in pages {
+        if p.folder != folder || p.isIndex { continue }
+        renderNestedPage(p)
+    }
+    if hasKids { tree += "</ul>" }
+    tree += "</li>"
+    closePage()
+}
+
+/// `##` `###` and `####` as a nested tree under the page. The ids match the
+/// ones the Markdown renderer gives them. `#` is the page title, already a
+/// node of its own.
+fn headingLevel(t: String) -> i64 {
+    if !text::startsWith(t, "#") { return 0 }
+    var level = 0
+    while level < t.$length() && t.$byteAt(level) == 35 { level += 1 }
+    if level < 2 || level > 4 { return 0 }
+    if level >= t.$length() || t.$byteAt(level) != 32 { return 0 }
+    level
+}
+
+fn headingHasKids(list: vector::Vector<OutlineHeading>, i: i64) -> bool {
+    if i + 1 >= list.length() { return false }
+    list.get(i + 1).level > list.get(i).level
+}
+
+fn headingNodes(md: String) -> String {
+    var list = vector::Vector<OutlineHeading>()
+    var inFence = false
+    for line in text::splitLines(md) {
+        let t = text::trim(line)
+        if text::startsWith(t, "```") { inFence = !inFence; continue }
+        if inFence { continue }
+        let level = headingLevel(t)
+        if level == 0 { continue }
+        let label = text::trim(t.$substring(level + 1, t.$length()))
+        if label.$isEmpty() { continue }
+        var h = OutlineHeading()
+        h.level = level
+        h.text = label
+        list.push(h)
+    }
+    if list.length() == 0 { return "" }
+
+    var out = ""
+    var stack = vector::Vector<i64>()
+    var i = 0
+    while i < list.length() {
+        let h = list.get(i)
+        let L = h.level
+        var sibling = false
+        while !stack.isEmpty() {
+            let top = stack.get(stack.length() - 1)
+            if top < L { break }
+            out += "</li>"
+            stack.pop()
+            if top > L && !stack.isEmpty() { out += "</ul>" }
+            if top == L { sibling = true }
+        }
+        if !stack.isEmpty() && L > stack.get(stack.length() - 1) && !sibling {
+            out += "<ul hidden>"
+        }
+        out += node(headingId(h.text), h.text, "", "", headingHasKids(list, i))
+        stack.push(L)
+        i += 1
+    }
+    while !stack.isEmpty() {
+        out += "</li>"
+        stack.pop()
+        if !stack.isEmpty() { out += "</ul>" }
+    }
+    out
+}
+
+/// A heading with its backticks and emphasis removed — search terms and
+/// the pager title, where the marks would only get in the way.
+fn stripInline(src: String) -> String {
+    var out = ""
+    var i = 0
+    while i < src.$length() {
+        let b = src.$byteAt(i)
+        if b != 96 && b != 42 { out += src.$substring(i, i + 1) }
+        i += 1
+    }
+    out
+}
+
+fn stripFirstHeading(page: String) -> String {
+    if !text::startsWith(page, "# ") { return page }
+    var i = 0
+    while i < page.$length() && page.$byteAt(i) != 10 { i += 1 }
+    while i < page.$length() && page.$byteAt(i) == 10 { i += 1 }
+    page.$substring(i, page.$length())
+}
+
+//===--------------------------------------------------------------------===//
+// The document
+//===--------------------------------------------------------------------===//
+
+global var style: String = ""
+global var script: String = ""
+
+let ICON_MENU = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M2.5 4h11M2.5 8h11M2.5 12h11\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"/></svg>"
+let ICON_FOLD = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><path d=\"M3 6l5-3.5L13 6M3 10l5 3.5L13 10\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+let ICON_FIND = "<svg viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><circle cx=\"7\" cy=\"7\" r=\"4.2\" stroke=\"currentColor\" stroke-width=\"1.5\"/><path d=\"M10.2 10.2L14 14\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\"/></svg>"
+
+fn writeDocument(dir: String) -> bool {
+    io::makeDirectories(dir)
+
+    var page = "<!doctype html>\n<html lang=\"en\">\n<head>\n"
+    page += "<meta charset=\"utf-8\">\n"
+    page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+    page += "<title>" + attr(pkgName) + "</title>\n"
+    page += "<style>" + style + "</style>\n"
+    page += "</head>\n<body>\n"
+    page += "<div class=\"shell\">\n"
+    page += "<aside class=\"side\">\n"
+    page += "  <div class=\"side-top\">\n"
+    page += "    <button class=\"icon\" id=\"menu\" type=\"button\" "
+    page += "aria-pressed=\"false\" aria-expanded=\"true\" "
+    page += "aria-controls=\"tree\" title=\"Hide the contents\" "
+    page += "aria-label=\"Hide the contents\">" + ICON_MENU + "</button>\n"
+    page += "    <span class=\"side-name\">" + attr(pkgName) + "</span>\n"
+    page += "    <button class=\"icon\" id=\"collapse\" type=\"button\" "
+    page += "aria-pressed=\"false\" title=\"Expand everything\" "
+    page += "aria-label=\"Expand everything\">" + ICON_FOLD + "</button>\n"
+    page += "    <button class=\"icon\" id=\"find\" type=\"button\" "
+    page += "aria-pressed=\"false\" title=\"Search\" "
+    page += "aria-label=\"Search\">" + ICON_FIND + "</button>\n"
+    page += "  </div>\n"
+    page += "  <div class=\"finder\" id=\"finder\" hidden>"
+    page += "<input id=\"q\" type=\"search\" autocomplete=\"off\" "
+    page += "placeholder=\"Filter\" aria-label=\"Filter contents\"></div>\n"
+    page += "  <p class=\"empty\" id=\"empty\" aria-live=\"polite\">Nothing matches.</p>\n"
+    page += "  <nav class=\"tree\" id=\"tree\" aria-label=\"Contents\"><ul>"
+    page += tree
+    page += "</ul></nav>\n"
+    page += "</aside>\n"
+    page += "<main>\n" + body
+    page += "<nav class=\"pager\" id=\"pager\" aria-label=\"Pages\" hidden>"
+    page += "</nav>\n</main>\n"
+    page += "</div>\n"
+    page += "<script>" + script + "</script>\n"
+    page += "</body>\n</html>\n"
+
+    match io::writeString(io::joinPath(dir, "index.html"), page) {
+        Ok(n) => true,
+        Err(e) => {
+            io::println("  cannot write the page: " + io::describe(e))
+            false
+        }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Driver
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    if process::argCount() < 4 {
+        io::println("usage: rune-doc <input.rdoc|-> <docs-dir> <out-dir> [style.css [app.js]]")
+        return 2
+    }
+    let input = process::arg(1)
+    // Read from, and written to. Two directories rather than one: the guide is
+    // the author's and is only read; the page is generated and belongs with
+    // the build.
+    let root = process::arg(2)
+    let outDir = process::arg(3)
+
+    // A missing sidecar is not a failure: a package with no source still has
+    // a guide, and that is the whole documentation for it.
+    var sidecar = ""
+    if input != "-" {
+        match io::readToString(input) {
+            Ok(t) => sidecar = t,
+            Err(e) => {},
+        }
+    }
+    if process::argCount() > 4 {
+        match io::readToString(process::arg(4)) {
+            Ok(css) => style = css,
+            Err(e) => io::println("  no stylesheet at " + process::arg(4)),
+        }
+    }
+    if process::argCount() > 5 {
+        match io::readToString(process::arg(5)) {
+            Ok(js) => script = js,
+            Err(e) => {},
+        }
+    }
+
+    io::makeDirectories(root)
+    let entries = readSidecar(sidecar)
+    let pages = readGuide(root)
+
+    // A page whose path spells a module's name — `std/io.md` for `std::io`
+    // — is that module's prose. It goes at the top of the module's own page,
+    // where the reference is, so `rune doc std::io` lands on one page that
+    // says what the module is for before it lists what is in it.
+    for p in pages {
+        let asModule = moduleOfPath(p.path)
+        for e in entries {
+            if e.kind == "module" && e.name == asModule {
+                p.module = e.name
+                moduleGuides.put(p.path, e.name)
+            }
+        }
+    }
+
+    // The package's name: the first module's own root, or the directory the
+    // documentation is being written into.
+    for e in entries {
+        if e.kind == "module" && pkgName.$isEmpty() {
+            var base = e.name
+            let cut = e.name.$find("::")
+            if cut >= 0 { base = e.name.$substring(0, cut) }
+            pkgName = base
+        }
+    }
+    // Nothing was compiled, so the name comes from where the documentation
+    // is being written: `<package>/docs` is named after the package, not
+    // after the folder the pages happen to sit in.
+    if pkgName.$isEmpty() {
+        var here = text::withoutSuffix(text::trimEnd(root), "/")
+        var last = fileOf(here)
+        if last == "docs" || last == "doc" { last = fileOf(folderOf(here)) }
+        pkgName = last
+    }
+    if pkgName.$isEmpty() { pkgName = "Documentation" }
+
+    // The guide first: it is what someone reads, and the reference is what
+    // they come back to. A page that belongs to a module is rendered with
+    // the module, below.
+    for p in pages {
+        if p.folder.$isEmpty() && p.module.$isEmpty() { renderPage(p) }
+    }
+    var folder = ""
+    for p in pages {
+        if p.folder.$isEmpty() || p.folder == folder { continue }
+        if !folderHasOwnPages(pages, p.folder) { continue }
+        folder = p.folder
+        renderFolder(pages, folder)
+    }
+
+    // The library, then what is inside it, then the program it builds: the
+    // order someone reads them in, rather than the order they compiled in.
+    for pass in 0..3 {
+        for e in entries {
+            if e.kind != "module" { continue }
+            let kind = moduleKind(e.name, pkgName)
+            var slot = 1
+            if kind == "library" { slot = 0 }
+            if kind == "binary" { slot = 2 }
+            if slot != pass { continue }
+            if kind != "binary" && !moduleHasContent(entries, e.name) &&
+               guideFor(pages, e.name).isNil() { continue }
+            renderModule(entries, pages, e)
+        }
+    }
+
+    if body.$isEmpty() {
+        openPage("nothing", pkgName, "page", "empty")
+        body += "<section id=\"nothing\"><h1>" + attr(pkgName) + "</h1>"
+        body += "<p>Nothing to document yet. Two things are read, and neither "
+        body += "was there: declarations marked <code>pub</code>, and Markdown "
+        body += "written by hand.</p>"
+        body += "<p>Add a page — <code>docs/index.md</code> is the one this "
+        body += "starts at — and it appears here as it is written. Nothing "
+        body += "under <code>docs/</code> is ever overwritten: the page you "
+        body += "are reading is written to <code>target/docs/</code> with the "
+        body += "rest of the build.</p></section>"
+        closePage()
+        tree += "<li class=\"leaf\" data-terms=\"" + attr(pkgName) +
+                "\"><a class=\"row top\" href=\"#nothing\">" + SPACER +
+                "<span class=\"label\">" + attr(pkgName) + "</span></a></li>"
+    }
+
+    if !writeDocument(outDir) { return 1 }
+    io::println("documented " + entryCount.$str() + " entr" +
+                (if entryCount == 1 { "y" } else { "ies" }) + " and " +
+                pages.length().$str() + " written page(s)")
+    0
+}
+
+//===--------------------------------------------------------------------===//
+// Markdown
+//
+// Enough of it to render what people actually write in a doc comment or a
+// guide page: headings, paragraphs, lists, tables, quotes, GitHub-style
+// callouts (`> [!NOTE]`), fenced code with a language, and the four-space
+// indented code that a `///` example is almost always written as. Anything
+// unrecognised becomes a paragraph, which is the safe way to be wrong about
+// a line.
+//===--------------------------------------------------------------------===//
+
+fn escapeHtml(src: String) -> String {
+    var out = ""
+    var i = 0
+    while i < src.$length() {
+        let c = src.$substring(i, i + 1)
+        if c == "&" { out += "&amp;" }
+        elif c == "<" { out += "&lt;" }
+        elif c == ">" { out += "&gt;" }
+        else { out += c }
+        i += 1
+    }
+    out
+}
+
+/// `code`, *emphasis*, **strong** and [label](href) inside a line of prose.
+fn inline(src: String) -> String {
+    var out = ""
+    var i = 0
+    let n = src.$length()
+    while i < n {
+        let c = src.$substring(i, i + 1)
+
+        if c == "`" {
+            var j = i + 1
+            var run = ""
+            while j < n && src.$substring(j, j + 1) != "`" {
+                run += src.$substring(j, j + 1)
+                j += 1
+            }
+            if j < n {
+                out += "<code>" + highlightRune(run) + "</code>"
+                i = j + 1
+                continue
+            }
+        }
+
+        if c == "*" {
+            let strong = i + 1 < n && src.$substring(i + 1, i + 2) == "*"
+            let fence2 = if strong { "**" } else { "*" }
+            let step = fence2.$length()
+            var j = i + step
+            var run = ""
+            var closed = false
+            while j < n {
+                // The fence may be two characters; do not read past the end
+                // looking for the second.
+                if j + step <= n && src.$substring(j, j + step) == fence2 { closed = true; break }
+                run += src.$substring(j, j + 1)
+                j += 1
+            }
+            if closed && !run.$isEmpty() {
+                let tag = if strong { "strong" } else { "em" }
+                out += "<" + tag + ">" + inline(run) + "</" + tag + ">"
+                i = j + step
+                continue
+            }
+        }
+
+        if c == "[" {
+            var j = i + 1
+            var label = ""
+            while j < n && src.$substring(j, j + 1) != "]" {
+                label += src.$substring(j, j + 1)
+                j += 1
+            }
+            if j + 1 < n && src.$substring(j + 1, j + 2) == "(" {
+                var k = j + 2
+                var href = ""
+                while k < n && src.$substring(k, k + 1) != ")" {
+                    href += src.$substring(k, k + 1)
+                    k += 1
+                }
+                out += "<a href=\"" + attr(linkTarget(href)) + "\">" +
+                       inline(label) + "</a>"
+                i = k + 1
+                continue
+            }
+        }
+
+        if c == "&" { out += "&amp;" }
+        elif c == "<" { out += "&lt;" }
+        elif c == ">" { out += "&gt;" }
+        else { out += c }
+        i += 1
+    }
+    out
+}
+
+/// Join `rel` onto `baseDir` as a docs-relative path, collapsing `.` and `..`.
+fn joinDocsPath(baseDir: String, rel: String) -> String {
+    var parts = vector::Vector<String>()
+    if !baseDir.$isEmpty() {
+        for seg in text::split(baseDir, "/") {
+            if !seg.$isEmpty() { parts.push(seg) }
+        }
+    }
+    for seg in text::split(rel, "/") {
+        if seg.$isEmpty() || seg == "." { continue }
+        if seg == ".." {
+            if !parts.isEmpty() { parts.pop() }
+            continue
+        }
+        parts.push(seg)
+    }
+    var out = ""
+    var i = 0
+    while i < parts.length() {
+        if i > 0 { out += "/" }
+        out += parts.get(i)
+        i += 1
+    }
+    out
+}
+
+/// A link between two written pages becomes a link within this one: there is
+/// only ever one file, so `Option_And_Result/what_they_are.md` is the anchor
+/// of that page. A sibling link `what_they_are.md` is resolved against the
+/// page being rendered before it is slugged.
+fn linkTarget(href: String) -> String {
+    if text::startsWith(href, "#") {
+        // An anchor inside the page being rendered is scoped the way its
+        // headings are; one that already names a section is left alone.
+        let bare = href.$substring(1, href.$length())
+        if headingScope.$isEmpty() || text::startsWith(bare, "m-") ||
+           text::startsWith(bare, "p-") || text::startsWith(bare, "f-") {
+            return href
+        }
+        return "#" + headingScope + "-" + bare
+    }
+    if text::startsWith(href, "http://") || text::startsWith(href, "https://") {
+        return href
+    }
+    var path = href
+    var i = 0
+    while i < href.$length() {
+        if href.$byteAt(i) == 35 {
+            path = href.$substring(0, i)
+            break
+        }
+        i += 1
+    }
+    if !text::endsWith(path, ".md") { return href }
+    if text::startsWith(path, "/") {
+        path = path.$substring(1, path.$length())
+    } else {
+        path = joinDocsPath(folderOf(linkFrom), path)
+    }
+    match moduleGuides.at(path) {
+        Some(module) => "#m-" + slug(module),
+        None => "#p-" + slug(path),
+    }
+}
+
+global var listDepth: i64 = 0
+
+fn openList(html: String, ordered: bool) -> String {
+    if listDepth > 0 { return html }
+    listDepth = 1
+    html + (if ordered { "<ol>\n" } else { "<ul>\n" })
+}
+
+fn closeList(html: String, ordered: bool) -> String {
+    if listDepth == 0 { return html }
+    listDepth = 0
+    html + (if ordered { "</ol>\n" } else { "</ul>\n" })
+}
+
+fn indentOf(line: String) -> i64 {
+    var i = 0
+    while i < line.$length() && line.$byteAt(i) == 32 { i += 1 }
+    i
+}
+
+fn isQuoteLine(line: String) -> bool {
+    text::startsWith(line, ">")
+}
+
+fn stripQuote(line: String) -> String {
+    if line == ">" { return "" }
+    if text::startsWith(line, "> ") {
+        return line.$substring(2, line.$length())
+    }
+    if text::startsWith(line, ">") {
+        return line.$substring(1, line.$length())
+    }
+    line
+}
+
+fn asciiUpper(src: String) -> String {
+    var out = ""
+    var i = 0
+    while i < src.$length() {
+        let b = src.$byteAt(i) as i64
+        if b >= 97 && b <= 122 { out += ((b - 32) as Character).$str() }
+        else { out += src.$substring(i, i + 1) }
+        i += 1
+    }
+    out
+}
+
+/// The tone of a GitHub alert line such as `[!NOTE]`, or empty if it is not
+/// one. Unknown names still count as a note, so a misspelt tag is visible
+/// rather than falling through as a quote.
+fn calloutTone(line: String) -> String {
+    let t = text::trim(line)
+    if t.$length() < 4 { return "" }
+    if !text::startsWith(t, "[!") { return "" }
+    if !text::endsWith(t, "]") { return "" }
+    let name = asciiUpper(t.$substring(2, t.$length() - 1))
+    if name == "WARNING" || name == "WARN" || name == "CAUTION" {
+        return "warn"
+    }
+    if name == "IMPORTANT" { return "important" }
+    if name == "HINT" { return "hint" }
+    if name == "TIP" { return "tip" }
+    "note"
+}
+
+fn calloutLabelFor(tone: String) -> String {
+    if tone == "warn" { return "Warning" }
+    if tone == "important" { return "Important" }
+    if tone == "hint" { return "Hint" }
+    if tone == "tip" { return "Tip" }
+    "Note"
+}
+
+fn isWholeBold(line: String) -> bool {
+    let t = text::trim(line)
+    t.$length() > 4 && text::startsWith(t, "**") && text::endsWith(t, "**")
+}
+
+fn stripWholeBold(line: String) -> String {
+    let t = text::trim(line)
+    text::trim(t.$substring(2, t.$length() - 2))
+}
+
+/// Consecutive non-empty lines become one paragraph; a blank line starts the
+/// next. Inline markup is applied, but nested blocks are not — a callout's
+/// body is prose.
+fn quoteParagraphs(lines: vector::Vector<String>, from: i64) -> String {
+    var html = ""
+    var para = ""
+    var i = from
+    while i < lines.length() {
+        let t = text::trim(lines.get(i))
+        i += 1
+        if t.$isEmpty() {
+            if !para.$isEmpty() {
+                html += "<p>" + inline(para) + "</p>\n"
+                para = ""
+            }
+            continue
+        }
+        if para.$isEmpty() { para = t } else { para += " " + t }
+    }
+    if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n" }
+    html
+}
+
+fn skipEmptyQuoted(lines: vector::Vector<String>, from: i64) -> i64 {
+    var i = from
+    while i < lines.length() && text::trim(lines.get(i)).$isEmpty() { i += 1 }
+    i
+}
+
+/// A run of `>` lines: a GitHub callout when it opens with `[!NOTE]` and so
+/// on, otherwise one blockquote.
+fn renderQuoted(lines: vector::Vector<String>) -> String {
+    var i = skipEmptyQuoted(lines, 0)
+    if i >= lines.length() { return "" }
+    let tone = calloutTone(lines.get(i))
+    if !tone.$isEmpty() {
+        i = skipEmptyQuoted(lines, i + 1)
+        var label = calloutLabelFor(tone)
+        if i < lines.length() && isWholeBold(lines.get(i)) {
+            label = stripWholeBold(lines.get(i))
+            i = skipEmptyQuoted(lines, i + 1)
+        }
+        let body = quoteParagraphs(lines, i)
+        return "<aside class=\"callout t-" + tone + "\">" +
+               "<span class=\"callout-label\">" + inline(label) + "</span>" +
+               "<div class=\"callout-body\">" + body + "</div></aside>\n"
+    }
+    "<blockquote>\n" + quoteParagraphs(lines, 0) + "</blockquote>\n"
+}
+
+/// The language tag on a fence: ` ```rune title` is `rune`.
+fn fenceLang(info: String) -> String {
+    let t = text::trim(info)
+    var i = 0
+    while i < t.$length() {
+        let b = t.$byteAt(i)
+        if b == 32 || b == 9 { return t.$substring(0, i) }
+        i += 1
+    }
+    t
+}
+
+fn fenceIsRune(lang: String) -> bool {
+    lang.$isEmpty() || lang == "rune" || lang == "rn"
+}
+
+fn renderFence(lang: String, code: String) -> String {
+    var cls = "fence"
+    var langAttr = ""
+    if !lang.$isEmpty() {
+        cls += " lang-" + slug(lang)
+        langAttr = " data-lang=\"" + attr(lang) + "\""
+    }
+    let body = if fenceIsRune(lang) { highlightRune(code) } else { escapeHtml(code) }
+    "<pre class=\"" + cls + "\"" + langAttr + "><code>" + body +
+        "</code></pre>\n"
+}
+
+fn isBullet(line: String) -> bool {
+    text::startsWith(line, "- ") || text::startsWith(line, "* ") ||
+    text::startsWith(line, "+ ")
+}
+
+/// A line like `1. something`.
+fn isNumbered(line: String) -> bool {
+    var i = 0
+    while i < line.$length() && line.$byteAt(i) >= 48 && line.$byteAt(i) <= 57 {
+        i += 1
+    }
+    i > 0 && i + 1 < line.$length() && line.$byteAt(i) == 46 &&
+        line.$byteAt(i + 1) == 32
+}
+
+fn afterNumber(line: String) -> String {
+    var i = 0
+    while i < line.$length() && line.$byteAt(i) != 46 { i += 1 }
+    text::trim(line.$substring(i + 1, line.$length()))
+}
+
+/// Splits `| a | b |` into its cells.
+fn cellsOf(line: String) -> vector::Vector<String> {
+    var t = text::trim(line)
+    t = text::withoutPrefix(t, "|")
+    t = text::withoutSuffix(t, "|")
+    var out = vector::Vector<String>()
+    for cell in text::split(t, "|") { out.push(text::trim(cell)) }
+    out
+}
+
+fn isDivider(line: String) -> bool {
+    let t = text::trim(line)
+    if !text::startsWith(t, "|") { return false }
+    var i = 0
+    while i < t.$length() {
+        let b = t.$byteAt(i)
+        if b != 124 && b != 45 && b != 58 && b != 32 { return false }
+        i += 1
+    }
+    true
+}
+
+fn renderMarkdown(md: String) -> String {
+    var html = ""
+    var para = ""
+    var fence = ""
+    var code = ""
+    var inFence = false
+    var inTable = false
+    var ordered = false
+
+    let lines = text::splitLines(md + "\n")
+    var idx = 0
+    let count = lines.length()
+    while idx < count {
+        let raw = lines.get(idx)
+        idx += 1
+        let line = text::trimEnd(raw)
+        let t = text::trim(line)
+
+        //--- fenced code ---------------------------------------------------
+        if text::startsWith(t, "```") {
+            if inFence {
+                html += renderFence(fence, code)
+                code = ""
+                fence = ""
+                inFence = false
+            } else {
+                if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+                html = closeList(html, ordered)
+                if inTable {
+                    html += "</tbody></table>\n"
+                    inTable = false
+                }
+                fence = fenceLang(t.$substring(3, t.$length()))
+                inFence = true
+            }
+            continue
+        }
+        if inFence {
+            if !code.$isEmpty() { code += "\n" }
+            code += line
+            continue
+        }
+
+        //--- indented code -------------------------------------------------
+        // Four spaces, with no list open: how an example in a `///` comment
+        // is nearly always written.
+        if listDepth == 0 && para.$isEmpty() && !t.$isEmpty() &&
+           indentOf(line) >= 4 {
+            var block = line.$substring(4, line.$length())
+            while idx < count {
+                let peek = text::trimEnd(lines.get(idx))
+                if text::trim(peek).$isEmpty() {
+                    // A blank line only ends the block if what follows is not
+                    // indented too.
+                    if idx + 1 < count && indentOf(text::trimEnd(lines.get(idx + 1))) >= 4 {
+                        block += "\n"
+                        idx += 1
+                        continue
+                    }
+                    break
+                }
+                if indentOf(peek) < 4 { break }
+                block += "\n" + peek.$substring(4, peek.$length())
+                idx += 1
+            }
+            html += "<pre><code>" + highlightRune(block) + "</code></pre>\n"
+            continue
+        }
+
+        //--- tables --------------------------------------------------------
+        if text::startsWith(t, "|") {
+            if isDivider(t) { continue }
+            if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+            let cells = cellsOf(t)
+            if !inTable {
+                inTable = true
+                html += "<table>\n<thead><tr>"
+                for c in cells { html += "<th>" + inline(c) + "</th>" }
+                html += "</tr></thead>\n<tbody>\n"
+                continue
+            }
+            html += "<tr>"
+            for c in cells { html += "<td>" + inline(c) + "</td>" }
+            html += "</tr>\n"
+            continue
+        }
+        if inTable {
+            html += "</tbody></table>\n"
+            inTable = false
+        }
+
+        //--- blank ---------------------------------------------------------
+        if t.$isEmpty() {
+            if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+            html = closeList(html, ordered)
+            continue
+        }
+
+        //--- rule ----------------------------------------------------------
+        if t == "---" || t == "***" || t == "___" {
+            if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+            html = closeList(html, ordered)
+            html += "<hr>\n"
+            continue
+        }
+
+        //--- headings ------------------------------------------------------
+        if text::startsWith(t, "#") {
+            var level = 0
+            while level < t.$length() && t.$byteAt(level) == 35 { level += 1 }
+            if level <= 6 && level < t.$length() && t.$byteAt(level) == 32 {
+                if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+                html = closeList(html, ordered)
+                let title = text::trim(t.$substring(level, t.$length()))
+                // A doc comment's own headings start a level below the entry
+                // they belong to, so they never compete with it.
+                var tag = "h" + (level + 1).$str()
+                if level + 1 > 6 { tag = "h6" }
+                html += "<" + tag + " id=\"" + headingId(title) + "\">" +
+                        inline(title) + "</" + tag + ">\n"
+                continue
+            }
+        }
+
+        //--- quotes and callouts -------------------------------------------
+        // Consecutive `>` lines are one block. `[!NOTE]` / `[!WARNING]` on
+        // the first line is a callout; anything else is a blockquote.
+        if isQuoteLine(t) {
+            if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+            html = closeList(html, ordered)
+            if inTable {
+                html += "</tbody></table>\n"
+                inTable = false
+            }
+            var quoted = vector::Vector<String>()
+            quoted.push(stripQuote(t))
+            while idx < count {
+                let peek = text::trim(text::trimEnd(lines.get(idx)))
+                if !isQuoteLine(peek) { break }
+                quoted.push(stripQuote(peek))
+                idx += 1
+            }
+            html += renderQuoted(quoted)
+            continue
+        }
+
+        //--- lists ---------------------------------------------------------
+        if isBullet(t) {
+            if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+            if listDepth > 0 && ordered { html = closeList(html, true) }
+            ordered = false
+            html = openList(html, false)
+            html += "<li>" + inline(text::trim(t.$substring(2, t.$length()))) +
+                    "</li>\n"
+            continue
+        }
+        if isNumbered(t) {
+            if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n"; para = "" }
+            if listDepth > 0 && !ordered { html = closeList(html, false) }
+            ordered = true
+            html = openList(html, true)
+            html += "<li>" + inline(afterNumber(t)) + "</li>\n"
+            continue
+        }
+
+        //--- prose ---------------------------------------------------------
+        // A wrapped sentence is one paragraph, so lines are gathered until a
+        // blank one arrives.
+        if para.$isEmpty() { para = t } else { para += " " + t }
+    }
+
+    if inFence && !code.$isEmpty() {
+        html += renderFence(fence, code)
+    }
+    if !para.$isEmpty() { html += "<p>" + inline(para) + "</p>\n" }
+    html = closeList(html, ordered)
+    if inTable { html += "</tbody></table>\n" }
+    html
+}
+
+//===--------------------------------------------------------------------===//
+// Rune, coloured
+//
+// A lexer's worth of rules and no more: comments, strings, numbers, and words
+// that are keywords or type names. Everything else is left alone, because
+// guessing wrong about an identifier is worse than not colouring it.
+//===--------------------------------------------------------------------===//
+
+fn isWordByte(b: u8) -> bool {
+    let v = b as i64
+    (v >= 97 && v <= 122) || (v >= 65 && v <= 90) || (v >= 48 && v <= 57) ||
+    v == 95
+}
+
+fn isKeyword(word: String) -> bool {
+    word == "fn" || word == "var" || word == "let" || word == "global" ||
+    word == "class" || word == "struct" || word == "enum" || word == "mark" ||
+    word == "bind" || word == "to" || word == "extend" || word == "super" ||
+    word == "self" || word == "Self" || word == "import" || word == "pub" ||
+    word == "as" || word == "is" || word == "if" || word == "elif" ||
+    word == "else" || word == "while" || word == "loop" || word == "for" ||
+    word == "in" || word == "match" || word == "return" || word == "break" ||
+    word == "continue" || word == "extern" || word == "where" ||
+    word == "defer" || word == "unsafe" || word == "operator" ||
+    word == "dyn" || word == "type" || word == "weak" || word == "macro" ||
+    word == "move" || word == "into" || word == "true" || word == "false" ||
+    word == "nil"
+}
+
+fn isTypeName(word: String) -> bool {
+    if word == "i8" || word == "i16" || word == "i32" || word == "i64" ||
+       word == "u8" || word == "u16" || word == "u32" || word == "u64" ||
+       word == "isize" || word == "usize" || word == "f32" || word == "f64" ||
+       word == "bool" || word == "int" || word == "uint" || word == "float" ||
+       word == "double" || word == "Byte" || word == "Character" ||
+       word == "String" || word == "CString" || word == "Any" ||
+       word == "Never" || word == "Option" || word == "Result" ||
+       word == "Unique" { return true }
+    // Anything else beginning with a capital reads as a type, which is the
+    // convention the whole language and library follow.
+    if word.$isEmpty() { return false }
+    let b = word.$byteAt(0) as i64
+    b >= 65 && b <= 90
+}
+
+fn highlightRune(code: String) -> String {
+    var out = ""
+    var afterFn = false
+    var i = 0
+    let n = code.$length()
+    while i < n {
+        let b = code.$byteAt(i) as i64
+        let c = code.$substring(i, i + 1)
+
+        // A comment runs to the end of its line.
+        if b == 47 && i + 1 < n && (code.$byteAt(i + 1) as i64) == 47 {
+            var j = i
+            var run = ""
+            while j < n && (code.$byteAt(j) as i64) != 10 {
+                run += code.$substring(j, j + 1)
+                j += 1
+            }
+            out += "<span class=\"c-com\">" + escapeHtml(run) + "</span>"
+            i = j
+            continue
+        }
+        // A string runs to its closing quote.
+        if b == 34 {
+            var j = i + 1
+            var run = "\""
+            while j < n {
+                let q = code.$byteAt(j) as i64
+                run += code.$substring(j, j + 1)
+                j += 1
+                if q == 92 && j < n { run += code.$substring(j, j + 1); j += 1; continue }
+                if q == 34 { break }
+            }
+            out += "<span class=\"c-str\">" + escapeHtml(run) + "</span>"
+            i = j
+            continue
+        }
+        // A number.
+        if b >= 48 && b <= 57 {
+            var j = i
+            var run = ""
+            while j < n && (isWordByte(code.$byteAt(j)) ||
+                            (code.$byteAt(j) as i64) == 46) {
+                run += code.$substring(j, j + 1)
+                j += 1
+            }
+            out += "<span class=\"c-num\">" + escapeHtml(run) + "</span>"
+            i = j
+            continue
+        }
+        // A word.
+        if isWordByte(code.$byteAt(i)) {
+            var j = i
+            var word = ""
+            while j < n && isWordByte(code.$byteAt(j)) {
+                word += code.$substring(j, j + 1)
+                j += 1
+            }
+            if isKeyword(word) {
+                out += "<span class=\"c-kw\">" + word + "</span>"
+                afterFn = word == "fn"
+            } elif isTypeName(word) {
+                out += "<span class=\"c-typ\">" + word + "</span>"
+                afterFn = false
+            } elif afterFn {
+                out += "<span class=\"c-fn\">" + escapeHtml(word) + "</span>"
+                afterFn = false
+            } else {
+                out += escapeHtml(word)
+                afterFn = false
+            }
+            i = j
+            continue
+        }
+        out += escapeHtml(c)
+        i += 1
+    }
+    out
+}

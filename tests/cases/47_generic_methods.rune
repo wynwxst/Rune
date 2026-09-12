@@ -1,0 +1,35 @@
+// A generic method is resolved from the type at the call site: inferred from
+// the arguments, or written out with `::<T>` when there is nothing to infer
+// from. It takes no vtable slot, because each set of arguments is a different
+// function.
+// EXPECT: 3
+// EXPECT: pair
+// EXPECT: 8
+// EXPECT: 4
+// EXPECT: 2
+// SAFETY: full
+import std::io
+import std::mem
+
+class Box {
+    pub tag: i64
+    fn init(self, tag: i64) { self.tag = tag }
+    pub fn pick<T>(&self, v: T) -> T { v }
+    pub fn width<T>(&self) -> i64 { mem::size_of<T>() as i64 }
+}
+
+struct Pair { pub a: i64, pub b: i64 }
+
+extend Pair {
+    pub fn label<T>(&self, v: T) -> String { "pair" }
+}
+
+fn main() -> i64 {
+    let b = Box(1)
+    io::println(b.pick(3i64).$str())
+    io::println(Pair { a: 1, b: 2 }.label::<f64>(1.5))
+    io::println(b.width::<f64>().$str())
+    io::println(b.width::<i32>().$str())
+    io::println(b.pick::<i64>(2i64).$str())
+    0
+}

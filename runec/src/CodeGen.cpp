@@ -1,0 +1,3202 @@
+//===- CodeGen.cpp - Types, ARC, declarations and statements ---*- C++ -*-===//
+
+#include "rune/CodeGen.h"
+#include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include <filesystem>
+
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/TargetParser/Host.h"
+
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/IPO/GlobalDCE.h>
+#include <llvm/Transforms/Utils/Cloning.h>
+
+#include <cctype>
+#include <set>
+
+namespace rune {
+
+using namespace llvm;
+
+//===----------------------------------------------------------------------===//
+// Construction
+//===----------------------------------------------------------------------===//
+
+CodeGen::CodeGen(const SourceManager &sm, DiagnosticEngine &diags,
+                 TypeContext &types, const SemaResult &sema,
+                 const CompilerOptions &opts)
+    : SM(sm), Diags(diags), Types(types), Sema(sema), Opts(opts) {
+  Ctx = std::make_unique<LLVMContext>();
+  M = std::make_unique<llvm::Module>(opts.ModuleName, *Ctx);
+  B = std::make_unique<IRBuilder<>>(*Ctx);
+  // The target's layout has to be in place before any code is generated:
+  // `size_of` and `align_of` are answered from it, and LLVM's default layout
+  // is not the machine's (it aligns i64 to 4).
+  applyTargetLayout();
+  initRuntimeTypes();
+}
+
+CodeGen::~CodeGen() = default;
+
+//===----------------------------------------------------------------------===//
+// Debug information
+//===----------------------------------------------------------------------===//
+
+void CodeGen::initDebugInfo() {
+  if (!Opts.DebugInfo)
+    return;
+  M->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                   llvm::DEBUG_METADATA_VERSION);
+  M->addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
+  DI = std::make_unique<llvm::DIBuilder>(*M);
+  // The unit's file is the first input; every other file appears through the
+  // subprograms that live in it.
+  std::string dir = ".", name = Opts.ModuleName + ".rune";
+  if (SM.fileCount() > 0) {
+    std::filesystem::path p(SM.file(0).Path);
+    name = p.filename().string();
+    dir = p.has_parent_path() ? p.parent_path().string() : ".";
+  }
+  llvm::DIFile *file = DI->createFile(name, dir);
+  DIFiles[0] = file;
+  DICU = DI->createCompileUnit(llvm::dwarf::DW_LANG_C99, file, "runec",
+                               Opts.OptLevel > 0, "", 0);
+}
+
+void CodeGen::finishDebugInfo() {
+  if (DI)
+    DI->finalize();
+}
+
+llvm::DIFile *CodeGen::debugFileFor(SourceRange r) {
+  if (!DI)
+    return nullptr;
+  const SourceFile *sf = r.isValid() ? SM.fileFor(r.begin()) : nullptr;
+  if (!sf)
+    return DIFiles.count(0) ? DIFiles[0] : nullptr;
+  auto it = DIFiles.find(sf->ID);
+  if (it != DIFiles.end())
+    return it->second;
+  std::filesystem::path p(sf->Path);
+  llvm::DIFile *f = DI->createFile(
+      p.filename().string(),
+      p.has_parent_path() ? p.parent_path().string() : ".");
+  DIFiles[sf->ID] = f;
+  return f;
+}
+
+llvm::DIType *CodeGen::debugTypeFor(Type *t) {
+  if (!DI || !t)
+    return nullptr;
+  auto it = DITypes.find(t);
+  if (it != DITypes.end())
+    return it->second;
+  // Insert a placeholder first: a struct that contains a pointer to itself
+  // would otherwise recurse forever.
+  DITypes[t] = nullptr;
+  llvm::DIType *result = nullptr;
+
+  auto basic = [&](const char *name, unsigned bits, unsigned enc) {
+    return DI->createBasicType(name, bits, enc);
+  };
+  switch (t->kind()) {
+  case TypeKind::Void:
+    result = nullptr;
+    break;
+  case TypeKind::Bool:
+    result = basic("bool", 8, llvm::dwarf::DW_ATE_boolean);
+    break;
+  case TypeKind::Char:
+    result = basic("Character", 32, llvm::dwarf::DW_ATE_UTF);
+    break;
+  case TypeKind::Int:
+    result = basic(t->toString().c_str(), t->intWidth(),
+                   t->isSigned() ? llvm::dwarf::DW_ATE_signed
+                                 : llvm::dwarf::DW_ATE_unsigned);
+    break;
+  case TypeKind::Float:
+    result = basic(t->toString().c_str(), t->floatWidth(),
+                   llvm::dwarf::DW_ATE_float);
+    break;
+  case TypeKind::String:
+  case TypeKind::CString:
+  case TypeKind::Class:
+  case TypeKind::Pointer: {
+    Type *pointee = t->is(TypeKind::Pointer) ? t->pointee() : nullptr;
+    llvm::DIType *inner = pointee ? debugTypeFor(pointee) : nullptr;
+    result = DI->createPointerType(inner, 64, 64, std::nullopt,
+                                   t->toString());
+    break;
+  }
+  case TypeKind::Array: {
+    llvm::DIType *elem = debugTypeFor(t->element());
+    if (!elem) break;
+    auto count = static_cast<int64_t>(t->arraySize());
+    llvm::Metadata *sub[] = {DI->getOrCreateSubrange(0, count)};
+    result = DI->createArrayType(
+        M->getDataLayout().getTypeAllocSizeInBits(lower(t)), 0, elem,
+        DI->getOrCreateArray(sub));
+    break;
+  }
+  case TypeKind::Struct:
+  case TypeKind::Enum:
+  case TypeKind::Tuple:
+  case TypeKind::Slice:
+  case TypeKind::Function:
+  case TypeKind::Any:
+  case TypeKind::DynMark: {
+    // A composite whose interior is not worth describing field by field yet;
+    // its size and name still let a debugger show the storage.
+    llvm::Type *lowered = lower(t);
+    uint64_t bits = lowered->isSized()
+                        ? M->getDataLayout().getTypeAllocSizeInBits(lowered)
+                        : 64;
+    result = DI->createStructType(DICU, t->toString(), DIFiles.count(0)
+                                                           ? DIFiles[0]
+                                                           : nullptr,
+                                  0, bits, 0, llvm::DINode::FlagZero, nullptr,
+                                  DI->getOrCreateArray({}));
+    break;
+  }
+  default:
+    break;
+  }
+  DITypes[t] = result;
+  return result;
+}
+
+llvm::DISubprogram *CodeGen::debugSubprogramFor(FunctionDecl *fn,
+                                                llvm::Function *f) {
+  if (!DI || !fn || !f)
+    return nullptr;
+  llvm::DIFile *file = debugFileFor(fn->Range);
+  if (!file)
+    return nullptr;
+  unsigned line =
+      fn->Range.isValid() ? SM.decode(fn->Range.begin()).Line : 0;
+
+  std::vector<llvm::Metadata *> sig;
+  sig.push_back(fn->Ty ? debugTypeFor(fn->Ty->result()) : nullptr);
+  for (const Param &p : fn->Params)
+    sig.push_back(debugTypeFor(p.Ty));
+  llvm::DISubroutineType *type =
+      DI->createSubroutineType(DI->getOrCreateTypeArray(sig));
+
+  llvm::DISubprogram::DISPFlags spFlags = llvm::DISubprogram::SPFlagDefinition;
+  if (fn->Name == "main")
+    spFlags |= llvm::DISubprogram::SPFlagMainSubprogram;
+  llvm::DISubprogram *sp =
+      DI->createFunction(file, fn->Name, f->getName(), file, line, type, line,
+                         llvm::DINode::FlagPrototyped, spFlags);
+  f->setSubprogram(sp);
+  return sp;
+}
+
+void CodeGen::setDebugLocation(SourceRange r) {
+  if (!DI || DIScopes.empty() || !DIScopes.back())
+    return;
+  unsigned line = 0, col = 0;
+  if (r.isValid()) {
+    PresumedLoc pl = SM.decode(r.begin());
+    line = pl.Line;
+    col = pl.Column;
+  }
+  B->SetCurrentDebugLocation(
+      llvm::DILocation::get(*Ctx, line, col, DIScopes.back()));
+}
+
+void CodeGen::declareDebugVariable(VarDecl *v, llvm::Value *slot,
+                                   unsigned argIndex) {
+  if (!DI || DIScopes.empty() || !DIScopes.back() || !v || !slot)
+    return;
+  llvm::DIType *ty = debugTypeFor(v->Ty);
+  if (!ty)
+    return;
+  llvm::DIFile *file = debugFileFor(v->Range);
+  unsigned line = v->Range.isValid() ? SM.decode(v->Range.begin()).Line : 0;
+  llvm::DILocalVariable *var =
+      argIndex ? DI->createParameterVariable(DIScopes.back(), v->Name,
+                                             argIndex, file, line, ty, true)
+               : DI->createAutoVariable(DIScopes.back(), v->Name, file, line,
+                                        ty, true);
+  DI->insertDeclare(slot, var, DI->createExpression(),
+                    llvm::DILocation::get(*Ctx, line, 0, DIScopes.back()),
+                    B->GetInsertBlock());
+}
+
+void CodeGen::applyTargetLayout() {
+  static bool initialised = false;
+  if (!initialised) {
+    initialiseTargets();
+    initialised = true;
+  }
+  std::string tripleStr = Opts.TargetTriple.empty()
+                              ? llvm::sys::getDefaultTargetTriple()
+                              : Opts.TargetTriple;
+  // `Triple` no longer normalises what it is given, so an alias like
+  // `x86_64-w64-mingw32` would parse as an unknown OS and quietly fall back
+  // to ELF. Normalising first turns it into `x86_64-w64-windows-gnu`.
+  llvm::Triple triple(llvm::Triple::normalize(tripleStr));
+  std::string err;
+  if (const llvm::Target *t = llvm::TargetRegistry::lookupTarget(triple, err)) {
+    llvm::TargetOptions targetOpts;
+    std::unique_ptr<llvm::TargetMachine> tm(t->createTargetMachine(
+        triple, "generic", "", targetOpts,
+        std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_)));
+    if (tm) {
+      M->setDataLayout(tm->createDataLayout());
+      M->setTargetTriple(triple);
+    }
+  }
+}
+
+void CodeGen::initRuntimeTypes() {
+  PtrTy = PointerType::get(*Ctx, 0);
+  // struct RuneObject { int64_t refcount; const RuneTypeInfo *type; }
+  ObjectHeaderTy = StructType::create(*Ctx, {B->getInt64Ty(), PtrTy},
+                                      "rune.object");
+  // struct RuneTypeInfo { name, size, deinit, super, vtable, vtableCount }
+  TypeInfoTy = StructType::create(
+      *Ctx, {PtrTy, B->getInt64Ty(), PtrTy, PtrTy, PtrTy, B->getInt32Ty()},
+      "rune.typeinfo");
+}
+
+FunctionCallee CodeGen::runtimeFn(const char *name, llvm::Type *ret,
+                                  std::vector<llvm::Type *> params,
+                                  bool variadic) {
+  return M->getOrInsertFunction(name, FunctionType::get(ret, params, variadic));
+}
+
+//===----------------------------------------------------------------------===//
+// Type lowering
+//===----------------------------------------------------------------------===//
+
+std::vector<FieldDecl *> CodeGen::allFieldsOf(NominalDecl *nd) {
+  std::vector<FieldDecl *> out;
+  if (auto *c = dyn_cast<ClassDecl>(static_cast<Decl *>(nd))) {
+    // Base class fields come first so Sema's flattened indices line up.
+    std::vector<ClassDecl *> chain;
+    for (ClassDecl *k = c; k; k = k->Super)
+      chain.push_back(k);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+      for (const auto &f : (*it)->Fields)
+        out.push_back(f.get());
+    return out;
+  }
+  for (const auto &f : nd->Fields)
+    out.push_back(f.get());
+  return out;
+}
+
+namespace {
+/// Tracks which nominal types are mid-layout so a self-referential value type
+/// can be reported instead of hanging.
+std::set<NominalDecl *> LayoutInProgress;
+} // namespace
+
+llvm::Type *CodeGen::variantPayloadType(EnumDecl *e, unsigned variantIndex) {
+  const auto &v = e->Variants[variantIndex];
+  std::vector<llvm::Type *> fields;
+  if (v->Shape == VariantShape::Tuple) {
+    for (const auto &tt : v->TupleTypes)
+      fields.push_back(lower(tt->Resolved));
+  } else if (v->Shape == VariantShape::Struct) {
+    for (const auto &f : v->Fields)
+      fields.push_back(lower(f->Ty));
+  }
+  return StructType::get(*Ctx, fields);
+}
+
+uint64_t CodeGen::enumPayloadSize(EnumDecl *e) {
+  const DataLayout &DL = M->getDataLayout();
+  uint64_t maxSize = 0;
+  for (unsigned i = 0; i < e->Variants.size(); ++i) {
+    llvm::Type *pt = variantPayloadType(e, i);
+    if (!pt->isSized()) {
+      // A payload whose layout is still being computed means the variant
+      // contains the enum itself, directly or through another value type.
+      const auto &variant = e->Variants[i];
+      auto d = Diags.error(
+          variant->NameRange.isValid() ? variant->NameRange : variant->Range,
+          "variant '{}' makes '{}' contain itself, so its size is unbounded",
+          variant->Name, e->Name);
+      d.note("an enum is a value, so a variant cannot hold the enum directly; "
+             "put the recursive part behind a class")
+          .code(502);
+      if (e->NameRange.isValid())
+        d.related(e->NameRange, fmt("'{}' declared here", e->Name),
+                  "every variant's payload has to have a known size");
+      continue;
+    }
+    maxSize = std::max(maxSize, DL.getTypeAllocSize(pt).getFixedValue());
+  }
+  return maxSize;
+}
+
+llvm::StructType *CodeGen::layoutOf(NominalDecl *nd, Type *t) {
+  auto it = NominalLayouts.find(nd);
+  if (it != NominalLayouts.end())
+    return it->second;
+
+  std::string name = static_cast<Decl *>(nd)->Name;
+  if (!t->typeArguments().empty())
+    name += "." + std::to_string(NominalLayouts.size());
+  auto *st = StructType::create(*Ctx, "rune." + name);
+  NominalLayouts[nd] = st;
+  // Seed the lowering cache so a type that refers to itself terminates. A
+  // class *value* is a pointer to its instance, not the instance layout, so
+  // only value types map onto the struct itself.
+  LoweredTypes[t] = isa<ClassDecl>(static_cast<Decl *>(nd))
+                        ? static_cast<llvm::Type *>(PtrTy)
+                        : static_cast<llvm::Type *>(st);
+
+  if (LayoutInProgress.count(nd)) {
+    // Reached while already laying this type out: it contains itself.
+    Diags.error(static_cast<Decl *>(nd)->NameRange,
+                "'{}' contains itself, so its size is unbounded",
+                static_cast<Decl *>(nd)->Name)
+        .note("store the nested value behind a class or a pointer to break "
+              "the cycle")
+        .code(500);
+    st->setBody({B->getInt8Ty()});
+    return st;
+  }
+  LayoutInProgress.insert(nd);
+
+  std::vector<llvm::Type *> body;
+  if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd))) {
+    body.push_back(B->getInt32Ty()); // discriminant
+    uint64_t payload = enumPayloadSize(e);
+    if (payload)
+      body.push_back(ArrayType::get(B->getInt8Ty(), payload));
+  } else {
+    if (isa<ClassDecl>(static_cast<Decl *>(nd)))
+      body.push_back(ObjectHeaderTy);
+    for (FieldDecl *f : allFieldsOf(nd)) {
+      // A weak field holds a bare pointer that the runtime nulls when the
+      // target dies; the Option it reads as is built on access.
+      llvm::Type *ft = f->IsWeak ? static_cast<llvm::Type *>(PtrTy)
+                                 : lower(f->Ty);
+      auto *asStruct = llvm::dyn_cast<StructType>(ft);
+      if (asStruct && asStruct->isOpaque()) {
+        // The field's own layout is still in progress, so it contains this
+        // type by value.
+        auto d = Diags.error(
+            f->NameRange.isValid() ? f->NameRange : f->Range,
+            "field '{}' makes '{}' contain itself, so its size is unbounded",
+            f->Name, static_cast<Decl *>(nd)->Name);
+        d.note("store it behind a class or a pointer to break the cycle")
+            .code(502);
+        ft = B->getInt8Ty();
+      }
+      body.push_back(ft);
+    }
+  }
+  st->setBody(body);
+  LayoutInProgress.erase(nd);
+  return st;
+}
+
+llvm::Type *CodeGen::lower(Type *t) {
+  if (!t)
+    return B->getVoidTy();
+  // A `some Mark` is laid out exactly as the type behind it.
+  t = t->canonical();
+  auto it = LoweredTypes.find(t);
+  if (it != LoweredTypes.end())
+    return it->second;
+
+  llvm::Type *r = nullptr;
+  switch (t->kind()) {
+  case TypeKind::Void:
+  case TypeKind::Never:
+  case TypeKind::Error:
+  case TypeKind::Opaque: // a `some` nothing ever fixed; Sema has reported it
+    r = StructType::get(*Ctx, {}); // zero-sized placeholder
+    break;
+  case TypeKind::Bool:
+    r = B->getInt1Ty();
+    break;
+  case TypeKind::Int:
+    r = IntegerType::get(*Ctx, t->intWidth());
+    break;
+  case TypeKind::Float:
+    r = t->floatWidth() == 32 ? B->getFloatTy() : B->getDoubleTy();
+    break;
+  case TypeKind::Char:
+    r = B->getInt32Ty();
+    break;
+  case TypeKind::CString:
+  case TypeKind::String:
+  case TypeKind::Pointer:
+  case TypeKind::Class:
+  case TypeKind::Mark:
+  // An `Any` is one pointer: the boxed value, whose object header already
+  // names the type. Nothing has to travel beside it.
+  case TypeKind::Any:
+    r = PtrTy;
+    break;
+  case TypeKind::Array:
+    r = ArrayType::get(lower(t->element()),
+                       t->arraySize() ? t->arraySize() : 0);
+    break;
+  case TypeKind::Slice:
+    r = StructType::get(*Ctx, {PtrTy, B->getInt64Ty()});
+    break;
+  case TypeKind::Tuple: {
+    std::vector<llvm::Type *> elems;
+    for (Type *e : t->tupleElements())
+      elems.push_back(lower(e));
+    r = StructType::get(*Ctx, elems);
+    break;
+  }
+  case TypeKind::CFunction:
+    // A bare pointer, exactly like C: nothing captured, nothing counted.
+    r = PtrTy;
+    break;
+  case TypeKind::Function:
+  case TypeKind::DynMark:
+    // { code pointer, environment } and { instance, vtable } share a shape.
+    r = StructType::get(*Ctx, {PtrTy, PtrTy});
+    break;
+  case TypeKind::Struct:
+  case TypeKind::Enum:
+    r = layoutOf(t->nominal(), t);
+    break;
+  case TypeKind::Generic:
+    // Only reachable if an uninstantiated template leaked through.
+    r = B->getInt8Ty();
+    break;
+  }
+  LoweredTypes[t] = r;
+  return r;
+}
+
+llvm::Type *CodeGen::lowerReturn(Type *t) {
+  if (!t || t->isVoid() || t->isNever() || t->isError())
+    return B->getVoidTy();
+  return lower(t);
+}
+
+llvm::FunctionType *CodeGen::functionTypeFor(FunctionDecl *fn) {
+  std::vector<llvm::Type *> params;
+  // Closures take their environment first.
+  if (fn->Flavour == FunctionFlavour::Closure)
+    params.push_back(PtrTy);
+  for (const Param &p : fn->Params) {
+    if (!p.Ty)
+      continue;
+    // `self` is just the first parameter; Sema already gave it the right
+    // shape (the class pointer, `&Struct`, or the struct by value).
+    params.push_back(lower(p.Ty));
+  }
+  Type *ret = fn->Ty ? fn->Ty->result() : Types.voidType();
+  // An initialiser writes into the freshly allocated instance and returns it.
+  if (fn->Flavour == FunctionFlavour::Initialiser)
+    return FunctionType::get(B->getVoidTy(), params, fn->IsVariadic);
+  return FunctionType::get(lowerReturn(ret), params, fn->IsVariadic);
+}
+
+//===----------------------------------------------------------------------===//
+// Reference counting
+//===----------------------------------------------------------------------===//
+
+/// Whether a value of `t` can be reached from more than one thread, and so
+/// needs its reference count changed indivisibly.
+///
+/// The compiler answers this from the static type, which is the whole point:
+/// a class that cannot be shared pays an ordinary add, and only what really
+/// is shared pays for an atomic. Measured on a reference-counting loop, that
+/// is the difference between one pass and two.
+///
+/// Three things qualify. `String` is `Send`, so a thread can be handed one.
+/// Anything marked `@sync` says outright that it is reached from several
+/// threads — `Arc` and `Mutex` are the two. And nothing else is either,
+/// because nothing else is `Send`.
+bool CodeGen::isSharedRefType(Type *t) {
+  if (!t)
+    return false;
+  if (t->is(TypeKind::String))
+    return true;
+  if (NominalDecl *nd = t->nominal())
+    return nd->hasAttr("sync");
+  return false;
+}
+
+const char *CodeGen::retainFnFor(Type *t) {
+  return isSharedRefType(t) ? "rune_retain_shared" : "rune_retain";
+}
+
+const char *CodeGen::releaseFnFor(Type *t) {
+  return isSharedRefType(t) ? "rune_release_shared" : "rune_release";
+}
+
+void CodeGen::emitRetain(Value *v, Type *t) {
+  if (!v || !t || !t->isRefCounted())
+    return;
+  switch (t->kind()) {
+  case TypeKind::Class:
+  case TypeKind::String:
+  case TypeKind::Any:
+    B->CreateCall(runtimeFn(retainFnFor(t), PtrTy, {PtrTy}), {v});
+    break;
+  case TypeKind::Function: {
+    Value *env = B->CreateExtractValue(v, 1, "env");
+    // A closure's environment is never shared: a closure is not `Send`.
+    B->CreateCall(runtimeFn("rune_retain", PtrTy, {PtrTy}), {env});
+    break;
+  }
+  case TypeKind::DynMark: {
+    // `{ object, vtable }`: the object is the reference-counted half.
+    Value *object = B->CreateExtractValue(v, 0, "dyn.object");
+    B->CreateCall(runtimeFn(retainFnFor(t), PtrTy, {PtrTy}), {object});
+    break;
+  }
+  case TypeKind::Tuple: {
+    const auto &elems = t->tupleElements();
+    for (unsigned i = 0; i < elems.size(); ++i)
+      if (elems[i]->isRefCounted())
+        emitRetain(B->CreateExtractValue(v, i), elems[i]);
+    break;
+  }
+  case TypeKind::Struct: {
+    auto fields = allFieldsOf(t->nominal());
+    for (unsigned i = 0; i < fields.size(); ++i)
+      if (fields[i]->Ty && fields[i]->Ty->isRefCounted())
+        emitRetain(B->CreateExtractValue(v, i), fields[i]->Ty);
+    break;
+  }
+  case TypeKind::Array: {
+    for (uint64_t i = 0; i < t->arraySize(); ++i)
+      emitRetain(B->CreateExtractValue(v, static_cast<unsigned>(i)),
+                 t->element());
+    break;
+  }
+  case TypeKind::Enum:
+    emitEnumRefCount(v, t, /*retain=*/true);
+    break;
+  default:
+    break;
+  }
+}
+
+void CodeGen::emitRelease(Value *v, Type *t) {
+  if (!v || !t || !t->isRefCounted())
+    return;
+  switch (t->kind()) {
+  case TypeKind::Class:
+  case TypeKind::String:
+  case TypeKind::Any:
+    B->CreateCall(runtimeFn(releaseFnFor(t), B->getVoidTy(), {PtrTy}), {v});
+    break;
+  case TypeKind::Function: {
+    Value *env = B->CreateExtractValue(v, 1, "env");
+    B->CreateCall(runtimeFn("rune_release", B->getVoidTy(), {PtrTy}), {env});
+    break;
+  }
+  case TypeKind::DynMark: {
+    Value *object = B->CreateExtractValue(v, 0, "dyn.object");
+    B->CreateCall(runtimeFn(releaseFnFor(t), B->getVoidTy(), {PtrTy}), {object});
+    break;
+  }
+  case TypeKind::Tuple: {
+    const auto &elems = t->tupleElements();
+    for (unsigned i = 0; i < elems.size(); ++i)
+      if (elems[i]->isRefCounted())
+        emitRelease(B->CreateExtractValue(v, i), elems[i]);
+    break;
+  }
+  case TypeKind::Struct: {
+    auto fields = allFieldsOf(t->nominal());
+    for (unsigned i = 0; i < fields.size(); ++i)
+      if (fields[i]->Ty && fields[i]->Ty->isRefCounted())
+        emitRelease(B->CreateExtractValue(v, i), fields[i]->Ty);
+    break;
+  }
+  case TypeKind::Array: {
+    for (uint64_t i = 0; i < t->arraySize(); ++i)
+      emitRelease(B->CreateExtractValue(v, static_cast<unsigned>(i)),
+                  t->element());
+    break;
+  }
+  case TypeKind::Enum:
+    emitEnumRefCount(v, t, /*retain=*/false);
+    break;
+  default:
+    break;
+  }
+}
+
+/// A structural hash of `v`, consistent with `emitEquals`.
+///
+/// The compiler knows the layout, so this needs nothing from the type: no
+/// `Hashable` mark to bind and no `Display` to stand in for one. A String
+/// hashes its contents; a class hashes its address, because two distinct
+/// objects are two distinct keys even when their fields agree.
+//===----------------------------------------------------------------------===//
+// Reflection
+//===----------------------------------------------------------------------===//
+
+/// The `reflect::Kind` case for `t`, as the enum's own tag value.
+Value *CodeGen::emitKindOf(Type *t, Type *kindType) {
+  // The order here is the order the cases are written in `std::reflect`; the
+  // enum has no explicit values, so a case's index is its tag.
+  unsigned index = 17; // Unknown
+  switch (t->kind()) {
+  case TypeKind::Void: index = 0; break;
+  case TypeKind::Bool: index = 1; break;
+  case TypeKind::Int: index = 2; break;
+  case TypeKind::Float: index = 3; break;
+  case TypeKind::Char: index = 4; break;
+  case TypeKind::String: index = 5; break;
+  case TypeKind::CString: index = 6; break;
+  case TypeKind::Pointer: index = 7; break;
+  case TypeKind::Array: index = 8; break;
+  case TypeKind::Slice: index = 9; break;
+  case TypeKind::Tuple: index = 10; break;
+  case TypeKind::Function:
+  case TypeKind::CFunction: index = 11; break;
+  case TypeKind::Struct: index = 12; break;
+  case TypeKind::Enum: index = 13; break;
+  case TypeKind::Class: index = 14; break;
+  case TypeKind::Mark:
+  case TypeKind::DynMark: index = 15; break;
+  case TypeKind::Any: index = 16; break;
+  default: index = 17; break;
+  }
+  // A payload-free enum is its tag, so the constant is the whole value.
+  llvm::Type *lowered = lower(kindType);
+  if (auto *st = dyn_cast<StructType>(lowered)) {
+    Value *slot = createEntryAlloca(st, "kind");
+    B->CreateStore(Constant::getNullValue(st), slot);
+    B->CreateStore(B->getInt32(index), B->CreateStructGEP(st, slot, 0));
+    return B->CreateLoad(st, slot);
+  }
+  return ConstantInt::get(lowered, index);
+}
+
+/// How many parts `t` has, in the sense `reflect::fieldCount` means.
+uint64_t CodeGen::reflectFieldCount(Type *t) {
+  switch (t->kind()) {
+  case TypeKind::Struct:
+    return allFieldsOf(t->nominal()).size();
+  case TypeKind::Class:
+    // Already flattened, base class fields first.
+    return allFieldsOf(t->nominal()).size();
+  case TypeKind::Tuple:
+    return t->tupleElements().size();
+  case TypeKind::Array:
+    return t->arraySize();
+  case TypeKind::Enum:
+    if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(t->nominal())))
+      return e->Variants.size();
+    return 0;
+  default:
+    return 0;
+  }
+}
+
+/// The name of part `index` of `t`, or of its type when `wantType`.
+std::string CodeGen::reflectFieldText(Type *t, int64_t index, bool wantType) {
+  if (index < 0)
+    return "";
+  const uint64_t at = static_cast<uint64_t>(index);
+  switch (t->kind()) {
+  case TypeKind::Struct:
+  case TypeKind::Class: {
+    auto fields = allFieldsOf(t->nominal());
+    if (at >= fields.size())
+      return "";
+    FieldDecl *f = fields[at];
+    if (!wantType)
+      return f->Name;
+    return f->Ty ? f->Ty->toString() : "";
+  }
+  case TypeKind::Tuple: {
+    const auto &elems = t->tupleElements();
+    if (at >= elems.size())
+      return "";
+    return wantType ? elems[at]->toString() : std::to_string(at);
+  }
+  case TypeKind::Array:
+    if (at >= t->arraySize())
+      return "";
+    return wantType ? t->element()->toString() : std::to_string(at);
+  case TypeKind::Enum: {
+    auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(t->nominal()));
+    if (!e || at >= e->Variants.size())
+      return "";
+    const auto &v = e->Variants[at];
+    if (!wantType)
+      return v->Name;
+    // A variant's "type" is the shape of its payload.
+    std::string out;
+    for (const auto &tt : v->TupleTypes)
+      out += (out.empty() ? "" : ", ") +
+             (tt->Resolved ? tt->Resolved->toString() : std::string("?"));
+    for (const auto &fd : v->Fields)
+      out += (out.empty() ? "" : ", ") + fd->Name + ": " +
+             (fd->Ty ? fd->Ty->toString() : std::string("?"));
+    return out;
+  }
+  default:
+    return "";
+  }
+}
+
+/// `offset_of!(T, field)`. The offset comes from the same layout the code
+/// generator uses, so it is the offset the program will actually see.
+Value *CodeGen::emitOffsetOf(CallExpr *c, Type *t, const std::string &field) {
+  llvm::Type *resultTy = lower(c->Ty);
+  if (!t->is(TypeKind::Struct) && !t->is(TypeKind::Class)) {
+    Diags.error(c->Range, "'{}' has no named fields to take an offset in",
+                t->toString())
+        .note("`offset_of!` applies to a struct or a class")
+        .code(506);
+    return ConstantInt::get(resultTy, 0);
+  }
+  auto fields = allFieldsOf(t->nominal());
+  for (unsigned i = 0; i < fields.size(); ++i) {
+    if (fields[i]->Name != field)
+      continue;
+    auto *layout = layoutOf(t->nominal(), t);
+    const llvm::StructLayout *sl = M->getDataLayout().getStructLayout(layout);
+    // A class stores its fields after the object header, and the header is
+    // part of the same struct, so the index is already right.
+    return ConstantInt::get(resultTy, sl->getElementOffset(i));
+  }
+  auto d = Diags.error(c->Range, "'{}' has no field named '{}'", t->toString(),
+                       field);
+  std::string names;
+  for (FieldDecl *f : fields)
+    names += (names.empty() ? "" : ", ") + f->Name;
+  if (!names.empty())
+    d.note("its fields are: {}", names);
+  d.code(506);
+  return ConstantInt::get(resultTy, 0);
+}
+
+/// Whether `t` binds the mark `markType`.
+bool CodeGen::reflectConforms(Type *t, Type *markType, SourceRange where) {
+  if (!markType || (!markType->is(TypeKind::Mark) &&
+                    !markType->is(TypeKind::DynMark))) {
+    Diags.error(where, "the second type argument of `conforms` has to be a mark")
+        .note("write `reflect::conforms<T, io::Display>()`")
+        .code(506);
+    return false;
+  }
+  NominalDecl *want = markType->nominal();
+  if (!want)
+    return false;
+  // A class inherits what its bases bound, so walk up as well as across.
+  for (NominalDecl *nd = t->nominal(); nd;) {
+    for (BindDecl *b : nd->Bindings)
+      if (b->ResolvedMark == static_cast<void *>(want))
+        return true;
+    auto *cd = dyn_cast<ClassDecl>(static_cast<Decl *>(nd));
+    nd = cd ? cd->Super : nullptr;
+  }
+  return false;
+}
+
+/// The `display` a type has bound, or null. `describe` defers to it, so a
+/// value that decided how it looks keeps that decision wherever it appears.
+FunctionDecl *CodeGen::displayMethodFor(Type *t) {
+  NominalDecl *nd = t->nominal();
+  if (!nd)
+    return nullptr;
+  for (BindDecl *b : nd->Bindings) {
+    if (!b->ResolvedMark || b->ResolvedMark->Name != "Display")
+      continue;
+    for (auto &m : b->Methods)
+      if (m->Name == "display" && m->Generics.empty())
+        return m.get();
+  }
+  return nullptr;
+}
+
+/// A type's name without its module path: `Point`, not `app::Point`. The
+/// module is usually noise in a rendered value, and `typeName` is there when
+/// it is not.
+std::string CodeGen::shortNameOf(Type *t) {
+  std::string full = t->toString();
+  size_t generic = full.find('<');
+  size_t search = generic == std::string::npos ? full.size() : generic;
+  size_t sep = full.rfind("::", search);
+  return sep == std::string::npos ? full : full.substr(sep + 2);
+}
+
+/// A structural rendering of `v`, worked out from `t`.
+///
+/// Matched to `emitHash` and `emitEquals`: the same walk over the same layout,
+/// producing something to read rather than a number or a verdict. A type that
+/// binds `io::Display` is asked instead, so a value that has decided how it
+/// looks keeps that decision even when it appears inside something else.
+Value *CodeGen::emitDescribe(Value *v, Type *t) {
+  auto text = [&](const std::string &s) { return emitStringLiteral(s, false); };
+  // Each concatenation makes a fresh string and finishes with its operands.
+  // Releasing them here keeps a rendering from leaking every piece it was
+  // built out of; a literal is immortal, so releasing one does nothing.
+  auto cat = [&](Value *a, Value *b) {
+    Value *joined = B->CreateCall(
+        runtimeFn("rune_string_concat", PtrTy, {PtrTy, PtrTy}), {a, b});
+    auto release = runtimeFn("rune_release_shared", B->getVoidTy(), {PtrTy});
+    B->CreateCall(release, {a});
+    B->CreateCall(release, {b});
+    return joined;
+  };
+  auto join = [&](std::initializer_list<Value *> parts) {
+    Value *out = nullptr;
+    for (Value *p : parts)
+      out = out ? cat(out, p) : p;
+    return out ? out : text("");
+  };
+  if (!v || !t)
+    return text("");
+
+  // A type that says how it prints is asked, whatever shape it is underneath.
+  if (FunctionDecl *display = displayMethodFor(t)) {
+    Function *f = declareFunction(display);
+    Value *self = v;
+    if (!t->is(TypeKind::Class)) {
+      // `display` takes `&self`, so an aggregate needs somewhere to be.
+      Value *slot = createEntryAlloca(lower(t), "describe.self");
+      B->CreateStore(v, slot);
+      self = slot;
+    }
+    return B->CreateCall(f, {self});
+  }
+
+  switch (t->kind()) {
+  case TypeKind::Bool: {
+    Value *sel = B->CreateSelect(B->CreateTrunc(v, B->getInt1Ty()),
+                                 text("true"), text("false"));
+    // Both arms are literals, which are immortal; nothing to retain.
+    return sel;
+  }
+  case TypeKind::Int: {
+    const char *fn = t->isSigned() ? "rune_string_from_i64"
+                                      : "rune_string_from_u64";
+    Value *wide = t->isSigned()
+                      ? B->CreateSExtOrTrunc(v, B->getInt64Ty())
+                      : B->CreateZExtOrTrunc(v, B->getInt64Ty());
+    return B->CreateCall(runtimeFn(fn, PtrTy, {B->getInt64Ty()}), {wide});
+  }
+  case TypeKind::Float: {
+    Value *wide = t->floatWidth() == 32
+                      ? B->CreateFPExt(v, B->getDoubleTy())
+                      : v;
+    return B->CreateCall(
+        runtimeFn("rune_string_from_f64", PtrTy, {B->getDoubleTy()}), {wide});
+  }
+  case TypeKind::Char:
+    return B->CreateCall(
+        runtimeFn("rune_string_from_char", PtrTy, {B->getInt32Ty()}),
+        {B->CreateZExtOrTrunc(v, B->getInt32Ty())});
+  case TypeKind::String:
+    // Quoted, so an empty string and a missing one look different.
+    return join({text("\""), B->CreateCall(runtimeFn("rune_retain_shared",
+                                                     PtrTy, {PtrTy}), {v}),
+                 text("\"")});
+  case TypeKind::CString:
+    return B->CreateCall(runtimeFn("rune_string_from_cstr", PtrTy, {PtrTy}),
+                         {v});
+  case TypeKind::Void:
+    return text("()");
+  case TypeKind::Tuple: {
+    const auto &elems = t->tupleElements();
+    Value *out = text("(");
+    for (unsigned i = 0; i < elems.size(); ++i) {
+      if (i)
+        out = cat(out, text(", "));
+      out = cat(out, emitDescribe(B->CreateExtractValue(v, i), elems[i]));
+    }
+    return cat(out, text(")"));
+  }
+  case TypeKind::Array: {
+    Value *out = text("[");
+    for (uint64_t i = 0; i < t->arraySize(); ++i) {
+      if (i)
+        out = cat(out, text(", "));
+      out = cat(out, emitDescribe(
+                         B->CreateExtractValue(v, static_cast<unsigned>(i)),
+                         t->element()));
+    }
+    return cat(out, text("]"));
+  }
+  case TypeKind::Struct: {
+    auto fields = allFieldsOf(t->nominal());
+    Value *out = text(shortNameOf(t) + " { ");
+    for (unsigned i = 0; i < fields.size(); ++i) {
+      if (i)
+        out = cat(out, text(", "));
+      out = cat(out, text(fields[i]->Name + ": "));
+      if (fields[i]->Ty)
+        out = cat(out, emitDescribe(B->CreateExtractValue(v, i),
+                                    fields[i]->Ty));
+    }
+    return cat(out, text(fields.empty() ? "}" : " }"));
+  }
+  case TypeKind::Class: {
+    // A class is a reference: what it *is* matters more than what it holds,
+    // and following it could run forever around a cycle.
+    return join({text(shortNameOf(t) + "@"),
+                 B->CreateCall(runtimeFn("rune_string_from_ptr", PtrTy,
+                                         {PtrTy}), {v})});
+  }
+  case TypeKind::Enum: {
+    auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(t->nominal()));
+    StructType *layout = layoutOf(t->nominal(), t);
+    Value *tmp = createEntryAlloca(layout, "describe.enum");
+    B->CreateStore(v, tmp);
+    Value *tag =
+        B->CreateLoad(B->getInt32Ty(), B->CreateStructGEP(layout, tmp, 0));
+    if (!e)
+      return text("?");
+
+    Value *slot = createEntryAlloca(PtrTy, "describe.enum.out");
+    B->CreateStore(text("?"), slot);
+    Function *fn = fs().Fn;
+    auto *doneBB = BasicBlock::Create(*Ctx, "describe.done", fn);
+    // The payload address has to be taken before the switch: the switch is
+    // this block's terminator, and nothing may follow it.
+    Value *payload = layout->getNumElements() >= 2
+                         ? B->CreateStructGEP(layout, tmp, 1)
+                         : nullptr;
+    SwitchInst *sw = B->CreateSwitch(tag, doneBB,
+                                     static_cast<unsigned>(e->Variants.size()));
+    for (unsigned i = 0; i < e->Variants.size(); ++i) {
+      const auto &variant = e->Variants[i];
+      auto *caseBB = BasicBlock::Create(*Ctx, "describe.variant", fn);
+      sw->addCase(B->getInt32(static_cast<uint32_t>(variant->Value)), caseBB);
+      B->SetInsertPoint(caseBB);
+
+      std::vector<Type *> payloadTypes;
+      std::vector<std::string> payloadNames;
+      for (const auto &tt : variant->TupleTypes) {
+        payloadTypes.push_back(tt->Resolved);
+        payloadNames.push_back("");
+      }
+      for (const auto &fd : variant->Fields) {
+        payloadTypes.push_back(fd->Ty);
+        payloadNames.push_back(fd->Name);
+      }
+      Value *out = text(variant->Name);
+      if (!payloadTypes.empty() && payload) {
+        llvm::Type *pt = variantPayloadType(e, i);
+        const bool named = !variant->Fields.empty();
+        out = cat(out, text(named ? " { " : "("));
+        for (unsigned j = 0; j < payloadTypes.size(); ++j) {
+          if (j)
+            out = cat(out, text(", "));
+          if (named)
+            out = cat(out, text(payloadNames[j] + ": "));
+          Type *ft = payloadTypes[j];
+          if (!ft)
+            continue;
+          Value *fieldPtr = B->CreateStructGEP(pt, payload, j);
+          out = cat(out, emitDescribe(B->CreateLoad(lower(ft), fieldPtr), ft));
+        }
+        out = cat(out, text(named ? " }" : ")"));
+      }
+      B->CreateStore(out, slot);
+      B->CreateBr(doneBB);
+    }
+    B->SetInsertPoint(doneBB);
+    return B->CreateLoad(PtrTy, slot);
+  }
+  case TypeKind::Pointer:
+    return join({text("*"), B->CreateCall(runtimeFn("rune_string_from_ptr",
+                                                    PtrTy, {PtrTy}), {v})});
+  case TypeKind::Any:
+    return join({text("Any("),
+                 B->CreateCall(runtimeFn("rune_string_from_cstr", PtrTy,
+                                         {PtrTy}),
+                               {B->CreateCall(runtimeFn("rune_any_type_cstr",
+                                                        PtrTy, {PtrTy}), {v})}),
+                 text(")")});
+  default:
+    // A function, a mark object: nothing to look inside, so name the type.
+    return text("<" + t->toString() + ">");
+  }
+}
+
+Value *CodeGen::emitHash(Value *v, Type *t, Value *acc) {
+  auto mix = [&](Value *bits) {
+    return B->CreateCall(
+        runtimeFn("rune_hash_mix", B->getInt64Ty(),
+                  {B->getInt64Ty(), B->getInt64Ty()}),
+        {acc, bits});
+  };
+  if (!v || !t)
+    return acc;
+  switch (t->kind()) {
+  case TypeKind::Bool:
+  case TypeKind::Char:
+  case TypeKind::Int:
+    return mix(B->CreateZExtOrTrunc(v, B->getInt64Ty()));
+  case TypeKind::Float: {
+    llvm::Type *asInt = t->floatWidth() == 32 ? B->getInt32Ty() : B->getInt64Ty();
+    return mix(B->CreateZExtOrTrunc(B->CreateBitCast(v, asInt),
+                                    B->getInt64Ty()));
+  }
+  case TypeKind::String:
+    return mix(B->CreateCall(
+        runtimeFn("rune_string_hash", B->getInt64Ty(), {PtrTy}), {v}));
+  case TypeKind::CString:
+    return mix(B->CreateCall(
+        runtimeFn("rune_cstring_hash", B->getInt64Ty(), {PtrTy}), {v}));
+  case TypeKind::Class:
+  case TypeKind::Pointer:
+  case TypeKind::Any:
+    return mix(B->CreatePtrToInt(v, B->getInt64Ty()));
+  case TypeKind::DynMark:
+    return mix(B->CreatePtrToInt(B->CreateExtractValue(v, 0),
+                                 B->getInt64Ty()));
+  case TypeKind::Function:
+    return mix(B->CreatePtrToInt(B->CreateExtractValue(v, 0),
+                                 B->getInt64Ty()));
+  case TypeKind::Tuple: {
+    const auto &elems = t->tupleElements();
+    for (unsigned i = 0; i < elems.size(); ++i)
+      acc = emitHash(B->CreateExtractValue(v, i), elems[i], acc);
+    return acc;
+  }
+  case TypeKind::Struct: {
+    auto fields = allFieldsOf(t->nominal());
+    for (unsigned i = 0; i < fields.size(); ++i)
+      if (fields[i]->Ty)
+        acc = emitHash(B->CreateExtractValue(v, i), fields[i]->Ty, acc);
+    return acc;
+  }
+  case TypeKind::Array: {
+    for (uint64_t i = 0; i < t->arraySize(); ++i)
+      acc = emitHash(B->CreateExtractValue(v, static_cast<unsigned>(i)),
+                     t->element(), acc);
+    return acc;
+  }
+  case TypeKind::Enum: {
+    // The tag, then the payload of whichever variant is live. Hashing the raw
+    // payload bytes instead would make `Some("a")` and `Some("a")` differ,
+    // since it would hash two String pointers rather than their contents.
+    auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(t->nominal()));
+    StructType *layout = layoutOf(t->nominal(), t);
+    Value *tmp = createEntryAlloca(layout, "enum.hash");
+    B->CreateStore(v, tmp);
+    Value *tag =
+        B->CreateLoad(B->getInt32Ty(), B->CreateStructGEP(layout, tmp, 0));
+    acc = mix(B->CreateZExtOrTrunc(tag, B->getInt64Ty()));
+    if (!e || layout->getNumElements() < 2)
+      return acc;
+
+    Value *payload = B->CreateStructGEP(layout, tmp, 1);
+    Value *slot = createEntryAlloca(B->getInt64Ty(), "enum.hash.acc");
+    B->CreateStore(acc, slot);
+    Function *f = fs().Fn;
+    auto *doneBB = BasicBlock::Create(*Ctx, "enum.hash.done", f);
+    SwitchInst *sw = B->CreateSwitch(tag, doneBB,
+                                     static_cast<unsigned>(e->Variants.size()));
+    for (unsigned i = 0; i < e->Variants.size(); ++i) {
+      const auto &variant = e->Variants[i];
+      std::vector<Type *> payloadTypes;
+      for (const auto &tt : variant->TupleTypes)
+        payloadTypes.push_back(tt->Resolved);
+      for (const auto &fd : variant->Fields)
+        payloadTypes.push_back(fd->Ty);
+      if (payloadTypes.empty())
+        continue;
+      auto *caseBB = BasicBlock::Create(*Ctx, "enum.hash.variant", f);
+      sw->addCase(B->getInt32(static_cast<uint32_t>(variant->Value)), caseBB);
+      B->SetInsertPoint(caseBB);
+      llvm::Type *pt = variantPayloadType(e, i);
+      Value *inner = B->CreateLoad(B->getInt64Ty(), slot);
+      for (unsigned j = 0; j < payloadTypes.size(); ++j) {
+        Type *ft = payloadTypes[j];
+        if (!ft)
+          continue;
+        Value *fieldPtr = B->CreateStructGEP(pt, payload, j);
+        Value *saved = acc;
+        acc = inner;
+        inner = emitHash(B->CreateLoad(lower(ft), fieldPtr), ft, inner);
+        acc = saved;
+      }
+      B->CreateStore(inner, slot);
+      B->CreateBr(doneBB);
+    }
+    B->SetInsertPoint(doneBB);
+    return B->CreateLoad(B->getInt64Ty(), slot);
+  }
+  default:
+    return acc;
+  }
+}
+
+/// Structural equality, matched to `emitHash`: contents for a String, address
+/// for a class, field by field for everything aggregate.
+Value *CodeGen::emitEquals(Value *a, Value *b, Type *t) {
+  if (!a || !b || !t)
+    return B->getInt1(true);
+  switch (t->kind()) {
+  case TypeKind::Bool:
+  case TypeKind::Char:
+  case TypeKind::Int:
+    return B->CreateICmpEQ(a, b);
+  case TypeKind::Float:
+    return B->CreateFCmpOEQ(a, b);
+  case TypeKind::String:
+    return B->CreateICmpEQ(
+        B->CreateCall(runtimeFn("rune_string_compare", B->getInt32Ty(),
+                                {PtrTy, PtrTy}),
+                      {a, b}),
+        B->getInt32(0));
+  case TypeKind::CString:
+    return B->CreateICmpEQ(
+        B->CreateCall(runtimeFn("rune_cstring_hash", B->getInt64Ty(), {PtrTy}),
+                      {a}),
+        B->CreateCall(runtimeFn("rune_cstring_hash", B->getInt64Ty(), {PtrTy}),
+                      {b}));
+  case TypeKind::Class:
+  case TypeKind::Pointer:
+  case TypeKind::Any:
+    return B->CreateICmpEQ(B->CreatePtrToInt(a, B->getInt64Ty()),
+                           B->CreatePtrToInt(b, B->getInt64Ty()));
+  case TypeKind::DynMark:
+  case TypeKind::Function:
+    return B->CreateICmpEQ(
+        B->CreatePtrToInt(B->CreateExtractValue(a, 0), B->getInt64Ty()),
+        B->CreatePtrToInt(B->CreateExtractValue(b, 0), B->getInt64Ty()));
+  case TypeKind::Tuple: {
+    Value *same = B->getInt1(true);
+    const auto &elems = t->tupleElements();
+    for (unsigned i = 0; i < elems.size(); ++i)
+      same = B->CreateAnd(same, emitEquals(B->CreateExtractValue(a, i),
+                                           B->CreateExtractValue(b, i),
+                                           elems[i]));
+    return same;
+  }
+  case TypeKind::Struct: {
+    Value *same = B->getInt1(true);
+    auto fields = allFieldsOf(t->nominal());
+    for (unsigned i = 0; i < fields.size(); ++i)
+      if (fields[i]->Ty)
+        same = B->CreateAnd(same, emitEquals(B->CreateExtractValue(a, i),
+                                             B->CreateExtractValue(b, i),
+                                             fields[i]->Ty));
+    return same;
+  }
+  case TypeKind::Array: {
+    Value *same = B->getInt1(true);
+    for (uint64_t i = 0; i < t->arraySize(); ++i) {
+      unsigned idx = static_cast<unsigned>(i);
+      same = B->CreateAnd(same, emitEquals(B->CreateExtractValue(a, idx),
+                                           B->CreateExtractValue(b, idx),
+                                           t->element()));
+    }
+    return same;
+  }
+  case TypeKind::Enum: {
+    // Equal when the tags agree and, where the live variant carries anything,
+    // the payloads agree too.
+    auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(t->nominal()));
+    StructType *layout = layoutOf(t->nominal(), t);
+    Value *ta = createEntryAlloca(layout, "enum.eq.a");
+    Value *tb = createEntryAlloca(layout, "enum.eq.b");
+    B->CreateStore(a, ta);
+    B->CreateStore(b, tb);
+    Value *tagA =
+        B->CreateLoad(B->getInt32Ty(), B->CreateStructGEP(layout, ta, 0));
+    Value *tagB =
+        B->CreateLoad(B->getInt32Ty(), B->CreateStructGEP(layout, tb, 0));
+    Value *sameTag = B->CreateICmpEQ(tagA, tagB);
+    if (!e || layout->getNumElements() < 2)
+      return sameTag;
+
+    Value *slot = createEntryAlloca(B->getInt1Ty(), "enum.eq");
+    B->CreateStore(sameTag, slot);
+    Function *f = fs().Fn;
+    auto *cmpBB = BasicBlock::Create(*Ctx, "enum.eq.payload", f);
+    auto *doneBB = BasicBlock::Create(*Ctx, "enum.eq.done", f);
+    B->CreateCondBr(sameTag, cmpBB, doneBB);
+
+    B->SetInsertPoint(cmpBB);
+    Value *pa = B->CreateStructGEP(layout, ta, 1);
+    Value *pb = B->CreateStructGEP(layout, tb, 1);
+    SwitchInst *sw = B->CreateSwitch(tagA, doneBB,
+                                     static_cast<unsigned>(e->Variants.size()));
+    for (unsigned i = 0; i < e->Variants.size(); ++i) {
+      const auto &variant = e->Variants[i];
+      std::vector<Type *> payloadTypes;
+      for (const auto &tt : variant->TupleTypes)
+        payloadTypes.push_back(tt->Resolved);
+      for (const auto &fd : variant->Fields)
+        payloadTypes.push_back(fd->Ty);
+      if (payloadTypes.empty())
+        continue;
+      auto *caseBB = BasicBlock::Create(*Ctx, "enum.eq.variant", f);
+      sw->addCase(B->getInt32(static_cast<uint32_t>(variant->Value)), caseBB);
+      B->SetInsertPoint(caseBB);
+      llvm::Type *pt = variantPayloadType(e, i);
+      Value *same = B->getInt1(true);
+      for (unsigned j = 0; j < payloadTypes.size(); ++j) {
+        Type *ft = payloadTypes[j];
+        if (!ft)
+          continue;
+        Value *fa = B->CreateLoad(lower(ft), B->CreateStructGEP(pt, pa, j));
+        Value *fb = B->CreateLoad(lower(ft), B->CreateStructGEP(pt, pb, j));
+        same = B->CreateAnd(same, emitEquals(fa, fb, ft));
+      }
+      B->CreateStore(same, slot);
+      B->CreateBr(doneBB);
+    }
+    B->SetInsertPoint(doneBB);
+    return B->CreateLoad(B->getInt1Ty(), slot);
+  }
+  default:
+    return B->getInt1(true);
+  }
+}
+
+void CodeGen::emitEnumRefCount(Value *v, Type *t, bool retain) {
+  auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(t->nominal()));
+  if (!e || !v)
+    return;
+  StructType *layout = layoutOf(t->nominal(), t);
+  if (layout->getNumElements() < 2)
+    return; // no payload to manage
+
+  // Work from memory: the active variant is only known at run time, so the
+  // payload has to be reinterpreted through its address.
+  Value *tmp = createEntryAlloca(layout, "enum.rc");
+  B->CreateStore(v, tmp);
+  Value *tag = B->CreateLoad(B->getInt32Ty(), B->CreateStructGEP(layout, tmp, 0));
+  Value *payload = B->CreateStructGEP(layout, tmp, 1);
+
+  Function *f = fs().Fn;
+  auto *doneBB = BasicBlock::Create(*Ctx, "enum.rc.done", f);
+  SwitchInst *sw = B->CreateSwitch(tag, doneBB,
+                                   static_cast<unsigned>(e->Variants.size()));
+
+  for (unsigned i = 0; i < e->Variants.size(); ++i) {
+    const auto &variant = e->Variants[i];
+    std::vector<Type *> payloadTypes;
+    for (const auto &tt : variant->TupleTypes)
+      payloadTypes.push_back(tt->Resolved);
+    for (const auto &fd : variant->Fields)
+      payloadTypes.push_back(fd->Ty);
+
+    bool any = false;
+    for (Type *pt : payloadTypes)
+      if (pt && pt->isRefCounted())
+        any = true;
+    if (!any)
+      continue;
+
+    auto *caseBB = BasicBlock::Create(*Ctx, "enum.rc.variant", f);
+    sw->addCase(B->getInt32(static_cast<uint32_t>(variant->Value)), caseBB);
+    B->SetInsertPoint(caseBB);
+    llvm::Type *pt = variantPayloadType(e, i);
+    for (unsigned j = 0; j < payloadTypes.size(); ++j) {
+      Type *ft = payloadTypes[j];
+      if (!ft || !ft->isRefCounted())
+        continue;
+      Value *slot = B->CreateStructGEP(pt, payload, j);
+      Value *field = B->CreateLoad(lower(ft), slot);
+      if (retain)
+        emitRetain(field, ft);
+      else
+        emitRelease(field, ft);
+    }
+    B->CreateBr(doneBB);
+  }
+  B->SetInsertPoint(doneBB);
+}
+
+void CodeGen::emitReleaseFields(Value *addr, Type *t) {
+  if (!t || !t->isRefCounted())
+    return;
+  Value *v = B->CreateLoad(lower(t), addr);
+  emitRelease(v, t);
+}
+
+Value *CodeGen::track(Value *v, Type *t) {
+  // Only reference-counted temporaries are tracked. A value with a `deinit`
+  // is destroyed by whoever ends up holding it — the local it is bound to, or
+  // the parameter it is passed into — so releasing it here as well would
+  // destroy it while its new owner still has it.
+  if (!v || !t || !t->isRefCounted())
+    return v;
+  // A temporary may be produced inside a conditional block (the right-hand
+  // side of `??`, an arm of a `match`) while the release runs after the paths
+  // rejoin. Parking it in a stack slot that starts null makes the release
+  // valid on every path, including the ones that never created it.
+  Function *f = fs().Fn;
+  IRBuilder<> entry(&f->getEntryBlock(), f->getEntryBlock().begin());
+  llvm::Type *ty = lower(t);
+  auto *slot = entry.CreateAlloca(ty, nullptr, "temp");
+  entry.CreateStore(Constant::getNullValue(ty), slot);
+  B->CreateStore(v, slot);
+  fs().Temps.push_back({slot, t});
+  return v;
+}
+
+void CodeGen::emitStatementCleanup(bool consume) {
+  if (blockIsTerminated()) {
+    if (consume)
+      fs().Temps.clear();
+    return;
+  }
+  for (auto it = fs().Temps.rbegin(); it != fs().Temps.rend(); ++it) {
+    llvm::Type *ty = lower(it->second);
+    // References only. A temporary is tracked to balance a `+1`, not because
+    // this statement owns the value: the slot it was stored into does, and
+    // running a destructor here would destroy what that slot still holds.
+    emitRelease(B->CreateLoad(ty, it->first), it->second);
+    // Blank the slot so a second pass over the same statement (a loop body,
+    // or an early exit that also runs cleanups) cannot release twice.
+    B->CreateStore(Constant::getNullValue(ty), it->first);
+  }
+  if (consume)
+    fs().Temps.clear();
+}
+
+void CodeGen::emitScopeCleanup(size_t scopeIndex, bool runDeferred) {
+  if (scopeIndex >= fs().Scopes.size())
+    return;
+  // Control never reaches the end of a block that already diverged (a
+  // `return`, a `break`, or a call that does not come back), so there is
+  // nothing left to clean up and nowhere to put the instructions.
+  if (blockIsTerminated())
+    return;
+  LexicalScope &scope = fs().Scopes[scopeIndex];
+  if (runDeferred && !scope.Deferred.empty()) {
+    // A deferred expression runs as its own statement, so whatever it creates
+    // is released right after it, not left for a statement that already ended.
+    auto pending = fs().Temps;
+    fs().Temps.clear();
+    for (auto it = scope.Deferred.rbegin(); it != scope.Deferred.rend(); ++it) {
+      emitRValue(*it);
+      emitStatementCleanup();
+    }
+    fs().Temps = pending;
+  }
+  for (auto it = scope.Locals.rbegin(); it != scope.Locals.rend(); ++it) {
+    Type *ty = it->Ty;
+    if (!needsDestruction(ty))
+      continue;
+    // The slot is blanked on the way out: a scope inside a loop is cleaned
+    // once per iteration, and the allocas are reused, so a stale pointer must
+    // not survive. `emitDestroy` does that for a reference-counted slot.
+    emitDestroy(it->Addr, ty, it->LiveFlag);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Value destructors
+//===----------------------------------------------------------------------===//
+
+FunctionDecl *CodeGen::valueDeinit(Type *t) {
+  if (!t)
+    return nullptr;
+  while (t->is(TypeKind::Pointer))
+    t = t->pointee();
+  if (!t->is(TypeKind::Struct) && !t->is(TypeKind::Enum))
+    return nullptr;
+  NominalDecl *nd = t->nominal();
+  return nd ? nd->Deinit : nullptr;
+}
+
+bool CodeGen::hasValueDeinit(Type *t) {
+  if (!t)
+    return false;
+  auto cached = DeinitCache.find(t);
+  if (cached != DeinitCache.end())
+    return cached->second;
+  // Insert `false` first: a type reachable from itself must not send this
+  // walk round for ever, and a cycle contributes nothing on its own.
+  DeinitCache[t] = false;
+  bool answer = false;
+  switch (t->kind()) {
+  case TypeKind::Struct:
+  case TypeKind::Enum: {
+    NominalDecl *nd = t->nominal();
+    if (nd && nd->Deinit) {
+      answer = true;
+      break;
+    }
+    if (!nd)
+      break;
+    for (auto &f : nd->Fields)
+      if (hasValueDeinit(f->Ty)) { answer = true; break; }
+    if (!answer)
+      if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+        for (auto &v : e->Variants) {
+          for (auto &f : v->Fields)
+            if (hasValueDeinit(f->Ty)) { answer = true; break; }
+          if (answer) break;
+          for (auto &tt : v->TupleTypes)
+            if (tt && hasValueDeinit(tt->Resolved)) { answer = true; break; }
+          if (answer) break;
+        }
+    break;
+  }
+  case TypeKind::Array:
+    answer = hasValueDeinit(t->element());
+    break;
+  case TypeKind::Tuple:
+    for (Type *e : t->tupleElements())
+      if (hasValueDeinit(e)) { answer = true; break; }
+    break;
+  default:
+    break;
+  }
+  DeinitCache[t] = answer;
+  return answer;
+}
+
+void CodeGen::emitRunDeinits(Value *addr, Type *t) {
+  if (!addr || !hasValueDeinit(t) || blockIsTerminated())
+    return;
+
+  if (FunctionDecl *d = valueDeinit(t)) {
+    // `deinit` borrows `self`, so the slot's address is what it wants. A
+    // class's is not reached this way at all — the runtime calls it when the
+    // count hits zero — so this is only ever a struct's or an enum's.
+    B->CreateCall(declareFunction(d), {addr});
+  }
+
+  // Then whatever the value contains. A struct, an array or a tuple is walked
+  // in place, so a part with a `deinit` of its own is reached by address.
+  switch (t->kind()) {
+  case TypeKind::Struct: {
+    auto *layout = llvm::dyn_cast<llvm::StructType>(lower(t));
+    auto fields = allFieldsOf(t->nominal());
+    if (layout)
+      for (unsigned i = 0; i < fields.size(); ++i)
+        if (hasValueDeinit(fields[i]->Ty))
+          emitRunDeinits(B->CreateStructGEP(layout, addr, i), fields[i]->Ty);
+    break;
+  }
+  case TypeKind::Array: {
+    if (!hasValueDeinit(t->element()))
+      break;
+    auto *arrTy = llvm::ArrayType::get(lower(t->element()), t->arraySize());
+    for (uint64_t i = 0; i < t->arraySize(); ++i)
+      emitRunDeinits(B->CreateConstInBoundsGEP2_64(arrTy, addr, 0, i),
+                     t->element());
+    break;
+  }
+  case TypeKind::Tuple: {
+    auto *layout = llvm::dyn_cast<llvm::StructType>(lower(t));
+    const auto &elems = t->tupleElements();
+    if (layout)
+      for (unsigned i = 0; i < elems.size(); ++i)
+        if (hasValueDeinit(elems[i]))
+          emitRunDeinits(B->CreateStructGEP(layout, addr, i), elems[i]);
+    break;
+  }
+  default:
+    // An enum's payload would need a switch on the tag to reach; its own
+    // `deinit` ran above, which is what a resource-owning enum declares.
+    break;
+  }
+}
+
+void CodeGen::emitDestroy(Value *addr, Type *t, Value *live) {
+  if (!addr || !needsDestruction(t) || blockIsTerminated())
+    return;
+
+  // The flag guards the *destructor* and nothing else. A value handed on may
+  // still hold references this slot claimed — a struct owning a descriptor
+  // may also hold a String — and those are balanced by the count, which the
+  // destination retained for itself. So the resource is released once, where
+  // it is still owned, and the references are released here either way.
+  BasicBlock *join = nullptr;
+  if (live) {
+    Function *f = fs().Fn;
+    BasicBlock *doIt = BasicBlock::Create(*Ctx, "drop.live", f);
+    join = BasicBlock::Create(*Ctx, "drop.done", f);
+    B->CreateCondBr(B->CreateLoad(B->getInt1Ty(), live, "owns"), doIt, join);
+    B->SetInsertPoint(doIt);
+    B->CreateStore(B->getFalse(), live);
+  }
+  emitRunDeinits(addr, t);
+  if (join) {
+    if (!blockIsTerminated())
+      B->CreateBr(join);
+    B->SetInsertPoint(join);
+  }
+
+  if (t->isRefCounted()) {
+    llvm::Type *lowered = lower(t);
+    emitRelease(B->CreateLoad(lowered, addr), t);
+    B->CreateStore(Constant::getNullValue(lowered), addr);
+  }
+}
+
+void CodeGen::emitDestroyValue(Value *v, Type *t) {
+  // Only the destructors: a value in a register that is about to be thrown
+  // away is a tracked temporary too, and the statement's cleanup is what
+  // releases the references it holds.
+  if (!v || !hasValueDeinit(t))
+    return;
+  Function *f = fs().Fn;
+  IRBuilder<> entry(&f->getEntryBlock(), f->getEntryBlock().begin());
+  auto *slot = entry.CreateAlloca(lower(t), nullptr, "drop.tmp");
+  B->CreateStore(v, slot);
+  emitRunDeinits(slot, t);
+}
+
+void CodeGen::emitAllScopeCleanups(size_t downTo) {
+  for (size_t i = fs().Scopes.size(); i > downTo; --i) {
+    if (blockIsTerminated())
+      return;
+    emitScopeCleanup(i - 1);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Helpers
+//===----------------------------------------------------------------------===//
+
+bool CodeGen::blockIsTerminated() const {
+  BasicBlock *bb = B->GetInsertBlock();
+  return !bb || bb->getTerminator() != nullptr;
+}
+
+void CodeGen::ensureTerminated(BasicBlock *target) {
+  if (!blockIsTerminated())
+    B->CreateBr(target);
+}
+
+Value *CodeGen::createEntryAlloca(llvm::Type *ty, const std::string &name) {
+  Function *f = fs().Fn;
+  IRBuilder<> entry(&f->getEntryBlock(), f->getEntryBlock().begin());
+  return entry.CreateAlloca(ty, nullptr, name);
+}
+
+Value *CodeGen::createEntryAllocaZeroed(llvm::Type *ty,
+                                        const std::string &name) {
+  // One builder for both, so the store lands immediately after the alloca it
+  // writes to. Two builders would each insert at the top of the block, and
+  // the store would come out *before* what it refers to.
+  Function *f = fs().Fn;
+  IRBuilder<> entry(&f->getEntryBlock(), f->getEntryBlock().begin());
+  Value *slot = entry.CreateAlloca(ty, nullptr, name);
+  entry.CreateStore(Constant::getNullValue(ty), slot);
+  return slot;
+}
+
+bool CodeGen::adoptsFreshConstruction(VarDecl *v, Expr *init) {
+  if (!v || !init || !v->NoEscape || v->IsCaptured)
+    return false;
+  if (!v->Ty || !v->Ty->is(TypeKind::Class) || v->Ty->isUniq())
+    return false;
+  // Only a construction. Anything else — a call that returns a reference, a
+  // read of a field — hands back something someone else may still hold, and
+  // the count has to say so.
+  auto *call = dyn_cast<CallExpr>(init);
+  return call && call->ConstructsClass;
+}
+
+llvm::Value *CodeGen::liveFlagFor(VarDecl *v) {
+  if (!v || FnStack.empty())
+    return nullptr;
+  auto it = fs().LiveFlags.find(v);
+  return it == fs().LiveFlags.end() ? nullptr : it->second;
+}
+
+Value *CodeGen::declareLocalSlot(VarDecl *v, const std::string &name) {
+  // Alternatives of a `|` pattern share one variable, so the slot may already
+  // exist; reuse it rather than shadowing it with a second allocation.
+  auto existing = fs().Slots.find(v);
+  if (existing != fs().Slots.end())
+    return existing->second;
+
+  llvm::Type *ty = lower(v->Ty);
+  // A reference-counted slot starts empty so the first store can release what
+  // was there safely. The emptying belongs in the *entry* block: a binding may
+  // be introduced on one path and cleaned up on another — `while x is Some(v)`
+  // binds `v` only when the pattern matches, and gives the scope back when it
+  // does not — and a slot zeroed only where it is bound is undefined on the
+  // path that skipped it, which the release at the end of that scope reads.
+  const bool counted = v->Ty && v->Ty->isRefCounted();
+  Value *slot = counted ? createEntryAllocaZeroed(ty, name)
+                        : createEntryAlloca(ty, name);
+  fs().Slots[v] = slot;
+  declareDebugVariable(v, slot, /*argIndex=*/0);
+  // Somewhere in this function the binding hands its value on, so whether it
+  // still owns one is a run-time question: an early `return` may already have
+  // given it away by the time the block ends. A flag answers it. Only a value
+  // with a destructor needs one — everything else is either copied, in which
+  // case nothing is lost, or reference counted, where the count is the answer.
+  Value *liveFlag = nullptr;
+  if (v->MovedSomewhere && hasValueDeinit(v->Ty)) {
+    // Zeroed in the entry block for the same reason: the flag is read
+    // wherever the scope ends, including on a path that never reached the
+    // declaration. False there means "owns nothing yet", which is right.
+    liveFlag = createEntryAllocaZeroed(B->getInt1Ty(), name + ".owns");
+    fs().LiveFlags[v] = liveFlag;
+  }
+  if (!fs().Scopes.empty())
+    fs().Scopes.back().Locals.push_back({slot, v->Ty, liveFlag});
+  return slot;
+}
+
+Value *CodeGen::locationString(SourceRange range) {
+  PresumedLoc pl = SM.decode(range.begin());
+  std::string text = pl.isValid() ? (pl.File->Name + ":" +
+                                     std::to_string(pl.Line) + ":" +
+                                     std::to_string(pl.Column))
+                                  : std::string("<unknown>");
+  auto it = StringLiterals.find("loc:" + text);
+  if (it != StringLiterals.end())
+    return it->second;
+  Constant *c = ConstantDataArray::getString(*Ctx, text, true);
+  auto *gv = new GlobalVariable(*M, c->getType(), true,
+                                GlobalValue::PrivateLinkage, c, ".rune.loc");
+  gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  StringLiterals["loc:" + text] = gv;
+  return gv;
+}
+
+Value *CodeGen::coerce(Value *v, Type *from, Type *to) {
+  // Into or out of a `some`: the representation is the concrete type's.
+  if (from)
+    from = from->canonical();
+  if (to)
+    to = to->canonical();
+  if (!v || !from || !to || from == to)
+    return v;
+  if (from->isError() || to->isError() || to->isVoid())
+    return v;
+
+  if (from->isInt() && to->isInt()) {
+    llvm::Type *dst = lower(to);
+    if (from->intWidth() == to->intWidth())
+      return v;
+    return from->isSigned() ? B->CreateSExtOrTrunc(v, dst)
+                            : B->CreateZExtOrTrunc(v, dst);
+  }
+  if (from->isInt() && to->isFloat())
+    return from->isSigned() ? B->CreateSIToFP(v, lower(to))
+                            : B->CreateUIToFP(v, lower(to));
+  if (from->isFloat() && to->isInt())
+    return to->isSigned() ? B->CreateFPToSI(v, lower(to))
+                          : B->CreateFPToUI(v, lower(to));
+  if (from->isFloat() && to->isFloat()) {
+    if (from->floatWidth() < to->floatWidth())
+      return B->CreateFPExt(v, lower(to));
+    if (from->floatWidth() > to->floatWidth())
+      return B->CreateFPTrunc(v, lower(to));
+    return v;
+  }
+  if (from->is(TypeKind::Char) && to->isInt())
+    return B->CreateZExtOrTrunc(v, lower(to));
+  if (from->isInt() && to->is(TypeKind::Char))
+    return B->CreateZExtOrTrunc(v, B->getInt32Ty());
+  if (from->isBool() && to->isInt())
+    return B->CreateZExt(v, lower(to));
+  if (from->isInt() && to->isBool())
+    return B->CreateICmpNE(v, Constant::getNullValue(lower(from)));
+  if (from->is(TypeKind::Enum) && to->isInt()) {
+    Value *tag = B->CreateExtractValue(v, 0);
+    return B->CreateSExtOrTrunc(tag, lower(to));
+  }
+
+  // T -> Option<T>
+  if (isOptionType(to) && !isOptionType(from))
+    return emitOptionSome(v, from, to);
+
+  // T -> Result<T, E>, or E -> Result<T, E>. Which channel is decided by the
+  // type, the same way Sema decided the conversion was allowed at all.
+  if (isResultType(to) && !isResultType(from))
+    return emitResultOf(v, from, to);
+
+  // T -> dyn Mark
+  if (to->is(TypeKind::DynMark) && !from->is(TypeKind::DynMark))
+    return track(emitDynCoerce(v, from, to), to);
+
+  // T -> Any. The box is the value; its header names the type.
+  if (to->isAny() && !from->isAny())
+    return track(emitAnyBox(v, from), to);
+
+  // Tuples are coerced element by element, which is where a `String` in one
+  // becomes the `Any` the destination asked for.
+  if (from->is(TypeKind::Tuple) && to->is(TypeKind::Tuple) && from != to) {
+    const auto &fe = from->tupleElements();
+    const auto &te = to->tupleElements();
+    if (fe.size() == te.size()) {
+      Value *out = UndefValue::get(lower(to));
+      for (unsigned i = 0; i < fe.size(); ++i)
+        out = B->CreateInsertValue(
+            out, coerce(B->CreateExtractValue(v, i), fe[i], te[i]), i);
+      return out;
+    }
+  }
+
+  // [N:T] -> [T]
+  if (from->is(TypeKind::Array) && to->is(TypeKind::Slice)) {
+    Value *tmp = createEntryAlloca(lower(from), "arr.tmp");
+    B->CreateStore(v, tmp);
+    Value *slice = UndefValue::get(lower(to));
+    slice = B->CreateInsertValue(slice, tmp, 0);
+    slice = B->CreateInsertValue(
+        slice, ConstantInt::get(B->getInt64Ty(), from->arraySize()), 1);
+    return slice;
+  }
+
+  // Pointers, classes and strings are all machine pointers already.
+  if (from->isPointerLike() && to->isPointerLike())
+    return v;
+  if (from->isPointerLike() && to->isInt())
+    return B->CreatePtrToInt(v, lower(to));
+  if (from->isInt() && to->isPointerLike())
+    return B->CreateIntToPtr(v, PtrTy);
+  return v;
+}
+
+Value *CodeGen::emitEnumVariant(Type *enumType, int variantIndex,
+                                const std::vector<Value *> &payload) {
+  auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(enumType->nominal()));
+  if (!e || variantIndex < 0)
+    return Constant::getNullValue(lower(enumType));
+  StructType *layout = layoutOf(enumType->nominal(), enumType);
+  Value *slot = createEntryAlloca(layout, "variant");
+  B->CreateStore(Constant::getNullValue(layout), slot);
+  const auto &variant = e->Variants[static_cast<size_t>(variantIndex)];
+  B->CreateStore(B->getInt32(static_cast<uint32_t>(variant->Value)),
+                 B->CreateStructGEP(layout, slot, 0));
+  if (!payload.empty() && layout->getNumElements() > 1) {
+    Value *payloadPtr = B->CreateStructGEP(layout, slot, 1);
+    llvm::Type *pt = variantPayloadType(e, static_cast<unsigned>(variantIndex));
+    for (unsigned i = 0; i < payload.size(); ++i)
+      B->CreateStore(payload[i],
+                     B->CreateStructGEP(pt, payloadPtr, i));
+  }
+  return B->CreateLoad(layout, slot);
+}
+
+Value *CodeGen::emitOptionSome(Value *v, Type *valueType, Type *optType) {
+  Type *elem = optionPayload(optType);
+  Value *coerced = coerce(v, valueType, elem);
+  int idx = variantIndexNamed(optType, "Some");
+  // The wrapped Option is a borrowed view of the same payload: whoever stores
+  // it retains the whole enum, which walks into the payload. Retaining here as
+  // well would leave the payload one reference too high.
+  return emitEnumVariant(optType, idx, {coerced});
+}
+
+/// Wraps a bare value into the `Result` channel its type belongs to.
+Value *CodeGen::emitResultOf(Value *v, Type *valueType, Type *resultType) {
+  Type *okTy = resultValue(resultType);
+  Type *errTy = resultError(resultType);
+  const bool ok = okTy && isImplicitlyConvertible(valueType, okTy);
+  Type *target = ok ? okTy : errTy;
+  Value *coerced = coerce(v, valueType, target);
+  int idx = variantIndexNamed(resultType, ok ? "Ok" : "Err");
+  // Borrowed, like the Option wrap above: whoever stores the enum retains it,
+  // and that walks into the payload.
+  return emitEnumVariant(resultType, idx, {coerced});
+}
+
+Value *CodeGen::emitEnumTag(Value *enumValue, Type *enumType) {
+  StructType *layout = layoutOf(enumType->nominal(), enumType);
+  Value *slot = createEntryAlloca(layout, "enum.tag");
+  B->CreateStore(enumValue, slot);
+  return B->CreateLoad(B->getInt32Ty(), B->CreateStructGEP(layout, slot, 0));
+}
+
+Value *CodeGen::emitVariantPayload(Value *enumValue, Type *enumType,
+                                   int variantIndex, unsigned field,
+                                   Type *fieldType) {
+  auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(enumType->nominal()));
+  if (!e)
+    return Constant::getNullValue(lower(fieldType));
+  StructType *layout = layoutOf(enumType->nominal(), enumType);
+  Value *slot = createEntryAlloca(layout, "enum.payload");
+  B->CreateStore(enumValue, slot);
+  Value *payloadPtr = B->CreateStructGEP(layout, slot, 1);
+  llvm::Type *pt = variantPayloadType(e, static_cast<unsigned>(variantIndex));
+  return B->CreateLoad(lower(fieldType),
+                       B->CreateStructGEP(pt, payloadPtr, field));
+}
+
+/// True when `enumValue` holds the variant named `name`.
+Value *CodeGen::emitVariantTest(Value *enumValue, Type *enumType,
+                                const char *name) {
+  auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(enumType->nominal()));
+  int idx = variantIndexNamed(enumType, name);
+  if (!e || idx < 0)
+    return B->getInt1(false);
+  int64_t want = e->Variants[static_cast<size_t>(idx)]->Value;
+  return B->CreateICmpEQ(emitEnumTag(enumValue, enumType),
+                         B->getInt32(static_cast<uint32_t>(want)));
+}
+
+Value *CodeGen::emitBoundsCheck(Value *index, Value *length, SourceRange range) {
+  if (Opts.Safety != SafetyLevel::Full || !length)
+    return index;
+  Function *f = fs().Fn;
+  auto *okBB = BasicBlock::Create(*Ctx, "bounds.ok", f);
+  auto *failBB = BasicBlock::Create(*Ctx, "bounds.fail", f);
+  Value *tooLow = B->CreateICmpSLT(index, ConstantInt::get(B->getInt64Ty(), 0));
+  Value *tooHigh = B->CreateICmpSGE(index, length);
+  B->CreateCondBr(B->CreateOr(tooLow, tooHigh), failBB, okBB);
+  B->SetInsertPoint(failBB);
+  B->CreateCall(
+      runtimeFn("rune_panic_bounds", B->getVoidTy(),
+                {B->getInt64Ty(), B->getInt64Ty(), PtrTy}),
+      {index, length, locationString(range)});
+  B->CreateUnreachable();
+  B->SetInsertPoint(okBB);
+  return index;
+}
+
+Value *CodeGen::emitLengthOf(Value *addr, Type *t) {
+  if (t->is(TypeKind::Array))
+    return ConstantInt::get(B->getInt64Ty(), t->arraySize());
+  if (t->is(TypeKind::Slice)) {
+    Value *lenPtr = B->CreateStructGEP(lower(t), addr, 1);
+    return B->CreateLoad(B->getInt64Ty(), lenPtr);
+  }
+  return nullptr;
+}
+
+void CodeGen::reportUnsupported(SourceRange range, const std::string &what) {
+  Diags.error(range, "{} is not supported by this code generator yet", what)
+      .note("this construct type-checks, but has no lowering; please open an "
+            "issue with a reproducer")
+      .code(599);
+}
+
+//===----------------------------------------------------------------------===//
+// Mark objects
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// A run-time type name turned into something a linker will accept, without
+/// letting two different names collapse into one: every character that is not
+/// already safe becomes `$` followed by its hex code.
+std::string symbolise(const std::string &name) {
+  std::string out;
+  out.reserve(name.size());
+  for (unsigned char c : name) {
+    if (std::isalnum(c) || c == '_')
+      out += static_cast<char>(c);
+    else {
+      static const char *hex = "0123456789abcdef";
+      out += '$';
+      out += hex[c >> 4];
+      out += hex[c & 0xF];
+    }
+  }
+  return out;
+}
+} // namespace
+
+std::string CodeGen::typeDisplayName(NominalDecl *nd) {
+  if (!nd)
+    return "?";
+  // The instantiation's own name, arguments included. This is what `Any`
+  // reports, what `is` compares and what a traceback prints, so
+  // `Vector<i64>` has to be able to say it is not `Vector<String>`.
+  if (nd->DeclaredType)
+    return runtimeTypeName(nd->DeclaredType);
+  const auto *d = static_cast<const Decl *>(nd);
+  return d->ModulePath.empty() ? d->Name : d->ModulePath + "::" + d->Name;
+}
+
+std::string CodeGen::typeSymbolFor(NominalDecl *nd) {
+  // The linker symbol for a type's per-type globals: its destructor, its
+  // descriptor, its vtable. All three use one-definition linkage so that a
+  // type reached through a `.rul` resolves to a single object, which means
+  // the name has to identify the type *exactly*.
+  //
+  // A generic's arguments are part of that identity. Leaving them out gave
+  // every instantiation of `Vector` the same name; inside one object file
+  // LLVM quietly numbered them apart, and across two the linker folded a
+  // `Vector<i64>` destructor onto a `Vector<String>` one — whichever
+  // happened to be emitted first. The result was a program that destroyed
+  // the wrong thing, and only when it was split into a library and a binary.
+  return symbolise(typeDisplayName(nd));
+}
+
+GlobalVariable *CodeGen::boxInfoFor(Type *concrete) {
+  auto it = BoxInfos.find(concrete);
+  if (it != BoxInfos.end())
+    return it->second;
+
+  llvm::Type *payload = lower(concrete);
+  auto *boxTy = StructType::get(*Ctx, {ObjectHeaderTy, payload});
+  uint64_t size = M->getDataLayout().getTypeAllocSize(boxTy).getFixedValue();
+
+  // The name is the type's run-time identity, and the symbol is derived from
+  // it, so every object file that boxes an `i64` names the same descriptor and
+  // the linker folds them into one. `Any` then answers "is this an i64?" with
+  // a pointer comparison rather than a string compare.
+  const std::string name = runtimeTypeName(concrete);
+  const std::string symbol = symbolise(name);
+
+  if (GlobalVariable *existing = M->getNamedGlobal("rune.typeinfo.box." + symbol)) {
+    BoxInfos[concrete] = existing;
+    return existing;
+  }
+
+  Function *deinit = nullptr;
+  if (concrete->isRefCounted()) {
+    auto *ft = FunctionType::get(B->getVoidTy(), {PtrTy}, false);
+    deinit = Function::Create(ft, GlobalValue::LinkOnceODRLinkage,
+                              "rune.box.deinit." + symbol, *M);
+    auto *saveBB = B->GetInsertBlock();
+    auto saveIt = saveBB ? B->GetInsertPoint() : BasicBlock::iterator();
+    FunctionState st;
+    st.Fn = deinit;
+    st.ReturnType = Types.voidType();
+    FnStack.push_back(st);
+    fs().Scopes.push_back(LexicalScope{});
+    B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", deinit));
+    Value *slot = B->CreateStructGEP(boxTy, deinit->getArg(0), 1);
+    emitRelease(B->CreateLoad(payload, slot), concrete);
+    B->CreateRetVoid();
+    fs().Scopes.pop_back();
+    FnStack.pop_back();
+    if (saveBB)
+      B->SetInsertPoint(saveBB, saveIt);
+  }
+
+  Constant *nameConst = ConstantDataArray::getString(*Ctx, name, true);
+  auto *nameGV = new GlobalVariable(*M, nameConst->getType(), true,
+                                    GlobalValue::PrivateLinkage, nameConst,
+                                    ".rune.boxname");
+  nameGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  auto *gv = new GlobalVariable(
+      *M, TypeInfoTy, true, GlobalValue::LinkOnceODRLinkage,
+      ConstantStruct::get(
+          TypeInfoTy,
+          {nameGV, ConstantInt::get(B->getInt64Ty(), size),
+           deinit ? static_cast<Constant *>(deinit)
+                  : ConstantPointerNull::get(PtrTy),
+           ConstantPointerNull::get(PtrTy), ConstantPointerNull::get(PtrTy),
+           B->getInt32(0)}),
+      "rune.typeinfo.box." + symbol);
+  BoxInfos[concrete] = gv;
+  return gv;
+}
+
+Value *CodeGen::emitDynBox(Value *v, Type *concrete) {
+  // A class instance is already a reference-counted object, so it can serve as
+  // the mark object's payload directly — but the mark object is a separate
+  // owner and needs a reference of its own.
+  if (concrete->is(TypeKind::Class)) {
+    emitRetain(v, concrete);
+    return v;
+  }
+
+  llvm::Type *payload = lower(concrete);
+  auto *boxTy = StructType::get(*Ctx, {ObjectHeaderTy, payload});
+  uint64_t size = M->getDataLayout().getTypeAllocSize(boxTy).getFixedValue();
+  Value *box = B->CreateCall(
+      runtimeFn("rune_alloc", PtrTy, {B->getInt64Ty(), PtrTy}),
+      {ConstantInt::get(B->getInt64Ty(), size), boxInfoFor(concrete)});
+  emitRetain(v, concrete);
+  B->CreateStore(v, B->CreateStructGEP(boxTy, box, 1));
+  return box;
+}
+
+Function *CodeGen::markThunkFor(FunctionDecl *impl, Type *concrete) {
+  auto key = std::make_pair(impl, concrete);
+  auto it = MarkThunks.find(key);
+  if (it != MarkThunks.end())
+    return it->second;
+
+  Function *target = declareFunction(impl);
+  // Uniform shape: the receiver always arrives as a pointer to the object.
+  std::vector<llvm::Type *> params{PtrTy};
+  FunctionType *targetTy = target->getFunctionType();
+  for (unsigned i = 1; i < targetTy->getNumParams(); ++i)
+    params.push_back(targetTy->getParamType(i));
+  auto *ft = FunctionType::get(targetTy->getReturnType(), params, false);
+  auto *thunk = Function::Create(ft, GlobalValue::InternalLinkage,
+                                 target->getName() + ".dyn", *M);
+  MarkThunks[key] = thunk;
+
+  auto *saveBB = B->GetInsertBlock();
+  auto saveIt = saveBB ? B->GetInsertPoint() : BasicBlock::iterator();
+  FunctionState st;
+  st.Fn = thunk;
+  st.ReturnType = impl->Ty ? impl->Ty->result() : Types.voidType();
+  FnStack.push_back(st);
+  fs().Scopes.push_back(LexicalScope{});
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", thunk));
+
+  Value *object = thunk->getArg(0);
+  Type *selfParam = nullptr;
+  for (const Param &p : impl->Params)
+    if (p.IsSelf)
+      selfParam = p.Ty;
+
+  Value *self = object;
+  if (!concrete->is(TypeKind::Class)) {
+    // The value lives just past the object header inside the box.
+    auto *boxTy = StructType::get(*Ctx, {ObjectHeaderTy, lower(concrete)});
+    Value *payload = B->CreateStructGEP(boxTy, object, 1);
+    // A borrowing method wants that address; a by-value method wants the value.
+    self = (selfParam && selfParam->is(TypeKind::Pointer))
+               ? payload
+               : B->CreateLoad(lower(concrete), payload);
+  }
+
+  std::vector<Value *> args{self};
+  for (unsigned i = 1; i < thunk->arg_size(); ++i)
+    args.push_back(thunk->getArg(i));
+  Value *r = B->CreateCall(target, args);
+  if (thunk->getReturnType()->isVoidTy())
+    B->CreateRetVoid();
+  else
+    B->CreateRet(r);
+
+  fs().Scopes.pop_back();
+  FnStack.pop_back();
+  if (saveBB)
+    B->SetInsertPoint(saveBB, saveIt);
+  return thunk;
+}
+
+GlobalVariable *CodeGen::markVTableFor(MarkDecl *mark, Type *concrete) {
+  auto key = std::make_pair(mark, concrete);
+  auto it = MarkVTables.find(key);
+  if (it != MarkVTables.end())
+    return it->second;
+
+  std::vector<Constant *> entries;
+  for (const auto &requirement : mark->Methods) {
+    // A static requirement keeps its slot so the indices stay aligned with the
+    // mark's method list, but there is nothing to dispatch to: Sema refuses to
+    // call one through a `dyn` value.
+    bool hasSelf = false;
+    for (const Param &p : requirement->Params)
+      hasSelf = hasSelf || p.IsSelf;
+    if (!hasSelf) {
+      entries.push_back(ConstantPointerNull::get(PtrTy));
+      continue;
+    }
+    FunctionDecl *impl =
+        Sema.markMethodFor(mark, concrete, requirement->Name);
+    if (!impl || (!impl->Body && !impl->IsImported)) {
+      // Sema has already reported the missing binding; keep going so the rest
+      // of the module still compiles.
+      entries.push_back(ConstantPointerNull::get(PtrTy));
+      continue;
+    }
+    entries.push_back(markThunkFor(impl, concrete));
+  }
+
+  auto *arrTy = ArrayType::get(PtrTy, entries.size());
+  auto *gv = new GlobalVariable(*M, arrTy, true, GlobalValue::InternalLinkage,
+                                ConstantArray::get(arrTy, entries),
+                                "rune.markvtable." + mark->Name);
+  MarkVTables[key] = gv;
+  return gv;
+}
+
+Value *CodeGen::emitDynCoerce(Value *v, Type *from, Type *dynType) {
+  MarkDecl *mark = dynType->mark();
+  if (!mark)
+    return Constant::getNullValue(lower(dynType));
+  Value *object = emitDynBox(v, from);
+  Value *pair = UndefValue::get(lower(dynType));
+  pair = B->CreateInsertValue(pair, object, 0);
+  pair = B->CreateInsertValue(pair, markVTableFor(mark, from), 1);
+  return pair;
+}
+
+//===----------------------------------------------------------------------===//
+// `Any`
+//
+// An `Any` and a mark object hold their value the same way, and for the same
+// reason: a class is already an object with a descriptor in its header, and
+// everything else is copied into a box that gets one. The difference is what
+// travels alongside. A mark object carries a vtable, because it knows in
+// advance which methods will be asked for. An `Any` carries nothing, because
+// it does not — the header is the whole answer, and every question about the
+// value goes back to it.
+//===----------------------------------------------------------------------===//
+
+GlobalVariable *CodeGen::typeDescriptorFor(Type *t) {
+  t = TypeContext::stripUniq(t);
+  // A class already has a descriptor, and it is the one that knows about the
+  // superclass chain, so `any is Animal` still finds a `Dog`.
+  if (t->is(TypeKind::Class))
+    return emitTypeInfo(t->nominal());
+  return boxInfoFor(t);
+}
+
+Value *CodeGen::emitAnyBox(Value *v, Type *concrete) {
+  return emitDynBox(v, TypeContext::stripUniq(concrete));
+}
+
+Value *CodeGen::emitAnyIs(Value *any, Type *target) {
+  if (!any || !target || !isStorableInAny(target))
+    return B->getInt1(false);
+  Value *r = B->CreateCall(
+      runtimeFn("rune_any_is", B->getInt32Ty(), {PtrTy, PtrTy}),
+      {any, typeDescriptorFor(target)});
+  return B->CreateICmpNE(r, B->getInt32(0), "any.is");
+}
+
+Value *CodeGen::emitAnyUnbox(Value *any, Type *target) {
+  target = TypeContext::stripUniq(target);
+  // A class was never boxed: the `Any` *is* the object.
+  if (target->is(TypeKind::Class)) {
+    emitRetain(any, target);
+    return any;
+  }
+  llvm::Type *payload = lower(target);
+  auto *boxTy = StructType::get(*Ctx, {ObjectHeaderTy, payload});
+  Value *v = B->CreateLoad(payload, B->CreateStructGEP(boxTy, any, 1),
+                           "any.value");
+  emitRetain(v, target);
+  return v;
+}
+
+Value *CodeGen::emitAnyTypeName(Value *any) {
+  Value *name = B->CreateCall(
+      runtimeFn("rune_any_type_cstr", PtrTy, {PtrTy}), {any});
+  return B->CreateCall(runtimeFn("rune_string_from_cstr", PtrTy, {PtrTy}),
+                       {name});
+}
+
+Value *CodeGen::emitAnyIntrinsic(CallExpr *c, const std::string &which,
+                                 Type *typeArg) {
+  auto *member = dyn_cast<MemberExpr>(c->Callee.get());
+  if (!member)
+    return nullptr;
+  Value *any = emitRValue(member->Base.get());
+  if (!any)
+    return Constant::getNullValue(lower(c->Ty));
+
+  if (which == "any_type_name")
+    return track(emitAnyTypeName(any), Types.stringType());
+
+  if (which == "any_holds")
+    return emitAnyIs(any, typeArg);
+
+  if (which == "any_get") {
+    // `Some(value)` or `None`, decided by the descriptor in the header.
+    Value *slot = createEntryAlloca(lower(c->Ty), "any.get");
+    B->CreateStore(Constant::getNullValue(lower(c->Ty)), slot);
+    Function *f = fs().Fn;
+    auto *hitBB = BasicBlock::Create(*Ctx, "any.get.hit", f);
+    auto *missBB = BasicBlock::Create(*Ctx, "any.get.miss", f);
+    auto *doneBB = BasicBlock::Create(*Ctx, "any.get.done", f);
+    B->CreateCondBr(emitAnyIs(any, typeArg), hitBB, missBB);
+
+    B->SetInsertPoint(hitBB);
+    B->CreateStore(emitOptionSome(emitAnyUnbox(any, typeArg), typeArg, c->Ty),
+                   slot);
+    B->CreateBr(doneBB);
+
+    B->SetInsertPoint(missBB);
+    B->CreateStore(emitEnumVariant(c->Ty, variantIndexNamed(c->Ty, "None"), {}),
+                   slot);
+    B->CreateBr(doneBB);
+
+    B->SetInsertPoint(doneBB);
+    return track(B->CreateLoad(lower(c->Ty), slot), c->Ty);
+  }
+
+  if (which == "any_expect") {
+    Function *f = fs().Fn;
+    auto *okBB = BasicBlock::Create(*Ctx, "any.expect.ok", f);
+    auto *badBB = BasicBlock::Create(*Ctx, "any.expect.bad", f);
+    B->CreateCondBr(emitAnyIs(any, typeArg), okBB, badBB);
+
+    // The message names both types, so the report says what was there as well
+    // as what was wanted.
+    B->SetInsertPoint(badBB);
+    std::string wanted = runtimeTypeName(typeArg);
+    Constant *msg = ConstantDataArray::getString(*Ctx, wanted, true);
+    auto *msgGV = new GlobalVariable(*M, msg->getType(), true,
+                                     GlobalValue::PrivateLinkage, msg,
+                                     ".rune.anyname");
+    msgGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    B->CreateCall(runtimeFn("rune_panic_any", B->getVoidTy(),
+                            {PtrTy, PtrTy, PtrTy}),
+                  {msgGV, any, locationString(c->Range)});
+    B->CreateUnreachable();
+
+    B->SetInsertPoint(okBB);
+    return track(emitAnyUnbox(any, typeArg), typeArg);
+  }
+  return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// Declarations
+//===----------------------------------------------------------------------===//
+
+/// Gives `gv` the linkage for a definition that may appear in more than one
+/// object and should merge rather than collide.
+///
+/// `weak_odr` says that everywhere but COFF, where it becomes a *weak
+/// external* — a reference with a fallback, which another object's reference
+/// does not resolve against. A COMDAT with strong linkage says the same thing
+/// in the form COFF understands: keep one, discard the rest.
+void CodeGen::setMergeableLinkage(llvm::GlobalObject *gv,
+                                  const std::string &name) {
+  if (llvm::Triple(M->getTargetTriple()).isOSBinFormatCOFF()) {
+    gv->setLinkage(GlobalValue::ExternalLinkage);
+    gv->setComdat(M->getOrInsertComdat(name));
+    return;
+  }
+  gv->setLinkage(GlobalValue::WeakODRLinkage);
+}
+
+/// Mergeable, and droppable when nothing here reaches it.
+///
+/// The standard library is compiled from source into every artefact that uses
+/// it, so a hello-world otherwise carries every function in it — nine hundred
+/// of them, for the seventeen it calls. `linkonce_odr` says what is true of
+/// such a copy: identical wherever it appears, so keep one; and belonging to
+/// nobody in particular, so a copy nothing calls can go. That last part is
+/// what `weak_odr` cannot say, and why a library's own exports keep it.
+///
+/// COFF needs the same COMDAT `setMergeableLinkage` uses — its linkage alone
+/// carries neither half of the meaning.
+void CodeGen::setDiscardableLinkage(llvm::GlobalObject *gv,
+                                    const std::string &name) {
+  gv->setLinkage(GlobalValue::LinkOnceODRLinkage);
+  if (llvm::Triple(M->getTargetTriple()).isOSBinFormatCOFF())
+    gv->setComdat(M->getOrInsertComdat(name));
+}
+
+bool CodeGen::isAncillary(const Decl *d) const {
+  return d && Sema.isAncillary(d->ModulePath);
+}
+
+/// True when `t` is a struct that this target's C ABI does not pass the way
+/// the code generator emits it.
+///
+/// Win64 passes an aggregate in a register only when it is exactly 1, 2, 4 or
+/// 8 bytes wide; anything else goes as a pointer to a copy the caller makes,
+/// and a result comes back through a hidden pointer. We emit the value
+/// directly, which every other target we support accepts. Rather than pass
+/// something C will misread, say so.
+bool CodeGen::abiRejectsByValue(Type *t) {
+  if (!t)
+    return false;
+  const llvm::Triple triple(M->getTargetTriple());
+  if (!triple.isOSBinFormatCOFF() || triple.getArch() != llvm::Triple::x86_64)
+    return false;
+  if (!t->is(TypeKind::Struct) && !t->is(TypeKind::Tuple))
+    return false;
+  llvm::Type *lowered = lower(t);
+  if (!lowered->isSized())
+    return false;
+  uint64_t size = M->getDataLayout().getTypeAllocSize(lowered);
+  return size != 1 && size != 2 && size != 4 && size != 8;
+}
+
+/// Checks a signature that C is on the other side of.
+void CodeGen::checkForeignABI(FunctionDecl *fn) {
+  auto complain = [&](SourceRange where, Type *t, const char *role) {
+    if (!abiRejectsByValue(t))
+      return;
+    auto d = Diags.error(where,
+                         "'{}' cannot cross the C boundary by value on this "
+                         "target", t->toString());
+    d.note("Windows x64 passes a struct in a register only at 1, 2, 4 or 8 "
+           "bytes wide, and this one is {} bytes",
+           M->getDataLayout().getTypeAllocSize(lower(t)));
+    d.note("pass it as a pointer instead — `*{}` for the {}, which every "
+           "target handles the same way", t->toString(), role);
+    d.code(504);
+  };
+  for (const Param &p : fn->Params)
+    complain(p.TypeAnnotation ? p.TypeAnnotation->Range : fn->Range, p.Ty,
+             "parameter");
+  if (fn->Ty)
+    complain(fn->ReturnType ? fn->ReturnType->Range : fn->Range,
+             fn->Ty->result(), "result");
+}
+
+Function *CodeGen::declareFunction(FunctionDecl *fn) {
+  auto it = Functions.find(fn);
+  if (it != Functions.end())
+    return it->second;
+
+  FunctionType *ft = functionTypeFor(fn);
+  std::string name = fn->MangledName.empty() ? fn->Name : fn->MangledName;
+
+  // The same foreign function may be declared in several modules. Reuse the
+  // symbol rather than letting LLVM invent `name.1`, and report a genuine
+  // disagreement about its signature.
+  if (Function *existing = M->getFunction(name)) {
+    if (existing->getFunctionType() != ft) {
+      Diags.error(fn->NameRange.isValid() ? fn->NameRange : fn->Range,
+                  "'{}' is declared with two different signatures", name)
+          .note("every declaration of a foreign function must agree on its "
+                "parameter and result types")
+          .code(501);
+    }
+    Functions[fn] = existing;
+    fn->CodeGenFn = existing;
+    return existing;
+  }
+
+  if (fn->IsExtern || fn->hasAttr("export"))
+    checkForeignABI(fn);
+
+  auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, name, *M);
+  // A traceback walks the frame-pointer chain, so a debug build has to keep
+  // one in every function or the walk stops at the first omission.
+  if (Opts.DebugInfo)
+    f->addFnAttr("frame-pointer", "all");
+  // Only definitions get restricted linkage: a bodyless declaration has to
+  // stay external so the linker can resolve it.
+  bool hasDefinition = fn->Body || fn->SourceClosure;
+  if (fn->IsImported)
+    hasDefinition = false; // the definition lives in the imported library
+  if (hasDefinition && !fn->IsExtern && fn->Name != "main") {
+    // A `pub` function can end up compiled into more than one artefact — the
+    // standard library lands in every object that uses it. Mangled names
+    // already encode the module, so identically named definitions really are
+    // the same function and may be merged. `weak_odr` rather than
+    // `linkonce_odr`: a library's exports must survive optimisation even
+    // when nothing inside that library calls them.
+    //
+    // Methods follow the type rather than the module. Whether a type conforms
+    // to a mark, or what methods it has, is visible wherever the type is, so a
+    // method cannot be private to the object that happened to compile it.
+    bool isMethod = fn->OwnerType != nullptr ||
+                    (fn->Parent && isa<NominalDecl>(fn->Parent));
+    // A debug build keeps every function nameable so a traceback can say what
+    // it was in, rather than showing a bare address. `weak_odr` rather than
+    // `external`: two objects that both carry the standard library have to
+    // merge those definitions, not collide over them.
+    // `@export` is different in kind: it says this function is *the* one
+    // that answers to that name from outside. A weak definition would not
+    // pull its object out of an archive on COFF, which is how the runtime is
+    // linked, and merging two different `@export("rune_alloc")`s was never
+    // wanted anyway. Give it strong external linkage.
+    if (fn->hasAttr("export"))
+      f->setLinkage(GlobalValue::ExternalLinkage);
+    else if (isAncillary(fn))
+      // Not this artefact's API: a copy of somebody else's code, kept only
+      // where this one reaches it.
+      setDiscardableLinkage(f, name);
+    else if (fn->IsPublic || isMethod || Opts.DebugInfo)
+      setMergeableLinkage(f, name);
+    else
+      f->setLinkage(GlobalValue::InternalLinkage);
+  }
+  if (fn->hasAttr("inline"))
+    f->addFnAttr(llvm::Attribute::AlwaysInline);
+  if (fn->hasAttr("noinline"))
+    f->addFnAttr(llvm::Attribute::NoInline);
+  Functions[fn] = f;
+  fn->CodeGenFn = f;
+  return f;
+}
+
+GlobalVariable *CodeGen::declareGlobal(GlobalVarDecl *g) {
+  auto it = Globals.find(g);
+  if (it != Globals.end())
+    return it->second;
+  llvm::Type *ty = lower(g->Ty);
+
+  // Foreign globals keep the name the C side gave them. Rune globals are
+  // mangled with their module so two modules may each have a `counter`.
+  bool isForeign = g->Parent && isa<ExternDecl>(g->Parent);
+  // `@as` renamed the Rune-side name only; the symbol stays what C exports.
+  std::string name = g->LinkName.empty() ? g->Name : g->LinkName;
+  if (!isForeign && !g->ModulePath.empty()) {
+    std::string mod = g->ModulePath;
+    for (char &ch : mod)
+      if (!std::isalnum(static_cast<unsigned char>(ch)))
+        ch = '_';
+    name = "_RG" + mod + "V" + g->Name;
+  }
+
+  GlobalValue::LinkageTypes linkage =
+      isForeign ? GlobalValue::ExternalLinkage
+                : (g->IsPublic ? GlobalValue::WeakODRLinkage
+                               : GlobalValue::InternalLinkage);
+  auto *gv = new GlobalVariable(*M, ty, /*isConstant=*/false, linkage, nullptr,
+                                name);
+  if (!isForeign && g->IsPublic)
+    isAncillary(g) ? setDiscardableLinkage(gv, name)
+                   : setMergeableLinkage(gv, name);
+  // Ours start zeroed and are filled in by the generated initialiser.
+  if (!isForeign)
+    gv->setInitializer(Constant::getNullValue(ty));
+  Globals[g] = gv;
+  g->CodeGenGlobal = gv;
+  return gv;
+}
+
+Function *CodeGen::emitClassDeinit(ClassDecl *c) {
+  auto it = ClassDeinits.find(static_cast<NominalDecl *>(c));
+  if (it != ClassDeinits.end())
+    return it->second;
+
+  // Deinit, type info and vtables use one-definition linkage with a fully
+  // qualified name so a class shared through a .rul resolves to a single
+  // object at link time; otherwise `is` checks would disagree across the
+  // library boundary.
+  std::string symbol = typeSymbolFor(static_cast<NominalDecl *>(c));
+  auto *ft = FunctionType::get(B->getVoidTy(), {PtrTy}, false);
+  auto *f = Function::Create(ft, GlobalValue::LinkOnceODRLinkage,
+                             "rune.deinit." + symbol, *M);
+  ClassDeinits[static_cast<NominalDecl *>(c)] = f;
+
+  // Build the body after the class layout exists; it releases every
+  // reference-counted field and then chains to the user's `deinit`.
+  auto *saveBB = B->GetInsertBlock();
+  auto saveIt = saveBB ? B->GetInsertPoint() : BasicBlock::iterator();
+
+  // A generated function still needs a FunctionState: releasing an enum field
+  // allocates a scratch slot and creates blocks, both of which look it up.
+  FunctionState st;
+  st.Fn = f;
+  st.ReturnType = Types.voidType();
+  FnStack.push_back(st);
+  fs().Scopes.push_back(LexicalScope{});
+
+  auto *entry = BasicBlock::Create(*Ctx, "entry", f);
+  B->SetInsertPoint(entry);
+  Value *self = f->getArg(0);
+
+  // Destruction runs from the most-derived class inwards: this class's own
+  // `deinit`, then its own fields, then the base class's deinit does the same
+  // for its half of the instance.
+  if (c->Deinit) {
+    Function *userDeinit = declareFunction(c->Deinit);
+    B->CreateCall(userDeinit, {self});
+  }
+  StructType *layout = layoutOf(static_cast<NominalDecl *>(c),
+                                c->DeclaredType);
+  for (const auto &field : c->Fields) {
+    Value *fieldPtr = B->CreateStructGEP(layout, self, 1 + field->Index);
+    if (field->IsWeak) {
+      // Forget the slot so the runtime never writes into freed memory.
+      B->CreateCall(runtimeFn("rune_weak_clear", B->getVoidTy(), {PtrTy}),
+                    {fieldPtr});
+      continue;
+    }
+    Type *ft2 = field->Ty;
+    if (!needsDestruction(ft2))
+      continue;
+    // A field that is itself a value with a `deinit` is destroyed in place:
+    // its destructor wants the address of the field, not a copy of it.
+    emitDestroy(fieldPtr, ft2);
+  }
+  if (c->Super)
+    B->CreateCall(emitClassDeinit(c->Super), {self});
+  B->CreateRetVoid();
+
+  fs().Scopes.pop_back();
+  FnStack.pop_back();
+  if (saveBB)
+    B->SetInsertPoint(saveBB, saveIt);
+  return f;
+}
+
+GlobalVariable *CodeGen::emitTypeInfo(NominalDecl *nd) {
+  auto it = TypeInfos.find(nd);
+  if (it != TypeInfos.end())
+    return it->second;
+
+  std::string symbol = typeSymbolFor(nd);
+  std::string qualified = typeDisplayName(nd);
+
+  // Reserve the slot first so a class that refers to itself terminates.
+  auto *gv = new GlobalVariable(*M, TypeInfoTy, /*isConstant=*/true,
+                                GlobalValue::LinkOnceODRLinkage, nullptr,
+                                "rune.typeinfo." + symbol);
+  TypeInfos[nd] = gv;
+
+  Constant *nameConst = ConstantDataArray::getString(*Ctx, qualified, true);
+  auto *nameGV = new GlobalVariable(*M, nameConst->getType(), true,
+                                    GlobalValue::PrivateLinkage, nameConst,
+                                    ".rune.typename");
+  nameGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+
+  auto *cls = dyn_cast<ClassDecl>(static_cast<Decl *>(nd));
+  StructType *layout = layoutOf(nd, nd->DeclaredType);
+  uint64_t size = layout->isSized()
+                      ? M->getDataLayout().getTypeAllocSize(layout).getFixedValue()
+                      : 0;
+
+  Constant *deinitFn = ConstantPointerNull::get(PtrTy);
+  Constant *superInfo = ConstantPointerNull::get(PtrTy);
+  Constant *vtable = ConstantPointerNull::get(PtrTy);
+  unsigned vtableCount = 0;
+
+  if (cls) {
+    deinitFn = emitClassDeinit(cls);
+    if (cls->Super)
+      superInfo = emitTypeInfo(static_cast<NominalDecl *>(cls->Super));
+    if (!cls->VTable.empty()) {
+      std::vector<Constant *> entries;
+      for (FunctionDecl *m : cls->VTable)
+        entries.push_back(declareFunction(m));
+      auto *arrTy = ArrayType::get(PtrTy, entries.size());
+      auto *vtGV = new GlobalVariable(*M, arrTy, true,
+                                      GlobalValue::LinkOnceODRLinkage,
+                                      ConstantArray::get(arrTy, entries),
+                                      "rune.vtable." + symbol);
+      vtable = vtGV;
+      vtableCount = static_cast<unsigned>(entries.size());
+    }
+  }
+
+  gv->setInitializer(ConstantStruct::get(
+      TypeInfoTy, {nameGV, ConstantInt::get(B->getInt64Ty(), size), deinitFn,
+                   superInfo, vtable,
+                   ConstantInt::get(B->getInt32Ty(), vtableCount)}));
+  return gv;
+}
+
+Function *CodeGen::thunkFor(Function *target, Type *fnType) {
+  auto it = ValueThunks.find(target);
+  if (it != ValueThunks.end())
+    return it->second;
+
+  // A plain function used as a value gains an ignored environment parameter so
+  // every callable value shares one calling convention.
+  std::vector<llvm::Type *> params{PtrTy};
+  for (llvm::Type *p : target->getFunctionType()->params())
+    params.push_back(p);
+  auto *ft = FunctionType::get(target->getReturnType(), params, false);
+  auto *thunk = Function::Create(ft, GlobalValue::InternalLinkage,
+                                 target->getName() + ".value", *M);
+  ValueThunks[target] = thunk;
+
+  auto *saveBB = B->GetInsertBlock();
+  auto saveIt = saveBB ? B->GetInsertPoint() : BasicBlock::iterator();
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", thunk));
+  std::vector<Value *> args;
+  for (unsigned i = 1; i < thunk->arg_size(); ++i)
+    args.push_back(thunk->getArg(i));
+  Value *r = B->CreateCall(target, args);
+  if (target->getReturnType()->isVoidTy())
+    B->CreateRetVoid();
+  else
+    B->CreateRet(r);
+  if (saveBB)
+    B->SetInsertPoint(saveBB, saveIt);
+  return thunk;
+}
+
+//===----------------------------------------------------------------------===//
+// Function bodies
+//===----------------------------------------------------------------------===//
+
+void CodeGen::emitFunctionBody(FunctionDecl *fn) {
+  if (fn->IsExtern || fn->IsImported)
+    return;
+  if (fn->Flavour == FunctionFlavour::Closure) {
+    emitClosureBody(fn);
+    return;
+  }
+  if (!fn->Body)
+    return;
+
+  Function *f = declareFunction(fn);
+  if (!f->empty())
+    return;
+
+  FunctionState st;
+  st.Decl = fn;
+  st.Fn = f;
+  st.ReturnType = fn->Ty ? fn->Ty->result() : Types.voidType();
+  FnStack.push_back(st);
+
+  auto *entry = BasicBlock::Create(*Ctx, "entry", f);
+  B->SetInsertPoint(entry);
+  // Everything emitted from here carries a location inside this subprogram.
+  DIScopes.push_back(debugSubprogramFor(fn, f));
+  setDebugLocation(fn->Range);
+
+  bool isInit = fn->Flavour == FunctionFlavour::Initialiser;
+  Type *ret = fs().ReturnType;
+  if (!isInit && ret && !ret->isVoid() && !ret->isNever() && !ret->isError())
+    fs().ReturnSlot = createEntryAlloca(lower(ret), "retval");
+  if (fs().ReturnSlot && ret->isRefCounted())
+    B->CreateStore(Constant::getNullValue(lower(ret)), fs().ReturnSlot);
+  fs().ReturnBlock = BasicBlock::Create(*Ctx, "return", f);
+
+  fs().Scopes.push_back(LexicalScope{});
+
+  // Bind parameters. Arguments arrive at +0; the callee retains what it keeps.
+  unsigned argIndex = 0;
+  for (Param &p : fn->Params) {
+    Value *arg = f->getArg(argIndex++);
+    arg->setName(p.Name);
+    if (p.IsSelf)
+      fs().SelfValue = arg;
+    if (!p.Binding)
+      continue;
+    Value *slot = createEntryAlloca(lower(p.Ty), p.Name);
+    B->CreateStore(arg, slot);
+    fs().Slots[p.Binding] = slot;
+    // `self` is borrowed for the duration of the call, so it is not retained
+    // and must not be released on the way out.
+    if (!p.IsSelf) {
+      emitRetain(arg, p.Ty);
+      // A parameter owns what it was passed, so it destroys it on the way
+      // out — unless the body hands it on, which is what the flag says.
+      // It starts true: an argument arrives already made.
+      Value *liveFlag = nullptr;
+      if (p.Binding->MovedSomewhere && hasValueDeinit(p.Ty)) {
+        liveFlag = createEntryAlloca(B->getInt1Ty(), p.Name + ".owns");
+        B->CreateStore(B->getTrue(), liveFlag);
+        fs().LiveFlags[p.Binding] = liveFlag;
+      }
+      fs().Scopes.back().Locals.push_back({slot, p.Ty, liveFlag});
+    }
+    declareDebugVariable(p.Binding, slot, argIndex);
+  }
+
+  emitBlock(fn->Body.get(), isInit ? nullptr : fs().ReturnSlot,
+            isInit ? nullptr : ret);
+
+  if (!blockIsTerminated()) {
+    emitStatementCleanup();
+    emitAllScopeCleanups(0);
+    B->CreateBr(fs().ReturnBlock);
+  }
+  fs().Scopes.pop_back();
+  if (!DIScopes.empty())
+    DIScopes.pop_back();
+
+  B->SetInsertPoint(fs().ReturnBlock);
+  if (fs().ReturnSlot)
+    B->CreateRet(B->CreateLoad(lower(ret), fs().ReturnSlot));
+  else if (f->getReturnType()->isVoidTy())
+    B->CreateRetVoid();
+  else
+    B->CreateRet(Constant::getNullValue(f->getReturnType()));
+
+  FnStack.pop_back();
+}
+
+void CodeGen::emitClosureBody(FunctionDecl *lifted) {
+  ClosureExpr *c = lifted->SourceClosure;
+  if (!c || !c->Body)
+    return;
+  Function *f = declareFunction(lifted);
+  if (!f->empty())
+    return;
+
+  FunctionState st;
+  st.Decl = lifted;
+  st.Closure = c;
+  st.Fn = f;
+  st.ReturnType = lifted->Ty ? lifted->Ty->result() : Types.voidType();
+  FnStack.push_back(st);
+
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", f));
+  fs().EnvValue = f->getArg(0);
+  fs().EnvValue->setName("env");
+
+  Type *ret = fs().ReturnType;
+  if (ret && !ret->isVoid() && !ret->isNever() && !ret->isError()) {
+    fs().ReturnSlot = createEntryAlloca(lower(ret), "retval");
+    if (ret->isRefCounted())
+      B->CreateStore(Constant::getNullValue(lower(ret)), fs().ReturnSlot);
+  }
+  fs().ReturnBlock = BasicBlock::Create(*Ctx, "return", f);
+  fs().Scopes.push_back(LexicalScope{});
+
+  for (unsigned i = 0; i < c->Captures.size(); ++i)
+    fs().CaptureIndex[c->Captures[i].Var] = i;
+  // A captured `self` is reachable through the environment as well.
+  if (FnStack.size() > 1)
+    fs().SelfValue = nullptr;
+
+  unsigned argIndex = 1; // 0 is the environment
+  for (Param &p : c->Params) {
+    Value *arg = f->getArg(argIndex++);
+    arg->setName(p.Name);
+    if (!p.Binding)
+      continue;
+    Value *slot = createEntryAlloca(lower(p.Ty), p.Name);
+    B->CreateStore(arg, slot);
+    emitRetain(arg, p.Ty);
+    fs().Slots[p.Binding] = slot;
+    Value *liveFlag = nullptr;
+    if (p.Binding->MovedSomewhere && hasValueDeinit(p.Ty)) {
+      liveFlag = createEntryAlloca(B->getInt1Ty(), p.Name + ".owns");
+      B->CreateStore(B->getTrue(), liveFlag);
+      fs().LiveFlags[p.Binding] = liveFlag;
+    }
+    fs().Scopes.back().Locals.push_back({slot, p.Ty, liveFlag});
+  }
+
+  emitBlock(c->Body.get(), fs().ReturnSlot, ret);
+  if (!blockIsTerminated()) {
+    emitStatementCleanup();
+    emitAllScopeCleanups(0);
+    B->CreateBr(fs().ReturnBlock);
+  }
+  fs().Scopes.pop_back();
+
+  B->SetInsertPoint(fs().ReturnBlock);
+  if (fs().ReturnSlot)
+    B->CreateRet(B->CreateLoad(lower(ret), fs().ReturnSlot));
+  else
+    B->CreateRetVoid();
+
+  FnStack.pop_back();
+}
+
+//===----------------------------------------------------------------------===//
+// Statements
+//===----------------------------------------------------------------------===//
+
+void CodeGen::emitBlock(BlockExpr *b, Value *resultSlot, Type *resultType) {
+  if (!b)
+    return;
+  // Statements inside this block own their own temporaries. The enclosing
+  // statement's are set aside first: a block used as an operand — `"n = " +
+  // unsafe { compute() }.$str()` — would otherwise release the values the
+  // expression around it is still holding.
+  TempScope ownTemps(*this);
+  fs().Scopes.push_back(LexicalScope{});
+  size_t depth = fs().Scopes.size();
+
+  for (auto &s : b->Stmts) {
+    if (blockIsTerminated())
+      break;
+    emitStmt(s.get());
+  }
+
+  if (!blockIsTerminated()) {
+    if (b->Tail) {
+      if (resultSlot && resultType && !resultType->isVoid()) {
+        emitInto(b->Tail.get(), resultSlot, resultType);
+      } else {
+        emitRValue(b->Tail.get());
+      }
+      emitStatementCleanup();
+    }
+    emitScopeCleanup(depth - 1);
+  }
+  fs().Scopes.pop_back();
+}
+
+void CodeGen::emitStmt(Stmt *s) {
+  if (!s)
+    return;
+  setDebugLocation(s->Range);
+  switch (s->Kind) {
+  case NodeKind::ExprStmt: {
+    Expr *value = cast<ExprStmt>(s)->Value.get();
+    Value *produced = emitRValue(value);
+    // A statement's value is thrown away. When it owns something — a struct
+    // with a `deinit`, made here and bound to nothing — this is the only
+    // place it can be destroyed, so destroy it. Anything that names a binding
+    // is left alone: the binding still owns it.
+    if (produced && value->Ty && hasValueDeinit(value->Ty) &&
+        value->Category == ValueCategory::RValue && !blockIsTerminated())
+      emitDestroyValue(produced, value->Ty);
+    emitStatementCleanup();
+    break;
+  }
+
+  case NodeKind::VarStmt: {
+    auto *v = cast<VarStmtNode>(s);
+    if (v->IsGlobal) {
+      // The storage lives at module scope; a `global` statement only makes the
+      // name visible, and the initialiser already ran in rune.init_globals.
+      break;
+    }
+    Type *ty = v->Binding ? v->Binding->Ty : nullptr;
+    if (!ty)
+      break;
+    if (auto *bp = dyn_cast<BindingPattern>(v->Binding.get())) {
+      if (!bp->Binding)
+        break;
+      Value *slot = declareLocalSlot(bp->Binding, bp->Name);
+      // A local that never leaves this scope, initialised by a construction
+      // nothing else holds: the object's own count is the binding's, so the
+      // slot adopts it rather than retaining a second reference and dropping
+      // the first. The scope hands it back on the way out exactly as before.
+      Expr *savedAdopt = AdoptedResult;
+      if (adoptsFreshConstruction(bp->Binding, v->Init.get()))
+        AdoptedResult = v->Init.get();
+      if (v->Init)
+        emitInto(v->Init.get(), slot, ty);
+      AdoptedResult = savedAdopt;
+      // The slot holds a value now, so it owns one. (The flag starts false so
+      // that a `return` before the initialiser — which only a loop can
+      // arrange — does not destroy uninitialised storage.)
+      if (Value *flag = liveFlagFor(bp->Binding))
+        B->CreateStore(B->getTrue(), flag);
+      emitStatementCleanup();
+      break;
+    }
+    // Destructuring: evaluate once into a temporary, then bind each part.
+    Value *tmp = createEntryAlloca(lower(ty), "destructure");
+    if (ty->isRefCounted())
+      B->CreateStore(Constant::getNullValue(lower(ty)), tmp);
+    if (v->Init)
+      emitInto(v->Init.get(), tmp, ty);
+    fs().Scopes.back().Locals.push_back({tmp, ty});
+    emitPatternBind(v->Binding.get(), tmp, ty);
+    emitStatementCleanup();
+    break;
+  }
+
+  case NodeKind::DeferStmt:
+    fs().Scopes.back().Deferred.push_back(cast<DeferStmtNode>(s)->Body.get());
+    break;
+
+  case NodeKind::DeclStmtKind:
+    // Nested functions are emitted from the module-level worklist.
+    break;
+
+  default:
+    break;
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Module assembly
+//===----------------------------------------------------------------------===//
+
+void CodeGen::emitGlobalInitialisers() {
+  auto *ft = FunctionType::get(B->getVoidTy(), {}, false);
+  auto *f = Function::Create(ft, GlobalValue::InternalLinkage,
+                             "rune.init_globals", *M);
+  FunctionState st;
+  st.Fn = f;
+  st.ReturnType = Types.voidType();
+  FnStack.push_back(st);
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", f));
+  fs().Scopes.push_back(LexicalScope{});
+
+  for (GlobalVarDecl *g : Sema.Globals) {
+    if (g->Parent && isa<ExternDecl>(g->Parent))
+      continue;
+    GlobalVariable *gv = declareGlobal(g);
+    if (!g->Init)
+      continue;
+    emitInto(g->Init.get(), gv, g->Ty);
+    emitStatementCleanup();
+  }
+
+  fs().Scopes.pop_back();
+  B->CreateRetVoid();
+  FnStack.pop_back();
+}
+
+void CodeGen::emitDecoratorCalls() {
+  auto *ft = FunctionType::get(B->getVoidTy(), {}, false);
+  auto *f = Function::Create(ft, GlobalValue::InternalLinkage,
+                             "rune.run_decorators", *M);
+  FunctionState st;
+  st.Fn = f;
+  st.ReturnType = Types.voidType();
+  FnStack.push_back(st);
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", f));
+  fs().Scopes.push_back(LexicalScope{});
+
+  // `@route("/health")` on `fn health()` is a call to `route("/health",
+  // health)`, made once, in the order the decorators were written.
+  for (const auto &use : Sema.DecoratorCalls) {
+    if (!use.Decorator || !use.Target || !use.Args)
+      continue;
+    Function *dec = declareFunction(use.Decorator);
+    const std::vector<Type *> &params = use.Decorator->Ty->params();
+    std::vector<Value *> args;
+    for (size_t i = 0; i + 1 < params.size() && i < use.Args->Args.size(); ++i) {
+      Value *v = emitRValue(use.Args->Args[i].get());
+      if (!v)
+        v = Constant::getNullValue(lower(params[i]));
+      args.push_back(coerce(v, use.Args->Args[i]->Ty, params[i]));
+    }
+    // The decorated function as a value. Every callable value carries a
+    // leading environment parameter, so the *thunk* goes in the slot — not
+    // the function itself, whose first parameter is its own. Passing the raw
+    // address here shifted every argument by one, and the first one arrived
+    // as the null environment.
+    Value *closure = UndefValue::get(lower(params.back()));
+    closure = B->CreateInsertValue(
+        closure, thunkFor(declareFunction(use.Target), params.back()), 0);
+    closure = B->CreateInsertValue(closure,
+                                   ConstantPointerNull::get(PtrTy), 1);
+    args.push_back(closure);
+    B->CreateCall(dec, args);
+    emitStatementCleanup();
+  }
+
+  fs().Scopes.pop_back();
+  B->CreateRetVoid();
+  FnStack.pop_back();
+}
+
+void CodeGen::emitGlobalTeardown() {
+  auto *ft = FunctionType::get(B->getVoidTy(), {}, false);
+  auto *f = Function::Create(ft, GlobalValue::InternalLinkage,
+                             "rune.deinit_globals", *M);
+  FunctionState st;
+  st.Fn = f;
+  st.ReturnType = Types.voidType();
+  FnStack.push_back(st);
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", f));
+  fs().Scopes.push_back(LexicalScope{});
+
+  // Reverse declaration order, mirroring how locals unwind.
+  for (auto it = Sema.Globals.rbegin(); it != Sema.Globals.rend(); ++it) {
+    GlobalVarDecl *g = *it;
+    if (g->Parent && isa<ExternDecl>(g->Parent))
+      continue;
+    if (!g->Ty || !g->Ty->isRefCounted())
+      continue;
+    GlobalVariable *gv = declareGlobal(g);
+    emitRelease(B->CreateLoad(lower(g->Ty), gv), g->Ty);
+    B->CreateStore(Constant::getNullValue(lower(g->Ty)), gv);
+  }
+
+  fs().Scopes.pop_back();
+  B->CreateRetVoid();
+  FnStack.pop_back();
+}
+
+void CodeGen::emitEntryPoint() {
+  // A library has no entry point, and an object or IR dump may legitimately
+  // lack one; only a finished executable must have `main`.
+  if (Opts.Output == OutputKind::Library)
+    return;
+
+  FunctionDecl *userMain = Sema.EntryPoint;
+  if (!userMain) {
+    if (Opts.Output != OutputKind::Executable)
+      return;
+    Diags.fatal("no `main` function found")
+        .note("a program needs `fn main() -> i64` (or `fn main()`) at the top "
+              "level of its root module");
+    return;
+  }
+
+  auto *ft = FunctionType::get(B->getInt32Ty(), {B->getInt32Ty(), PtrTy}, false);
+  auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, "main", *M);
+  auto *entry = BasicBlock::Create(*Ctx, "entry", f);
+  B->SetInsertPoint(entry);
+
+  B->CreateCall(runtimeFn("rune_runtime_init", B->getVoidTy(),
+                          {B->getInt32Ty(), PtrTy}),
+                {f->getArg(0), f->getArg(1)});
+  B->CreateCall(M->getFunction("rune.init_globals"));
+  // Decorators run after globals exist and before `main` is entered, so a
+  // registry a decorator fills is ready by the time anything reads it.
+  if (llvm::Function *decorators = M->getFunction("rune.run_decorators"))
+    B->CreateCall(decorators);
+
+  Function *mainFn = declareFunction(userMain);
+  Value *result = B->CreateCall(mainFn);
+  Type *ret = userMain->Ty ? userMain->Ty->result() : Types.voidType();
+
+  Value *code = B->getInt32(0);
+  if (ret && ret->isInt())
+    code = B->CreateSExtOrTrunc(result, B->getInt32Ty());
+
+  // Globals live for the whole program, so they are released here rather than
+  // at any scope exit — before the leak report, so they are not counted.
+  if (llvm::Function *teardown = M->getFunction("rune.deinit_globals"))
+    B->CreateCall(teardown);
+  // `full` refuses the shapes that leak, so the report is mostly for the
+  // levels that allow them: a program working below `full` still wants to
+  // hear about what it left behind. Only `none` opts out entirely.
+  if (Opts.Safety != SafetyLevel::None)
+    B->CreateCall(runtimeFn("rune_report_leaks", B->getVoidTy(), {}));
+  B->CreateRet(code);
+}
+
+bool CodeGen::run() {
+  // Layouts and type metadata for this artefact's own types first, so calls
+  // into them are already typed. Borrowed types — the standard library's, an
+  // imported library's — are laid out and given their descriptors the first
+  // time something here reaches them, which for most programs is a small
+  // fraction of what the library declares; declaring all of it up front was
+  // most of what a hello world spent in the code generator.
+  for (NominalDecl *nd : Sema.Nominals) {
+    if (!nd->DeclaredType || isAncillary(nd))
+      continue;
+    lower(nd->DeclaredType);
+    if (isa<ClassDecl>(static_cast<Decl *>(nd)))
+      emitTypeInfo(nd);
+  }
+
+  for (GlobalVarDecl *g : Sema.Globals)
+    declareGlobal(g);
+  // Functions likewise: a declaration is made where a call, a vtable or a
+  // global first names one, and the artefact's own bodies are emitted below.
+  for (FunctionDecl *fn : Sema.Functions)
+    if (!isAncillary(fn))
+      declareFunction(fn);
+
+  // The runtime prints a traceback only for a build that carries debug
+  // information; this is how it finds out.
+  {
+    // Every Rune object defines this, and the runtime reads it from whichever
+    // one the linker keeps. On COFF a `weak_odr` definition becomes a weak
+    // external, which does not satisfy the runtime's reference; a COMDAT with
+    // strong linkage merges the duplicates and resolves. Mach-O has no
+    // COMDATs, and its weak definitions resolve fine.
+    auto *flag = new GlobalVariable(
+        *M, B->getInt32Ty(), /*isConstant=*/true, GlobalValue::WeakODRLinkage,
+        ConstantInt::get(B->getInt32Ty(), Opts.DebugInfo ? 1 : 0),
+        "rune_debug_build");
+    setMergeableLinkage(flag, "rune_debug_build");
+  }
+
+  initDebugInfo();
+
+  emitGlobalInitialisers();
+  emitDecoratorCalls();
+  emitGlobalTeardown();
+
+  // This artefact's own code, all of it: what it exports is not for this pass
+  // to second-guess, and a `.rul` has to carry every public thing it declares
+  // whether or not anything inside it calls them.
+  for (FunctionDecl *fn : Sema.Functions)
+    if (!fn->hasAttr("intrinsic") && !isAncillary(fn))
+      emitFunctionBody(fn);
+
+  emitEntryPoint();
+
+  // Borrowed code — the standard library, an imported library's generics —
+  // gets a body only where this module turns out to refer to it. The module
+  // itself is what says so: a function left standing as a bodyless
+  // declaration with users is one something here reached, whether through a
+  // call, a vtable slot, a global's initialiser or a thunk. Emitting a body
+  // can reach further, so this runs to a fixed point.
+  //
+  // Asking the IR rather than walking the AST is the point: every way one
+  // function can name another ends up as a use, so no list of reference kinds
+  // has to be kept correct as the code generator grows.
+  //
+  // Each candidate is offered once and no more. Not everything asked for has
+  // a body to give — a generic template has none until it is instantiated, a
+  // mark's requirement may have none at all — and a loop that judged by the
+  // result would offer those again forever.
+  {
+    std::set<FunctionDecl *> offered;
+    for (bool more = true; more;) {
+      more = false;
+      for (FunctionDecl *fn : Sema.Functions) {
+        if (!isAncillary(fn) || fn->hasAttr("intrinsic"))
+          continue;
+        auto it = Functions.find(fn);
+        if (it == Functions.end() || !it->second->isDeclaration() ||
+            it->second->use_empty())
+          continue;
+        if (!offered.insert(fn).second)
+          continue;
+        emitFunctionBody(fn);
+        more = true;
+      }
+    }
+  }
+
+  finishDebugInfo();
+
+  if (Diags.hadError())
+    return false;
+
+  // Pruning first, and verifying what is left: the module that goes to the
+  // back end is the one worth checking, and there is a great deal more of it
+  // before the prune than after.
+  pruneUnreachable();
+
+  std::string err;
+  raw_string_ostream os(err);
+  if (verifyModule(*M, &os)) {
+    os.flush();
+    Diags.fatal("internal error: generated IR did not verify")
+        .note("this is a compiler bug, not a problem with your program")
+        .note(err.c_str());
+    return false;
+  }
+  if (Opts.OptLevel)
+    optimizeModule(*M, Opts.OptLevel);
+  return true;
+}
+
+/// Throws away what this artefact does not reach.
+///
+/// The emission loop above already declines to lower most of what it will not
+/// need, but it decides by asking whether anything refers to a function, and
+/// something may refer to a function that is itself about to go. A type's
+/// metadata names a `deinit` for a type nothing ends up constructing; a vtable
+/// is built for a mark object the last use of which was in a function that
+/// was not emitted either. This settles all of that at once, over the finished
+/// module, where the answer is no longer a moving target.
+///
+/// Only definitions marked discardable are candidates: this artefact's own
+/// code, its exports and anything foreign keep linkage that says "somebody
+/// outside may want this", and are roots of the walk rather than casualties
+/// of it.
+///
+/// Nothing is lost. A dropped definition is one no call, no vtable, no
+/// initialiser and no metadata in this module mentions, and another artefact
+/// that wants it carries — or merges in — its own copy.
+void CodeGen::pruneUnreachable() {
+  ModuleAnalysisManager mam;
+  PassBuilder pb;
+  pb.registerModuleAnalyses(mam);
+  ModulePassManager mpm;
+  mpm.addPass(GlobalDCEPass());
+  mpm.run(*M, mam);
+}
+
+void initialiseTargets() {
+  static const bool once = [] {
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmParsers();
+    llvm::InitializeAllAsmPrinters();
+    return true;
+  }();
+  (void)once;
+}
+
+void optimizeModule(llvm::Module &m, unsigned level) {
+  PassBuilder pb;
+  LoopAnalysisManager lam;
+  FunctionAnalysisManager fam;
+  CGSCCAnalysisManager cgam;
+  ModuleAnalysisManager mam;
+  pb.registerModuleAnalyses(mam);
+  pb.registerCGSCCAnalyses(cgam);
+  pb.registerFunctionAnalyses(fam);
+  pb.registerLoopAnalyses(lam);
+  pb.crossRegisterProxies(lam, fam, cgam, mam);
+
+  OptimizationLevel ol = OptimizationLevel::O0;
+  switch (level) {
+  case 1: ol = OptimizationLevel::O1; break;
+  case 2: ol = OptimizationLevel::O2; break;
+  case 3: ol = OptimizationLevel::O3; break;
+  default: ol = OptimizationLevel::O0; break;
+  }
+  if (ol == OptimizationLevel::O0)
+    return;
+  ModulePassManager mpm = pb.buildPerModuleDefaultPipeline(ol);
+  mpm.run(m, mam);
+}
+
+} // namespace rune

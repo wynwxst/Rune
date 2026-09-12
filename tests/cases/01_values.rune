@@ -1,0 +1,26 @@
+// Literals, integer widths, floats and string building.
+// EXPECT: 7 -3 255 1000000
+// EXPECT: 2.5 0.5
+// EXPECT: true false A
+// EXPECT: len=11 sub=world find=6
+import std::io
+
+fn main() -> i64 {
+    a: i64 = 7
+    b = -3
+    c: u8 = 0xFF
+    d = 1_000_000
+    io::println(a.$str() + " " + b.$str() + " " + c.$str() + " " + d.$str())
+
+    x: f64 = 2.5
+    y: f32 = 0.5
+    io::println(x.$str() + " " + y.$str())
+
+    io::println(true.$str() + " " + false.$str() + " " + 'A'.$str())
+
+    text = "hello world"
+    io::println("len=" + text.$length().$str() +
+                " sub=" + text.$substring(6, 11) +
+                " find=" + text.$find("world").$str())
+    0
+}

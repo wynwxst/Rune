@@ -1,0 +1,32 @@
+// The type that answers `type Iter: Iterator` may be bound further down the
+// file. Declaration order does not decide whether the program compiles.
+// EXPECT: 0 1 2
+// SAFETY: full
+import std::io
+
+struct Grid { pub w: i64 }
+struct Cells { pub g: Grid, pub at: i64 }
+
+bind Sequence to Grid {
+    type Iter = Cells
+    fn iterate(&self) -> Cells { Cells { g: *self, at: 0 } }
+}
+
+bind Iterator to Cells {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.at >= self.g.w { return nil }
+        self.at += 1
+        self.at - 1
+    }
+}
+
+fn main() -> i64 {
+    var out = ""
+    for n in (Grid { w: 3 }) {
+        if out != "" { out += " " }
+        out += n.$str()
+    }
+    io::println(out)
+    0
+}

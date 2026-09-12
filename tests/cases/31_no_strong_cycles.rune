@@ -1,0 +1,61 @@
+// Owning a recursive structure without a cycle.
+//
+// A `Unique` reference has exactly one owner: it can be moved or borrowed, never
+// copied. A ring needs a second reference to close it, and there is no way to
+// produce one, so a list or a tree owned through `Unique` is acyclic by
+// construction rather than by inspection.
+//
+// A class that can reach itself through ordinary counted references is still
+// reported — see the warning on `Parent` below — but reporting is all it is.
+// A type that *can* cycle is not a program that does.
+// EXPECT: total 6
+// EXPECT: releasing node 1
+// EXPECT: releasing node 2
+// EXPECT: releasing node 3
+// EXPECT: nodes left 0
+import std::io
+import std::process
+
+class Node {
+    pub value: i64
+    pub next: Unique<Node>?
+    fn init(self, value: i64) { self.value = value }
+    fn deinit(self) { io::println("releasing node " + self.value.$str()) }
+}
+
+/// Borrows each link rather than copying it, so nothing gains a second owner.
+fn total(n: &Node) -> i64 {
+    var sum = n.value
+    match n.next {
+        Some(c) => sum += total(&c),
+        None => {}
+    }
+    sum
+}
+
+// Counted both ways: still allowed, still reported. `weak owner` breaks it.
+class Parent {
+    child: Child?
+    fn init(self) { self.child = nil }
+}
+class Child {
+    owner: Parent?
+    fn init(self) { self.owner = nil }
+}
+
+fn main() -> i64 {
+    let start = process::liveObjectCount()
+    {
+        let head: Unique<Node> = Node(1)
+        let second: Unique<Node> = Node(2)
+        let third: Unique<Node> = Node(3)
+        second.next = third
+        head.next = second
+        io::println("total " + total(&head).$str())
+    }
+    // The whole chain went when its one owner did: releasing the head releases
+    // the link it owns, and so on down.
+    let left = process::liveObjectCount() - start
+    io::println("nodes left " + left.$str())
+    0
+}

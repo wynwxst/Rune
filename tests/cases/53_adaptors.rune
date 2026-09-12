@@ -1,0 +1,127 @@
+// `map`, `filter` and `zip` each wrap one iterator in another. Nothing is
+// computed until the loop at the end asks, so a chain is one pass and no
+// storage.
+// EXPECT: odd 1 | odd 3 | odd 5
+// EXPECT: 36 25 16 9
+// EXPECT: 0=ada 1=grace 2=edsger
+// EXPECT: 10 5 0
+// EXPECT: 2/9 1/8
+// EXPECT: h o
+// EXPECT: 3 : 2 4 6
+// EXPECT: 6 : #1 #2 #3 #4 #5 #6
+// EXPECT: empty stays empty: 0
+// EXPECT: freed b
+// EXPECT: kept a
+// EXPECT: freed a
+// SAFETY: full
+import std::io
+import std::iter
+import std::text
+import std::collections::vector
+
+struct Countdown { pub remaining: i64 }
+
+bind Iterator to Countdown {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.remaining <= 0 { return nil }
+        self.remaining -= 1
+        self.remaining + 1
+    }
+}
+
+class Res {
+    pub tag: String
+    fn init(self, tag: String) { self.tag = tag }
+    fn deinit(self) { io::println("freed " + self.tag) }
+}
+
+/// Words with a separator between them, and none at either end.
+class Line {
+    pub text: String
+    sep: String
+    fn init(self, sep: String) { self.text = ""; self.sep = sep }
+    pub fn add(&var self, word: String) {
+        if self.text != "" { self.text += self.sep }
+        self.text += word
+    }
+}
+
+fn main() -> i64 {
+    var v = vector::Vector<i64>()
+    var i = 1
+    while i <= 6 { v.push(i); i += 1 }
+
+    // A container carries the adaptors too: it hands out a cursor first.
+    var l = Line(" | ")
+    for s in v.filter(||(n: i64) -> bool { n % 2 == 1 })
+              .map(||(n: i64) -> String { "odd " + n.$str() }) {
+        l.add(s)
+    }
+    io::println(l.text)
+
+    // Chains of any length, on an iterator.
+    l = Line(" ")
+    for n in (Countdown { remaining: 6 })
+              .map(||(n: i64) -> i64 { n * n })
+              .filter(||(n: i64) -> bool { n > 5 }) {
+        l.add(n.$str())
+    }
+    io::println(l.text)
+
+    // `zip` with a counter is how something gets numbered.
+    var names = vector::Vector<String>()
+    names.push("ada")
+    names.push("grace")
+    names.push("edsger")
+    l = Line(" ")
+    for (n, name) in iter::counting(0).zip(names.iterate()) {
+        l.add(n.$str() + "=" + name)
+    }
+    io::println(l.text)
+
+    l = Line(" ")
+    for (n, name) in iter::countingBy(10, -5).zip(names.iterate()) { l.add(n.$str()) }
+    io::println(l.text)
+
+    // `zip` stops with the shorter side, and does not advance the longer one
+    // past the pair it produced.
+    l = Line(" ")
+    for (a, b) in (Countdown { remaining: 2 }).zip(Countdown { remaining: 9 }) {
+        l.add(a.$str() + "/" + b.$str())
+    }
+    io::println(l.text)
+
+    // Adaptors work over anything that is an iterator, characters included.
+    l = Line(" ")
+    for c in text::chars("héllo").filter(||(c: Character) -> bool {
+        c != 'l' && c != 'é'
+    }) {
+        l.add(c.$str())
+    }
+    io::println(l.text)
+
+    // `collect` is the other end: the adaptors are lazy, and this runs them.
+    let evens = vector::collect(v.filter(||(n: i64) -> bool { n % 2 == 0 }))
+    l = Line(" ")
+    for n in evens { l.add(n.$str()) }
+    io::println(evens.length().$str() + " : " + l.text)
+
+    let tagged = vector::collect(v.map(||(n: i64) -> String { "#" + n.$str() }))
+    l = Line(" ")
+    for s in tagged { l.add(s) }
+    io::println(tagged.length().$str() + " : " + l.text)
+
+    var none = vector::Vector<i64>()
+    io::println("empty stays empty: " +
+                vector::collect(none.map(||(n: i64) -> i64 { n })).length().$str())
+
+    // What a filtered-out value owns is released with the value.
+    var held = vector::Vector<Res>()
+    held.push(Res("a"))
+    held.push(Res("b"))
+    let kept = vector::collect(held.filter(||(r: Res) -> bool { r.tag == "a" }))
+    held.clear()
+    for r in kept { io::println("kept " + r.tag) }
+    0
+}

@@ -1,0 +1,15 @@
+// `@resource` says a field holds something the compiler cannot release on
+// its own, so `deinit` has to mention it. This one does not.
+// EXPECT-ERROR: is a `@resource` that 'Socket::deinit' never mentions
+import std::io
+
+struct Socket {
+    @resource fd: i32,
+    port: i32
+}
+
+extend Socket {
+    fn deinit(&self) { io::println("bye") }
+}
+
+fn main() -> i64 { let s = Socket { fd: 3, port: 80 }; 0 }

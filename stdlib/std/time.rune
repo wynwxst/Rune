@@ -1,0 +1,525 @@
+// std::time — a length of time, a clock to measure one against, and the
+// calendar: dates, times of day, and moments on the wall clock.
+//
+// `Time` is a count of nanoseconds held in an `i64`, which reaches a little
+// over 292 years either side of zero. It is a plain struct of one number, so
+// it is `Send` and `Sync` for the same reason an `i64` is, and costs the
+// same to pass around.
+//
+// A duration is built by naming its unit rather than by writing a bare
+// number, because a bare number is how the wrong unit gets passed:
+//
+//     thread::sleep(time::milliseconds(250))
+//
+// `Instant` and `now()` read a clock that only goes forwards, for measuring.
+// `DateTime`, `Date` and `TimeOfDay` are the calendar, read off the wall
+// clock with `utcNow()` and `localNow()`, and are for saying *when*:
+//
+//     let stamp = time::utcNow()
+//     io::println(stamp.iso())                  // 2026-09-11T10:20:30Z
+//     io::println(stamp.date.plusDays(30))      // 2026-10-11
+
+import std::io
+import std::text
+
+extern "C" {
+    fn rune_monotonic_ns() -> i64
+    fn rune_wall_clock_ns() -> i64
+    fn rune_local_utc_offset(unixSeconds: i64) -> i64
+    fn rune_local_zone_name() -> String
+}
+
+/// A length of time, to the nanosecond.
+///
+/// Negative durations are allowed and mean what they say: `a.since(b)` is
+/// negative when `a` came first.
+pub struct Time {
+    nanos: i64
+}
+
+//===--------------------------------------------------------------------===//
+// Building one
+//===--------------------------------------------------------------------===//
+
+pub fn nanoseconds(count: i64) -> Time { Time { nanos: count } }
+pub fn microseconds(count: i64) -> Time { Time { nanos: count * 1000 } }
+pub fn milliseconds(count: i64) -> Time { Time { nanos: count * 1000000 } }
+pub fn seconds(count: i64) -> Time { Time { nanos: count * 1000000000 } }
+pub fn minutes(count: i64) -> Time { Time { nanos: count * 60000000000 } }
+pub fn hours(count: i64) -> Time { Time { nanos: count * 3600000000000 } }
+
+/// No time at all — the identity for `plus`, and what an unset timeout means.
+pub fn zero() -> Time { Time { nanos: 0 } }
+
+//===--------------------------------------------------------------------===//
+// Reading one
+//===--------------------------------------------------------------------===//
+
+extend Time {
+    /// The whole duration, in each unit. Division truncates, so
+    /// `milliseconds(1500).asSeconds()` is 1 rather than 2.
+    pub fn asNanoseconds(&self) -> i64 { self.nanos }
+    pub fn asMicroseconds(&self) -> i64 { self.nanos / 1000 }
+    pub fn asMilliseconds(&self) -> i64 { self.nanos / 1000000 }
+    pub fn asSeconds(&self) -> i64 { self.nanos / 1000000000 }
+
+    /// Seconds with the fraction kept, for arithmetic that wants it.
+    pub fn asSecondsFloat(&self) -> f64 {
+        (self.nanos as f64) / 1000000000.0
+    }
+
+    pub fn plus(&self, other: Time) -> Time {
+        Time { nanos: self.nanos + other.nanos }
+    }
+    pub fn minus(&self, other: Time) -> Time {
+        Time { nanos: self.nanos - other.nanos }
+    }
+    pub fn times(&self, factor: i64) -> Time {
+        Time { nanos: self.nanos * factor }
+    }
+
+    pub fn isZero(&self) -> bool { self.nanos == 0 }
+    pub fn isNegative(&self) -> bool { self.nanos < 0 }
+
+    /// The same length, never negative.
+    pub fn magnitude(&self) -> Time {
+        if self.nanos < 0 { return Time { nanos: 0 - self.nanos } }
+        Time { nanos: self.nanos }
+    }
+}
+
+bind operator::add to Time {
+    fn add(&self, other: Time) -> Time { self.plus(other) }
+}
+bind operator::sub to Time {
+    fn sub(&self, other: Time) -> Time { self.minus(other) }
+}
+bind operator::eq to Time {
+    fn eq(&self, other: Time) -> bool { self.nanos == other.nanos }
+}
+bind operator::cmp to Time {
+    fn cmp(&self, other: Time) -> i64 {
+        if self.nanos < other.nanos { return -1 }
+        if self.nanos > other.nanos { return 1 }
+        0
+    }
+}
+
+/// Printed in the largest unit that leaves a whole number, so a duration
+/// reads the way it was written.
+bind io::Display to Time {
+    fn display(&self) -> String {
+        let n = self.nanos
+        let magnitude = if n < 0 { 0 - n } else { n }
+        if magnitude == 0 { return "0s" }
+        if magnitude % 3600000000000 == 0 { return (n / 3600000000000).$str() + "h" }
+        if magnitude % 60000000000 == 0 { return (n / 60000000000).$str() + "m" }
+        if magnitude % 1000000000 == 0 { return (n / 1000000000).$str() + "s" }
+        if magnitude % 1000000 == 0 { return (n / 1000000).$str() + "ms" }
+        if magnitude % 1000 == 0 { return (n / 1000).$str() + "us" }
+        n.$str() + "ns"
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// A clock
+//===--------------------------------------------------------------------===//
+
+/// A reading from a clock that only ever goes forwards.
+///
+/// The number itself means nothing — it is not a date, and comparing one from
+/// this machine with one from another is meaningless. What it is for is
+/// `since`, which gives the length of time between two readings.
+pub struct Instant {
+    at: i64
+}
+
+/// The clock, now.
+@safe("reads a monotonic counter the operating system maintains")
+pub fn now() -> Instant { Instant { at: rune_monotonic_ns() } }
+
+extend Instant {
+    /// How long has passed since `earlier`. Negative if it has not yet.
+    pub fn since(&self, earlier: Instant) -> Time {
+        Time { nanos: self.at - earlier.at }
+    }
+
+    /// How long since this reading was taken.
+    pub fn elapsed(&self) -> Time { now().since(Instant { at: self.at }) }
+}
+
+//===--------------------------------------------------------------------===//
+// The calendar
+//
+// Proleptic Gregorian, the calendar everything digital agrees on, with the
+// arithmetic done on a count of days since 1970-01-01 so that adding a month
+// or asking for a weekday never has to think about leap years twice. The
+// conversions are Howard Hinnant's, which are exact over the whole range an
+// `i64` can hold.
+//===--------------------------------------------------------------------===//
+
+/// A day of the week.
+pub enum Weekday { Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday }
+
+bind io::Display to Weekday {
+    fn display(&self) -> String {
+        match self {
+            Weekday::Monday => "Monday",
+            Weekday::Tuesday => "Tuesday",
+            Weekday::Wednesday => "Wednesday",
+            Weekday::Thursday => "Thursday",
+            Weekday::Friday => "Friday",
+            Weekday::Saturday => "Saturday",
+            Weekday::Sunday => "Sunday",
+        }
+    }
+}
+
+/// A calendar date. Built with `date`, which checks it exists, or read off
+/// a `DateTime`. `month` and `day` count from one.
+pub struct Date {
+    pub year: i64,
+    pub month: i64,
+    pub day: i64
+}
+
+/// True for a year with a 29th of February.
+pub fn isLeapYear(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// How many days `month` has in `year`; 0 for a month that does not exist.
+pub fn daysInMonth(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if isLeapYear(year) { 29 } else { 28 },
+        _ => 0,
+    }
+}
+
+/// The date, or `nil` when there is no such day — the 31st of April, the
+/// 29th of February in a common year.
+pub fn date(year: i64, month: i64, day: i64) -> Date? {
+    if month < 1 || month > 12 { return nil }
+    if day < 1 || day > daysInMonth(year, month) { return nil }
+    Date { year: year, month: month, day: day }
+}
+
+/// Days since 1970-01-01 as a date; negative counts reach before it.
+pub fn dateFromDays(days: i64) -> Date {
+    // civil_from_days: shift the epoch to 0000-03-01 so leap days fall at
+    // the end of the year, then take the era (400 years) apart.
+    let z = days + 719468
+    let era = if z >= 0 { z } else { z - 146096 } / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }
+    Date { year: if m <= 2 { y + 1 } else { y }, month: m, day: d }
+}
+
+extend Date {
+    /// Days since 1970-01-01, negative before it.
+    pub fn toDays(&self) -> i64 {
+        // days_from_civil, the inverse of the above.
+        let y = if self.month <= 2 { self.year - 1 } else { self.year }
+        let era = if y >= 0 { y } else { y - 399 } / 400
+        let yoe = y - era * 400
+        let m = self.month
+        let mp = if m > 2 { m - 3 } else { m + 9 }
+        let doy = (153 * mp + 2) / 5 + self.day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        era * 146097 + doe - 719468
+    }
+
+    /// The day of the week.
+    pub fn weekday(&self) -> Weekday {
+        // 1970-01-01 was a Thursday.
+        let d = self.toDays()
+        let index = ((d % 7) + 7 + 3) % 7
+        match index {
+            0 => Weekday::Monday,
+            1 => Weekday::Tuesday,
+            2 => Weekday::Wednesday,
+            3 => Weekday::Thursday,
+            4 => Weekday::Friday,
+            5 => Weekday::Saturday,
+            _ => Weekday::Sunday,
+        }
+    }
+
+    /// The day's position in its year, counting from one.
+    pub fn dayOfYear(&self) -> i64 {
+        self.toDays() - (Date { year: self.year, month: 1, day: 1 }).toDays() + 1
+    }
+
+    pub fn isLeapYear(&self) -> bool { isLeapYear(self.year) }
+
+    /// `count` days later — or earlier, when negative.
+    pub fn plusDays(&self, count: i64) -> Date { dateFromDays(self.toDays() + count) }
+    pub fn minusDays(&self, count: i64) -> Date { dateFromDays(self.toDays() - count) }
+
+    /// The same day `count` months on, clamped to the end of the month it
+    /// lands in: the 31st of January plus a month is the 28th of February.
+    pub fn plusMonths(&self, count: i64) -> Date {
+        var total = self.year * 12 + (self.month - 1) + count
+        let y = if total >= 0 { total / 12 } else { (total - 11) / 12 }
+        let m = total - y * 12 + 1
+        let d = if self.day < daysInMonth(y, m) { self.day } else { daysInMonth(y, m) }
+        Date { year: y, month: m, day: d }
+    }
+    pub fn plusYears(&self, count: i64) -> Date { self.plusMonths(count * 12) }
+
+    /// How many days from this date to `other`; negative when `other` came
+    /// first.
+    pub fn daysUntil(&self, other: Date) -> i64 { other.toDays() - self.toDays() }
+
+    /// The next `weekday` strictly after this date.
+    pub fn next(&self, weekday: Weekday) -> Date {
+        var d = self.plusDays(1)
+        while d.weekday() as i64 != weekday as i64 { d = d.plusDays(1) }
+        d
+    }
+
+    /// `2026-09-11` — ISO 8601, zero padded, which sorts as text the way it
+    /// sorts as dates.
+    pub fn iso(&self) -> String {
+        pad(self.year, 4) + "-" + pad(self.month, 2) + "-" + pad(self.day, 2)
+    }
+}
+
+bind io::Display to Date { fn display(&self) -> String { self.iso() } }
+bind operator::eq to Date {
+    fn eq(&self, other: Date) -> bool {
+        self.year == other.year && self.month == other.month && self.day == other.day
+    }
+}
+bind operator::cmp to Date {
+    fn cmp(&self, other: Date) -> i64 {
+        let a = self.toDays()
+        let b = other.toDays()
+        if a < b { -1 } elif a > b { 1 } else { 0 }
+    }
+}
+
+/// `2026-09-11` read back into a date, or `nil` for anything else.
+pub fn parseDate(source: String) -> Date? {
+    let parts = text::split(source, "-")
+    if parts.length() != 3 { return nil }
+    let y = parts.get(0).$toInt()?
+    let m = parts.get(1).$toInt()?
+    let d = parts.get(2).$toInt()?
+    date(y, m, d)
+}
+
+/// A time of day, to the nanosecond.
+pub struct TimeOfDay {
+    pub hour: i64,
+    pub minute: i64,
+    pub second: i64,
+    pub nanosecond: i64 = 0
+}
+
+/// The time, or `nil` when the fields do not make one.
+pub fn timeOfDay(hour: i64, minute: i64, second: i64) -> TimeOfDay? {
+    if hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59 {
+        return nil
+    }
+    TimeOfDay { hour: hour, minute: minute, second: second }
+}
+
+extend TimeOfDay {
+    /// Seconds since midnight.
+    pub fn secondsSinceMidnight(&self) -> i64 {
+        self.hour * 3600 + self.minute * 60 + self.second
+    }
+
+    /// `10:20:30` — and the fraction of a second when there is one.
+    pub fn iso(&self) -> String {
+        var s = pad(self.hour, 2) + ":" + pad(self.minute, 2) + ":" + pad(self.second, 2)
+        if self.nanosecond != 0 {
+            var frac = pad(self.nanosecond, 9)
+            while text::endsWith(frac, "0") { frac = frac.$substring(0, frac.$length() - 1) }
+            s += "." + frac
+        }
+        s
+    }
+}
+
+bind io::Display to TimeOfDay { fn display(&self) -> String { self.iso() } }
+
+/// A moment: a date and a time of day, in a zone given as its offset from
+/// UTC in seconds. `utcNow` gives one with an offset of zero; `localNow`
+/// one in this machine's zone.
+pub struct DateTime {
+    pub date: Date,
+    pub time: TimeOfDay,
+    /// Seconds east of UTC. Zero for UTC itself.
+    pub offset: i64 = 0
+}
+
+/// The moment `seconds` after 1970-01-01T00:00:00Z, in UTC.
+pub fn fromUnix(seconds: i64) -> DateTime {
+    fromUnixNanos(seconds * 1000000000)
+}
+
+/// The same, to the nanosecond.
+pub fn fromUnixNanos(nanos: i64) -> DateTime {
+    var secs = nanos / 1000000000
+    var frac = nanos % 1000000000
+    if frac < 0 { frac += 1000000000; secs -= 1 }
+    var days = secs / 86400
+    var rest = secs % 86400
+    if rest < 0 { rest += 86400; days -= 1 }
+    DateTime {
+        date: dateFromDays(days),
+        time: TimeOfDay { hour: rest / 3600, minute: (rest % 3600) / 60,
+                          second: rest % 60, nanosecond: frac },
+        offset: 0
+    }
+}
+
+/// The wall clock, now, in UTC.
+@safe("reads the system clock")
+pub fn utcNow() -> DateTime { fromUnixNanos(rune_wall_clock_ns()) }
+
+/// The wall clock, now, in this machine's zone.
+@safe("reads the system clock and the zone the platform reports")
+pub fn localNow() -> DateTime {
+    let nanos = rune_wall_clock_ns()
+    let offset = rune_local_utc_offset(nanos / 1000000000)
+    fromUnixNanos(nanos + offset * 1000000000).withOffset(offset)
+}
+
+/// Today's date, in this machine's zone.
+pub fn today() -> Date { localNow().date }
+
+/// What the platform calls the local zone right now — `BST`, `PDT` — or
+/// an empty string if it will not say.
+@safe("reads a name the platform keeps")
+pub fn localZoneName() -> String { rune_local_zone_name() }
+
+extend DateTime {
+    /// Seconds since 1970-01-01T00:00:00Z, whatever zone this is written in.
+    pub fn toUnix(&self) -> i64 {
+        self.date.toDays() * 86400 + self.time.secondsSinceMidnight() - self.offset
+    }
+    /// The same, to the nanosecond.
+    pub fn toUnixNanos(&self) -> i64 {
+        self.toUnix() * 1000000000 + self.time.nanosecond
+    }
+
+    /// The same moment, written in UTC.
+    pub fn inUtc(&self) -> DateTime { fromUnixNanos(self.toUnixNanos()) }
+
+    /// The same moment, written in this machine's zone as it was then.
+    @safe("asks the platform for the zone's offset at that instant")
+    pub fn inLocalZone(&self) -> DateTime {
+        let unix = self.toUnix()
+        let offset = rune_local_utc_offset(unix)
+        fromUnixNanos(self.toUnixNanos() + offset * 1000000000).withOffset(offset)
+    }
+
+    /// The same clock reading, labelled as being `offset` seconds east of UTC.
+    /// This changes which moment it is, not how it reads.
+    pub fn withOffset(&self, offset: i64) -> DateTime {
+        DateTime { date: self.date, time: self.time, offset: offset }
+    }
+
+    /// This moment plus a duration, or minus one.
+    pub fn plus(&self, span: Time) -> DateTime {
+        fromUnixNanos(self.toUnixNanos() + span.asNanoseconds()).toOffset(self.offset)
+    }
+    pub fn minus(&self, span: Time) -> DateTime { self.plus(span.times(-1)) }
+
+    /// The time from `earlier` to this moment.
+    pub fn since(&self, earlier: DateTime) -> Time {
+        nanoseconds(self.toUnixNanos() - earlier.toUnixNanos())
+    }
+
+    /// The same moment, written `offset` seconds east of UTC.
+    pub fn toOffset(&self, offset: i64) -> DateTime {
+        fromUnixNanos(self.toUnixNanos() + offset * 1000000000).withOffset(offset)
+    }
+
+    /// `2026-09-11T10:20:30Z`, or `2026-09-11T11:20:30+01:00` in a zone —
+    /// ISO 8601 / RFC 3339.
+    pub fn iso(&self) -> String {
+        var s = self.date.iso() + "T" + self.time.iso()
+        if self.offset == 0 { return s + "Z" }
+        let magnitude = if self.offset < 0 { 0 - self.offset } else { self.offset }
+        s += if self.offset < 0 { "-" } else { "+" }
+        s + pad(magnitude / 3600, 2) + ":" + pad((magnitude % 3600) / 60, 2)
+    }
+}
+
+bind io::Display to DateTime { fn display(&self) -> String { self.iso() } }
+bind operator::eq to DateTime {
+    fn eq(&self, other: DateTime) -> bool { self.toUnixNanos() == other.toUnixNanos() }
+}
+bind operator::cmp to DateTime {
+    fn cmp(&self, other: DateTime) -> i64 {
+        let a = self.toUnixNanos()
+        let b = other.toUnixNanos()
+        if a < b { -1 } elif a > b { 1 } else { 0 }
+    }
+}
+
+/// `2026-09-11T10:20:30Z` or `2026-09-11T11:20:30.5+01:00` read back, or
+/// `nil` for anything else. A date on its own is midnight UTC.
+pub fn parseDateTime(source: String) -> DateTime? {
+    let tPos = text::find(source, "T")
+    if tPos.isNil() {
+        let d = parseDate(source)?
+        return DateTime { date: d, time: TimeOfDay { hour: 0, minute: 0, second: 0 }, offset: 0 }
+    }
+    let at = tPos ?? 0
+    let d = parseDate(source.$substring(0, at))?
+    var rest = source.$substring(at + 1, source.$length())
+    var offset = 0
+    if text::endsWith(rest, "Z") {
+        rest = rest.$substring(0, rest.$length() - 1)
+    } else {
+        let plus = text::find(rest, "+")
+        let minus = text::find(rest, "-")
+        let signAt = plus.otherwise(minus)
+        if signAt is Some(p) {
+            let sign = if rest.$at(p) == '-' { -1 } else { 1 }
+            let zone = rest.$substring(p + 1, rest.$length())
+            let zoneParts = text::split(zone, ":")
+            if zoneParts.length() != 2 { return nil }
+            let zh = zoneParts.get(0).$toInt()?
+            let zm = zoneParts.get(1).$toInt()?
+            offset = sign * (zh * 3600 + zm * 60)
+            rest = rest.$substring(0, p)
+        }
+    }
+    let clock = text::split(rest, ":")
+    if clock.length() != 3 { return nil }
+    let h = clock.get(0).$toInt()?
+    let m = clock.get(1).$toInt()?
+    var secText = clock.get(2)
+    var nanos = 0
+    if text::find(secText, ".") is Some(dot) {
+        var frac = secText.$substring(dot + 1, secText.$length())
+        secText = secText.$substring(0, dot)
+        while frac.$length() < 9 { frac += "0" }
+        nanos = frac.$substring(0, 9).$toInt()?
+    }
+    let sec = secText.$toInt()?
+    var tod = timeOfDay(h, m, sec)?
+    tod.nanosecond = nanos
+    DateTime { date: d, time: tod, offset: offset }
+}
+
+/// `value` as decimal, padded with zeros to at least `width` digits.
+fn pad(value: i64, width: i64) -> String {
+    let negative = value < 0
+    var digits = (if negative { 0 - value } else { value }).$str()
+    while digits.$length() < width { digits = "0" + digits }
+    if negative { "-" + digits } else { digits }
+}

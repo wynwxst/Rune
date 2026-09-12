@@ -1,0 +1,12 @@
+[package]
+name = "geometry"
+version = "0.3.0"
+edition = "2025"
+description = "Points and vectors on the plane: distances, dot products, and the arithmetic between them"
+authors = ["The Rune examples"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]

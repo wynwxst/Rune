@@ -1,0 +1,122 @@
+// webserver::pool — the workers, and what crosses between them.
+//
+// The accept loop runs on the main thread and does nothing but hand the next
+// descriptor to a channel. A fixed set of workers takes them off it, one
+// connection at a time, and answers. Nothing is created per connection except
+// the connection.
+//
+// Handing a connection over
+// -------------------------
+// A `net::TcpStream` owns a descriptor, and only one thing may own it. The
+// compiler enforces that inside a function, but a channel stores what it
+// carries through raw memory the compiler cannot see, so a `TcpStream` must
+// not be sent through one — two copies of a descriptor is one `close` too
+// many.
+//
+// What crosses instead is the descriptor itself. `release` hands it out of
+// the stream that accepted it, and `adopt` builds a stream around it again on
+// the worker. Between the two it is an `i64`: nothing owns it, nothing can
+// close it, and the type system has nothing to protect.
+
+import std::io
+import webserver::http
+import webserver::routes
+import std::net
+import std::thread
+import std::process
+import std::collections::vector
+
+/// What a worker is handed: the queue of descriptors, and the tally every
+/// worker adds to.
+///
+/// A struct of `@sync` classes, so it is `Send`: both the channel and the
+/// counter synchronise their own access, which is what lets them be shared
+/// rather than copied.
+pub struct Worker {
+    jobs: thread::Channel<i64>,
+    served: thread::Mutex<i64>,
+    verbose: bool = false
+}
+
+/// One more served. `Mutex::withLock` takes a top-level function rather than
+/// a closure, so this is that function.
+fn increment(n: i64) -> i64 { n + 1 }
+
+/// Takes connections off the queue until it closes.
+///
+/// Returns how many this worker answered, which `join` collects — so the
+/// totals can be checked against the counter two ways.
+pub fn serve(worker: Worker) -> i64 {
+    var jobs = worker.jobs
+    var mine = 0
+    while jobs.receive() is Some(descriptor) {
+        // The worker owns the descriptor from here: `conn` closes it when
+        // this turn of the loop ends, whatever the conversation did.
+        var conn = net::adopt(descriptor)
+        conn.setNoDelay(true)
+        conn.setReadTimeout(5000)
+        converse(conn, worker.verbose)
+        mine += 1
+        var tally = worker.served
+        tally.withLock(increment)
+    }
+    mine
+}
+
+/// One connection, from the first request to the last.
+///
+/// `conn` is taken by value: this call owns the connection now, and closes it
+/// on the way out. That is the whole lifetime rule, written in the signature.
+fn converse(conn: net::TcpStream, verbose: bool) {
+    var lines = io::BufferedReader<net::TcpStream>(conn)
+    loop {
+        match http::readRequest(&var lines) {
+            Ok(request) => {
+                var response = routes::answer(request)
+                // A client that asked to close gets one exchange; so does a
+                // reply that has decided this is the last one.
+                if !request.wantsKeepAlive() { response.keepAlive = false }
+                if verbose {
+                    io::println(request.method + " " + request.path + " -> " +
+                                response.status.$str())
+                }
+                match lines.writeAll(http::render(response)) {
+                    Ok(n) => {},
+                    // The other end went away mid-reply. Nothing to say to
+                    // it, and nothing left to do with this connection.
+                    Err(e) => return,
+                }
+                if !response.keepAlive { return }
+            },
+            Err(e) => {
+                match e {
+                    // The ordinary end of a kept-alive conversation.
+                    http::RequestError::Ended => return,
+                    _ => {
+                        var reply = http::failure(400, "Bad Request")
+                        lines.writeAll(http::render(reply))
+                        return
+                    },
+                }
+            },
+        }
+    }
+}
+
+/// Starts `count` workers on the same queue.
+///
+/// The handles come back so the caller can join them; dropping one waits for
+/// its thread anyway, so a caller that does not care may drop them.
+pub fn start(count: i64, jobs: thread::Channel<i64>,
+             served: thread::Mutex<i64>,
+             verbose: bool) -> vector::Vector<thread::Handle<i64>> {
+    var handles = vector::Vector<thread::Handle<i64>>()
+    var i = 0
+    while i < count {
+        handles.push(thread::spawn(serve, Worker {
+            jobs: jobs, served: served, verbose: verbose
+        }))
+        i += 1
+    }
+    handles
+}

@@ -1,0 +1,83 @@
+// units — a length that knows what it is measured in.
+//
+// A bare `f64` is how a metre gets added to a mile. A `Length` carries its
+// unit, converts on request, and prints with it.
+
+import std::io
+
+/// A length, kept in metres and read out in whatever unit is asked for.
+pub struct Length { metres: f64 }
+
+pub fn metres(value: f64) -> Length { Length { metres: value } }
+pub fn kilometres(value: f64) -> Length { Length { metres: value * 1000.0 } }
+pub fn centimetres(value: f64) -> Length { Length { metres: value / 100.0 } }
+pub fn feet(value: f64) -> Length { Length { metres: value * 0.3048 } }
+pub fn miles(value: f64) -> Length { Length { metres: value * 1609.344 } }
+
+extend Length {
+    pub fn asMetres(&self) -> f64 { self.metres }
+    pub fn asKilometres(&self) -> f64 { self.metres / 1000.0 }
+    pub fn asCentimetres(&self) -> f64 { self.metres * 100.0 }
+    pub fn asFeet(&self) -> f64 { self.metres / 0.3048 }
+    pub fn asMiles(&self) -> f64 { self.metres / 1609.344 }
+
+    /// This length scaled: `metres(2.0).times(3.0)` is six metres.
+    pub fn times(&self, factor: f64) -> Length { Length { metres: self.metres * factor } }
+}
+
+bind operator::add to Length {
+    fn add(&self, other: Length) -> Length { Length { metres: self.metres + other.metres } }
+}
+bind operator::sub to Length {
+    fn sub(&self, other: Length) -> Length { Length { metres: self.metres - other.metres } }
+}
+bind operator::cmp to Length {
+    fn cmp(&self, other: Length) -> i64 {
+        if self.metres < other.metres { -1 } elif self.metres > other.metres { 1 } else { 0 }
+    }
+}
+bind operator::eq to Length {
+    fn eq(&self, other: Length) -> bool { self.metres == other.metres }
+}
+
+/// Prints in the largest unit that keeps the number readable: `1.5 km`,
+/// `250 m`, `12.5 cm`.
+bind io::Display to Length {
+    fn display(&self) -> String {
+        let m = self.metres
+        if m >= 1000.0 { return round2(m / 1000.0) + " km" }
+        if m >= 1.0 { return round2(m) + " m" }
+        round2(m * 100.0) + " cm"
+    }
+}
+
+/// Two decimal places, without trailing zeros.
+fn round2(value: f64) -> String {
+    let scaled = ((value * 100.0) + 0.5) as i64
+    let whole = scaled / 100
+    let frac = scaled % 100
+    if frac == 0 { return whole.$str() }
+    if frac % 10 == 0 { return whole.$str() + "." + (frac / 10).$str() }
+    whole.$str() + "." + (if frac < 10 { "0" } else { "" }) + frac.$str()
+}
+
+//=== Temperature (since 1.1.0) ==========================================//
+
+/// A temperature, kept in kelvin.
+pub struct Temperature { kelvin: f64 }
+
+pub fn celsius(value: f64) -> Temperature { Temperature { kelvin: value + 273.15 } }
+pub fn fahrenheit(value: f64) -> Temperature { Temperature { kelvin: (value - 32.0) * 5.0 / 9.0 + 273.15 } }
+pub fn kelvin(value: f64) -> Temperature { Temperature { kelvin: value } }
+
+extend Temperature {
+    pub fn asCelsius(&self) -> f64 { self.kelvin - 273.15 }
+    pub fn asFahrenheit(&self) -> f64 { (self.kelvin - 273.15) * 9.0 / 5.0 + 32.0 }
+    pub fn asKelvin(&self) -> f64 { self.kelvin }
+    /// Below absolute zero is not a temperature; `celsius(-300.0)` is refused here.
+    pub fn isPhysical(&self) -> bool { self.kelvin >= 0.0 }
+}
+
+bind io::Display to Temperature {
+    fn display(&self) -> String { round2(self.asCelsius()) + " °C" }
+}

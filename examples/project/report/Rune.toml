@@ -1,0 +1,15 @@
+[package]
+name = "report"
+version = "0.1.0"
+edition = "2025"
+description = "Command line front end for the statistics library"
+authors = []
+
+[build]
+safety = "full"
+optimize = 0
+debug = true
+warnings-as-errors = false
+
+[dependencies]
+statistics = { path = "../statistics" }

@@ -1,0 +1,44 @@
+// std::random — a seeded generator repeats exactly; an OS-seeded one stays
+// in the ranges it is asked for. The sequence for seed 42 is xoshiro256**
+// over SplitMix64, checked against a reference implementation.
+// EXPECT: 1546998764402558742
+// EXPECT: same
+// EXPECT: in range
+// EXPECT: 5
+// EXPECT: 16
+// EXPECT: 0
+// EXPECT: 7
+
+import std::io
+import std::random
+import std::collections::vector
+
+fn main() -> i64 {
+    var a = random::seeded(42)
+    io::println(a.next())
+    var b = random::seeded(42)
+    b.next()
+    io::println(if a.next() == b.next() { "same" } else { "different" })
+
+    var rng = random::new()
+    var ok = true
+    for _ in 0..2000 {
+        let n = rng.between(1, 6)
+        if n < 1 || n > 6 { ok = false }
+        let f = rng.float()
+        if f < 0.0 || f >= 1.0 { ok = false }
+        if rng.below(1) != 0 { ok = false }
+    }
+    io::println(if ok { "in range" } else { "out of range" })
+
+    var v = vec!(1, 2, 3, 4, 5)
+    rng.shuffle(v)
+    var sum = 0
+    for x in v { sum += x }
+    io::println(v.length())
+    io::println(random::bytes(16).length())
+    io::println(random::between(0, 0))
+    let items: [1:i64] = [7]
+    io::println(random::choose(items) ?? 0)
+    0
+}

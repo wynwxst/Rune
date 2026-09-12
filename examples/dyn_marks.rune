@@ -1,0 +1,117 @@
+// `dyn Mark` is a mark object: a value whose concrete type is only known at
+// run time, paired with a dispatch table for the mark it satisfies.
+//
+//     runec -o dyn_marks examples/dyn_marks.rune && ./dyn_marks
+//
+// Use it when a collection has to hold several unrelated types. Prefer a
+// generic parameter (`fn f<T: Shape>(s: T)`) when the type *is* known at the
+// call site: that version is dispatched statically and can be inlined.
+
+import std::io
+
+mark Shape {
+    fn area(&self) -> f64
+    fn name(&self) -> String
+
+    // Defaults work through a mark object as well; the copy bound to each
+    // type is what the dispatch table points at.
+    fn summary(&self) -> String {
+        self.name() + " (" + self.area().$str() + ")"
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Anything can satisfy a mark: structs, enums, classes, even builtins.
+//===--------------------------------------------------------------------===//
+
+struct Circle { radius: f64 }
+struct Rect { width: f64, height: f64 }
+
+enum Tile { Small, Large }
+
+class Canvas {
+    pub label: String
+    pub side: f64
+    fn init(self, label: String, side: f64) {
+        self.label = label
+        self.side = side
+    }
+    fn deinit(self) { io::println("  releasing canvas " + self.label) }
+}
+
+bind Shape to Circle {
+    fn area(&self) -> f64 { 3.14159265 * self.radius * self.radius }
+    fn name(&self) -> String { "circle" }
+}
+
+bind Shape to Rect {
+    fn area(&self) -> f64 { self.width * self.height }
+    fn name(&self) -> String { "rect" }
+}
+
+bind Shape to Tile {
+    fn area(&self) -> f64 {
+        match self {
+            Tile::Small => 1.0,
+            Tile::Large => 4.0,
+        }
+    }
+    fn name(&self) -> String { "tile" }
+    fn summary(&self) -> String { "a " + self.name() }   // overrides the default
+}
+
+bind Shape to Canvas {
+    fn area(&self) -> f64 { self.side * self.side }
+    fn name(&self) -> String { "canvas " + self.label }
+}
+
+//===--------------------------------------------------------------------===//
+// Working with mark objects
+//===--------------------------------------------------------------------===//
+
+/// Takes any shape at all; the implementation is chosen at run time.
+fn describe(s: dyn Shape) -> String {
+    s.summary()
+}
+
+/// A heterogeneous collection is the case mark objects exist for.
+fn totalArea(shapes: [dyn Shape]) -> f64 {
+    var total = 0.0
+    for s in shapes {
+        total += s.area()
+    }
+    total
+}
+
+/// The static alternative, for comparison: monomorphised, no vtable.
+fn describeStatic<T: Shape>(s: T) -> String {
+    s.summary()
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    io::println(describe(Circle { radius: 1.0 }))
+    io::println(describe(Rect { width: 3.0, height: 4.0 }))
+    io::println(describe(Tile::Large))
+    io::println(describe(Canvas("main", 2.0)))
+
+    io::println("")
+    let mixed: [4:dyn Shape] = [
+        Circle { radius: 2.0 },
+        Rect { width: 1.0, height: 5.0 },
+        Tile::Small,
+        Canvas("scratch", 3.0),
+    ]
+    for s in mixed {
+        io::println("  " + s.summary())
+    }
+    io::println("total = " + totalArea(mixed).$str())
+
+    io::println("")
+    io::println("static = " + describeStatic(Circle { radius: 1.0 }))
+
+    io::println("")
+    io::println("mark objects own what they hold:")
+    0
+}

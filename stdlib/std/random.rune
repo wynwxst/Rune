@@ -1,0 +1,231 @@
+// std::random — numbers nobody can predict, and numbers that repeat exactly.
+//
+// A `Random` is a generator with its own state. One seeded from the
+// operating system gives a different sequence every run; one seeded from a
+// number gives the same sequence every time, which is what a test or a
+// simulation wants:
+//
+//     var rng = random::new()                // seeded from the OS
+//     let roll = rng.between(1, 6)           // 1 to 6, inclusive
+//     let coin = rng.chance(0.5)
+//
+//     var fixed = random::seeded(42)         // reproducible
+//
+// The generator is xoshiro256**: fast, small, and good enough for anything
+// that is not cryptography. It is *not* a source of secrets — a token, a
+// key or a nonce needs `random::bytes`, which comes straight from the
+// operating system.
+//
+// The module-level functions draw from one shared generator, seeded from the
+// OS when the program starts, for the cases where a generator of one's own
+// is more ceremony than the job deserves:
+//
+//     if random::chance(0.1) { ... }
+//     let pick = random::between(0, 100)
+
+import std::io
+import std::collections::vector
+
+extern "C" {
+    fn rune_os_entropy(out: *var u8, count: i64) -> bool
+}
+
+/// A pseudo-random generator: 256 bits of state, advanced by `next`.
+///
+/// A struct, so it is copied on assignment — two copies then produce the
+/// same numbers, which is either exactly what is wanted or a surprise. Pass
+/// it by `&var` to advance one generator from several places.
+pub struct Random {
+    s0: u64,
+    s1: u64,
+    s2: u64,
+    s3: u64
+}
+
+//=== Making one =========================================================//
+
+/// A generator seeded from `seed`. The same seed always gives the same
+/// sequence. Any seed will do, zero included: the seed is stretched into
+/// the state by SplitMix64, which never produces the all-zero state
+/// xoshiro cannot leave.
+pub fn seeded(seed: u64) -> Random {
+    var mixer = seed
+    let s0 = splitMix(&var mixer)
+    let s1 = splitMix(&var mixer)
+    let s2 = splitMix(&var mixer)
+    let s3 = splitMix(&var mixer)
+    Random { s0: s0, s1: s1, s2: s2, s3: s3 }
+}
+
+/// A generator seeded from the operating system's entropy, so each run of
+/// the program gets a sequence of its own.
+pub fn new() -> Random {
+    seeded(entropy64())
+}
+
+/// One number from SplitMix64 — the standard way to turn one seed into
+/// several good state words.
+fn splitMix(state: &var u64) -> u64 {
+    *state = (*state).$wrappingAdd(0x9e3779b97f4a7c15)
+    var z = *state
+    z = (z ^ (z >> 30)).$wrappingMul(0xbf58476d1ce4e5b9)
+    z = (z ^ (z >> 27)).$wrappingMul(0x94d049bb133111eb)
+    z ^ (z >> 31)
+}
+
+fn rotl(x: u64, k: u64) -> u64 { (x << k) | (x >> (64 - k)) }
+
+/// Eight bytes of OS entropy as one number, or — should the OS have none —
+/// the address of a fresh allocation, which is at least different from run
+/// to run on a system that randomises its layout.
+@safe("the buffer is given eight bytes of room and the call is told so")
+fn entropy64() -> u64 {
+    var buf = io::Bytes()
+    let at = buf.writePoint(8)
+    if rune_os_entropy(at, 8) {
+        buf.advance(8)
+        var v: u64 = 0
+        for i in 0..8 {
+            v = (v << 8) | ((buf.at(i) ?? 0) as u64)
+        }
+        return v
+    }
+    unsafe { (at as u64) ^ 0x2545f4914f6cdd1d }
+}
+
+//=== Drawing from one ===================================================//
+
+extend Random {
+    /// The next 64 random bits.
+    pub fn next(&var self) -> u64 {
+        let result = rotl(self.s1.$wrappingMul(5), 7).$wrappingMul(9)
+        let t = self.s1 << 17
+        self.s2 ^= self.s0
+        self.s3 ^= self.s1
+        self.s1 ^= self.s2
+        self.s0 ^= self.s3
+        self.s2 ^= t
+        self.s3 = rotl(self.s3, 45)
+        result
+    }
+
+    /// A whole number from 0 up to but not including `bound`. A bound of
+    /// zero or less gives 0.
+    ///
+    /// Unbiased: a draw that would favour the low end is thrown away and
+    /// taken again, which happens rarely and never for a power of two.
+    pub fn below(&var self, bound: i64) -> i64 {
+        if bound <= 1 { return 0 }
+        let range = bound as u64
+        // Everything at or above `limit` would wrap unevenly.
+        let limit = 0xffffffffffffffff - (0xffffffffffffffff % range)
+        loop {
+            let v = self.next()
+            if v < limit { return (v % range) as i64 }
+        }
+    }
+
+    /// A whole number from `low` to `high`, both included. Swapped bounds
+    /// are put the right way round.
+    ///
+    ///     let die = rng.between(1, 6)
+    pub fn between(&var self, low: i64, high: i64) -> i64 {
+        let lo = if low < high { low } else { high }
+        let hi = if low < high { high } else { low }
+        lo + self.below(hi - lo + 1)
+    }
+
+    /// A number from 0.0 up to but not including 1.0, with 53 bits of
+    /// precision — every double in that range is equally likely.
+    pub fn float(&var self) -> f64 {
+        ((self.next() >> 11) as f64) * 1.1102230246251565e-16
+    }
+
+    /// A number from `low` up to but not including `high`.
+    pub fn floatBetween(&var self, low: f64, high: f64) -> f64 {
+        low + (high - low) * self.float()
+    }
+
+    /// True with probability `p`: `chance(0.25)` is true a quarter of the
+    /// time. Anything at or below 0.0 is never true; at or above 1.0, always.
+    pub fn chance(&var self, p: f64) -> bool {
+        self.float() < p
+    }
+
+    /// True or false, evenly.
+    pub fn coin(&var self) -> bool { (self.next() & 1) == 1 }
+
+    /// One of `items`, or `nil` when there are none.
+    pub fn choose<T>(&var self, items: [T]) -> T? {
+        if items.$isEmpty() { return nil }
+        items[self.below(items.$length())]
+    }
+
+    /// One of the vector's elements, or `nil` when it is empty.
+    pub fn pick<T>(&var self, items: vector::Vector<T>) -> T? {
+        if items.isEmpty() { return nil }
+        items.get(self.below(items.length()))
+    }
+
+    /// Puts the vector's elements in a random order, in place. Every order
+    /// is equally likely (Fisher–Yates).
+    pub fn shuffle<T>(&var self, items: vector::Vector<T>) {
+        var i = items.length() - 1
+        while i > 0 {
+            let j = self.below(i + 1)
+            let a = items.get(i)
+            let b = items.get(j)
+            items.set(i, b)
+            items.set(j, a)
+            i -= 1
+        }
+    }
+}
+
+//=== Secrets ============================================================//
+
+/// `count` bytes straight from the operating system's entropy source — the
+/// right thing for a key, a token, or a nonce. Empty if the OS has none to
+/// give, which is worth checking for anything that matters.
+@safe("the buffer is given `count` bytes of room and the call is told exactly that")
+pub fn bytes(count: i64) -> vector::Vector<u8> {
+    var out = vector::Vector<u8>()
+    if count <= 0 { return out }
+    var buf = io::Bytes()
+    let at = buf.writePoint(count)
+    if !rune_os_entropy(at, count) { return out }
+    buf.advance(count)
+    for i in 0..count { out.push(buf.at(i) ?? 0) }
+    out
+}
+
+//=== The shared generator ===============================================//
+
+/// One generator for the whole program, seeded from the OS the first time
+/// it is asked for anything. It starts all zero — a state xoshiro can never
+/// be in, so "all zero" is the same as "not yet seeded", and a program that
+/// never draws a number never pays for the seeding.
+global var shared: Random = Random { s0: 0, s1: 0, s2: 0, s3: 0 }
+
+fn ready() {
+    if shared.s0 == 0 && shared.s1 == 0 && shared.s2 == 0 && shared.s3 == 0 {
+        shared = new()
+    }
+}
+
+/// The next 64 random bits from the shared generator.
+pub fn next() -> u64 { ready(); shared.next() }
+/// A whole number from 0 up to but not including `bound`.
+pub fn below(bound: i64) -> i64 { ready(); shared.below(bound) }
+/// A whole number from `low` to `high`, both included.
+pub fn between(low: i64, high: i64) -> i64 { ready(); shared.between(low, high) }
+/// A number from 0.0 up to but not including 1.0.
+pub fn float() -> f64 { ready(); shared.float() }
+/// True with probability `p`.
+pub fn chance(p: f64) -> bool { ready(); shared.chance(p) }
+/// True or false, evenly.
+pub fn coin() -> bool { ready(); shared.coin() }
+/// One of `items`, or `nil` when there are none.
+pub fn choose<T>(items: [T]) -> T? { ready(); shared.choose(items) }
+/// Puts the vector in a random order, in place.
+pub fn shuffle<T>(items: vector::Vector<T>) { ready(); shared.shuffle(items) }

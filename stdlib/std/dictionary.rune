@@ -1,0 +1,406 @@
+// Keyed lookup: a `Map` from keys to values, and a `Set` of keys alone.
+//
+//     var ages = dictionary::Map<String, i64>()
+//     ages.put("ada", 36)
+//     match ages.at("ada") { Some(n) => ..., None => ... }
+//
+// Both are open-addressed hash tables with linear probing, backed by
+// `mem::Buffer`: one buffer for the keys, one for the values, and one for the
+// state of each slot. They grow by doubling when they get past two thirds
+// full, which is where linear probing starts to cost more than it saves.
+//
+// A key is hashed and compared **structurally**, by `mem::hash` and
+// `mem::equals`. The compiler works both out from the layout, so a key needs
+// nothing of its own: no `Hashable` mark to bind, and no `Display` standing in
+// for one. Any type at all can be a key.
+//
+// A `String` key is compared by its contents; a class key by its address,
+// because two distinct objects are two distinct keys even when their fields
+// agree. An aggregate is compared part by part.
+
+import std::mem
+import std::process
+import std::collections::vector
+
+// Slot states. Zero is `empty` on purpose: a fresh buffer is zeroed, so a new
+// table is entirely empty without writing anything.
+fn stateEmpty() -> i64 { 0 }
+fn stateLive() -> i64 { 1 }
+fn stateGone() -> i64 { 2 }
+
+//===--------------------------------------------------------------------===//
+// Map
+//===--------------------------------------------------------------------===//
+
+/// A mapping from keys to values.
+///
+/// `Map` is a class, so passing one around shares it rather than copying it.
+pub class Map<K, V> {
+    // `state` is what says whether a slot is live, so every read of `keys`
+    // and `vals` goes through `Buffer::read` rather than `Buffer::at`: `at`
+    // reads a slot of all zero bytes as one that was never written, and an
+    // empty `String` or a counted enum's first empty variant is exactly that.
+    keys: mem::Buffer<K>
+    vals: mem::Buffer<V>
+    state: mem::Buffer<i64>
+    slots: i64      // how many slots the buffers have
+    live: i64       // how many hold a key
+    gone: i64       // how many were removed and not yet reclaimed
+
+    fn init(self) {
+        self.slots = 0
+        self.live = 0
+        self.gone = 0
+        self.keys = mem::Buffer<K>(0)
+        self.vals = mem::Buffer<V>(0)
+        self.state = mem::Buffer<i64>(0)
+    }
+
+    //=== Size ===========================================================//
+
+    /// How many keys it holds.
+    pub fn length(&self) -> i64 { self.live }
+
+    /// True when it holds none.
+    pub fn isEmpty(&self) -> bool { self.live == 0 }
+
+    //=== Finding a slot =================================================//
+
+    /// Where `key` lives, or where it would go. Returns -1 only when there
+    /// are no slots at all.
+    ///
+    /// Probing walks forward from the hash, wrapping at the end. A removed
+    /// slot is passed over when searching — something after it may have
+    /// probed past it — and remembered as the first place to insert.
+    fn probe(&self, key: K, forInsert: bool) -> i64 {
+        if self.slots == 0 { return 0 - 1 }
+        let mask = self.slots - 1
+        var i = (mem::hash(key) as i64) & mask
+        var firstGone = 0 - 1
+        var steps = 0
+        while steps < self.slots {
+            let st = self.state.get(i)
+            if st == stateEmpty() {
+                // Nothing further along can be this key.
+                if forInsert && firstGone >= 0 { return firstGone }
+                return i
+            }
+            if st == stateGone() {
+                if firstGone < 0 { firstGone = i }
+            } else {
+                if self.keys.read(i) is Some(k) {
+                    if mem::equals(k, key) { return i }
+                }
+            }
+            i = (i + 1) & mask
+            steps += 1
+        }
+        firstGone
+    }
+
+    //=== Reading ========================================================//
+
+    /// The value stored under `key`, or nothing.
+    pub fn at(&self, key: K) -> V? {
+        let i = self.probe(key, false)
+        if i < 0 { return nil }
+        if self.state.get(i) != stateLive() { return nil }
+        self.vals.read(i)
+    }
+
+    /// True when `key` is present.
+    pub fn holds(&self, key: K) -> bool { self.at(key).hasValue() }
+
+    /// The value under `key`, or `fallback` when there is none.
+    pub fn atOr(&self, key: K, fallback: V) -> V {
+        match self.at(key) {
+            Some(v) => v,
+            None => fallback,
+        }
+    }
+
+    //=== Writing ========================================================//
+
+    /// Stores `value` under `key`, replacing whatever was there. Returns the
+    /// value it replaced, or nothing when the key is new.
+    pub fn put(&var self, key: K, value: V) -> V? {
+        self.growIfFull()
+        let i = self.probe(key, true)
+        if i < 0 { return nil }
+        if self.state.get(i) == stateLive() {
+            let old = self.vals.read(i)
+            self.vals.put(i, value)
+            return old
+        }
+        if self.state.get(i) == stateGone() { self.gone -= 1 }
+        self.keys.put(i, key)
+        self.vals.put(i, value)
+        self.state.put(i, stateLive())
+        self.live += 1
+        nil
+    }
+
+    /// Removes `key`. Returns the value it held, or nothing.
+    ///
+    /// The slot is marked removed rather than emptied, because emptying it
+    /// would cut the probe chain for anything that walked past it.
+    pub fn remove(&var self, key: K) -> V? {
+        let i = self.probe(key, false)
+        if i < 0 { return nil }
+        if self.state.get(i) != stateLive() { return nil }
+        let old = self.vals.read(i)
+        self.keys.clear(i)
+        self.vals.clear(i)
+        self.state.put(i, stateGone())
+        self.live -= 1
+        self.gone += 1
+        old
+    }
+
+    /// Drops every entry, keeping the storage.
+    pub fn clear(&var self) {
+        var i = 0
+        while i < self.slots {
+            if self.state.get(i) != stateEmpty() {
+                self.keys.clear(i)
+                self.vals.clear(i)
+                self.state.put(i, stateEmpty())
+            }
+            i += 1
+        }
+        self.live = 0
+        self.gone = 0
+    }
+
+    //=== Storage ========================================================//
+
+    /// Doubles the table when it is more than two thirds occupied, counting
+    /// removed slots — they cost a probe step just as live ones do.
+    fn growIfFull(&var self) {
+        if self.slots > 0 && (self.live + self.gone) * 3 < self.slots * 2 {
+            return
+        }
+        var wanted = self.slots * 2
+        if wanted < 8 { wanted = 8 }
+
+        let oldKeys = self.keys
+        let oldVals = self.vals
+        let oldState = self.state
+        let oldSlots = self.slots
+
+        self.keys = mem::Buffer<K>(wanted)
+        self.vals = mem::Buffer<V>(wanted)
+        self.state = mem::Buffer<i64>(wanted)
+        self.slots = wanted
+        self.live = 0
+        self.gone = 0
+
+        var i = 0
+        while i < oldSlots {
+            if oldState.get(i) == stateLive() {
+                // `is` destructures without the match having to be an
+                // expression, so the replaced value `put` returns is simply
+                // dropped rather than having to be matched too.
+                if oldKeys.read(i) is Some(k) {
+                    if oldVals.read(i) is Some(v) {
+                        self.put(k, v)
+                    }
+                }
+            }
+            i += 1
+        }
+    }
+
+    //=== Walking ========================================================//
+
+    /// Every key, in whatever order the table holds them.
+    ///
+    /// The order is not the insertion order and is not stable across a resize.
+    /// Sort the result if you need one.
+    pub fn keysOf(&self) -> vector::Vector<K> {
+        let out = vector::Vector<K>()
+        var i = 0
+        while i < self.slots {
+            if self.state.get(i) == stateLive() {
+                match self.keys.read(i) {
+                    Some(k) => out.push(k),
+                    None => {}
+                }
+            }
+            i += 1
+        }
+        out
+    }
+
+    /// Every value, in the same order `keysOf` gives its keys.
+    pub fn valuesOf(&self) -> vector::Vector<V> {
+        let out = vector::Vector<V>()
+        var i = 0
+        while i < self.slots {
+            if self.state.get(i) == stateLive() {
+                match self.vals.read(i) {
+                    Some(v) => out.push(v),
+                    None => {}
+                }
+            }
+            i += 1
+        }
+        out
+    }
+}
+
+// `m[key]` and `m[key] = value`. Reading is the direct form and **aborts** on
+// a key that is not there, the same way an out-of-range index does elsewhere;
+// `at` and `atOr` are the forms that answer instead.
+bind<K, V> operator::"[]" to Map<K, V> {
+    fn index(&self, key: K) -> V {
+        match self.at(key) {
+            Some(v) => v,
+            None => {
+                process::panic("Map has no such key")
+                self.at(key).unwrap()
+            }
+        }
+    }
+
+    fn indexSet(&var self, key: K, value: V) { self.put(key, value) }
+}
+
+//===--------------------------------------------------------------------===//
+// Walking a Map
+//
+// A cursor produces `(key, value)` pairs. It holds the map, so the map
+// outlives any loop over it, and it reads the keys and values it was built
+// from — a map that grows while a loop walks it may show the loop anything.
+//===--------------------------------------------------------------------===//
+
+/// A cursor over a `Map`, handed out by `iterate`.
+pub struct MapIter<K, V> {
+    keys: vector::Vector<K>
+    values: vector::Vector<V>
+    index: i64
+}
+
+bind<K, V> Iterator to MapIter<K, V> {
+    type Item = (K, V)
+    fn next(&var self) -> (K, V)? {
+        if self.index >= self.keys.length() { return nil }
+        let i = self.index
+        self.index += 1
+        match self.keys.at(i) {
+            Some(k) => {
+                match self.values.at(i) {
+                    Some(v) => (k, v),
+                    None => nil,
+                }
+            }
+            None => nil,
+        }
+    }
+}
+
+bind<K, V> Sequence to Map<K, V> {
+    type Iter = MapIter<K, V>
+
+    /// A cursor over every entry, as a `(key, value)` pair.
+    ///
+    ///     for (name, age) in ages { ... }
+    fn iterate(&self) -> MapIter<K, V> {
+        MapIter<K, V> { keys: self.keysOf(), values: self.valuesOf(), index: 0 }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Set
+//===--------------------------------------------------------------------===//
+
+/// A collection of keys with no values.
+///
+/// It is a `Map` whose values are all `true`, which is exactly what a set is,
+/// and means there is one probing implementation rather than two.
+pub class Set<T> {
+    items: Map<T, bool>
+
+    fn init(self) { self.items = Map<T, bool>() }
+
+    /// How many it holds.
+    pub fn length(&self) -> i64 { self.items.length() }
+
+    /// True when it holds none.
+    pub fn isEmpty(&self) -> bool { self.items.isEmpty() }
+
+    /// True when `value` is present.
+    pub fn holds(&self, value: T) -> bool { self.items.holds(value) }
+
+    /// Adds `value`. Returns false when it was already there.
+    pub fn add(&var self, value: T) -> bool {
+        !self.items.put(value, true).hasValue()
+    }
+
+    /// Removes `value`. Returns false when it was not there.
+    pub fn remove(&var self, value: T) -> bool {
+        self.items.remove(value).hasValue()
+    }
+
+    /// Drops everything, keeping the storage.
+    pub fn clear(&var self) { self.items.clear() }
+
+    /// Every member, in whatever order the table holds them.
+    pub fn membersOf(&self) -> vector::Vector<T> { self.items.keysOf() }
+}
+
+// `s[value]` asks whether it is there. A set has nothing to store under a key,
+// so there is no `indexSet`; use `add` and `remove`.
+bind<T> operator::"[]" to Set<T> {
+    fn index(&self, value: T) -> bool { self.holds(value) }
+}
+
+/// A cursor over a `Set`, handed out by `iterate`.
+pub struct SetIter<T> {
+    members: vector::Vector<T>
+    index: i64
+}
+
+bind<T> Iterator to SetIter<T> {
+    type Item = T
+    fn next(&var self) -> T? {
+        let value = self.members.at(self.index)
+        self.index += 1
+        value
+    }
+}
+
+bind<T> Sequence to Set<T> {
+    type Iter = SetIter<T>
+
+    /// A cursor over every member.
+    ///
+    ///     for name in seen { ... }
+    fn iterate(&self) -> SetIter<T> {
+        SetIter<T> { members: self.membersOf(), index: 0 }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Building
+//===--------------------------------------------------------------------===//
+
+/// A set holding every element of `values`, duplicates collapsed.
+pub fn setOf<T>(values: [T]) -> Set<T> {
+    let s = Set<T>()
+    for v in values { s.add(v) }
+    s
+}
+
+/// A map built from matching runs of keys and values, stopping at the shorter.
+pub fn mapOf<K, V>(keys: [K], values: [V]) -> Map<K, V> {
+    let m = Map<K, V>()
+    var i = 0
+    var n = keys.$length()
+    if values.$length() < n { n = values.$length() }
+    while i < n {
+        m.put(keys[i], values[i])
+        i += 1
+    }
+    m
+}

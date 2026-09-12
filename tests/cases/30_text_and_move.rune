@@ -1,0 +1,59 @@
+// Unicode normalisation, collation, and `move` closures.
+// EXPECT: raw== false  text::equal true
+// EXPECT: nfd 2  nfc 1  round-trip true
+// EXPECT: reorder true  hangul true  deep true
+// EXPECT: resume<résumé -1  case -1  ignoring true
+// EXPECT: apple APPLE Ápple äpple Banana zebra
+// EXPECT: move sees 1, plain sees 1
+import std::io
+import std::text
+
+fn nfc(s: String) -> String { text::normalize(s, text::Form::Composed) }
+fn nfd(s: String) -> String { text::normalize(s, text::Form::Decomposed) }
+
+fn main() -> i64 {
+    let composed = "é"
+    let decomposed = "e\u{301}"
+    io::println("raw== " + (composed == decomposed).$str() +
+                "  text::equal " + text::equal(composed, decomposed).$str())
+    io::println("nfd " + nfd(composed).$charCount().$str() +
+                "  nfc " + nfc(decomposed).$charCount().$str() +
+                "  round-trip " + (nfc(nfd(composed)) == composed).$str())
+
+    let reorder = nfd("q\u{307}\u{323}") == nfd("q\u{323}\u{307}")
+    let hangul = nfc("\u{1100}\u{1161}\u{11A8}") == "\u{AC01}"
+    let deep = nfc(nfd("\u{1E69}")) == "\u{1E69}"
+    io::println("reorder " + reorder.$str() + "  hangul " + hangul.$str() +
+                "  deep " + deep.$str())
+
+    io::println("resume<résumé " + text::compare("resume", "résumé").$str() +
+                "  case " + text::compare("résumé", "RÉSUMÉ").$str() +
+                "  ignoring " +
+                text::equalIgnoringCase("Straße", "STRAßE").$str())
+
+    var words: [6:String] = ["zebra", "Ápple", "apple", "Banana", "äpple", "APPLE"]
+    var i = 1
+    while i < 6 {
+        var j = i
+        while j > 0 {
+            if text::compare(words[j], words[j - 1]) < 0 {
+                let hold = words[j]
+                words[j] = words[j - 1]
+                words[j - 1] = hold
+            }
+            j -= 1
+        }
+        i += 1
+    }
+    var out = ""
+    for w in words { out += w + " " }
+    io::println(out.$substring(0, out.$length() - 1))
+
+    // Captures are copied when the closure is made, `move` or not.
+    var n = 1
+    let moved = move ||() -> i64 { n }
+    let plain = ||() -> i64 { n }
+    n = 99
+    io::println("move sees " + moved().$str() + ", plain sees " + plain().$str())
+    0
+}

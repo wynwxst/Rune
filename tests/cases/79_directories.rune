@@ -1,0 +1,86 @@
+// Listing a directory, which is the one file operation whose shape genuinely
+// differs between platforms — POSIX hands back a `struct dirent` and Windows
+// has none at all. Both are behind the same four calls.
+// EXPECT: made
+// EXPECT: file b.txt
+// EXPECT: dir inner
+// EXPECT: b.txt
+// EXPECT: inner/a.txt
+// EXPECT: joined a/b b a/b
+// EXPECT: file is not a directory
+// EXPECT: missing is not a directory
+// EXPECT: gone
+import std::io
+import std::collections::vector
+
+/// The entries of `path`, sorted, since the filesystem's own order is not
+/// alphabetical and not the same on two machines.
+fn sortedNames(entries: vector::Vector<io::DirEntry>) -> vector::Vector<io::DirEntry> {
+    var out = entries
+    var i = 1
+    while i < out.length() {
+        var j = i
+        while j > 0 && out.get(j).name < out.get(j - 1).name {
+            let hold = out.get(j)
+            out.set(j, out.get(j - 1))
+            out.set(j - 1, hold)
+            j -= 1
+        }
+        i += 1
+    }
+    out
+}
+
+fn main() -> i64 {
+    let root = "/tmp/rune_dir_case"
+    let inner = root + "/inner"
+    io::makeDirectories(inner)
+    io::writeString(io::joinPath(inner, "a.txt"), "a")
+    io::writeString(io::joinPath(root, "b.txt"), "b")
+    io::println("made")
+
+    match io::readDirectory(root) {
+        Ok(entries) => {
+            for e in sortedNames(entries) {
+                io::println((if e.isDirectory { "dir " } else { "file " }) + e.name)
+            }
+        },
+        Err(e) => io::println("read failed: " + io::describe(e)),
+    }
+
+    // The whole tree, files only, relative to where the walk began.
+    var found = io::walkDirectory(root, 4)
+    var names = vector::Vector<String>()
+    for p in found { names.push(p) }
+    var i = 1
+    while i < names.length() {
+        var j = i
+        while j > 0 && names.get(j) < names.get(j - 1) {
+            let hold = names.get(j)
+            names.set(j, names.get(j - 1))
+            names.set(j - 1, hold)
+            j -= 1
+        }
+        i += 1
+    }
+    for p in names { io::println(p) }
+
+    io::println("joined " + io::joinPath("a", "b") + " " +
+                io::joinPath("", "b") + " " + io::joinPath("a/", "b"))
+
+    // A file is not a directory, and neither is a path that is not there.
+    if !io::isDirectory(io::joinPath(root, "b.txt")) {
+        io::println("file is not a directory")
+    }
+    if !io::isDirectory("/tmp/rune_dir_case_absent") {
+        io::println("missing is not a directory")
+    }
+
+    io::delete(io::joinPath(inner, "a.txt"))
+    io::delete(io::joinPath(root, "b.txt"))
+    match io::readDirectory("/tmp/rune_dir_case_absent") {
+        Ok(any) => io::println("read something that is not there"),
+        Err(e) => io::println("gone"),
+    }
+    0
+}

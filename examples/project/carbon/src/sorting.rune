@@ -1,0 +1,43 @@
+@type(Executable)
+
+fn Partition<T: operator::cmp>(var s: [T]) -> i64 {
+    var i: i64 = -1
+    var ii: i64 = 0
+    for elem in s {
+        if elem <= s[s.$length()-1] {
+            i += 1
+            tmp = s[i]
+            s[i] = elem
+            s[ii] = tmp
+        }
+        ii += 1
+    }
+    i
+    
+}
+
+fn QuickSort<T: operator::cmp>(var s: [T]){
+    if s.$length() <= 1 {
+        return;
+    }
+    p = Partition(s)
+    QuickSort(s[..(p-1)])
+    QuickSort(s[(p+1)..])
+}
+
+bind std::io::Display to [i64] {
+    fn display(&self) -> String {
+        var out: String = ""
+        for value in self {
+            out += value.$str() + " " 
+        }
+        out
+    }
+}
+
+fn main() -> i64 {
+    s: [i64] = [1,4,2,3]
+    QuickSort(s)
+    println!("{s}")
+    0
+}

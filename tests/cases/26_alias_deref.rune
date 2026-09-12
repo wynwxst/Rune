@@ -1,0 +1,84 @@
+// `@alias` gives a declaration another name, string-based so it can hold
+// spellings no identifier can. Operators use it to answer to punctuation, and
+// `deref`/`derefSet` make a value behave like a pointer.
+// EXPECT: 3 3 3
+// EXPECT: made by alias
+// EXPECT: 21.5 30.0
+// EXPECT: 26.85 273.15
+// EXPECT: 41 42 27
+// EXPECT: hello there
+// EXPECT: balanced true
+import std::io
+import std::process
+import std::mem
+
+struct Bag { count: i64 }
+
+extend Bag {
+    @alias("size")
+    @alias("howMany")
+    pub fn length(&self) -> i64 { self.count }
+}
+
+@alias("makeBag")
+fn bag(n: i64) -> Bag { Bag { count: n } }
+
+@alias("Tote")
+struct Sack { label: String }
+
+struct Celsius { deg: f64 }
+
+// The punctuation spelling of the operator, plus an alias for it.
+@alias("degrees")
+bind operator::"*" to Celsius {
+    fn deref(&self) -> f64 { self.deg }
+    fn derefSet(&var self, value: f64) { (*self).deg = value }
+}
+
+struct Kelvin { deg: f64 }
+
+// `degrees` now names the same operator as `*`.
+bind operator::"degrees" to Kelvin {
+    fn deref(&self) -> f64 { self.deg - 273.15 }
+    fn derefSet(&var self, value: f64) { (*self).deg = value + 273.15 }
+}
+
+fn main() -> i64 {
+    let b = makeBag(3)
+    io::println(b.length().$str() + " " + b.size().$str() + " " +
+                b.howMany().$str())
+
+    let t = Tote { label: "made by alias" }
+    io::println(t.label)
+
+    var c = Celsius { deg: 21.5 }
+    let read = (*c).$str()
+    *c = 30.0
+    io::println(read + " " + (*c).$str())
+
+    var k = Kelvin { deg: 300.0 }
+    let rounded = ((*k * 100.0 + 0.5) as i64 as f64) / 100.0
+    *k = 0.0
+    io::println(rounded.$str() + " " + k.deg.$str())
+
+    // A Handle behaves like a pointer, including through `+=`.
+    var h = mem::Handle<i64>(41)
+    let first = (*h).$str()
+    *h = *h + 1
+    let second = (*h).$str()
+    var n = mem::Handle<i64>(10)
+    *n += 5
+    *n *= 2
+    *n -= 3
+    io::println(first + " " + second + " " + (*n).$str())
+
+    let before = process::liveObjectCount()
+    {
+        var s = mem::of("hello")
+        *s += " there"
+        io::println(*s)
+    }
+    let after = process::liveObjectCount()
+    io::println("balanced " + (before == after).$str())
+    0
+}

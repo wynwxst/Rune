@@ -1,0 +1,11 @@
+// Two unrelated error types, and nothing that says how to get from one to
+// the other: `?` cannot guess.
+// EXPECT-ERROR: write `bind A into B`
+
+enum A { X }
+enum B { Y }
+
+fn a() -> Result<i64, A> { A::X }
+fn b() -> Result<i64, B> { let v = a()?; v }
+
+fn main() -> i64 { 0 }

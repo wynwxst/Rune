@@ -1,0 +1,12 @@
+// Reading past the end aborts rather than reading whatever is there.
+// EXPECT: about to read past the end
+// EXPECT-PANIC: Buffer index out of range
+import std::io
+import std::mem
+
+fn main() -> i64 {
+    var b = mem::Buffer<i64>(size: 2, fill: 0)
+    io::println("about to read past the end")
+    io::println(b[5].$str())
+    0
+}

@@ -1,0 +1,12 @@
+// A type whose own definition contains a deeper version of itself has no end,
+// and is reported rather than run out of stack.
+// EXPECT-ERROR: generic instantiation is too deeply nested
+import std::io
+
+struct Nest<T> { pub value: T, pub deeper: Nest<Nest<T>>? }
+
+fn main() -> i64 {
+    let n = Nest<i64> { value: 1, deeper: nil }
+    io::println(n.value.$str())
+    0
+}

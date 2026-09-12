@@ -1,0 +1,59 @@
+// A generic `bind` may name a shape rather than a declaration: `[T]`,
+// `(A, B)`, `&T`. Every type of that shape gets the binding, and a `where`
+// clause decides which ones.
+//
+// `std::io` uses this itself, which is why an array prints without anything
+// having to be written for its element type.
+// EXPECT: [1, 2, 3]
+// EXPECT: [a, b]
+// EXPECT: [2, 3]
+// EXPECT: (7, seven)
+// EXPECT: [[1, 2], [3]]
+// EXPECT: 6
+// EXPECT: 3
+// EXPECT: not summable
+import std::io
+import std::reflect
+
+/// A mark of one's own, bound to a shape.
+mark Total { fn total(&self) -> i64 }
+bind Total to i64 { fn total(&self) -> i64 { self } }
+bind<T> Total to [T] where T: Total {
+    fn total(&self) -> i64 {
+        var sum = 0
+        for i in 0..self.$length() { sum += self[i].total() }
+        sum
+    }
+}
+bind<A, B> Total to (A, B) where A: Total, B: Total {
+    fn total(&self) -> i64 { self.0.total() + self.1.total() }
+}
+
+struct Opaque { n: i64 }
+
+fn sum<T: Total>(value: T) -> i64 { value.total() }
+fn describe<T>(value: T) -> String {
+    if reflect::conforms::<T, Total>() { "summable" } else { "not summable" }
+}
+
+fn main() -> i64 {
+    let ints: [3:i64] = [1, 2, 3]
+    let words: [2:String] = ["a", "b"]
+
+    // The library's own shape bindings.
+    io::println(ints)
+    io::println(words)
+    io::println(ints[1..3])
+    io::println((7, "seven"))
+    io::println([[1, 2], [3, 4][0..1]])
+
+    // And one written here, over the same shapes.
+    io::println(sum(ints))
+    io::println(sum((1, 2)))
+
+    // The `where` clause is what decides: `Opaque` is not `Total`, so a
+    // slice of it is not either.
+    let opaque: [1:Opaque] = [Opaque { n: 1 }]
+    io::println(describe(opaque))
+    0
+}

@@ -1,0 +1,10 @@
+// A multi-threaded HTTP server.
+//
+//     rune run -- --port 8080 --workers 4 --verbose
+//
+// The program is one file per job — the accept loop, the workers, the HTTP
+// text, the pages — and this is the one that starts it.
+
+import webserver::server
+
+fn main() -> i64 { server::run() }

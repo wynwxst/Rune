@@ -1,0 +1,15 @@
+[package]
+name = "."
+version = "0.1.0"
+edition = "2025"
+description = "How the Rune toolchain is built, how it works, and how to change it."
+authors = []
+
+[build]
+# none | minimal | full — how much checking the compiler inserts.
+safety = "full"
+optimize = 0
+debug = true
+warnings-as-errors = false
+
+[dependencies]

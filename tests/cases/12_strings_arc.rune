@@ -1,0 +1,31 @@
+// String building in loops must not leak: the harness fails on any live
+// object left at exit.
+// EXPECT: joined=0,1,2,3,4,5,6,7,8,9,
+// EXPECT: repeated length=30
+// EXPECT: people=ada,grace,alan,
+// EXPECT: upperFirst=a
+import std::io
+
+struct Person { name: String, note: String }
+
+fn roster() -> [3:Person] {
+    [ Person { name: "ada", note: "a" },
+      Person { name: "grace", note: "b" },
+      Person { name: "alan", note: "c" } ]
+}
+
+fn main() -> i64 {
+    var joined = ""
+    for i in 0..10 { joined += i.$str() + "," }
+    io::println("joined=" + joined)
+
+    io::println("repeated length=" + "abc".$repeat(10).$length().$str())
+
+    people = roster()
+    var names = ""
+    for p in people { names += p.name + "," }
+    io::println("people=" + names)
+
+    io::println("upperFirst=" + people[0].name.$substring(0, 1))
+    0
+}

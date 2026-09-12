@@ -1,0 +1,81 @@
+// statistics — the package root.
+//
+// `src/lib.rune` *is* the `statistics` module. Every other file under src/
+// becomes a submodule of it, so `src/spread.rune` is `statistics::spread`.
+
+import std::io
+import statistics::spread
+
+/// A finished summary of a data set. Returned by `summarise`.
+pub struct Summary {
+    pub count: i64
+    pub total: f64
+    pub mean: f64
+    pub smallest: f64
+    pub largest: f64
+    pub deviation: f64
+}
+
+bind io::Display to Summary {
+    fn display(&self) -> String {
+        "n=" + self.count.$str() +
+            " mean=" + round(self.mean, 3).$str() +
+            " sd=" + round(self.deviation, 3).$str() +
+            " range=[" + round(self.smallest, 3).$str() +
+            ", " + round(self.largest, 3).$str() + "]"
+    }
+
+    fn describe(&self) -> String {
+        "Summary { count: " + self.count.$str() +
+            ", total: " + self.total.$str() +
+            ", mean: " + self.mean.$str() +
+            ", deviation: " + self.deviation.$str() + " }"
+    }
+}
+
+/// Summarises `values`. Returns `None` for an empty data set rather than
+/// inventing a mean of zero.
+pub fn summarise(values: [f64]) -> Summary? {
+    if values.$isEmpty() { return nil }
+
+    var total = 0.0
+    var smallest = values[0]
+    var largest = values[0]
+    for v in values {
+        total += v
+        if v < smallest { smallest = v }
+        if v > largest { largest = v }
+    }
+    let count = values.$length()
+    let mean = total / (count as f64)
+
+    Summary {
+        count: count,
+        total: total,
+        mean: mean,
+        smallest: smallest,
+        largest: largest,
+        deviation: spread::standardDeviation(values, mean),
+    }
+}
+
+/// Rounds to `places` decimal places. Useful for stable output.
+pub fn round(value: f64, places: i64) -> f64 {
+    var factor = 1.0
+    for i in 0..places { factor *= 10.0 }
+    let scaled = value * factor
+    let shifted = if scaled < 0.0 { scaled - 0.5 } else { scaled + 0.5 }
+    (shifted as i64 as f64) / factor
+}
+
+/// Folds a run of values into one.
+///
+///     sum!(1, 2, 3)   ->   0 + 1 + 2 + 3
+///
+/// The `+` goes *inside* the repetition rather than between rounds, because
+/// `$( )+` already means "one or more" — so the body emits `+ $item` each
+/// time, starting from the identity. The `0` takes its type from the context,
+/// so this sums floats too.
+pub macro sum {
+    ($($item: expr),*) => { 0 $(+ $item)* }
+}

@@ -1,0 +1,45 @@
+// The everyday half of std::text: splitting, trimming, replacing and padding.
+// These work on bytes rather than code points, which is exact for the ASCII
+// delimiters a separator almost always is — the normalisation and collation
+// above them are what handles the rest.
+// EXPECT: true
+// EXPECT: true
+// EXPECT: true
+// EXPECT: 2
+// EXPECT: body
+// EXPECT: body
+// EXPECT: [padded]
+// EXPECT: <a>
+// EXPECT: <>
+// EXPECT: <b>
+// EXPECT: <c>
+// EXPECT: |one
+// EXPECT: |two
+// EXPECT: |three
+// EXPECT: bonono
+// EXPECT: x-y-z
+// EXPECT: 007
+// EXPECT: ab...
+import std::io
+import std::text
+
+fn main() -> i64 {
+    io::println(text::startsWith("hello world", "hello").$str())
+    io::println(text::endsWith("hello world", "world").$str())
+    io::println(text::contains("hello world", "lo w").$str())
+    // `$find` answers -1 for "nowhere"; `text::find` answers `nil`, which
+    // cannot be mistaken for a position.
+    io::println((text::find("hello", "llo") ?? -1).$str())
+    io::println(text::withoutPrefix("prefix-body", "prefix-"))
+    io::println(text::withoutSuffix("body.txt", ".txt"))
+    io::println("[" + text::trim("  padded  ") + "]")
+    // Adjacent separators produce empty pieces, which is what keeps a
+    // split-then-join round trip exact.
+    for field in text::split("a,,b,c", ",") { io::println("<" + field + ">") }
+    for line in text::splitLines("one\r\ntwo\nthree\n") { io::println("|" + line) }
+    io::println(text::replace("banana", "a", "o"))
+    io::println(text::join(text::split("x;y;z", ";"), "-"))
+    io::println(text::padStart("7", 3, '0'))
+    io::println(text::padEnd("ab", 5, '.'))
+    0
+}

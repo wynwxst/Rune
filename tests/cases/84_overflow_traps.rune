@@ -1,0 +1,45 @@
+// Integer arithmetic that does not fit traps in a debug build (`-O0`, which
+// is what the suite compiles at) the way a bounds check does. The named
+// forms say what they want instead and get it at every setting.
+// EXPECT: -128
+// EXPECT: 127
+// EXPECT: none
+// EXPECT: 127
+// EXPECT: 4
+// EXPECT: 255
+// EXPECT: none
+// EXPECT: 0
+// EXPECT: 12638153115695167455
+// EXPECT-PANIC: arithmetic overflow
+
+import std::io
+import std::math
+
+fn main() -> i64 {
+    var x: i8 = 127
+    io::println(x.$wrappingAdd(1))
+    io::println(x.$saturatingAdd(1))
+    match x.$checkedAdd(1) {
+        Some(v) => io::println(v),
+        None => io::println("none"),
+    }
+    io::println(x.$checkedAdd(0) ?? -1)
+
+    let u: u8 = 250
+    io::println(u.$wrappingAdd(10))
+    io::println(u.$saturatingAdd(10))
+    match u.$checkedMul(2) {
+        Some(v) => io::println(v),
+        None => io::println("none"),
+    }
+    io::println((3 as u8).$saturatingSub(5))
+
+    // A hash that is supposed to wrap says so.
+    let basis: u64 = 0xcbf29ce484222325
+    let prime: u64 = 0x100000001b3
+    io::println(math::wrappingMul(basis, prime))
+
+    x += 1
+    io::println(x)
+    0
+}

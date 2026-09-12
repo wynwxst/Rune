@@ -1,0 +1,9 @@
+// A type the language has no comparison for still has to say how, and the
+// bound is where that is noticed.
+// EXPECT-ERROR: does not overload `operator::cmp`
+struct Point { x: i64, y: i64 }
+fn maxOf<T: operator::cmp>(a: T, b: T) -> T { if a > b { a } else { b } }
+fn main() -> i64 {
+    let _ = maxOf(Point { x: 1, y: 2 }, Point { x: 3, y: 4 })
+    0
+}

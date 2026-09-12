@@ -1,0 +1,22 @@
+// A function type has one spelling: the parameters in parentheses, then `->`
+// and the result. Without the arrow it returns nothing — so `@function(i64)`
+// takes an `i64`, and `@function() -> i64` produces one.
+// EXPECT: 36
+// EXPECT: 9
+// EXPECT: 7
+
+import std::io
+
+type Sink = @function(i64)
+type Producer = @function() -> i64
+
+fn apply(f: @function(i64, i64) -> i64, a: i64) -> i64 { f(a, a) }
+fn drain(f: Sink, v: i64) { f(v) }
+fn produce(f: Producer) -> i64 { f() }
+
+fn main() -> i64 {
+    io::println(apply(||(a: i64, b: i64) -> i64 { a * b }, 6))
+    drain(||(n: i64) { io::println(n) }, 9)
+    io::println(produce(||() -> i64 { 7 }))
+    0
+}

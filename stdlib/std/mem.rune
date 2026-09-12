@@ -1,0 +1,423 @@
+// Raw memory: how much space a type needs, where to get it, and a safe
+// wrapper so most code never has to touch any of it.
+//
+// The unsafe surface is deliberately small. `Allocator` hands out untyped
+// blocks; `Handle<T>` is the one owning pointer you should reach for, and it
+// frees itself. Anything built on these — see `std::collections` — pays for
+// `unsafe` once, inside, and offers a checked interface outside.
+
+import std::process
+
+extern "C" {
+    fn rune_raw_alloc(size: u64) -> *var u8
+    fn rune_raw_realloc(block: *var u8, size: u64) -> *var u8
+    fn rune_raw_free(block: *var u8)
+    fn rune_raw_copy(dst: *var u8, src: *u8, size: u64)
+    fn rune_raw_zero(block: *var u8, size: u64)
+    fn rune_raw_is_zero(block: *u8, size: u64) -> bool
+}
+
+//===--------------------------------------------------------------------===//
+// Layout
+//===--------------------------------------------------------------------===//
+
+/// Bytes one value of `T` occupies, including any tail padding — the stride
+/// between neighbouring elements of an array of `T`.
+///
+///     let n = mem::size_of<i64>()     // 8
+@intrinsic("size_of")
+pub fn size_of<T>() -> usize
+
+/// The alignment `T` requires, in bytes.
+@intrinsic("align_of")
+pub fn align_of<T>() -> usize
+
+/// True when `T` is reference counted — a class, a `String`, a `dyn Mark`, or
+/// anything holding one of those.
+///
+/// This is the same question the compiler answers for itself before it emits a
+/// retain, so a container that asks it agrees with the compiler by
+/// construction rather than by convention. It is decided at compile time, so
+/// the branch it guards costs nothing.
+///
+///     if mem::is_counted<T>() { ... } else { ... }
+///
+/// The one place it matters: all-zero bytes are a perfectly good `i64`, `f64`
+/// or `bool`, and are never a valid reference. A container that zeroes its
+/// storage can therefore hand back zeroed slots for one kind of `T` and must
+/// call them empty for the other.
+@intrinsic("is_counted")
+pub fn is_counted<T>() -> bool
+
+/// A hash of `value`, worked out from its layout.
+///
+/// The compiler knows what `T` is made of, so this asks nothing of `T`: no
+/// `Hashable` mark to bind, and no `Display` standing in for one. It is
+/// consistent with `equals` — two values that compare equal hash the same.
+///
+///     let h = mem::hash(key)
+///
+/// A `String` hashes its contents; a class hashes its address, because two
+/// distinct objects are two distinct keys even when their fields agree. An
+/// aggregate hashes its parts, and an enum its tag and live payload.
+@intrinsic("hash")
+pub fn hash<T>(value: T) -> u64
+
+/// True when `a` and `b` are structurally equal, worked out from the layout.
+///
+/// Contents for a `String`, address for a class, part by part for anything
+/// aggregate. This is the comparison `hash` is consistent with, and it needs
+/// no bound on `T`.
+@intrinsic("equals")
+pub fn equals<T>(a: T, b: T) -> bool
+
+//===--------------------------------------------------------------------===//
+// Allocators
+//===--------------------------------------------------------------------===//
+
+/// A source of untyped memory. Blocks come back uninitialised, and every one
+/// handed out must be given back to the same allocator exactly once.
+pub mark Allocator {
+    /// A block of at least `bytes`, or a null pointer if none can be had.
+    fn allocate(&self, bytes: usize) -> *var u8
+
+    /// Returns a block. Passing a null pointer is allowed and does nothing.
+    fn deallocate(&self, block: *var u8)
+
+    /// Grows or shrinks a block, preserving its contents up to the smaller of
+    /// the two sizes. The old pointer is invalid afterwards.
+    fn reallocate(&self, block: *var u8, bytes: usize) -> *var u8
+}
+
+/// The allocator backing every other one: the process heap.
+pub struct SystemAllocator {}
+
+bind Allocator to SystemAllocator {
+    @safe("the runtime returns either a valid block of this size or null")
+    fn allocate(&self, bytes: usize) -> *var u8 {
+        unsafe { rune_raw_alloc(bytes as u64) }
+    }
+
+    @safe("the runtime ignores a null block")
+    fn deallocate(&self, block: *var u8) {
+        unsafe { rune_raw_free(block) }
+    }
+
+    @safe("the runtime copies the contents it can keep")
+    fn reallocate(&self, block: *var u8, bytes: usize) -> *var u8 {
+        unsafe { rune_raw_realloc(block, bytes as u64) }
+    }
+}
+
+/// The process heap, ready to use: `mem::allocator.allocate(n)`.
+pub global allocator: SystemAllocator = SystemAllocator {}
+
+/// A block pointer that refers to nothing yet. `deallocate` and `reallocate`
+/// both accept it, so a container can start out holding one.
+@safe("a null block is never read through; it only marks 'nothing allocated'")
+pub fn noBlock() -> *var u8 { unsafe { 0 as *var u8 } }
+
+/// True when a block pointer refers to nothing.
+@safe("comparing an address to zero reads no memory")
+pub fn isNull(block: *var u8) -> bool { unsafe { block as u64 == 0 } }
+
+/// Copies `bytes` from one block to another. The two must not overlap.
+@safe("both blocks are sized by the caller, which is where the invariant is")
+pub fn copy(dst: *var u8, src: *u8, bytes: usize) {
+    if bytes == 0 { return }
+    unsafe { rune_raw_copy(dst, src, bytes as u64) }
+}
+
+/// The address `bytes` further into a block. The caller is responsible for
+/// that address still being inside it.
+@safe("address arithmetic reads nothing; the block's extent is the caller's")
+pub fn offset(block: *var u8, bytes: usize) -> *var u8 {
+    unsafe { (block as u64 + bytes as u64) as *var u8 }
+}
+
+/// Sets `bytes` of a block to zero. A null block is accepted and ignored.
+@safe("the block is sized by the caller, which is where the invariant is")
+pub fn zero(block: *var u8, bytes: usize) {
+    unsafe { rune_raw_zero(block, bytes as u64) }
+}
+
+/// True when `bytes` of a block are all zero — the test for "never written",
+/// worth making only when `T` has no all-zero value. See `is_counted`.
+@safe("reads exactly the bytes the caller sized, and only to compare them")
+pub fn isZeroed(block: *u8, bytes: usize) -> bool {
+    unsafe { rune_raw_is_zero(block, bytes as u64) }
+}
+
+//===--------------------------------------------------------------------===//
+// Viewing raw memory as a slice
+//===--------------------------------------------------------------------===//
+
+/// `count` elements of `T` starting at `block`, as a slice.
+///
+/// Nothing is copied: the slice is the block's address and the count, so it
+/// reads the same memory the block does and is valid exactly as long as the
+/// block is. This is how a container hands its contents to code that takes
+/// a `[T]` — see `Vector::asSlice` — and the caller is responsible for the
+/// block holding `count` initialised elements.
+///
+///     let view = unsafe { mem::slice_of<T>(self.block as *var T, self.count) }
+@unsafe
+@intrinsic("slice_of")
+pub fn slice_of<T>(block: *var T, count: usize) -> [T]
+
+//===--------------------------------------------------------------------===//
+// Reference counting, for containers that hold their own storage
+//===--------------------------------------------------------------------===//
+
+/// Claims a reference to `value`. No effect on a type that is not counted.
+///
+/// Only needed when a value is stored somewhere the compiler cannot see — raw
+/// memory. Everything else is balanced for you.
+@unsafe
+@intrinsic("retain")
+pub fn retain<T>(value: T)
+
+/// Gives up a reference to `value`. Must balance a `retain`.
+@unsafe
+@intrinsic("release")
+pub fn release<T>(value: T)
+
+//===--------------------------------------------------------------------===//
+// Handle: one owned value on the heap
+//===--------------------------------------------------------------------===//
+
+/// A single `T` living on the heap, owned by this handle.
+///
+/// `Handle` is a class, so it is reference counted: copies share one value,
+/// and the last one to go releases it. Nothing about using one is unsafe —
+/// there is no way to reach the value after it is gone, and no way to free it
+/// twice. This is what most code should reach for instead of an allocator.
+///
+///     var h = Handle<i64>(41)
+///     h.set(h.get() + 1)
+///     io::println(h.get().$str())      // 42
+pub class Handle<T> {
+    value: T
+
+    fn init(self, value: T) { self.value = value }
+
+    /// A copy of the value.
+    pub fn get(&self) -> T { self.value }
+
+    /// Replaces the value. Every handle sharing it sees the change.
+    pub fn set(&var self, value: T) { self.value = value }
+}
+
+// A handle behaves like a pointer: `*h` reads the value, `*h = v` writes it.
+// `deref` and `derefSet` are the two halves; `operator::"*"` is the same
+// operator written as punctuation.
+bind<T> operator::"*" to Handle<T> {
+    @alias("Asterisk")
+    fn deref(&self) -> T { self.value }
+
+    @alias("AsteriskEquals")
+    fn derefSet(&var self, value: T) { self.value = value }
+}
+
+/// `mem::of(v)` reads better than `Handle<T>(v)` when `T` is obvious.
+pub fn of<T>(value: T) -> Handle<T> { Handle<T>(value) }
+
+//===--------------------------------------------------------------------===//
+// Buffer: n values, checked on every access
+//===--------------------------------------------------------------------===//
+
+/// `size` values of `T`.
+///
+///     var b = buffer::Buffer<i64>(4)          // four zeroed slots
+///     b[2] = 7
+///     io::println(b[2].$str())
+///
+///     var c = buffer::Buffer<i64>(4, 1)       // four slots holding 1
+///
+/// Leaving the fill out zeroes the storage, which means two different things
+/// depending on `T`, and both are safe:
+///
+/// * For a value type — an integer, a float, `bool`, a struct of those — all
+///   zero *is* a value, so every slot starts at `0` / `0.0` / `false` and
+///   reads back like any other.
+/// * For a counted type — a class, a `String` — all zero is not a reference to
+///   anything, so a slot that has never been written reads as empty: `at`
+///   gives `nil` and `get` aborts. Write to it and it behaves normally from
+///   then on.
+///
+/// What it never does is hand back whatever the allocator happened to leave
+/// there, which is the one thing a safe container must not do.
+pub class Buffer<T> {
+    block: *var u8
+    count: i64
+
+    fn init(self, size: i64, fill: T? = nil) {
+        self.count = if size > 0 { size } else { 0 }
+        if self.count == 0 {
+            self.block = noBlock()
+            return
+        }
+        let bytes = self.count as usize * size_of<T>()
+        self.block = allocator.allocate(bytes)
+        if isNull(self.block) {
+            process::panic("Buffer: out of memory")
+            self.count = 0
+            return
+        }
+        // Zero first, unconditionally: it is what an absent fill means, and it
+        // is also the state a fill overwrites, so nothing is ever read before
+        // it is written.
+        zero(self.block, bytes)
+        match fill {
+            Some(value) => {
+                var i = 0
+                while i < self.count {
+                    unsafe {
+                        (self.block as *var T)[i] = value
+                        retain<T>(value)
+                    }
+                    i += 1
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn deinit(self) {
+        var i = 0
+        while i < self.count {
+            // `release` ignores a null reference, so a slot still zeroed from
+            // the constructor costs nothing here.
+            unsafe { release<T>((self.block as *var T)[i]) }
+            i += 1
+        }
+        allocator.deallocate(self.block)
+    }
+
+    //=== Size ===========================================================//
+
+    /// How many values it holds. Fixed for the buffer's whole life.
+    pub fn length(&self) -> i64 { self.count }
+
+    /// True when it was made with a size of zero.
+    pub fn isEmpty(&self) -> bool { self.count == 0 }
+
+    /// True when `index` names a slot in this buffer.
+    pub fn holds(&self, index: i64) -> bool {
+        index >= 0 && index < self.count
+    }
+
+    /// True when `index` names a slot that has something in it.
+    ///
+    /// For a value type every slot in range is occupied, because zero is a
+    /// value. For a counted type a slot is occupied once something has been
+    /// written to it.
+    @safe("the index is compared against the count before the block is read")
+    pub fn occupied(&self, index: i64) -> bool {
+        if !self.holds(index) { return false }
+        if !is_counted<T>() { return true }
+        let stride = size_of<T>()
+        let slot = offset(self.block, index as usize * stride)
+        !isZeroed(unsafe { slot as *u8 }, stride)
+    }
+
+    //=== Reading ========================================================//
+
+    /// The value at `index`, or nothing when there is no such slot or nothing
+    /// has been written to it. This is the form to reach for when the index
+    /// came from outside.
+    ///
+    /// "Nothing has been written to it" is decided by `occupied`, which reads
+    /// a slot of all zero bytes as empty. That is exactly right for a slot
+    /// nobody has touched and wrong for one holding a value whose bytes
+    /// happen to all be zero — an empty `String`, or the first variant of a
+    /// counted enum that carries nothing. A caller that keeps its own record
+    /// of which slots are live wants `read`, which asks no such question.
+    @safe("the slot is checked for range and for contents before the read")
+    pub fn at(&self, index: i64) -> T? {
+        if !self.occupied(index) { return nil }
+        unsafe { (self.block as *var T)[index] }
+    }
+
+    /// The value at `index`, whatever its bytes are, or nothing when there is
+    /// no such slot.
+    ///
+    /// The read `at` cannot do: it takes the caller's word that the slot has
+    /// been written, so a value of all zero bytes comes back as the value it
+    /// is rather than as nothing. A hash table with a state buffer of its own
+    /// already knows which slots are live, and this is the read for it.
+    @safe("the index is compared against the count before the read")
+    pub fn read(&self, index: i64) -> T? {
+        if !self.holds(index) { return nil }
+        unsafe { (self.block as *var T)[index] }
+    }
+
+    /// The value at `index`. Aborts when there is no such slot, or when
+    /// nothing has been written to it.
+    pub fn get(&self, index: i64) -> T {
+        match self.at(index) {
+            Some(v) => v,
+            None => {
+                if self.holds(index) {
+                    process::panic("Buffer slot has not been written")
+                } else {
+                    process::panic("Buffer index out of range")
+                }
+                self.at(0).unwrap()
+            }
+        }
+    }
+
+    //=== Writing ========================================================//
+
+    /// Replaces the value at `index`. Returns false when there is no such
+    /// slot, leaving the buffer untouched.
+    @safe("the index is compared against the count before the write")
+    pub fn put(&var self, index: i64, value: T) -> bool {
+        if !self.holds(index) { return false }
+        let slot = unsafe { self.block as *var T }
+        unsafe {
+            release<T>(slot[index])
+            slot[index] = value
+            retain<T>(value)
+        }
+        true
+    }
+
+    /// Empties the slot at `index`, releasing whatever was there.
+    ///
+    /// For a counted type the slot reads as `nil` afterwards. For a value type
+    /// there is no such thing as an empty slot, so this sets it back to zero.
+    /// Returns false when there is no such slot.
+    @safe("the index is compared against the count before the write")
+    pub fn clear(&var self, index: i64) -> bool {
+        if !self.holds(index) { return false }
+        let stride = size_of<T>()
+        unsafe {
+            release<T>((self.block as *var T)[index])
+            zero(offset(self.block, index as usize * stride), stride)
+        }
+        true
+    }
+
+    /// Writes `value` into every slot.
+    pub fn fill(&var self, value: T) {
+        var i = 0
+        while i < self.count {
+            self.put(i, value)
+            i += 1
+        }
+    }
+}
+
+// `b[i]` and `b[i] = v`, both bounds checked: reading past the end aborts
+// rather than reading whatever is there.
+bind<T> operator::"[]" to Buffer<T> {
+    fn index(&self, index: i64) -> T { self.get(index) }
+
+    fn indexSet(&var self, index: i64, value: T) {
+        if !self.put(index, value) {
+            process::panic("Buffer index out of range")
+        }
+    }
+}

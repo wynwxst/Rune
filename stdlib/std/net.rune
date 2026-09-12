@@ -1,0 +1,425 @@
+// std::net — TCP, as streams.
+//
+// A connection is a `TcpStream`, and a `TcpStream` is an `io::Stream`: the
+// same `read`, `write`, `writeText` and `BufferedReader` that work on a file
+// work on a socket, because they are the same two marks.
+//
+//     import std::{io, net}
+//
+//     fn main() -> i64 {
+//         match net::connect("example.com", 80) {
+//             Ok(c) => {
+//                 var conn = c
+//                 conn.writeText("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+//                 var page = io::Bytes()
+//                 conn.readAll(page)
+//                 io::println(page.toString())
+//             },
+//             Err(e) => io::eprintln(net::describe(e)),
+//         }
+//         0
+//     }
+//
+// Owning a descriptor
+// -------------------
+// `TcpStream` and `TcpListener` are structs that own a file descriptor, and
+// they say so: the descriptor is marked `@resource`, and each has a `deinit`
+// that closes it. So a connection closes itself when the binding holding it
+// goes out of scope, and handing one on is a move — the binding it came from
+// stops owning it, and the descriptor is closed exactly once.
+//
+// What that rules out is putting one in a container. `Vector<TcpStream>`
+// copies through raw memory the compiler cannot follow, and two copies of a
+// descriptor is one close too many. To move a connection somewhere the
+// compiler cannot follow — another thread, a queue — hand over the descriptor
+// itself with `release`, and build a stream around it again with `adopt`:
+//
+//     let fd = connection.release()     // this stream no longer owns it
+//     work.send(fd)                     // an i64 crosses; nothing to close
+//     ...
+//     var conn = net::adopt(fd)         // the worker owns it now
+//
+// Addresses
+// ---------
+// A host is a name or a dotted address, and the platform resolves it. Both
+// IPv4 and IPv6 are used when the machine has them; nothing here has to know
+// which, because nothing here builds an address by hand.
+
+import std::io
+import std::mem
+import std::process
+
+extern "C" {
+    fn rune_net_start()
+    fn rune_net_listen(host: CString, port: i32, backlog: i32) -> i64
+    fn rune_net_connect(host: CString, port: i32) -> i64
+    fn rune_net_accept(fd: i64, peer: *var u8, cap: i64,
+                       port: *var i32) -> i64
+    fn rune_net_read(fd: i64, buffer: *var u8, count: i64) -> i64
+    fn rune_net_write(fd: i64, data: *u8, count: i64) -> i64
+    fn rune_net_shutdown(fd: i64, how: i32) -> i32
+    fn rune_net_close(fd: i64) -> i32
+    fn rune_net_set_nodelay(fd: i64, on: i32) -> i32
+    fn rune_net_set_timeout_ms(fd: i64, ms: i64, forRead: i32) -> i32
+    fn rune_net_local_port(fd: i64) -> i32
+    fn rune_net_last_error() -> i64
+    fn rune_string_from_cstr(text: CString) -> String
+}
+
+/// Long enough for any address the platform prints, IPv6 included.
+global ADDRESS_TEXT_MAX: i64 = 64
+
+//===--------------------------------------------------------------------===//
+// Errors
+//===--------------------------------------------------------------------===//
+
+/// Why a network operation did not work.
+pub enum NetError {
+    /// Nothing is listening there.
+    Refused,
+    /// The port is already taken.
+    AddressInUse,
+    /// No route to that machine.
+    Unreachable,
+    /// Nothing is ready yet, on a socket that was told not to wait.
+    WouldBlock,
+    /// A signal cut the call short. Asking again is the right response.
+    Interrupted,
+    /// The socket was left waiting longer than it was willing to.
+    TimedOut,
+    /// The other end went away mid-conversation.
+    Reset,
+    PermissionDenied,
+    /// The host could not be resolved.
+    NotFound,
+    /// The socket is closed, so there was nothing to do it to.
+    Closed,
+    Failed,
+}
+
+@safe("reads a code the runtime classified; touches no memory")
+fn lastError() -> NetError {
+    match unsafe { rune_net_last_error() } {
+        1 => NetError::Refused,
+        2 => NetError::AddressInUse,
+        3 => NetError::Unreachable,
+        4 => NetError::WouldBlock,
+        5 => NetError::Interrupted,
+        6 => NetError::TimedOut,
+        7 => NetError::Reset,
+        8 => NetError::PermissionDenied,
+        9 => NetError::NotFound,
+        _ => NetError::Failed,
+    }
+}
+
+/// What went wrong, in words.
+pub fn describe(e: NetError) -> String {
+    match e {
+        NetError::Refused => "connection refused",
+        NetError::AddressInUse => "the address is already in use",
+        NetError::Unreachable => "no route to that host",
+        NetError::WouldBlock => "nothing is ready yet",
+        NetError::Interrupted => "the call was interrupted",
+        NetError::TimedOut => "the connection timed out",
+        NetError::Reset => "the connection was reset",
+        NetError::PermissionDenied => "permission denied",
+        NetError::NotFound => "the host could not be found",
+        NetError::Closed => "the socket is closed",
+        NetError::Failed => "the operation failed",
+    }
+}
+
+/// The same error, as one an `io::Stream` reports. A stream is a stream
+/// whatever is underneath, so a caller that only cares that the read failed
+/// does not have to know it was a socket.
+fn asStreamError(e: NetError) -> io::StreamError {
+    match e {
+        NetError::WouldBlock => io::StreamError::WouldBlock,
+        NetError::Interrupted => io::StreamError::Interrupted,
+        NetError::TimedOut => io::StreamError::TimedOut,
+        NetError::Reset => io::StreamError::Closed,
+        NetError::Closed => io::StreamError::Closed,
+        _ => io::StreamError::Failed,
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Connections
+//===--------------------------------------------------------------------===//
+
+/// One end of a TCP connection.
+///
+/// It owns its descriptor: the `deinit` closes it, so a connection that goes
+/// out of scope is closed whether or not the code that had it remembered to.
+/// Handing one on moves it, so exactly one binding owns it at a time.
+pub struct TcpStream {
+    @resource descriptor: i64 = -1,
+    peer: String = "",
+    peerPort: i32 = 0
+}
+
+extend TcpStream {
+    @safe("the descriptor is nulled before anything else can reach it again")
+    fn deinit(&var self) {
+        if self.descriptor >= 0 {
+            unsafe { rune_net_close(self.descriptor) }
+            self.descriptor = -1
+        }
+    }
+
+    /// True until the connection is closed.
+    pub fn isOpen(&self) -> bool { self.descriptor >= 0 }
+
+    /// The address at the other end, as text.
+    pub fn peerAddress(&self) -> String { self.peer }
+
+    /// The port at the other end.
+    pub fn port(&self) -> i32 { self.peerPort }
+
+    /// Closes it now. Calling this twice is harmless.
+    @safe("the descriptor is nulled before anything else can reach it again")
+    pub fn close(&var self) {
+        if self.descriptor < 0 { return }
+        unsafe { rune_net_close(self.descriptor) }
+        self.descriptor = -1
+    }
+
+    /// Says no more will be sent, read, or either — `how` is
+    /// `Shutdown::Read`, `Shutdown::Write` or `Shutdown::Both`.
+    ///
+    /// Half-closing the write side is how a client says "that is the whole
+    /// request" without giving up the reply.
+    @safe("shutdown on a live descriptor, or a reported failure")
+    pub fn shutdown(&var self, how: Shutdown) -> NetError? {
+        if self.descriptor < 0 { return NetError::Closed }
+        let code = match how {
+            Shutdown::Read => 0i32,
+            Shutdown::Write => 1i32,
+            Shutdown::Both => 2i32,
+        }
+        if unsafe { rune_net_shutdown(self.descriptor, code) } != 0 {
+            return lastError()
+        }
+        nil
+    }
+
+    /// Sends small writes immediately instead of waiting to fill a packet.
+    /// A request-response protocol wants this on.
+    @safe("setsockopt on a live descriptor, or a reported failure")
+    pub fn setNoDelay(&var self, on: bool) -> NetError? {
+        if self.descriptor < 0 { return NetError::Closed }
+        let flag = if on { 1i32 } else { 0i32 }
+        if unsafe { rune_net_set_nodelay(self.descriptor, flag) } != 0 {
+            return lastError()
+        }
+        nil
+    }
+
+    /// How long a read may wait before giving up with `TimedOut`. Zero waits
+    /// for ever, which is what a socket does by default.
+    @safe("setsockopt on a live descriptor, or a reported failure")
+    pub fn setReadTimeout(&var self, milliseconds: i64) -> NetError? {
+        if self.descriptor < 0 { return NetError::Closed }
+        if unsafe { rune_net_set_timeout_ms(self.descriptor, milliseconds, 1i32) } != 0 {
+            return lastError()
+        }
+        nil
+    }
+
+    /// The same for a write.
+    @safe("setsockopt on a live descriptor, or a reported failure")
+    pub fn setWriteTimeout(&var self, milliseconds: i64) -> NetError? {
+        if self.descriptor < 0 { return NetError::Closed }
+        if unsafe { rune_net_set_timeout_ms(self.descriptor, milliseconds, 0i32) } != 0 {
+            return lastError()
+        }
+        nil
+    }
+
+    //=== Handing the descriptor over ====================================//
+
+    /// Gives the descriptor up. This stream stops owning it — it will not be
+    /// closed here — and whoever takes it is responsible for closing it,
+    /// which `adopt` is for.
+    ///
+    /// This is how a connection crosses a boundary the compiler cannot
+    /// follow: a channel, a thread, a container.
+    pub fn release(&var self) -> i64 {
+        let fd = self.descriptor
+        self.descriptor = -1
+        fd
+    }
+
+    /// The raw descriptor, without giving up ownership. For a call this
+    /// module does not wrap; the stream still closes it.
+    pub fn descriptorValue(&self) -> i64 { self.descriptor }
+}
+
+/// Which half of a connection to close.
+pub enum Shutdown { Read, Write, Both }
+
+/// A stream around a descriptor that was handed over — from `release`, or
+/// from a C library that opened the socket itself.
+///
+/// The stream owns it from here: it is closed when the stream goes.
+pub fn adopt(descriptor: i64) -> TcpStream {
+    TcpStream { descriptor: descriptor, peer: "", peerPort: 0 }
+}
+
+/// The same, remembering who is at the other end.
+pub fn adoptFrom(descriptor: i64, peer: String, port: i32) -> TcpStream {
+    TcpStream { descriptor: descriptor, peer: peer, peerPort: port }
+}
+
+bind io::Reader to TcpStream {
+    @safe("recv is given the buffer's own spare room and never exceeds it")
+    fn read(&var self, sink: io::Bytes, most: i64) -> Result<i64, io::StreamError> {
+        if self.descriptor < 0 { return Err(io::StreamError::Closed) }
+        if most <= 0 { return Ok(0) }
+        let at = sink.writePoint(most)
+        let got = unsafe { rune_net_read(self.descriptor, at, most) }
+        if got < 0 { return Err(asStreamError(lastError())) }
+        sink.advance(got)
+        // Zero from a socket means the other end has finished sending, which
+        // is the same thing the end of a file means.
+        Ok(got)
+    }
+}
+
+bind io::Writer to TcpStream {
+    @safe("send is given the buffer's own count, and its own bytes")
+    fn write(&var self, data: io::Bytes) -> Result<i64, io::StreamError> {
+        if self.descriptor < 0 { return Err(io::StreamError::Closed) }
+        let n = data.length()
+        if n == 0 { return Ok(0) }
+        let sent = unsafe { rune_net_write(self.descriptor, data.raw() as *u8, n) }
+        if sent < 0 { return Err(asStreamError(lastError())) }
+        Ok(sent)
+    }
+
+    /// A socket buffers in the kernel, not here, so there is nothing to push.
+    fn flush(&var self) -> Result<i64, io::StreamError> {
+        if self.descriptor < 0 { return Err(io::StreamError::Closed) }
+        Ok(0)
+    }
+}
+
+bind io::Stream to TcpStream {}
+
+//===--------------------------------------------------------------------===//
+// Listening
+//===--------------------------------------------------------------------===//
+
+/// A socket waiting for connections.
+///
+/// It owns its descriptor exactly as a `TcpStream` does, and closes it the
+/// same way.
+pub struct TcpListener {
+    @resource descriptor: i64 = -1,
+    address: String = "",
+    boundPort: i32 = 0
+}
+
+extend TcpListener {
+    @safe("the descriptor is nulled before anything else can reach it again")
+    fn deinit(&var self) {
+        if self.descriptor >= 0 {
+            unsafe { rune_net_close(self.descriptor) }
+            self.descriptor = -1
+        }
+    }
+
+    /// True until the listener is closed.
+    pub fn isOpen(&self) -> bool { self.descriptor >= 0 }
+
+    /// The address it was asked for.
+    pub fn address(&self) -> String { self.address }
+
+    /// The port it actually got. Asking for port 0 lets the system pick one,
+    /// and this is how to find out which.
+    pub fn port(&self) -> i32 { self.boundPort }
+
+    /// Waits for the next connection.
+    ///
+    /// Blocks until one arrives, or until a read timeout expires. The stream
+    /// that comes back owns its own descriptor, independent of this one.
+    @safe("the address buffer is sized here and the runtime terminates it")
+    pub fn accept(&var self) -> Result<TcpStream, NetError> {
+        if self.descriptor < 0 { return Err(NetError::Closed) }
+
+        var text = io::Bytes()
+        let at = text.writePoint(ADDRESS_TEXT_MAX)
+        mem::zero(at, ADDRESS_TEXT_MAX as usize)
+        var peerPort = 0i32
+
+        let fd = unsafe {
+            rune_net_accept(self.descriptor, at, ADDRESS_TEXT_MAX,
+                            &var peerPort as *var i32)
+        }
+        if fd < 0 { return Err(lastError()) }
+
+        let peer = unsafe { rune_string_from_cstr(at as CString) }
+        Ok(adoptFrom(fd, peer, peerPort))
+    }
+
+    /// Stops listening. Anything already accepted is unaffected.
+    @safe("the descriptor is nulled before anything else can reach it again")
+    pub fn close(&var self) {
+        if self.descriptor < 0 { return }
+        unsafe { rune_net_close(self.descriptor) }
+        self.descriptor = -1
+    }
+
+    /// Gives the descriptor up, as `TcpStream::release` does.
+    pub fn release(&var self) -> i64 {
+        let fd = self.descriptor
+        self.descriptor = -1
+        fd
+    }
+
+    /// The raw descriptor, without giving up ownership.
+    pub fn descriptorValue(&self) -> i64 { self.descriptor }
+}
+
+//===--------------------------------------------------------------------===//
+// Making one
+//===--------------------------------------------------------------------===//
+
+/// Listens on `address`:`port`.
+///
+///     var server = net::listen("0.0.0.0", 8080).unwrap()
+///
+/// An empty address, or `"0.0.0.0"`, means every interface. Port 0 asks the
+/// system to pick one; `port()` then says which.
+@safe("the runtime binds and listens, or reports why it could not")
+pub fn listen(address: String, port: i32) -> Result<TcpListener, NetError> {
+    listenWith(address, port, 128)
+}
+
+/// The same, with the backlog said out loud: how many connections the system
+/// may hold for this listener before it starts refusing them.
+@safe("the runtime binds and listens, or reports why it could not")
+pub fn listenWith(address: String, port: i32,
+                  backlog: i32) -> Result<TcpListener, NetError> {
+    unsafe { rune_net_start() }
+    let fd = unsafe { rune_net_listen(address.$cstr(), port, backlog) }
+    if fd < 0 { return Err(lastError()) }
+    let actual = unsafe { rune_net_local_port(fd) }
+    Ok(TcpListener {
+        descriptor: fd,
+        address: address,
+        boundPort: if actual > 0 { actual } else { port }
+    })
+}
+
+/// Connects to `host`:`port`. The host may be a name or a dotted address.
+///
+///     var conn = net::connect("localhost", 8080).unwrap()
+@safe("the runtime resolves and connects, or reports why it could not")
+pub fn connect(host: String, port: i32) -> Result<TcpStream, NetError> {
+    unsafe { rune_net_start() }
+    let fd = unsafe { rune_net_connect(host.$cstr(), port) }
+    if fd < 0 { return Err(lastError()) }
+    Ok(adoptFrom(fd, host, port))
+}

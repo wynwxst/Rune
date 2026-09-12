@@ -1,0 +1,12 @@
+[package]
+name = "units"
+version = "1.0.0"
+edition = "2025"
+description = "Lengths with their unit attached, so a metre is never added to a mile by accident"
+authors = ["The Rune examples"]
+license = "MIT"
+
+[build]
+safety = "full"
+
+[dependencies]

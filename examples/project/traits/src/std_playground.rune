@@ -1,0 +1,7 @@
+@type(Executable)
+import std
+
+fn main() -> i64 {
+    std::io::println("Hello!")
+    0
+}

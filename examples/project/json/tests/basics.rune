@@ -1,0 +1,255 @@
+// Reading and writing, and the round trip between them.
+//
+// A parser is judged by what it *refuses* as much as by what it accepts, so
+// half of this is documents that should not parse — and each of those checks
+// the position the failure was reported at, because an error without one is
+// almost useless on a document of any size.
+
+import std::testing
+import std::io
+import std::json
+
+/// Parses, or fails the test and hands back `null` so the run continues.
+fn ok(name: String, source: String) -> json::Value {
+    match json::parse(source) {
+        Ok(doc) => doc,
+        Err(e) => {
+            testing::unreachable(name + ": " + e.describe())
+            json::null()
+        },
+    }
+}
+
+/// Checks that `source` is refused, and where.
+fn refused(name: String, source: String, line: i64, column: i64) {
+    match json::parse(source) {
+        Ok(doc) => testing::unreachable(name + ": it was accepted"),
+        Err(e) => {
+            testing::equal(name + " (line)", e.line, line)
+            testing::equal(name + " (column)", e.column, column)
+        },
+    }
+}
+
+fn main() -> i64 {
+    //=== The six shapes =================================================//
+    testing::isTrue("null", ok("null", "null").isNull())
+    testing::equal("true", ok("true", "true").asBool().or(false), true)
+    testing::equal("false", ok("false", "false").asBool().or(true), false)
+    testing::equal("an integer", ok("int", "42").asInt().or(0), 42)
+    testing::equal("a negative integer", ok("neg", "-7").asInt().or(0), -7)
+    testing::equal("a fraction", ok("frac", "1.5").asFloat().or(0.0), 1.5)
+    testing::equal("an exponent", ok("exp", "2e3").asFloat().or(0.0), 2000.0)
+    testing::equal("a string", ok("str", "\"ada\"").asText().or(""), "ada")
+    testing::equal("an empty array", ok("arr", "[]").length(), 0)
+    testing::equal("an empty object", ok("obj", "{}").length(), 0)
+
+    // An integer stays an integer, so it survives a round trip.
+    testing::equal("3 is not 3.0", json::write(ok("i", "3")), "3")
+    testing::equal("3.0 stays fractional", json::write(ok("f", "3.0")), "3.0")
+
+    //=== Reaching in ====================================================//
+    let doc = ok("document", "{\"name\": \"ada\", \"age\": 36, \"tags\": [\"a\", \"b\"]}")
+    testing::equal("three members", doc.length(), 3)
+    testing::equal("a member", doc.get("name").unwrap().asText().or(""), "ada")
+    testing::equal("a number member", doc.get("age").unwrap().asInt().or(0), 36)
+    testing::equal("an element", doc.get("tags").unwrap().index(1).unwrap()
+                                    .asText().or(""), "b")
+    testing::isNone::<json::Value>("a member that is not there",
+                                    doc.get("nobody"))
+    testing::isNone::<json::Value>("reaching into a string",
+                                    doc.get("name").unwrap().get("x"))
+    testing::equal("the shape has a name", doc.get("tags").unwrap().kind(),
+                   "array")
+
+    // An accessor asks; it never assumes. A string is not a number.
+    testing::isNone::<i64>("a string is not an integer",
+                           doc.get("name").unwrap().asInt())
+    testing::isNone::<i64>("1.5 is not an integer",
+                           ok("f", "1.5").asInt())
+    testing::equal("but 4.0 is", ok("f", "4.0").asInt().or(0), 4)
+
+    //=== Nesting ========================================================//
+    let deep = ok("nested", "{\"a\": {\"b\": {\"c\": [1, 2, {\"d\": true}]}}}")
+    testing::equal("four levels down",
+                   deep.get("a").unwrap().get("b").unwrap().get("c").unwrap()
+                       .index(2).unwrap().get("d").unwrap().asBool().or(false),
+                   true)
+
+    //=== Strings ========================================================//
+    testing::equal("an escaped quote",
+                   ok("esc", "\"a\\\"b\"").asText().or(""), "a\"b")
+    testing::equal("an escaped backslash",
+                   ok("esc", "\"a\\\\b\"").asText().or(""), "a\\b")
+    testing::equal("a newline escape",
+                   ok("esc", "\"a\\nb\"").asText().or(""), "a\nb")
+    testing::equal("a solidus escape",
+                   ok("esc", "\"a\\/b\"").asText().or(""), "a/b")
+    testing::equal("a \\u escape",
+                   ok("esc", "\"\\u0041\"").asText().or(""), "A")
+    testing::equal("a surrogate pair",
+                   ok("esc", "\"\\uD83D\\uDE00\"").asText().or(""), "😀")
+    testing::equal("UTF-8 passes through",
+                   ok("utf", "\"héllo\"").asText().or(""), "héllo")
+
+    //=== Writing ========================================================//
+    testing::equal("compact", json::write(doc),
+                   "{\"name\":\"ada\",\"age\":36,\"tags\":[\"a\",\"b\"]}")
+    testing::equal("members keep their order",
+                   json::write(ok("order", "{\"z\":1,\"a\":2,\"m\":3}")),
+                   "{\"z\":1,\"a\":2,\"m\":3}")
+    testing::equal("laid out", json::pretty(ok("p", "{\"a\":[1,2]}")),
+                   "{\n  \"a\": [\n    1,\n    2\n  ]\n}")
+    testing::equal("an empty one stays on one line",
+                   json::pretty(ok("p", "{\"a\":{},\"b\":[]}")),
+                   "{\n  \"a\": {},\n  \"b\": []\n}")
+    testing::equal("a control character is escaped",
+                   json::write(ok("c", "\"a\\u0001b\"")), "\"a\\u0001b\"")
+    testing::equal("a tab uses the short escape",
+                   json::write(ok("c", "\"a\\tb\"")), "\"a\\tb\"")
+
+    //=== Round trip =====================================================//
+    let source = "{\"a\":[1,2.5,true,null,\"x\"],\"b\":{\"c\":-3}}"
+    testing::equal("what goes in comes out",
+                   json::write(ok("round", source)), source)
+    testing::equal("and again from the laid-out form",
+                   json::write(ok("round", json::pretty(ok("round", source)))),
+                   source)
+
+    //=== Building one ===================================================//
+    var built = json::Object()
+    built.put("name", "grace" into json::Value)
+    built.put("age", 45 into json::Value)
+    var list = json::Array()
+    list.push("x" into json::Value)
+    list.push(true into json::Value)
+    built.put("tags", json::Value::Array(list))
+    testing::equal("built by hand",
+                   json::write(json::Value::Object(built)),
+                   "{\"name\":\"grace\",\"age\":45,\"tags\":[\"x\",true]}")
+
+    // Setting a member again replaces it and leaves it where it was.
+    built.put("name", "ada" into json::Value)
+    testing::equal("replacing keeps the order",
+                   json::write(json::Value::Object(built)),
+                   "{\"name\":\"ada\",\"age\":45,\"tags\":[\"x\",true]}")
+    testing::equal("still three members", built.length(), 3)
+
+    //=== Written out with json! =========================================//
+    // The macro is the same document, said the way JSON says it.
+    let named = "grace"
+    let written = json!{
+        "name": named,
+        "age": 45,
+        "member": true,
+        "score": 1.5,
+        "tags": ["x", true],
+        "address": { "city": "London", "postcode": "N1" },
+        "retired": null,
+    }
+    testing::equal("json! writes an object",
+                   json::write(written),
+                   "{\"name\":\"grace\",\"age\":45,\"member\":true," +
+                   "\"score\":1.5,\"tags\":[\"x\",true]," +
+                   "\"address\":{\"city\":\"London\",\"postcode\":\"N1\"}," +
+                   "\"retired\":null}")
+
+    // It agrees with the parser, which is the only agreement that matters.
+    testing::equal("json! and the parser agree",
+                   json::write(written),
+                   json::write(ok("round", json::write(written))))
+
+    // The other shapes, and the two empty ones.
+    testing::equal("an array at the top level",
+                   json::write(json!["a", "b", 3]), "[\"a\",\"b\",3]")
+    testing::equal("a value on its own", json::write(json!(42)), "42")
+    testing::equal("a string on its own", json::write(json!("x")), "\"x\"")
+    testing::equal("null on its own", json::write(json!(null)), "null")
+    testing::equal("an empty object", json::write(json!{}), "{}")
+    testing::equal("an empty array", json::write(json!([])), "[]")
+    testing::equal("one element is a value, not an array",
+                   json::write(json![7]), "7")
+
+    // An expression is a value: what the program already has goes straight in.
+    let year = 1815
+    testing::equal("a member can be an expression",
+                   json::write(json!{ "next": year + 1 }), "{\"next\":1816}")
+
+    // Nesting all the way down, since each level expands the one inside it.
+    testing::equal("nested to four levels",
+                   json::write(json!{ "a": { "b": { "c": [1, { "d": true }] } } }),
+                   "{\"a\":{\"b\":{\"c\":[1,{\"d\":true}]}}}")
+
+    //=== What it refuses ================================================//
+    refused("nothing at all", "", 1, 1)
+    refused("only whitespace", "   \n  ", 2, 3)
+    refused("a trailing comma in an array", "[1, 2, ]", 1, 8)
+    refused("a trailing comma in an object", "{\"a\": 1, }", 1, 10)
+    refused("a missing colon", "{\"a\" 1}", 1, 6)
+    refused("an unquoted name", "{a: 1}", 1, 2)
+    refused("an unterminated string", "\"abc", 1, 5)
+    refused("an unterminated array", "[1, 2", 1, 6)
+    refused("a leading zero", "01", 1, 2)
+    refused("a bare decimal point", ".5", 1, 1)
+    refused("a trailing decimal point", "1.", 1, 3)
+    refused("an empty exponent", "1e", 1, 3)
+    refused("a stray character", "@", 1, 1)
+    refused("content after the value", "1 2", 1, 3)
+    refused("a bad escape", "\"a\\qb\"", 1, 4)
+    refused("a short \\u escape", "\"\\u00\"", 1, 6)
+    refused("a raw newline in a string", "\"a\nb\"", 1, 3)
+    refused("true misspelled", "tru", 1, 1)
+
+    // The position is a real one, on a document with lines in it.
+    refused("deep in a document", "{\n  \"a\": 1,\n  \"b\": ,\n}", 3, 8)
+
+    //=== Depth ==========================================================//
+    var nested = ""
+    var i = 0
+    while i < json::MAX_DEPTH + 5 { nested += "["; i += 1 }
+    match json::parse(nested) {
+        Ok(doc) => testing::unreachable("a document that deep was accepted"),
+        Err(e) => testing::isTrue("nesting has a limit",
+                                  e.describe().$find("deeply") > 0),
+    }
+
+    //=== Files ==========================================================//
+    let path = "/tmp/rune_json_test.json"
+    match json::save(path, doc) {
+        Some(e) => testing::unreachable("save: " + e.describe()),
+        None => {},
+    }
+    match json::load(path) {
+        Ok(back) => testing::equal("a file round trip",
+                                   json::write(back), json::write(doc)),
+        Err(e) => testing::unreachable("load: " + e.describe()),
+    }
+    std::io::delete(path)
+
+    match json::load("/tmp/rune_json_absent.json") {
+        Ok(back) => testing::unreachable("a missing file was read"),
+        Err(e) => testing::isTrue("a missing file says so",
+                                  e.describe().$find("no such file") > 0),
+    }
+
+    // Subscripting, both ways. `operator::"[]"` is bound twice — once for a
+    // member name and once for a position — and what is between the brackets
+    // is what says which one runs.
+    match json::parse("{\"user\":{\"name\":\"ada\",\"tags\":[\"x\",\"y\"]}}") {
+        Ok(tree) => {
+            testing::equal("a member by name",
+                           tree["user"]["name"].asText() ?? "-", "ada")
+            testing::equal("an element by position",
+                           tree["user"]["tags"][1].asText() ?? "-", "y")
+            // A subscript has to produce something, so reaching into what is
+            // not there gives `null` and a chain ends rather than aborting.
+            testing::equal("a member that is not there",
+                           tree["nope"]["deeper"].kind(), "null")
+            testing::equal("an index past the end",
+                           tree["user"]["tags"][9].kind(), "null")
+        },
+        Err(e) => testing::unreachable("subscript: " + e.describe()),
+    }
+
+    testing::summary()
+}

@@ -1,0 +1,15 @@
+// Overloads are chosen by what the call hands over, so a value no version
+// accepts is reported against all of them rather than against whichever one
+// happened to hold the name.
+// EXPECT-ERROR: no version of 'index' takes
+import std::io
+
+struct P { pub n: i64 }
+
+bind operator::"[]" to P { fn index(&self, k: String) -> i64 { self.n } }
+bind operator::"[]" to P { fn index(&self, k: i64) -> i64 { self.n } }
+
+fn main() -> i64 {
+    io::println(P { n: 1 }[1.5])
+    0
+}

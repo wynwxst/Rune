@@ -1,0 +1,7 @@
+// A format string is read at compile time, so what it asks for is checked
+// then too — an argument that is never printed is a mistake worth catching.
+// EXPECT-ERROR: argument 1 is never used by the format string
+fn main() -> i64 {
+    println!("{}", 1, 2)
+    0
+}

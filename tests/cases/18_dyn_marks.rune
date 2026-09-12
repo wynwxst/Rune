@@ -1,0 +1,61 @@
+// A mark object dispatches through a table built for its concrete type.
+// EXPECT: circle 3.0
+// EXPECT: rect 12.0
+// EXPECT: tile 4.0
+// EXPECT: blob 9.0
+// EXPECT: total 28.0
+// EXPECT: static circle 3.0
+import std::io
+
+mark Shape {
+    fn area(&self) -> f64
+    fn name(&self) -> String
+    fn summary(&self) -> String { self.name() + " " + self.area().$str() }
+}
+
+struct Circle { radius: f64 }
+struct Rect { width: f64, height: f64 }
+enum Tile { Small, Large }
+class Blob {
+    pub side: f64
+    fn init(self, side: f64) { self.side = side }
+}
+
+bind Shape to Circle {
+    fn area(&self) -> f64 { 3.0 * self.radius * self.radius }
+    fn name(&self) -> String { "circle" }
+}
+bind Shape to Rect {
+    fn area(&self) -> f64 { self.width * self.height }
+    fn name(&self) -> String { "rect" }
+}
+bind Shape to Tile {
+    fn area(&self) -> f64 { match self { Tile::Small => 1.0, Tile::Large => 4.0 } }
+    fn name(&self) -> String { "tile" }
+}
+bind Shape to Blob {
+    fn area(&self) -> f64 { self.side * self.side }
+    fn name(&self) -> String { "blob" }
+}
+
+fn describe(s: dyn Shape) -> String { s.summary() }
+fn describeStatic<T: Shape>(s: T) -> String { s.summary() }
+
+fn main() -> i64 {
+    io::println(describe(Circle { radius: 1.0 }))
+    io::println(describe(Rect { width: 3.0, height: 4.0 }))
+    io::println(describe(Tile::Large))
+    io::println(describe(Blob(3.0)))
+
+    let mixed: [4:dyn Shape] = [
+        Circle { radius: 1.0 },
+        Rect { width: 3.0, height: 4.0 },
+        Tile::Large,
+        Blob(3.0),
+    ]
+    var total = 0.0
+    for s in mixed { total += s.area() }
+    io::println("total " + total.$str())
+    io::println("static " + describeStatic(Circle { radius: 1.0 }))
+    0
+}

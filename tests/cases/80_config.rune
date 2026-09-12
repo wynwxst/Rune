@@ -1,0 +1,54 @@
+// `@Config` decides which declarations exist, before anything is checked.
+// EXPECT: unix
+// EXPECT: kept
+// EXPECT: id=7 fd=3
+// EXPECT: two variants
+import std::io
+
+// One of these exists on any given build; the other names nothing.
+@Config(family == "unix")
+fn family() -> String { "unix" }
+@Config(family == "windows")
+fn family() -> String { "windows" }
+
+// A flag nobody set rules this one out, so its body is never checked.
+@Config(never_set_by_anyone)
+fn dropped() -> i64 { this_name_does_not_exist() }
+
+@Config(!never_set_by_anyone)
+fn kept() -> String { "kept" }
+
+// Members carry conditions too, and surviving fields are renumbered.
+struct Handle {
+    pub id: i64,
+    @Config(os == "definitely-not-this-one")
+    pub gone: i64,
+    pub fd: i64,
+}
+
+extend Handle {
+    @Config(family == "unix")
+    pub fn show(&self) -> String {
+        "id=" + self.id.$str() + " fd=" + self.fd.$str()
+    }
+}
+
+enum Backend {
+    Portable,
+    Native,
+    @Config(os == "definitely-not-this-one")
+    Exotic,
+}
+
+fn main() -> i64 {
+    io::println(family())
+    io::println(kept())
+    io::println(Handle { id: 7, fd: 3 }.show())
+    // Exhaustive over what survived: `Exotic` is not a case here.
+    let b = Backend::Native
+    match b {
+        Backend::Portable => io::println("one variant"),
+        Backend::Native => io::println("two variants"),
+    }
+    0
+}

@@ -1,0 +1,51 @@
+// An operator may be overloaded once per right-hand type, so a type can define
+// `+` against several others. A builtin may be *extended* the same way — but
+// never overridden: `String + String` stays the language's, while
+// `String + Character` is a meaning it does not have.
+// EXPECT: append: ab
+// EXPECT: money + money: 150
+// EXPECT: money + i64: 107
+// EXPECT: money + rate: 110
+// EXPECT: compound with a different type: 150
+// EXPECT: balanced true
+import std::io
+import std::process
+
+struct Money { pub cents: i64 }
+struct Rate { pub percent: i64 }
+
+bind operator::add to Money {
+    fn add(&self, rhs: &Money) -> Money { Money { cents: self.cents + rhs.cents } }
+}
+bind operator::add to Money {
+    fn add(&self, rhs: i64) -> Money { Money { cents: self.cents + rhs } }
+}
+bind operator::add to Money {
+    fn add(&self, rhs: &Rate) -> Money {
+        Money { cents: self.cents + self.cents * rhs.percent / 100 }
+    }
+}
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        // The stdlib's own extension of a builtin: a Character onto a String.
+        var text = ""
+        text += 'a'
+        text += 'b'
+        io::println("append: " + text)
+
+        let m = Money { cents: 100 }
+        io::println("money + money: " + (m + Money { cents: 50 }).cents.$str())
+        io::println("money + i64: " + (m + 7).cents.$str())
+        io::println("money + rate: " + (m + Rate { percent: 10 }).cents.$str())
+
+        // Compound assignment picks the overload the same way, so the right
+        // side need not be the same type as the left.
+        var running = Money { cents: 100 }
+        running += Rate { percent: 50 }
+        io::println("compound with a different type: " + running.cents.$str())
+    }
+    io::println("balanced " + (before == process::liveObjectCount()).$str())
+    0
+}

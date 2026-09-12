@@ -1,0 +1,1109 @@
+// std::io — the Display mark, and console input and output.
+//
+// `print` and `println` accept anything that is bound to `Display`, so
+// rendering a value is a property of its type rather than a call to a
+// compiler builtin:
+//
+//     import std::io
+//     io::println(42)
+//     io::println(Point { x: 1.0, y: 2.0 })   // needs `bind Display to Point`
+//
+// The wrappers around the runtime carry @safe because the runtime owns and
+// bounds-checks its buffers; calling the extern declarations directly would
+// (correctly) warn.
+
+import std::mem
+import std::process
+import std::collections::vector
+
+extern "C" {
+    fn rune_print(text: String)
+    fn rune_println(text: String)
+    fn rune_eprint(text: String)
+    fn rune_eprintln(text: String)
+    fn rune_read_line() -> String
+    fn rune_read_line_checked(more: *var i8) -> String
+}
+
+/// How a value renders as text.
+///
+/// `describe` defaults to `display`; override it when a debugging form should
+/// differ from the user-facing one.
+//===--------------------------------------------------------------------===//
+// Building a String out of other things
+//
+// `String + String` is the language's own and cannot be overloaded. These are
+// the pairs it has no meaning for, so they are ours to give: appending one
+// character, or one rendered value, without spelling out the conversion.
+//===--------------------------------------------------------------------===//
+
+bind operator::add to String {
+    /// `text + 'c'` and `text += 'c'` — one character onto the end.
+    fn add(&self, rhs: Character) -> String { self + rhs.$str() }
+}
+
+pub mark Display {
+    fn display(&self) -> String
+
+    fn describe(&self) -> String {
+        self.display()
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Display for the builtin types
+//===--------------------------------------------------------------------===//
+
+bind Display to i8    { fn display(&self) -> String { self.$str() } }
+bind Display to i16   { fn display(&self) -> String { self.$str() } }
+bind Display to i32   { fn display(&self) -> String { self.$str() } }
+bind Display to i64   { fn display(&self) -> String { self.$str() } }
+bind Display to u8    { fn display(&self) -> String { self.$str() } }
+bind Display to u16   { fn display(&self) -> String { self.$str() } }
+bind Display to u32   { fn display(&self) -> String { self.$str() } }
+bind Display to u64   { fn display(&self) -> String { self.$str() } }
+bind Display to f32   { fn display(&self) -> String { self.$str() } }
+bind Display to f64   { fn display(&self) -> String { self.$str() } }
+bind Display to bool  { fn display(&self) -> String { self.$str() } }
+
+bind Display to Character {
+    fn display(&self) -> String { self.$str() }
+}
+
+bind Display to CString {
+    fn display(&self) -> String { self.$str() }
+}
+
+bind Display to String {
+    fn display(&self) -> String { self }
+    fn describe(&self) -> String { "\"" + self + "\"" }
+}
+
+//===--------------------------------------------------------------------===//
+// Display for the shapes
+//
+// A `bind` may name a shape rather than a declaration, and these do: every
+// slice, every array and every pair of printable things prints, without each
+// element type having to be written out.
+//===--------------------------------------------------------------------===//
+
+/// `[1, 2, 3]`. An array is usable wherever a slice is, so this covers both.
+bind<T> Display to [T] where T: Display {
+    fn display(&self) -> String {
+        var out = "["
+        for i in 0..self.$length() {
+            if i != 0 { out += ", " }
+            out += self[i].display()
+        }
+        out + "]"
+    }
+    fn describe(&self) -> String {
+        var out = "["
+        for i in 0..self.$length() {
+            if i != 0 { out += ", " }
+            out += self[i].describe()
+        }
+        out + "]"
+    }
+}
+
+/// `(1, "one")`.
+bind<A, B> Display to (A, B) where A: Display, B: Display {
+    fn display(&self) -> String {
+        "(" + self.0.display() + ", " + self.1.display() + ")"
+    }
+    fn describe(&self) -> String {
+        "(" + self.0.describe() + ", " + self.1.describe() + ")"
+    }
+}
+
+/// `(1, "one", true)`.
+bind<A, B, C> Display to (A, B, C) where A: Display, B: Display, C: Display {
+    fn display(&self) -> String {
+        "(" + self.0.display() + ", " + self.1.display() + ", " +
+              self.2.display() + ")"
+    }
+    fn describe(&self) -> String {
+        "(" + self.0.describe() + ", " + self.1.describe() + ", " +
+              self.2.describe() + ")"
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Output
+//===--------------------------------------------------------------------===//
+
+/// Writes `value` to standard output with no trailing newline.
+@safe("the runtime owns and bounds-checks the output buffer")
+pub fn print<T: Display>(value: T) {
+    rune_print(value.display())
+}
+
+/// Writes `value` to standard output followed by a newline.
+@safe("the runtime owns and bounds-checks the output buffer")
+pub fn println<T: Display>(value: T) {
+    rune_println(value.display())
+}
+
+/// Writes `value` to standard error with no trailing newline.
+@safe("the runtime owns and bounds-checks the output buffer")
+pub fn eprint<T: Display>(value: T) {
+    rune_eprint(value.display())
+}
+
+/// Writes `value` to standard error followed by a newline.
+@safe("the runtime owns and bounds-checks the output buffer")
+pub fn eprintln<T: Display>(value: T) {
+    rune_eprintln(value.display())
+}
+
+/// Writes the debugging form of `value`, followed by a newline.
+@safe("the runtime owns and bounds-checks the output buffer")
+pub fn debug<T: Display>(value: T) {
+    rune_println(value.describe())
+}
+
+/// Writes a bare newline.
+@safe("the runtime owns and bounds-checks the output buffer")
+pub fn newline() {
+    rune_println("")
+}
+
+//===--------------------------------------------------------------------===//
+// Printing with a format string
+//===--------------------------------------------------------------------===//
+
+/// `println!("{} of {}", got, want)` — writes a formatted line.
+///
+/// The arguments go into the `{}` placeholders of the format string, which
+/// `format!` reads at compile time; see **Formatting** for what a placeholder
+/// may say. The bodies name `std::io` in full, so these need no import.
+///
+///     println!()                       // a blank line
+///     println!("ready")
+///     println!("{} of {}", 3, 10)
+///     println!("{:>8.2}", 3.14159)
+pub macro println {
+    () => { std::io::println("") }
+    ($($arg: expr),+) => { std::io::println(format!($($arg),+)) }
+}
+
+/// `print!("{}", x)` — the same, without the newline.
+///
+/// Standard output is line-buffered when it is a terminal, so a prompt
+/// written with `print!` may sit in the buffer until a newline follows it.
+///
+///     print!("name: ")
+///     let answer = io::readLine()
+pub macro print {
+    ($($arg: expr),+) => { std::io::print(format!($($arg),+)) }
+}
+
+//===--------------------------------------------------------------------===//
+// Input
+//===--------------------------------------------------------------------===//
+
+/// Reads one line from standard input, without its terminator.
+///
+/// An empty string is what a blank line gives *and* what the end of input
+/// gives, so a loop over standard input wants `readLineOrEnd` instead.
+@safe("the runtime allocates and terminates the returned String")
+pub fn readLine() -> String {
+    rune_read_line()
+}
+
+/// The next line of standard input, or nothing when there is no more.
+///
+/// This is the one to loop over, because it tells a blank line apart from the
+/// end of the input:
+///
+///     while io::readLineOrEnd() is Some(line) { io::println(line) }
+@safe("the runtime allocates the String and sets the flag beside it")
+pub fn readLineOrEnd() -> String? {
+    var more = 0i8
+    let line = unsafe { rune_read_line_checked(&var more as *var i8) }
+    if more == 0i8 { return nil }
+    line
+}
+
+//===--------------------------------------------------------------------===//
+// Files
+//
+// Every operation that can fail says so in its type. A `File` closes itself
+// when the last reference to it goes, so a program that forgets to call
+// `close` still does not leak a descriptor.
+//===--------------------------------------------------------------------===//
+
+extern "C" {
+    fn fopen(path: CString, mode: CString) -> *var u8
+    fn fclose(handle: *var u8) -> i32
+    fn fflush(handle: *var u8) -> i32
+    fn fgets(buffer: *var u8, size: i32, handle: *var u8) -> *var u8
+    // `size` and `count` are C's `size_t`, which is `usize`: pointer-sized.
+    fn fread(buffer: *var u8, size: usize, count: usize, handle: *var u8) -> usize
+    fn fwrite(data: *u8, size: usize, count: usize, handle: *var u8) -> usize
+    // A file offset is C's `long`, which is pointer-sized everywhere Rune
+    // targets except 64-bit Windows — where it stays 32 bits, and this
+    // over-wide spelling survives only because the value rides in the low
+    // half of the register.
+    fn fseek(handle: *var u8, offset: isize, whence: i32) -> i32
+    fn ftell(handle: *var u8) -> isize
+    fn feof(handle: *var u8) -> i32
+    fn remove(path: CString) -> i32
+    fn mkdir(path: CString, mode: u32) -> i32
+    fn rename(from: CString, to2: CString) -> i32
+    fn rune_last_file_error() -> i64
+    fn rune_string_from_cstr(text: CString) -> String
+    fn rune_dir_open(path: CString) -> *var u8
+    fn rune_dir_next(dir: *var u8) -> CString
+    fn rune_dir_close(dir: *var u8)
+    fn rune_path_is_dir(path: CString) -> i64
+}
+
+/// Why a file operation did not work.
+pub enum FileError {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    IsDirectory,
+    TooManyOpenFiles,
+    /// The file is closed, so there was nothing to do it to.
+    Closed,
+    Other,
+}
+
+@safe("reads a code the runtime classified; touches no memory")
+fn lastError() -> FileError {
+    match unsafe { rune_last_file_error() } {
+        1 => FileError::NotFound,
+        2 => FileError::PermissionDenied,
+        3 => FileError::AlreadyExists,
+        4 => FileError::IsDirectory,
+        5 => FileError::TooManyOpenFiles,
+        _ => FileError::Other,
+    }
+}
+
+/// What went wrong, in words.
+pub fn describe(e: FileError) -> String {
+    match e {
+        FileError::NotFound => "no such file",
+        FileError::PermissionDenied => "permission denied",
+        FileError::AlreadyExists => "already exists",
+        FileError::IsDirectory => "is a directory",
+        FileError::TooManyOpenFiles => "too many open files",
+        FileError::Closed => "the file is closed",
+        FileError::Other => "the operation failed",
+    }
+}
+
+/// An open file. Closing is automatic — `deinit` runs when the last reference
+/// goes — but `close` is there for when the moment matters.
+pub class File {
+    handle: *var u8
+    path: String
+
+    fn init(self, handle: *var u8, path: String) {
+        self.handle = handle
+        self.path = path
+    }
+
+    fn deinit(self) { self.close() }
+
+    /// True until `close` is called.
+    pub fn isOpen(&self) -> bool { !mem::isNull(self.handle) }
+
+    /// The name it was opened under.
+    pub fn name(&self) -> String { self.path }
+
+    /// Closes it now. Calling this twice is harmless.
+    @safe("the handle is nulled before anything else can reach it again")
+    pub fn close(&var self) {
+        if mem::isNull(self.handle) { return }
+        unsafe { fclose(self.handle) }
+        self.handle = mem::noBlock()
+    }
+
+    /// Pushes buffered writes out to the operating system.
+    @safe("fflush on a live handle, or nothing at all")
+    pub fn flush(&var self) {
+        if mem::isNull(self.handle) { return }
+        unsafe { fflush(self.handle) }
+    }
+
+    //=== Reading ========================================================//
+
+    /// The next line, without its newline, or nothing at end of file.
+    @safe("fgets never writes past the size it is given")
+    pub fn readLine(&var self) -> String? {
+        if mem::isNull(self.handle) { return nil }
+        let cap = 4096
+        let block = mem::allocator.allocate(cap as usize)
+        if mem::isNull(block) { return nil }
+        let got = unsafe { fgets(block, cap as i32, self.handle) }
+        if mem::isNull(got) {
+            mem::allocator.deallocate(block)
+            return nil
+        }
+        var line = unsafe { rune_string_from_cstr(block as CString) }
+        mem::allocator.deallocate(block)
+        // fgets keeps the newline; callers almost never want it.
+        let n = line.$length()
+        if n > 0 && line.$byteAt(n - 1) == 10 {
+            line = line.$substring(0, n - 1)
+        }
+        line
+    }
+
+    /// Everything left in the file, as text.
+    @safe("the block is sized from the file's own length and NUL terminated")
+    pub fn readAll(&var self) -> String {
+        if mem::isNull(self.handle) { return "" }
+        unsafe { fseek(self.handle, 0, 2) }          // SEEK_END
+        let size = unsafe { ftell(self.handle) }
+        unsafe { fseek(self.handle, 0, 0) }          // SEEK_SET
+        if size <= 0 { return "" }
+        let block = mem::allocator.allocate((size + 1) as usize)
+        if mem::isNull(block) { return "" }
+        let read = unsafe { fread(block, 1 as usize, size as usize, self.handle) }
+        // Terminate it where the read actually stopped.
+        unsafe { (block as *var u8)[read as i64] = 0 }
+        let text = unsafe { rune_string_from_cstr(block as CString) }
+        mem::allocator.deallocate(block)
+        text
+    }
+
+    //=== Writing ========================================================//
+
+    /// Writes `text`, and says how many bytes went out.
+    @safe("fwrite is given the string's own length, and its own bytes")
+    pub fn write(&var self, text: String) -> Result<i64, FileError> {
+        if mem::isNull(self.handle) { return Err(FileError::Closed) }
+        let n = text.$length()
+        if n == 0 { return Ok(0) }
+        let wrote = unsafe {
+            fwrite(text.$cstr() as *u8, 1 as usize, n as usize, self.handle)
+        }
+        if (wrote as i64) != n { return Err(lastError()) }
+        Ok(wrote as i64)
+    }
+
+    /// The same, with a newline after it.
+    pub fn writeLine(&var self, text: String) -> Result<i64, FileError> {
+        self.write(text + "\n")
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Opening, and the one-line forms
+//===--------------------------------------------------------------------===//
+
+@safe("fopen either returns a handle or reports why it did not")
+fn openWith(path: String, mode: CString) -> Result<File, FileError> {
+    let handle = unsafe { fopen(path.$cstr(), mode) }
+    if mem::isNull(handle) { return Err(lastError()) }
+    Ok(File(handle, path))
+}
+
+/// Opens an existing file for reading.
+pub fn open(path: String) -> Result<File, FileError> { openWith(path, "rb") }
+
+/// Makes a new file, or empties one that is already there.
+pub fn create(path: String) -> Result<File, FileError> { openWith(path, "wb") }
+
+/// Opens for writing at the end, making the file if it is missing.
+pub fn append(path: String) -> Result<File, FileError> { openWith(path, "ab") }
+
+/// The whole file as text, in one call.
+pub fn readToString(path: String) -> Result<String, FileError> {
+    match open(path) {
+        Ok(f) => Ok(f.readAll()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Writes `text` as the file's entire contents.
+pub fn writeString(path: String, text: String) -> Result<i64, FileError> {
+    match create(path) {
+        Ok(f) => f.write(text),
+        Err(e) => Err(e),
+    }
+}
+
+/// Adds `text` to the end of a file.
+pub fn appendString(path: String, text: String) -> Result<i64, FileError> {
+    match append(path) {
+        Ok(f) => f.write(text),
+        Err(e) => Err(e),
+    }
+}
+
+/// True when the path can be opened for reading.
+pub fn exists(path: String) -> bool {
+    match open(path) {
+        Ok(f) => true,
+        Err(e) => false,
+    }
+}
+
+/// Deletes a file. The error, if there was one — `nil` means it is gone.
+@safe("remove either unlinks the path or reports why it did not")
+pub fn delete(path: String) -> FileError? {
+    if unsafe { remove(path.$cstr()) } == 0 { return nil }
+    lastError()
+}
+
+/// Creates a directory. Succeeds when it already exists, so a generator can
+/// call it without checking first.
+@safe("mkdir either creates the directory or reports why it did not")
+pub fn makeDirectory(path: String) -> FileError? {
+    let rc = unsafe { mkdir(path.$cstr(), 493 as u32) }   // 0755
+    if rc == 0 { return nil }
+    let e = lastError()
+    match e {
+        FileError::AlreadyExists => nil,
+        _ => e,
+    }
+}
+
+/// True when `path` names a directory rather than a file.
+///
+/// False for anything else, a missing path included, so this answers "can I
+/// list it" rather than "does it exist".
+@safe("stat either answers or reports that it could not, and touches nothing")
+pub fn isDirectory(path: String) -> bool {
+    unsafe { rune_path_is_dir(path.$cstr()) } == 1
+}
+
+/// One name inside a directory.
+///
+/// `name` is the entry on its own, not a path — join it to the directory to
+/// reach it. `.` and `..` never appear.
+pub struct DirEntry {
+    pub name: String
+    pub isDirectory: bool
+}
+
+/// Everything inside `path`, in whatever order the filesystem hands it over.
+///
+/// The order is the filesystem's, which is not alphabetical and not stable
+/// between machines: sort the result when the order matters. Directories and
+/// files come back together, told apart by `isDirectory`.
+///
+///     match io::readDirectory("docs") {
+///         Ok(entries) => for e in entries { io::println(e.name) },
+///         Err(e) => io::println(io::describe(e)),
+///     }
+@safe("the handle is opened, walked and closed here; nothing escapes")
+pub fn readDirectory(path: String) -> Result<vector::Vector<DirEntry>, FileError> {
+    let handle = unsafe { rune_dir_open(path.$cstr()) }
+    if mem::isNull(handle) { return lastError() }
+    var out = vector::Vector<DirEntry>()
+    loop {
+        let raw = unsafe { rune_dir_next(handle) }
+        if mem::isNull(raw as *var u8) { break }
+        let name = unsafe { rune_string_from_cstr(raw) }
+        out.push(DirEntry {
+            name: name,
+            isDirectory: isDirectory(joinPath(path, name)),
+        })
+    }
+    unsafe { rune_dir_close(handle) }
+    out
+}
+
+/// Everything under `path`, and under everything under it, as paths relative
+/// to `path` itself.
+///
+/// Directories are walked but not listed — the result is files only, which is
+/// what a caller looking for content wants. A cycle through a symbolic link
+/// would not end, so the walk stops at `depth` levels down.
+pub fn walkDirectory(path: String, depth: i64) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    if depth < 0 { return out }
+    match readDirectory(path) {
+        Ok(entries) => {
+            for e in entries {
+                if e.isDirectory {
+                    for inner in walkDirectory(joinPath(path, e.name), depth - 1) {
+                        out.push(joinPath(e.name, inner))
+                    }
+                } else {
+                    out.push(e.name)
+                }
+            }
+        },
+        Err(err) => {},
+    }
+    out
+}
+
+/// Two path pieces with exactly one separator between them.
+///
+/// An empty side is dropped rather than leaving a leading or trailing slash,
+/// so `joinPath("", "a")` is `"a"`.
+pub fn joinPath(left: String, right: String) -> String {
+    if left.$isEmpty() { return right }
+    if right.$isEmpty() { return left }
+    if left.$byteAt(left.$length() - 1) == 47 { return left + right }
+    left + "/" + right
+}
+
+/// Creates a directory and every missing parent above it.
+pub fn makeDirectories(path: String) -> FileError? {
+    var soFar = ""
+    var i = 0
+    while i < path.$length() {
+        let b = path.$byteAt(i)
+        if b == 47 && !soFar.$isEmpty() {
+            match makeDirectory(soFar) {
+                Some(e) => return e,
+                None => {}
+            }
+        }
+        soFar += path.$substring(i, i + 1)
+        i += 1
+    }
+    makeDirectory(path)
+}
+
+//===--------------------------------------------------------------------===//
+// Bytes
+//
+// A growable run of bytes. `String` is text — UTF-8, and NUL-terminated for
+// the C boundary — so it is the wrong thing to read a socket into: a response
+// body is whatever the other end sent, NULs and all. `Bytes` is that, and it
+// is what `Reader` and `Writer` move.
+//===--------------------------------------------------------------------===//
+
+extern "C" {
+    fn rune_string_from_bytes(data: *u8, count: i64) -> String
+}
+
+/// A growable byte buffer.
+///
+///     var b = io::Bytes()
+///     b.appendText("GET / HTTP/1.1\r\n")
+///     stream.write(b)
+///
+/// Storage is one block from `mem::allocator`, doubled when it runs out and
+/// handed back when the last reference goes.
+pub class Bytes {
+    block: *var u8
+    count: i64
+    capacity: i64
+
+    fn init(self) {
+        self.block = mem::noBlock()
+        self.count = 0
+        self.capacity = 0
+    }
+
+    fn deinit(self) {
+        mem::allocator.deallocate(self.block)
+        self.block = mem::noBlock()
+        self.count = 0
+        self.capacity = 0
+    }
+
+    /// How many bytes are in it.
+    pub fn length(&self) -> i64 { self.count }
+    pub fn isEmpty(&self) -> bool { self.count == 0 }
+
+    /// Room for `wanted` bytes in total, without changing what is there.
+    @safe("the block is only ever grown, and the count is left alone")
+    pub fn reserve(&var self, wanted: i64) {
+        if wanted <= self.capacity { return }
+        var next = if self.capacity == 0 { 32 } else { self.capacity }
+        while next < wanted { next *= 2 }
+        let grown = mem::allocator.reallocate(self.block, next as usize)
+        if mem::isNull(grown) {
+            process::panic("out of memory growing a byte buffer")
+        }
+        self.block = grown
+        self.capacity = next
+    }
+
+    /// The byte at `index`, or nothing when the index is past the end.
+    @safe("the index is checked against the count before the block is read")
+    pub fn at(&self, index: i64) -> u8? {
+        if index < 0 || index >= self.count { return nil }
+        unsafe { (self.block as *u8)[index] }
+    }
+
+    /// Adds one byte to the end.
+    @safe("space is reserved before the write, and the count follows it")
+    pub fn push(&var self, value: u8) {
+        self.reserve(self.count + 1)
+        unsafe { self.block[self.count] = value }
+        self.count += 1
+    }
+
+    /// Adds every byte of `text` — its UTF-8, without a terminator.
+    @safe("the copy is bounded by the string's own length")
+    pub fn appendText(&var self, text: String) {
+        let n = text.$length()
+        if n == 0 { return }
+        self.reserve(self.count + n)
+        unsafe {
+            mem::copy(mem::offset(self.block, self.count as usize),
+                      text.$cstr() as *u8, n as usize)
+        }
+        self.count += n
+    }
+
+    /// Adds every byte of `other`.
+    @safe("the copy is bounded by the other buffer's own count")
+    pub fn append(&var self, other: Bytes) {
+        let n = other.length()
+        if n == 0 { return }
+        self.reserve(self.count + n)
+        unsafe {
+            mem::copy(mem::offset(self.block, self.count as usize),
+                      other.raw() as *u8, n as usize)
+        }
+        self.count += n
+    }
+
+    /// Empties it, keeping the storage for the next fill.
+    pub fn clear(&var self) { self.count = 0 }
+
+    /// Drops the first `n` bytes, moving what is left to the front. This is
+    /// what a buffered reader does once it has handed a line out.
+    @safe("the move is bounded by the count, and the count follows it")
+    pub fn consume(&var self, n: i64) {
+        if n <= 0 { return }
+        if n >= self.count { self.count = 0; return }
+        let left = self.count - n
+        // Overlapping, so byte by byte from the front rather than mem::copy,
+        // which promises the two blocks do not overlap.
+        var i = 0
+        while i < left {
+            unsafe { self.block[i] = (self.block as *u8)[n + i] }
+            i += 1
+        }
+        self.count = left
+    }
+
+    /// The bytes from `from` up to `to`, as a buffer of their own.
+    pub fn slice(&self, from: i64, upto: i64) -> Bytes {
+        var out = Bytes()
+        var i = if from < 0 { 0 } else { from }
+        let stop = if upto > self.count { self.count } else { upto }
+        while i < stop {
+            match self.at(i) {
+                Some(b) => out.push(b),
+                None => {},
+            }
+            i += 1
+        }
+        out
+    }
+
+    /// The contents read as text. Invalid UTF-8 is left as it is: this is a
+    /// reinterpretation, not a conversion.
+    @safe("the runtime copies exactly the count of bytes it is given")
+    pub fn toString(&self) -> String {
+        if self.count == 0 { return "" }
+        unsafe { rune_string_from_bytes(self.block as *u8, self.count) }
+    }
+
+    /// Where `needle` starts at or after `from`, or `-1`.
+    pub fn find(&self, needle: String, from: i64) -> i64 {
+        let n = needle.$length()
+        if n == 0 { return from }
+        if n > self.count { return -1 }
+        var i = if from < 0 { 0 } else { from }
+        while i + n <= self.count {
+            var j = 0
+            var same = true
+            while j < n {
+                if self.at(i + j).or(0u8) != needle.$byteAt(j) {
+                    same = false
+                    j = n
+                } else {
+                    j += 1
+                }
+            }
+            if same { return i }
+            i += 1
+        }
+        -1
+    }
+
+    //=== The raw block, for the C boundary ==============================//
+
+    /// The start of the storage. Valid for `length()` bytes, and only until
+    /// the next `push`, `append` or `reserve`.
+    pub fn raw(&self) -> *var u8 { self.block }
+
+    /// Space for `wanted` more bytes, and the address to write them at. What
+    /// is written has to be announced with `advance`.
+    pub fn writePoint(&var self, wanted: i64) -> *var u8 {
+        self.reserve(self.count + wanted)
+        mem::offset(self.block, self.count as usize)
+    }
+
+    /// Says that `n` more bytes were written at the last `writePoint`.
+    pub fn advance(&var self, n: i64) {
+        if n <= 0 { return }
+        self.count += n
+        if self.count > self.capacity { self.count = self.capacity }
+    }
+}
+
+/// A buffer holding `text`'s bytes.
+pub fn bytes(text: String) -> Bytes {
+    var b = Bytes()
+    b.appendText(text)
+    b
+}
+
+bind Display to Bytes {
+    fn display(&self) -> String { self.toString() }
+}
+
+//===--------------------------------------------------------------------===//
+// Streams
+//
+// Two marks, and one that is both. A `Reader` is somewhere bytes come from; a
+// `Writer` is somewhere they go; a `Stream` — a socket, a pipe, an open file
+// — is both at once. What binds them is what the rest of the library takes:
+// `readAll`, `lines`, `copy` and everything else here work on any of them.
+//===--------------------------------------------------------------------===//
+
+/// Why a read or a write did not finish.
+pub enum StreamError {
+    /// The other end has gone.
+    Closed,
+    /// Nothing is ready yet; a non-blocking stream says this rather than
+    /// waiting. Trying again later is the right response.
+    WouldBlock,
+    /// The call was cut short by a signal. Trying again is the right
+    /// response here too.
+    Interrupted,
+    /// The stream was left waiting longer than it was willing to.
+    TimedOut,
+    /// Something the operating system said no to.
+    Failed,
+}
+
+/// What went wrong, in words.
+pub fn describeStream(e: StreamError) -> String {
+    match e {
+        StreamError::Closed => "the stream is closed",
+        StreamError::WouldBlock => "no data is ready yet",
+        StreamError::Interrupted => "the call was interrupted",
+        StreamError::TimedOut => "the stream timed out",
+        StreamError::Failed => "the stream failed",
+    }
+}
+
+/// Somewhere bytes come from.
+///
+/// One method has to be supplied: `read`, which appends what arrives to a
+/// buffer and says how much that was. Everything else here is built on it.
+///
+///     var all = io::Bytes()
+///     source.readAll(all)
+pub mark Reader {
+    /// Appends at most `most` bytes to `sink` and says how many arrived.
+    ///
+    /// `0` means the source is finished — not that nothing was ready. A
+    /// stream with nothing ready reports `WouldBlock` instead, so the two
+    /// cases never have to be told apart by guessing.
+    fn read(&var self, sink: Bytes, most: i64) -> Result<i64, StreamError>
+
+    /// Everything left, appended to `sink`. Says how many bytes that was.
+    ///
+    /// Reads until the source says it is finished, so this is for a source
+    /// that ends. A socket that stays open needs `read` and a rule of its own
+    /// for when to stop.
+    fn readAll(&var self, sink: Bytes) -> Result<i64, StreamError> {
+        var total = 0
+        loop {
+            match self.read(sink, 8192) {
+                Ok(n) => {
+                    if n == 0 { return Ok(total) }
+                    total += n
+                },
+                Err(e) => {
+                    match e {
+                        // A signal is not a failure; the read simply has to
+                        // be asked again.
+                        StreamError::Interrupted => {},
+                        _ => return Err(e),
+                    }
+                },
+            }
+        }
+    }
+
+    /// Exactly `count` bytes, appended to `sink`.
+    ///
+    /// `Closed` when the source ends first — a short read is a failure here,
+    /// which is the whole difference from `read`.
+    fn readExact(&var self, sink: Bytes, count: i64) -> Result<i64, StreamError> {
+        var left = count
+        while left > 0 {
+            match self.read(sink, left) {
+                Ok(n) => {
+                    if n == 0 { return Err(StreamError::Closed) }
+                    left -= n
+                },
+                Err(e) => {
+                    match e {
+                        StreamError::Interrupted => {},
+                        _ => return Err(e),
+                    }
+                },
+            }
+        }
+        Ok(count)
+    }
+}
+
+/// Somewhere bytes go.
+pub mark Writer {
+    /// Writes what it can of `data` and says how much went out. A short write
+    /// is not a failure: the rest is the caller's to send, which is what
+    /// `writeAll` does.
+    fn write(&var self, data: Bytes) -> Result<i64, StreamError>
+
+    /// Pushes anything buffered out. A stream that buffers nothing may do
+    /// nothing here, which is why it has a default.
+    fn flush(&var self) -> Result<i64, StreamError> { Ok(0) }
+
+    /// Every byte of `data`, however many calls that takes.
+    fn writeAll(&var self, data: Bytes) -> Result<i64, StreamError> {
+        var sent = 0
+        let total = data.length()
+        while sent < total {
+            let rest = data.slice(sent, total)
+            match self.write(rest) {
+                Ok(n) => {
+                    if n <= 0 { return Err(StreamError::Closed) }
+                    sent += n
+                },
+                Err(e) => {
+                    match e {
+                        StreamError::Interrupted => {},
+                        _ => return Err(e),
+                    }
+                },
+            }
+        }
+        Ok(sent)
+    }
+
+    /// `text`'s bytes, all of them.
+    fn writeText(&var self, text: String) -> Result<i64, StreamError> {
+        self.writeAll(bytes(text))
+    }
+
+    /// `text` followed by a newline.
+    fn writeLine(&var self, text: String) -> Result<i64, StreamError> {
+        self.writeText(text + "\n")
+    }
+}
+
+/// Both at once: a socket, a pipe, a file opened for update.
+pub mark Stream: Reader + Writer {}
+
+/// Everything `source` has left, written to `sink`. Says how many bytes moved.
+///
+///     io::copy(request, logFile)
+pub fn copy<R: Reader, W: Writer>(source: &var R,
+                                  target: &var W) -> Result<i64, StreamError> {
+    var moved = 0
+    var chunk = Bytes()
+    loop {
+        chunk.clear()
+        match source.read(chunk, 8192) {
+            Ok(n) => {
+                if n == 0 { return Ok(moved) }
+                match target.writeAll(chunk) {
+                    Ok(w) => moved += w,
+                    Err(e) => return Err(e),
+                }
+            },
+            Err(e) => {
+                match e {
+                    StreamError::Interrupted => {},
+                    _ => return Err(e),
+                }
+            },
+        }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Reading a stream a line at a time
+//===--------------------------------------------------------------------===//
+
+/// A `Reader` with a buffer in front of it, so a line can be taken out
+/// without a system call per byte.
+///
+///     var lines = io::BufferedReader<net::TcpStream>(stream)
+///     while lines.readLine() is Some(line) { ... }
+///
+/// The buffer keeps whatever arrived past the end of the line it handed back,
+/// so the next call starts where this one stopped. That is what makes it
+/// usable on a socket, where one read commonly brings several lines.
+pub class BufferedReader<R: Reader> {
+    var source: R
+    var held: Bytes
+    var finished: bool
+
+    fn init(self, source: R) {
+        self.source = source
+        self.held = Bytes()
+        self.finished = false
+    }
+
+    /// The reader underneath, borrowed.
+    ///
+    /// It is lent, not handed over: a source that owns something — a socket
+    /// owns its descriptor — is owned by this reader for as long as it lives,
+    /// and there must never be a second owner of it. Reading through the
+    /// borrow also skips whatever is still buffered here, so take
+    /// `buffered()` first when that matters.
+    pub fn inner(&var self) -> &var R { &var self.source }
+
+    /// What has arrived but not yet been handed out.
+    pub fn buffered(&self) -> Bytes { self.held }
+
+    /// True once the source has said it is finished and the buffer is empty.
+    pub fn atEnd(&self) -> bool { self.finished && self.held.isEmpty() }
+
+    /// Pulls one more chunk in. `false` means the source is finished.
+    fn fill(&var self) -> bool {
+        if self.finished { return false }
+        match self.source.read(self.held, 8192) {
+            Ok(n) => {
+                if n == 0 { self.finished = true; return false }
+                true
+            },
+            Err(e) => {
+                match e {
+                    // Worth another go; anything else ends the stream as far
+                    // as this reader is concerned.
+                    StreamError::Interrupted => true,
+                    _ => { self.finished = true; false },
+                }
+            },
+        }
+    }
+
+    /// The next line, without its terminator. `nil` at the end of the stream.
+    ///
+    /// Both `\n` and `\r\n` end a line, so a reader over a network protocol
+    /// and one over a text file behave the same.
+    pub fn readLine(&var self) -> String? {
+        loop {
+            let at = self.held.find("\n", 0)
+            if at >= 0 {
+                var end = at
+                if end > 0 && self.held.at(end - 1).or(0u8) == 13u8 {
+                    end -= 1
+                }
+                let line = self.held.slice(0, end).toString()
+                self.held.consume(at + 1)
+                return line
+            }
+            if !self.fill() {
+                if self.held.isEmpty() { return nil }
+                let rest = self.held.toString()
+                self.held.clear()
+                return rest
+            }
+        }
+    }
+
+    /// Everything left, as text.
+    pub fn readAll(&var self) -> String {
+        while self.fill() {}
+        let all = self.held.toString()
+        self.held.clear()
+        all
+    }
+}
+
+// A buffered reader over something that can also be written to is a
+// connection: the buffering is on the way in, and a write goes straight
+// through. That is what lets one object be both halves of a conversation.
+bind<R> Writer to BufferedReader<R> where R: Writer {
+    fn write(&var self, data: Bytes) -> Result<i64, StreamError> {
+        self.source.write(data)
+    }
+    fn flush(&var self) -> Result<i64, StreamError> { self.source.flush() }
+}
+
+//===--------------------------------------------------------------------===//
+// A file, seen as a stream
+//
+// `File` has a `write` and a `flush` of its own, taking text and a file's
+// idea of an error. `Stream` asks for the same two names with different
+// shapes, and Rune has one name per method — so a file is *turned into* a
+// stream rather than being one. `file.asStream()` is that turn, and it costs
+// an object, not a copy of the file.
+//===--------------------------------------------------------------------===//
+
+/// A `File` in the shape the stream machinery takes.
+///
+///     var s = logFile.asStream()
+///     s.writeText("started\n")
+///
+/// The underlying file is shared, not copied: writing through the stream and
+/// writing through the file both go to the same handle, and closing either
+/// closes it.
+pub class FileStream {
+    var file: File
+
+    fn init(self, file: File) { self.file = file }
+
+    /// The file underneath.
+    pub fn inner(&self) -> File { self.file }
+}
+
+/// The same file, in the shape `Reader`, `Writer` and `Stream` take.
+extend File {
+    pub fn asStream(&self) -> FileStream { FileStream(self) }
+}
+
+bind Reader to FileStream {
+    @safe("fread is given the buffer's own spare room and never exceeds it")
+    fn read(&var self, sink: Bytes, most: i64) -> Result<i64, StreamError> {
+        if !self.file.isOpen() { return Err(StreamError::Closed) }
+        if most <= 0 { return Ok(0) }
+        let at = sink.writePoint(most)
+        let got = unsafe { fread(at, 1 as usize, most as usize, self.file.handle) }
+        sink.advance(got as i64)
+        if (got as i64) > 0 { return Ok(got as i64) }
+        if unsafe { feof(self.file.handle) } != 0 { return Ok(0) }
+        Err(StreamError::Failed)
+    }
+}
+
+bind Writer to FileStream {
+    @safe("fwrite is given the buffer's own count, and its own bytes")
+    fn write(&var self, data: Bytes) -> Result<i64, StreamError> {
+        if !self.file.isOpen() { return Err(StreamError::Closed) }
+        let n = data.length()
+        if n == 0 { return Ok(0) }
+        let wrote = unsafe {
+            fwrite(data.raw() as *u8, 1 as usize, n as usize, self.file.handle)
+        }
+        if (wrote as i64) <= 0 { return Err(StreamError::Failed) }
+        Ok(wrote as i64)
+    }
+
+    @safe("fflush on a live handle, or nothing at all")
+    fn flush(&var self) -> Result<i64, StreamError> {
+        if !self.file.isOpen() { return Err(StreamError::Closed) }
+        unsafe { fflush(self.file.handle) }
+        Ok(0)
+    }
+}
+
+bind Stream to FileStream {}

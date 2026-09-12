@@ -1,0 +1,48 @@
+// `As<Target>` is the built-in conversion mark, and `into` is how a program
+// reaches it. `as` keeps its own meanings, which no binding can change.
+// EXPECT: 212.0 373.15
+// EXPECT: 100.0
+// EXPECT: warm true false true
+// EXPECT: as is untouched 3
+// EXPECT: chained 100.0
+import std::io
+
+struct Celsius { v: f64 }
+struct Fahrenheit { v: f64 }
+struct Kelvin { v: f64 }
+
+// One source, several destinations: the mark's argument says which.
+bind As<Fahrenheit> to Celsius {
+    fn convert(&self) -> Fahrenheit { Fahrenheit { v: self.v * 1.8 + 32.0 } }
+}
+bind As<Kelvin> to Celsius {
+    fn convert(&self) -> Kelvin { Kelvin { v: self.v + 273.15 } }
+}
+bind As<Celsius> to Fahrenheit {
+    fn convert(&self) -> Celsius { Celsius { v: (self.v - 32.0) / 1.8 } }
+}
+bind As<Fahrenheit> to Kelvin {
+    fn convert(&self) -> Fahrenheit {
+        Fahrenheit { v: (self.v - 273.15) * 1.8 + 32.0 }
+    }
+}
+
+// A bound says what the parameter has to convert into.
+fn isWarm<T: As<Fahrenheit>>(v: T) -> bool { (v into Fahrenheit).v > 80.0 }
+
+fn main() -> i64 {
+    let c = Celsius { v: 100.0 }
+    io::println((c into Fahrenheit).v.$str() + " " + (c into Kelvin).v.$str())
+    io::println((Fahrenheit { v: 212.0 } into Celsius).v.$str())
+
+    io::println("warm " + isWarm(Celsius { v: 30.0 }).$str() +
+                " " + isWarm(Celsius { v: 10.0 }).$str() +
+                " " + isWarm(Kelvin { v: 320.0 }).$str())
+
+    io::println("as is untouched " + (3.7 as i64).$str())
+
+    // Conversions compose left to right.
+    let back = c into Kelvin into Fahrenheit into Celsius
+    io::println("chained " + back.v.$str())
+    0
+}

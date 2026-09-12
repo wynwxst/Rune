@@ -1,0 +1,32 @@
+// An overloaded `[]` or `*` yields a value, not a place. Reaching a field off
+// one directly has to work the same as binding it first.
+// EXPECT: subscript field 3 4
+// EXPECT: subscript bound 3 4
+// EXPECT: deref field 7 8
+// EXPECT: deref bound 7 8
+// EXPECT: nested inner
+import std::io
+import std::mem
+
+struct Point { pub x: i64, pub y: i64 }
+struct Wrapper { pub inner: String }
+
+fn main() -> i64 {
+    var pts = mem::Buffer<Point>(2)
+    pts[0] = Point { x: 3, y: 4 }
+    io::println("subscript field " + pts[0].x.$str() + " " + pts[0].y.$str())
+    let bound = pts[0]
+    io::println("subscript bound " + bound.x.$str() + " " + bound.y.$str())
+
+    let h = mem::Handle<Point>(Point { x: 7, y: 8 })
+    io::println("deref field " + (*h).x.$str() + " " + (*h).y.$str())
+    let d = *h
+    io::println("deref bound " + d.x.$str() + " " + d.y.$str())
+
+    // A counted field reached the same way, so the borrow has to outlive the
+    // expression that produced it.
+    var ws = mem::Buffer<Wrapper>(1)
+    ws[0] = Wrapper { inner: "inner" }
+    io::println("nested " + ws[0].inner)
+    0
+}

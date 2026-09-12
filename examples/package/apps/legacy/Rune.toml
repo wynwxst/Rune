@@ -1,0 +1,13 @@
+[package]
+name = "legacy"
+version = "0.1.0"
+edition = "2025"
+description = "A program pinned to units 1.0.0, so two versions of one package are installed side by side"
+authors = ["The Rune examples"]
+
+[build]
+safety = "full"
+
+[dependencies]
+units = "=1.0.0"
+stats = "2.0"

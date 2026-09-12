@@ -1,0 +1,6 @@
+// More placeholders than arguments.
+// EXPECT-ERROR: the format string needs at least 2 arguments
+fn main() -> i64 {
+    println!("{} {}", 1)
+    0
+}

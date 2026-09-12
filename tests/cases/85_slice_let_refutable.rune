@@ -1,0 +1,10 @@
+// A `let` has no other arm, so a pattern that can fail — one that asks
+// something of a slice's length — is refused there.
+// EXPECT-ERROR: a `let` pattern has to match every value
+
+fn main() -> i64 {
+    let xs: [3:i64] = [1, 2, 3]
+    let s: [i64] = xs
+    let [p, ..] = s
+    p
+}

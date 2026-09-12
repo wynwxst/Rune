@@ -1,0 +1,59 @@
+import std::io
+
+pub class Cell<T> {
+    pub head: T
+    pub tail: List<T>
+    fn init(self, head: T, tail: List<T>) {
+        self.head = head
+        self.tail = tail
+    }
+}
+
+pub enum List<T> {
+    Nil,
+    Cons(Cell<T>),
+
+
+    pub fn append(&var self, value: T) {
+        match self {
+            List::Nil => {
+                // assign current
+                *self = List::Cons(Cell(value,List::Nil))
+            },
+            List::Cons(cell) => {
+                cell.tail.append(value)
+            }
+        }
+    }
+
+    pub fn get(&self, index: i64) -> T? {
+        match self {
+            List::Nil => nil,
+            List::Cons(cell) if index == 0 => cell.head,
+            List::Cons(cell) => cell.tail.get(index-1)
+        }
+    }
+}
+
+
+bind<T> operator::"[]" to List<T> {
+    fn index(&self, index: i64) -> i64? {
+        return self.get(index)
+    }
+}
+
+bind<T> io::Display to List<T> where T : io::Display {
+    fn display(&self) -> String {
+        var out: String = "[ "
+        var index: int = 0
+        var value: T? = self.get(index)
+        while value is Some(val) {
+            out += "'" + val.$str() + "' "
+            index += 1
+            value = self.get(index)
+        }
+        out += "]"
+        out
+
+    }
+}

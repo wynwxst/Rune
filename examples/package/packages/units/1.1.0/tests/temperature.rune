@@ -1,0 +1,10 @@
+import std::testing
+import units
+
+fn main() -> i64 {
+    testing::equal("boiling point", units::fahrenheit(212.0).asCelsius(), 100.0)
+    testing::equal("absolute zero", units::kelvin(0.0).asCelsius(), -273.15)
+    testing::isFalse("below absolute zero is not physical", units::celsius(-300.0).isPhysical())
+    testing::equal("prints in celsius", units::celsius(21.5).display(), "21.5 °C")
+    testing::summary()
+}

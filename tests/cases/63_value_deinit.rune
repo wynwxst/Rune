@@ -1,0 +1,75 @@
+// A struct's `deinit`, from an `extend` and from a `bind`, and the move that
+// stops it running twice.
+// EXPECT: start
+// EXPECT: using 1
+// EXPECT: closing 1
+// EXPECT: made 5
+// EXPECT: have 5
+// EXPECT: closing 5
+// EXPECT: built pair
+// EXPECT: closing 10
+// EXPECT: closing 11
+// EXPECT: built array
+// EXPECT: closing 20
+// EXPECT: closing 21
+// EXPECT: built class
+// EXPECT: closing 99
+// EXPECT: holding
+// EXPECT: latch 3 released
+// EXPECT: consumed 2
+// EXPECT: closing 2
+// EXPECT: borrowed 3
+// EXPECT: closing 3
+// EXPECT: done
+import std::io
+
+struct Handle { id: i64 }
+extend Handle {
+    fn deinit(&self) { io::println("closing " + self.id.$str()) }
+}
+
+struct Pair { a: Handle, b: Handle }
+
+/// A `deinit` a mark supplies rather than the type declaring it.
+mark Closeable { fn deinit(&self) }
+struct Latch { n: i64 }
+bind Closeable to Latch {
+    fn deinit(&self) { io::println("latch " + self.n.$str() + " released") }
+}
+
+class Owner {
+    h: Handle
+    fn init(self) { self.h = Handle { id: 99 } }
+}
+
+/// The local is returned, so this scope stops owning it: one `closing 5`,
+/// not two.
+fn make(n: i64) -> Handle {
+    let h = Handle { id: n }
+    io::println("made " + n.$str())
+    h
+}
+
+fn consume(h: Handle) { io::println("consumed " + h.id.$str()) }
+fn borrow(h: &Handle) { io::println("borrowed " + h.id.$str()) }
+
+fn main() -> i64 {
+    io::println("start")
+    { let h = Handle { id: 1 }; io::println("using " + h.id.$str()) }
+
+    { let x = make(5); io::println("have " + x.id.$str()) }
+
+    { let p = Pair { a: Handle{id:10}, b: Handle{id:11} }; io::println("built pair") }
+
+    { let arr: [2:Handle] = [Handle{id:20}, Handle{id:21}]; io::println("built array") }
+
+    { let o = Owner(); io::println("built class") }
+
+    { let l = Latch { n: 3 }; io::println("holding") }
+
+    { let a = Handle { id: 2 }; consume(a) }
+    { let b = Handle { id: 3 }; borrow(&b) }
+
+    io::println("done")
+    0
+}

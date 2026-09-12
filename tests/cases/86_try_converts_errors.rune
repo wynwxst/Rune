@@ -1,0 +1,60 @@
+// `?` hands the error out as the function's own error type. When the two
+// differ, `bind Theirs into Ours` (the same as `bind As<Ours> to Theirs`)
+// says how to get from one to the other and `?` calls its `convert` on the
+// way out — so a layered library can pass a low-level failure up without a
+// `mapErr` at every boundary. An error type that converts implicitly (a
+// narrow integer into a wide one) is widened.
+// EXPECT: parse: empty
+// EXPECT: parse: not a number: abc
+// EXPECT: disk: no such file
+// EXPECT: 10
+
+import std::io
+
+enum ParseError { Empty, NotANumber { text: String } }
+enum AppError { Parse(ParseError), Disk(io::FileError), Message(String) }
+
+bind ParseError into AppError {
+    fn convert(&self) -> AppError { AppError::Parse(*self) }
+}
+bind io::FileError into AppError {
+    fn convert(&self) -> AppError { AppError::Disk(*self) }
+}
+
+fn parse(text: String) -> Result<i64, ParseError> {
+    if text.$isEmpty() { return ParseError::Empty }
+    match text.$toInt() {
+        Some(n) => n,
+        None => ParseError::NotANumber { text: text },
+    }
+}
+
+fn load(path: String) -> Result<String, io::FileError> {
+    io::readToString(path)
+}
+
+fn run(text: String) -> Result<i64, AppError> {
+    let n = parse(text)?
+    let contents = load("/definitely/not/here")?
+    n + contents.$length()
+}
+
+fn describe(e: AppError) -> String {
+    match e {
+        AppError::Parse(ParseError::Empty) => "parse: empty",
+        AppError::Parse(ParseError::NotANumber { text }) => "parse: not a number: " + text,
+        AppError::Disk(f) => "disk: " + io::describe(f),
+        AppError::Message(m) => m,
+    }
+}
+
+fn narrow() -> Result<i64, i32> { 5 }
+fn wide() -> Result<i64, i64> { let v = narrow()?; v * 2 }
+
+fn main() -> i64 {
+    match run("") { Ok(v) => io::println(v), Err(e) => io::println(describe(e)) }
+    match run("abc") { Ok(v) => io::println(v), Err(e) => io::println(describe(e)) }
+    match run("42") { Ok(v) => io::println(v), Err(e) => io::println(describe(e)) }
+    match wide() { Ok(v) => io::println(v), Err(e) => io::println(e) }
+    0
+}

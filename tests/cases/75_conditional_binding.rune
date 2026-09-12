@@ -1,0 +1,52 @@
+// A binding introduced on one path and cleaned up on another.
+//
+// `while x is Some(v)` binds `v` only when the pattern matches, and gives the
+// scope back when it does not — so on a loop that never runs, the scope ends
+// having never reached the declaration. The slot has to be empty there, or
+// the release at the end of it reads whatever the stack happened to hold.
+// EXPECT: before
+// EXPECT: never ran: 0
+// EXPECT: ran three times: 3
+// EXPECT: matched once, then stopped
+// EXPECT: if-let that did not bind
+// EXPECT: done
+import std::io
+import std::collections::vector
+
+fn nothing() -> String? { nil }
+
+fn main() -> i64 {
+    io::println("before")
+
+    // The loop body never runs, so `line` is never bound.
+    var n = 0
+    while nothing() is Some(line) { n += 1 }
+    io::println("never ran: " + n.$str())
+
+    // And one that does run, so the slot is reused across iterations and
+    // then left behind by the turn that fails.
+    var words = vector::Vector<String>()
+    words.push("a"); words.push("b"); words.push("c")
+    var taken = 0
+    var i = 0
+    while words.at(i) is Some(word) {
+        taken += 1
+        i += 1
+    }
+    io::println("ran three times: " + taken.$str())
+
+    // The same shape one level in: a match that binds, then one that does not.
+    match words.at(0) {
+        Some(first) => io::println("matched once, then stopped"),
+        None => io::println("nothing at all"),
+    }
+
+    if nothing() is Some(missing) {
+        io::println("bound something that was not there")
+    } else {
+        io::println("if-let that did not bind")
+    }
+
+    io::println("done")
+    0
+}

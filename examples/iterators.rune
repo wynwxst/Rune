@@ -1,0 +1,170 @@
+// `for` walks three things natively — a range, an array, a slice — and asks
+// everything else. `Iterator` and `Sequence` are the two questions it asks.
+//
+//     runec -o iterators examples/iterators.rune && ./iterators
+//
+// `Iterator` is a cursor: `next` hands back a value until it runs out.
+// `Sequence` is something a fresh cursor can be had from, which is what a
+// container binds — a container is not a cursor over itself, and two loops
+// over one container should not interfere.
+
+import std::io
+import std::iter
+import std::text
+import std::collections::vector
+
+//===--------------------------------------------------------------------===//
+// Writing an iterator
+//===--------------------------------------------------------------------===//
+
+struct Countdown { pub remaining: i64 }
+
+bind Iterator to Countdown {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.remaining <= 0 { return nil }       // `nil` ends the loop
+        self.remaining -= 1
+        self.remaining + 1
+    }
+}
+
+/// The Fibonacci numbers below `limit`. An iterator is often the clearest way
+/// to write a series: the state is named, and the loop that consumes it does
+/// not have to know any of it.
+struct Fibonacci { pub limit: i64, pub a: i64, pub b: i64 }
+
+fn fibonacci(limit: i64) -> Fibonacci { Fibonacci { limit: limit, a: 0, b: 1 } }
+
+bind Iterator to Fibonacci {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.a >= self.limit { return nil }
+        let value = self.a
+        let next = self.a + self.b
+        self.a = self.b
+        self.b = next
+        value
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Writing a sequence
+//
+// A grid is not a cursor over itself, so it binds `Sequence` and hands out a
+// `GridCells`. Two loops over the same grid then get one each.
+//===--------------------------------------------------------------------===//
+
+struct Grid { pub width: i64, pub height: i64 }
+struct GridCells { pub grid: Grid, pub at: i64 }
+
+bind Sequence to Grid {
+    type Iter = GridCells
+    fn iterate(&self) -> GridCells { GridCells { grid: *self, at: 0 } }
+}
+
+bind Iterator to GridCells {
+    // Each turn produces a whole cell, which the loop can take apart.
+    type Item = (i64, i64)
+    fn next(&var self) -> Self::Item? {
+        if self.at >= self.grid.width * self.grid.height { return nil }
+        let cell = (self.at % self.grid.width, self.at / self.grid.width)
+        self.at += 1
+        cell
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Reshaping one
+//
+// `map`, `filter` and `zip` each wrap an iterator in another iterator. They
+// compute nothing on their own: a value moves through the chain only when the
+// loop at the end asks for it, so a chain costs one pass and no storage.
+//===--------------------------------------------------------------------===//
+
+struct Person { pub name: String, pub age: i64 }
+
+fn adults(people: vector::Vector<Person>) -> vector::Vector<String> {
+    vector::collect(
+        people.filter(||(p: Person) -> bool { p.age >= 18 })
+              .map(||(p: Person) -> String { p.name }))
+}
+
+//===--------------------------------------------------------------------===//
+// Iterating generically
+//===--------------------------------------------------------------------===//
+
+/// Works on anything a `for` can walk, and on nothing else — the bound says
+/// so, and the compiler holds the caller to it.
+fn count<S: Sequence>(s: S) -> i64 {
+    var n = 0
+    for _ in s { n += 1 }
+    n
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    io::println("a hand-written iterator:")
+    for n in (Countdown { remaining: 5 }) { io::print(n.$str() + " ") }
+    io::println("")
+
+    io::println("")
+    io::println("a series:")
+    for n in fibonacci(100) { io::print(n.$str() + " ") }
+    io::println("")
+
+    io::println("")
+    io::println("a sequence, walked twice:")
+    let board = Grid { width: 3, height: 2 }
+    // The binding is a pattern, so a cell arrives already taken apart.
+    for (x, y) in board { io::print("(" + x.$str() + "," + y.$str() + ") ") }
+    io::println("")
+    io::println("  " + count(board).$str() + " cells, counted generically")
+
+    io::println("")
+    io::println("the standard library:")
+    var names = vector::Vector<String>()
+    names.push("ada")
+    names.push("grace")
+    names.push("edsger")
+    for name in names { io::println("  " + name) }
+
+    io::print("  characters: ")
+    for c in text::chars("héllo") { io::print(c.$str() + "·") }
+    io::println("")
+
+    io::println("")
+    io::println("map, filter and zip:")
+    for n in fibonacci(100).filter(||(n: i64) -> bool { n % 2 == 0 }) {
+        io::print(n.$str() + " ")
+    }
+    io::println("")
+    for label in fibonacci(30).map(||(n: i64) -> String { "[" + n.$str() + "]" }) {
+        io::print(label)
+    }
+    io::println("")
+
+    // `0..n` is loop syntax rather than a value, so `counting` is what numbers
+    // something. `zip` ends with the shorter side, so an endless counter is safe.
+    for (i, name) in iter::counting(1).zip(names.iterate()) {
+        io::println("  " + i.$str() + ". " + name)
+    }
+
+    io::println("")
+    io::println("a chain, collected:")
+    var people = vector::Vector<Person>()
+    people.push(Person { name: "ada", age: 36 })
+    people.push(Person { name: "tom", age: 11 })
+    people.push(Person { name: "grace", age: 45 })
+    for name in adults(people) { io::println("  " + name) }
+
+    io::println("")
+    io::println("break, continue and labels work as they do anywhere:")
+    outer: for n in fibonacci(1000) {
+        if n % 2 == 0 { continue }
+        if n > 100 { break :outer }
+        io::print(n.$str() + " ")
+    }
+    io::println("")
+    0
+}

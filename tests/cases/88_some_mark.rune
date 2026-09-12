@@ -1,0 +1,80 @@
+// `fn make() -> some Shape`: the body decides the concrete type, every call
+// yields that same type, and callers see only the mark. It costs nothing at
+// run time — there is no box and no vtable, the value is the concrete one —
+// which is what makes it the right spelling for an iterator chain.
+// EXPECT: 9.0
+// EXPECT: 5.0
+// EXPECT: 0
+// EXPECT: 2
+// EXPECT: 4
+// EXPECT: 0:a
+// EXPECT: 1:b
+// EXPECT: 16.0
+// EXPECT: Sq(3.0)
+// EXPECT: 4.0
+// EXPECT: 4.0
+// EXPECT: 3.0
+// EXPECT: 4.0
+// EXPECT: 3.0
+// EXPECT: 4.0
+// EXPECT: person ada
+
+import std::io
+import std::iter
+import std::collections::vector
+
+mark Shape: io::Display { fn area(&self) -> f64 }
+struct Sq { pub s: f64 }
+struct Circle { pub r: f64 }
+bind Shape to Sq { fn area(&self) -> f64 { self.s * self.s } }
+bind Shape to Circle { fn area(&self) -> f64 { 3.0 * self.r * self.r } }
+bind io::Display to Sq { fn display(&self) -> String { "Sq(" + self.s.$str() + ")" } }
+bind io::Display to Circle { fn display(&self) -> String { "Circle(" + self.r.$str() + ")" } }
+
+fn make(side: f64) -> some Shape { Sq { s: side } }
+
+/// The point of it: a chain whose type nobody has to write out.
+fn evens(limit: i64) -> some iter::Iterator {
+    iter::counting(0).filter(||(n: i64) -> bool { n % 2 == 0 }).take(limit)
+}
+
+fn labelled(names: vector::Vector<String>) -> some iter::Iterator {
+    names.as_iter().enumerate().map(||(p: (i64, String)) -> String { p.0.$str() + ":" + p.1 })
+}
+
+/// Every call returns the same type, so two results satisfy one `S`.
+fn total<S: Shape>(a: S, b: S) -> f64 { a.area() + b.area() }
+
+struct Box { pub w: f64 }
+extend Box {
+    pub fn shape(&self) -> some Shape { Sq { s: self.w } }
+    pub fn unit() -> some Shape { Circle { r: 1.0 } }
+}
+
+/// Each instantiation has a `some` of its own.
+fn wrap<T: Shape>(x: T) -> some Shape { x }
+fn twice() -> some Shape { make(2.0) }
+
+class Person { pub name: String; fn init(&self, n: String) { self.name = n } }
+bind io::Display to Person { fn display(&self) -> String { "person " + self.name } }
+fn named(n: String) -> some io::Display { Person(n) }
+
+fn main() -> i64 {
+    let s = make(3.0)
+    io::println(s.area())
+    io::println(total(make(1.0), make(2.0)))
+    for n in evens(3) { io::println(n) }
+    for l in labelled(vec!("a", "b")) { io::println(l) }
+    let d: dyn Shape = make(4.0)
+    io::println(d.area())
+    io::println(s)
+    let v = vec!(make(1.0), make(2.0))
+    io::println(v.get(1).area())
+    io::println(Box { w: 2.0 }.shape().area())
+    io::println(Box::unit().area())
+    io::println(wrap(Sq { s: 2.0 }).area())
+    io::println(wrap(Circle { r: 1.0 }).area())
+    io::println(twice().area())
+    io::println(named("ada").display())
+    0
+}

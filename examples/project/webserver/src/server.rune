@@ -1,0 +1,128 @@
+// webserver::server — the command line, the listener, and the accept loop.
+//
+// One thread accepts, a fixed pool answers. What passes between them is a
+// file descriptor and nothing else, which is the only thing that *can* pass
+// between them: a `net::TcpStream` owns its descriptor, and a channel carries
+// its contents through memory the compiler cannot follow. `release` and
+// `adopt` are where ownership is handed over by name.
+//
+// This lives beside the rest of the library rather than in `main.rune` so
+// that `tests/` can reach it: a test program imports the package, and only a
+// library has anything to import.
+
+import std::io
+import webserver::pool
+import std::net
+import std::thread
+import std::process
+import std::collections::vector
+
+/// What the command line asked for.
+struct Settings {
+    address: String = "127.0.0.1",
+    port: i32 = 8080,
+    workers: i64 = 0,
+    verbose: bool = false,
+    /// Stop after this many connections. Zero serves until interrupted; the
+    /// tests use a small number so the server ends on its own.
+    limit: i64 = 0
+}
+
+fn parseSettings() -> Settings {
+    var settings = Settings {
+        address: "127.0.0.1", port: 8080,
+        workers: 0, verbose: false, limit: 0
+    }
+    var i = 1
+    let n = process::argCount()
+    while i < n {
+        let flag = process::arg(i)
+        let value = if i + 1 < n { process::arg(i + 1) } else { "" }
+        if flag == "--address" { settings.address = value; i += 1 }
+        else if flag == "--port" { settings.port = value.$toInt().or(8080) as i32; i += 1 }
+        else if flag == "--workers" { settings.workers = value.$toInt().or(0); i += 1 }
+        else if flag == "--limit" { settings.limit = value.$toInt().or(0); i += 1 }
+        else if flag == "--verbose" { settings.verbose = true }
+        else if flag == "--help" {
+            io::println("usage: webserver [--address A] [--port N] " +
+                        "[--workers N] [--limit N] [--verbose]")
+            process::exit(0)
+        }
+        i += 1
+    }
+    // One worker per hardware thread is the default: the work is a socket
+    // read, a match and a socket write, so there is nothing to gain from
+    // more and something to lose from fewer.
+    if settings.workers <= 0 { settings.workers = thread::hardwareThreads() }
+    settings
+}
+
+/// Serves until the connection limit is reached, or for ever when there is
+/// none. Hands back what `main` should exit with.
+pub fn run() -> i64 {
+    let settings = parseSettings()
+
+    var listener = match net::listen(settings.address, settings.port) {
+        Ok(l) => l,
+        Err(e) => {
+            io::eprintln("cannot listen: " + net::describe(e))
+            return 1
+        },
+    }
+
+    io::println("serving http://" + settings.address + ":" +
+                listener.port().$str() + " on " + settings.workers.$str() +
+                " worker(s)")
+    if settings.limit > 0 {
+        io::println("stopping after " + settings.limit.$str() + " connection(s)")
+    }
+
+    let jobs = thread::Channel<i64>()
+    let served = thread::Mutex<i64>(0)
+    var workers = pool::start(settings.workers, jobs, served, settings.verbose)
+
+    // The accept loop. It does as little as possible: take the connection,
+    // hand the descriptor to the queue, go back to waiting.
+    var accepted = 0
+    loop {
+        if settings.limit > 0 && accepted >= settings.limit { break }
+        match listener.accept() {
+            Ok(c) => {
+                var conn = c
+                // `release` gives the descriptor up: `conn` stops owning it,
+                // so the end of this arm does not close what a worker is
+                // about to answer on.
+                var queue = jobs
+                queue.send(conn.release())
+                accepted += 1
+            },
+            Err(e) => {
+                match e {
+                    // Worth another go; anything else is the listener itself
+                    // failing, and there is nothing left to accept on.
+                    net::NetError::Interrupted => {},
+                    _ => {
+                        io::eprintln("accept: " + net::describe(e))
+                        break
+                    },
+                }
+            },
+        }
+    }
+
+    // Closing the queue is what tells the workers there will be no more;
+    // each `receive` that is waiting comes back empty and the thread ends.
+    var queue = jobs
+    queue.close()
+
+    var answered = 0
+    for handle in workers {
+        var h = handle
+        answered += h.join()
+    }
+
+    var tally = served
+    io::println("served " + answered.$str() + " connection(s) (" +
+                tally.get().$str() + " by the counter)")
+    0
+}

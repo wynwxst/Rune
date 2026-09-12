@@ -1,0 +1,19 @@
+import std::io
+import std::collections::vector
+
+
+fn boxUp<T>(v: T) -> Any { v }
+
+fn main() -> i64 {
+
+    var v = vector::Vector<Any>()
+    v.push(1i64)
+    v.push("two")
+    v.push(3.0)
+    var i = 0
+    while i < v.length() {
+        io::println("  " + v.at(i).unwrap().expect::<i64>().$str())
+        i += 1
+    }
+    0
+}

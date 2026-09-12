@@ -1,0 +1,302 @@
+// std::hash — hashes with a name, for when the structural `mem::hash` is
+// not what is wanted.
+//
+// `mem::hash` is fast and consistent within one program, and says nothing
+// about what number it produces: a table that only compares hashes from one
+// run is free to change how it makes them. A hash that is written to a file,
+// sent over a wire, or compared against one someone else computed has to be
+// a *particular* hash, and these are:
+//
+//     hash::fnv1a64("hello")            // 0xa430d84680aabd0b, always
+//     hash::crc32("hello")              // 907060870
+//     hash::sha256("hello")             // "2cf24dba5fb0a30e..."
+//
+// Each algorithm is also a struct that can be fed piece by piece, for input
+// that does not all arrive at once:
+//
+//     var h = hash::Sha256()
+//     h.feedText(header)
+//     h.feedText(body)
+//     let digest = h.finish()            // [32:u8]
+//
+// FNV-1a and CRC32 are for tables and checksums. SHA-256 is the one to use
+// where a collision would matter.
+
+import std::collections::vector
+
+//=== FNV-1a =============================================================//
+
+/// FNV-1a, 64 bits: one multiply and one xor per byte. The hash tables of
+/// the world run on it.
+pub struct Fnv64 { state: u64 = 0xcbf29ce484222325 }
+
+extend Fnv64 {
+    pub fn feed(&var self, byte: u8) {
+        self.state = (self.state ^ (byte as u64)).$wrappingMul(0x100000001b3)
+    }
+    pub fn feedBytes(&var self, bytes: [u8]) {
+        for b in bytes { self.feed(b) }
+    }
+    pub fn feedText(&var self, text: String) {
+        for i in 0..text.$length() { self.feed(text.$byteAt(i)) }
+    }
+    pub fn finish(&self) -> u64 { self.state }
+}
+
+/// FNV-1a, 32 bits.
+pub struct Fnv32 { state: u32 = 0x811c9dc5 }
+
+extend Fnv32 {
+    pub fn feed(&var self, byte: u8) {
+        self.state = (self.state ^ (byte as u32)).$wrappingMul(0x01000193)
+    }
+    pub fn feedBytes(&var self, bytes: [u8]) {
+        for b in bytes { self.feed(b) }
+    }
+    pub fn feedText(&var self, text: String) {
+        for i in 0..text.$length() { self.feed(text.$byteAt(i)) }
+    }
+    pub fn finish(&self) -> u32 { self.state }
+}
+
+/// The 64-bit FNV-1a hash of the text's bytes.
+pub fn fnv1a64(text: String) -> u64 {
+    var h = Fnv64 {}
+    h.feedText(text)
+    h.finish()
+}
+
+/// The 64-bit FNV-1a hash of the bytes.
+pub fn fnv1a64Bytes(bytes: [u8]) -> u64 {
+    var h = Fnv64 {}
+    h.feedBytes(bytes)
+    h.finish()
+}
+
+/// The 32-bit FNV-1a hash of the text's bytes.
+pub fn fnv1a32(text: String) -> u32 {
+    var h = Fnv32 {}
+    h.feedText(text)
+    h.finish()
+}
+
+//=== CRC-32 =============================================================//
+
+/// CRC-32 as zip, PNG and Ethernet use it (polynomial 0xEDB88320, reflected).
+///
+/// Not a hash for a table — it is a checksum, built to notice a flipped bit
+/// rather than to spread keys — but it is the one everyone has agreed on.
+pub struct Crc32 { state: u32 = 0xffffffff }
+
+/// The lookup table, built the first time a CRC is asked for: the reflected
+/// polynomial, shifted right eight times per entry. Entry 1 is never zero
+/// once built, so it says whether the table is.
+global var crcTable: [256:u32] = [0u32; 256]
+
+fn buildCrcTable() {
+    for n in 0..256 {
+        var c = n as u32
+        for _ in 0..8 {
+            c = if (c & 1) == 1 { 0xedb88320 ^ (c >> 1) } else { c >> 1 }
+        }
+        crcTable[n] = c
+    }
+}
+
+extend Crc32 {
+    pub fn feed(&var self, byte: u8) {
+        if crcTable[1] == 0 { buildCrcTable() }
+        let index = ((self.state ^ (byte as u32)) & 0xff) as i64
+        self.state = crcTable[index] ^ (self.state >> 8)
+    }
+    pub fn feedBytes(&var self, bytes: [u8]) {
+        for b in bytes { self.feed(b) }
+    }
+    pub fn feedText(&var self, text: String) {
+        for i in 0..text.$length() { self.feed(text.$byteAt(i)) }
+    }
+    pub fn finish(&self) -> u32 { self.state ^ 0xffffffff }
+}
+
+/// The CRC-32 of the text's bytes.
+pub fn crc32(text: String) -> u32 {
+    var h = Crc32 {}
+    h.feedText(text)
+    h.finish()
+}
+
+/// The CRC-32 of the bytes.
+pub fn crc32Bytes(bytes: [u8]) -> u32 {
+    var h = Crc32 {}
+    h.feedBytes(bytes)
+    h.finish()
+}
+
+//=== SHA-256 ============================================================//
+
+/// SHA-256, as FIPS 180-4 specifies it. Fed a byte at a time; `finish` pads
+/// and produces the 32-byte digest, and leaves the hasher as it was, so more
+/// can be fed and a longer digest taken.
+pub struct Sha256 {
+    h0: u32 = 0x6a09e667,
+    h1: u32 = 0xbb67ae85,
+    h2: u32 = 0x3c6ef372,
+    h3: u32 = 0xa54ff53a,
+    h4: u32 = 0x510e527f,
+    h5: u32 = 0x9b05688c,
+    h6: u32 = 0x1f83d9ab,
+    h7: u32 = 0x5be0cd19,
+    /// The block being filled, and how much of it is.
+    block: [64:u8] = [0u8; 64],
+    filled: i64 = 0,
+    /// Bytes fed so far, for the length the padding carries.
+    total: u64 = 0
+}
+
+global sha256Round: [64:u32] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+
+fn rotr(x: u32, n: u32) -> u32 { (x >> n) | (x << (32 - n)) }
+
+extend Sha256 {
+    pub fn feed(&var self, byte: u8) {
+        self.block[self.filled] = byte
+        self.filled += 1
+        self.total += 1
+        if self.filled == 64 {
+            self.compress()
+            self.filled = 0
+        }
+    }
+    pub fn feedBytes(&var self, bytes: [u8]) {
+        for b in bytes { self.feed(b) }
+    }
+    pub fn feedText(&var self, text: String) {
+        for i in 0..text.$length() { self.feed(text.$byteAt(i)) }
+    }
+
+    /// One block through the compression function.
+    fn compress(&var self) {
+        var w: [64:u32] = [0u32; 64]
+        for i in 0..16 {
+            let j = i * 4
+            w[i] = ((self.block[j] as u32) << 24) | ((self.block[j + 1] as u32) << 16) |
+                   ((self.block[j + 2] as u32) << 8) | (self.block[j + 3] as u32)
+        }
+        for i in 16..64 {
+            let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
+            let s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)
+            w[i] = w[i - 16].$wrappingAdd(s0).$wrappingAdd(w[i - 7]).$wrappingAdd(s1)
+        }
+        var a = self.h0
+        var b = self.h1
+        var c = self.h2
+        var d = self.h3
+        var e = self.h4
+        var f = self.h5
+        var g = self.h6
+        var h = self.h7
+        for i in 0..64 {
+            let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+            let ch = (e & f) ^ ((~e) & g)
+            let t1 = h.$wrappingAdd(s1).$wrappingAdd(ch).$wrappingAdd(sha256Round[i]).$wrappingAdd(w[i])
+            let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+            let maj = (a & b) ^ (a & c) ^ (b & c)
+            let t2 = s0.$wrappingAdd(maj)
+            h = g
+            g = f
+            f = e
+            e = d.$wrappingAdd(t1)
+            d = c
+            c = b
+            b = a
+            a = t1.$wrappingAdd(t2)
+        }
+        self.h0 = self.h0.$wrappingAdd(a)
+        self.h1 = self.h1.$wrappingAdd(b)
+        self.h2 = self.h2.$wrappingAdd(c)
+        self.h3 = self.h3.$wrappingAdd(d)
+        self.h4 = self.h4.$wrappingAdd(e)
+        self.h5 = self.h5.$wrappingAdd(f)
+        self.h6 = self.h6.$wrappingAdd(g)
+        self.h7 = self.h7.$wrappingAdd(h)
+    }
+
+    /// The digest of everything fed so far.
+    pub fn finish(&self) -> [32:u8] {
+        // Pad a copy, so feeding can continue afterwards.
+        var copy = *self
+        let bits = self.total * 8
+        copy.feed(0x80)
+        while copy.filled != 56 { copy.feed(0) }
+        var shift: u64 = 56
+        loop {
+            copy.feed(((bits >> shift) & 0xff) as u8)
+            if shift == 0 { break }
+            shift -= 8
+        }
+        var out: [32:u8] = [0u8; 32]
+        let words: [8:u32] = [copy.h0, copy.h1, copy.h2, copy.h3, copy.h4, copy.h5, copy.h6, copy.h7]
+        for i in 0..8 {
+            out[i * 4] = ((words[i] >> 24) & 0xff) as u8
+            out[i * 4 + 1] = ((words[i] >> 16) & 0xff) as u8
+            out[i * 4 + 2] = ((words[i] >> 8) & 0xff) as u8
+            out[i * 4 + 3] = (words[i] & 0xff) as u8
+        }
+        out
+    }
+
+    /// The digest as 64 hexadecimal characters.
+    pub fn finishHex(&self) -> String { hex(self.finish()) }
+}
+
+/// The SHA-256 of the text's bytes, as 64 hexadecimal characters.
+pub fn sha256(text: String) -> String {
+    var h = Sha256 {}
+    h.feedText(text)
+    h.finishHex()
+}
+
+/// The SHA-256 of the bytes, as the 32-byte digest.
+pub fn sha256Bytes(bytes: [u8]) -> [32:u8] {
+    var h = Sha256 {}
+    h.feedBytes(bytes)
+    h.finish()
+}
+
+//=== Rendering ==========================================================//
+
+/// Bytes as lowercase hexadecimal, two characters each.
+pub fn hex(bytes: [u8]) -> String {
+    let digits = "0123456789abcdef"
+    var out = ""
+    for b in bytes {
+        out += digits.$at((b >> 4) as i64).$str() + digits.$at((b & 15) as i64).$str()
+    }
+    out
+}
+
+/// A 64-bit hash as 16 hexadecimal characters.
+pub fn hex64(value: u64) -> String {
+    var bytes: [8:u8] = [0u8; 8]
+    for i in 0..8 {
+        bytes[i] = ((value >> ((7 - i) * 8) as u64) & 0xff) as u8
+    }
+    hex(bytes)
+}
+
+/// A 32-bit hash as 8 hexadecimal characters.
+pub fn hex32(value: u32) -> String {
+    var bytes: [4:u8] = [0u8; 4]
+    for i in 0..4 {
+        bytes[i] = ((value >> ((3 - i) * 8) as u32) & 0xff) as u8
+    }
+    hex(bytes)
+}

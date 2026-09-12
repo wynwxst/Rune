@@ -1,0 +1,51 @@
+// std::asm — inline assembly.
+//
+// Two calls, both taking the instructions and the constraints that say how
+// operands reach them, in the notation LLVM and GCC share:
+//
+//     unsafe {
+//         asm::run("nop", "")
+//         let doubled: i64 = asm::value<i64>("add $0, $1, $1", "=r,r", n)
+//     }
+//
+// `$0` is the result where there is one and the first input where there is
+// not; the inputs follow in the order they were written. The constraint string
+// lists one constraint per operand, comma separated, outputs first — `"=r,r,r"`
+// is "a result in a register, and two inputs in registers".
+//
+// This is the least portable thing in the language and the compiler cannot
+// check any of it: the instructions are handed to the assembler as written,
+// and the constraints are handed to the register allocator as written. Both
+// calls are `@unsafe` for that reason, and a `@Config(arch == "...")` around
+// anything using them is not optional — the same text is meaningless on
+// another machine.
+//
+//     @Config(arch == "aarch64")
+//     fn cycles() -> i64 {
+//         unsafe { asm::value<i64>("mrs $0, cntvct_el0", "=r") }
+//     }
+
+/// Runs `template` for its effects.
+///
+/// Never elided, reordered past other assembly, or merged with an identical
+/// call: something written for its effects has effects the compiler cannot
+/// see. Use it for barriers, fences, syscalls and instructions that write
+/// somewhere Rune has no name for.
+///
+///     unsafe { asm::run("dmb ish", "") }
+@unsafe
+@intrinsic("asm")
+pub fn run(template: String, constraints: String, ...)
+
+/// Runs `template` and takes its result as `R`.
+///
+/// Treated as a pure function of its inputs: the compiler may drop the call if
+/// nothing uses the result, and may keep one copy where the same call appears
+/// twice on the same values. If that is wrong for what you are writing — if it
+/// reads a clock, a counter, or anything else that answers differently each
+/// time — use `run` and write the result somewhere yourself.
+///
+///     let sum: i64 = unsafe { asm::value<i64>("add $0, $1, $2", "=r,r,r", a, b) }
+@unsafe
+@intrinsic("asm_value")
+pub fn value<R>(template: String, constraints: String, ...) -> R

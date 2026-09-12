@@ -1,0 +1,10 @@
+// A field's name is part of the type, not something the program computes, so
+// the index has to be there to read while compiling.
+// EXPECT-ERROR: the index has to be a literal
+import std::reflect
+struct Point { x: i64 }
+fn main() -> i64 {
+    var i: usize = 0
+    let _ = reflect::fieldName<Point>(i)
+    0
+}

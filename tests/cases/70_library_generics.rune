@@ -1,0 +1,58 @@
+// A library type used as a generic argument, across the `.rul` boundary.
+//
+// A `.rul` carries its modules' source, and the consumer re-parses it into
+// modules of its own — parsed before the standard library, so a `Vector<T>`
+// named in that interface used to instantiate `Vector` while `bind<T>
+// Sequence to Vector<T>` was still untouched, and the instantiation came out
+// with the bind's methods but no mark behind them: nothing to iterate over.
+//
+// The other half is naming. `Item` here and `libshapes::Item` are two types,
+// and `Vector<Item>` means a different one in each.
+// LIB: libshapes lib/libshapes.rune
+// EXPECT: Host=rune Accept=text/plain [hello]
+// EXPECT: headers 2
+// EXPECT: consumer built: A=1 B=2 [body]
+// EXPECT: labels one,two,
+// EXPECT: mine 7 11
+// EXPECT: greeting Host Accept
+import std::io
+import libshapes
+import std::collections::vector
+
+/// The same name the library gives one of its types, and not the same type.
+struct Item { size: i64 = 0 }
+
+fn main() -> i64 {
+    // A `Vector<Header>` the library made, iterated on this side.
+    var m = libshapes::Message { headers: libshapes::greeting(), body: "hello" }
+    io::println(m.render())
+    io::println("headers " + m.count().$str())
+
+    // And one this side made, iterated on the library's.
+    var mine = vector::Vector<libshapes::Header>()
+    mine.push(libshapes::Header { name: "A", value: "1" })
+    mine.push(libshapes::Header { name: "B", value: "2" })
+    let built = libshapes::Message { headers: mine, body: "body" }
+    io::println("consumer built: " + built.render())
+
+    // A `Vector` of a library type, passed to the library.
+    var items = vector::Vector<libshapes::Item>()
+    items.push(libshapes::Item { label: "one" })
+    items.push(libshapes::Item { label: "two" })
+    io::println("labels " + libshapes::labels(items))
+
+    // `Vector<Item>` for the consumer's own `Item`, which shares its name
+    // with the library's and must not share its instantiation.
+    var ours = vector::Vector<Item>()
+    ours.push(Item { size: 7 })
+    ours.push(Item { size: 11 })
+    var sizes = ""
+    for it in ours { sizes += " " + it.size.$str() }
+    io::println("mine" + sizes)
+
+    // Iterating a `Vector` the library returned, directly.
+    var names = ""
+    for h in libshapes::greeting() { names += " " + h.name }
+    io::println("greeting" + names)
+    0
+}

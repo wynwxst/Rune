@@ -1,0 +1,41 @@
+// dashboard — every package in the ecosystem, used once.
+//
+// `report` brings in stats, units and plot; `shapes` brings in geometry;
+// `logger` stands alone — and comes from the `lab` registry, not the main
+// one, which the manifest says with `registry = "lab"`. `rune deps` draws
+// the tree and says where each package came from.
+
+import std::io
+import report
+import shapes
+import geometry
+import units
+import logger
+
+fn main() -> i64 {
+    var log = logger::standard("dashboard")
+    log.toStdout = true
+    log.info("measuring")
+
+    let circles: [3:shapes::Circle] = [
+        shapes::circle(geometry::origin(), 1.0),
+        shapes::circle(geometry::point(3.0, 0.0), 2.0),
+        shapes::circle(geometry::point(0.0, 5.0), 0.5),
+    ]
+    var areas: [3:f64] = [0.0; 3]
+    for i in 0..3 { areas[i] = circles[i].area() }
+
+    var r = report::report("Shapes")
+    r.section("Circles")
+    for c in circles { r.line(c.display()) }
+    r.statistic("area", areas)
+    r.distance("span", units::metres(geometry::distance(circles[0].centre, circles[2].centre)))
+    r.section("Chart")
+    let labels: [3:String] = ["small", "big", "tiny"]
+    r.chart(labels, areas)
+    io::print(r.render())
+
+    log.trace("not shown at Info")
+    log.info("done: " + circles.$length().$str() + " circles; " + log.summary())
+    0
+}

@@ -1,0 +1,16 @@
+// legacy — pinned to `units = "=1.0.0"`, the version before temperatures,
+// and `stats = "2.0"`, which resolves to 2.1.0 (the newest 2.x) unless a
+// lock says otherwise. Beside `dashboard` this puts units 1.0.0 and 1.1.0
+// in the store at once, each used by one project.
+
+import std::io
+import units
+import stats
+
+fn main() -> i64 {
+    let trip = units::miles(26.2)
+    io::println(trip)
+    let splits: [4:f64] = [5.1, 5.3, 4.9, 5.0]
+    io::println(stats::mean(splits) ?? 0.0)
+    0
+}

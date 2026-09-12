@@ -1,0 +1,27 @@
+import std::testing
+import std::text
+import report
+import units
+
+fn main() -> i64 {
+    var r = report::report("Test")
+    r.section("Numbers")
+    let values: [4:f64] = [1.0, 2.0, 3.0, 4.0]
+    r.statistic("values", values)
+    r.distance("run", units::kilometres(5.0))
+    r.temperature("outside", units::celsius(21.0))
+    let labels: [2:String] = ["a", "b"]
+    let bars: [2:f64] = [1.0, 2.0]
+    r.chart(labels, bars)
+    let out = r.render()
+    testing::isTrue("title underlined", text::startsWith(out, "Test\n====\n"))
+    testing::isTrue("section numbered", text::contains(out, "1. Numbers"))
+    testing::isTrue("statistic line", text::contains(out, "values: n=4 mean=2.50 median=2.50"))
+    testing::isTrue("distance in km", text::contains(out, "run: 5 km"))
+    testing::isTrue("temperature", text::contains(out, "outside: 21 °C"))
+    testing::isTrue("chart rows", text::contains(out, "b |########################"))
+    let none: [0:f64] = []
+    r.statistic("empty", none)
+    testing::isTrue("no data", text::contains(r.render(), "empty: no data"))
+    testing::summary()
+}

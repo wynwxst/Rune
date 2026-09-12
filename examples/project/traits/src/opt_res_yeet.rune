@@ -1,0 +1,15 @@
+import std::{process,io}
+
+fn hello(a: String) -> Result<String,i32> {
+    if a.$length() == 0 {
+        1i32
+    } else {
+        "Hello " + a
+    }
+}
+
+fn main(){
+    if process::argCount() >= 2 {
+        io::println(hello(process::arg(1)).unwrap())
+    }
+}

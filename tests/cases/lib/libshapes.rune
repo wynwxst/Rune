@@ -1,0 +1,61 @@
+// A library that hands out a `Vector` of one of its own types.
+//
+// The point of it is the boundary: a `.rul` carries its modules' source, and
+// the consumer re-parses that source into modules of its own. Everything
+// below is therefore checked twice — once here, and once again inside
+// whatever imports it — and the second time is where the generics have to
+// keep working.
+
+import std::io
+import std::collections::vector
+
+/// A header line, split into its two halves.
+///
+/// A struct rather than the raw line: `Vector<Header>` is exactly the shape
+/// that used to be impossible to hand across the boundary.
+pub struct Header {
+    name: String = "",
+    value: String = ""
+}
+
+/// A `Vector` of the library's own type, held in a field of another of them.
+pub struct Message {
+    headers: vector::Vector<Header>,
+    body: String = ""
+}
+
+/// Named the same as a type in the consumer, on purpose: two `Item`s in two
+/// modules are two types, and `Vector<Item>` means a different thing in each.
+pub struct Item {
+    label: String = ""
+}
+
+extend Message {
+    /// Iterating a `Vector` reached through a field — the `for` here is the
+    /// half that needs `bind<T> Sequence to Vector<T>` to have been applied
+    /// to the instantiation this library's own field asked for.
+    pub fn render(&self) -> String {
+        var out = ""
+        for h in self.headers {
+            out += h.name + "=" + h.value + " "
+        }
+        out + "[" + self.body + "]"
+    }
+
+    pub fn count(&self) -> i64 { self.headers.length() }
+}
+
+/// And a `Vector` of a library type arriving as an argument.
+pub fn labels(items: vector::Vector<Item>) -> String {
+    var out = ""
+    for it in items { out += it.label + "," }
+    out
+}
+
+/// One built here, so the consumer can iterate a `Vector` this side made.
+pub fn greeting() -> vector::Vector<Header> {
+    var v = vector::Vector<Header>()
+    v.push(Header { name: "Host", value: "rune" })
+    v.push(Header { name: "Accept", value: "text/plain" })
+    v
+}

@@ -1,0 +1,16 @@
+import std::io
+import std::process
+import runegrep
+
+
+
+fn main() -> i64 {
+    args = process::args()
+    var query: String = ""
+    var target: String = ""
+    if args.at(1) is Some(Query){query = Query} else {process::panic("Please specify a query to search for")}
+    if args.at(2) is Some(Target){target = Target} else {process::panic("Please specify a target to search from")}
+    println!("Searching for '{query}' [{target}]")
+    runegrep::ReadFile(target)
+    0
+}

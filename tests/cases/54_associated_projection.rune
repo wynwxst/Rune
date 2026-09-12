@@ -1,0 +1,54 @@
+// `I::Item` names what a cursor yields, and `S::Iter::Item` what a sequence
+// does. Both work wherever a type can be written, including in a signature
+// whose owner is still a parameter.
+// EXPECT: 2
+// EXPECT: first ada
+// EXPECT: 3
+// EXPECT: closure in a field: 42
+// SAFETY: full
+import std::io
+import std::collections::vector
+
+struct Ticks { pub left: i64 }
+
+bind Iterator to Ticks {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.left <= 0 { return nil }
+        self.left -= 1
+        self.left
+    }
+}
+
+/// The owner is a parameter here, so the projection stays symbolic until the
+/// call site says what `I` is.
+fn firstOf<I: Iterator>(source: I) -> I::Item? {
+    var cursor = source
+    cursor.next()
+}
+
+/// Two levels: the sequence's cursor, and what that cursor yields.
+fn firstIn<S: Sequence>(source: S) -> S::Iter::Item? {
+    var cursor = source.iterate()
+    cursor.next()
+}
+
+/// A closure kept in a generic struct's field, and called through it.
+struct Applied<A, B> { pub f: @function(A) -> B }
+
+fn apply<A, B>(held: &Applied<A, B>, value: A) -> B { (held.f)(value) }
+
+fn main() -> i64 {
+    io::println(firstOf(Ticks { left: 3 }).or(-1).$str())
+
+    var names = vector::Vector<String>()
+    names.push("ada")
+    names.push("grace")
+    io::println("first " + firstIn(names).or("none"))
+
+    io::println(vector::collect(Ticks { left: 3 }).length().$str())
+
+    let doubled = Applied<i64, i64> { f: ||(n: i64) -> i64 { n * 2 } }
+    io::println("closure in a field: " + apply(&doubled, 21).$str())
+    0
+}

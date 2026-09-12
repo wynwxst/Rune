@@ -1,0 +1,74 @@
+// report — reads numbers from the command line and prints a summary.
+//
+//     rune run -- 2 4 4 4 6
+//
+// With no arguments it falls back to a built-in sample, so `rune run` on its
+// own still shows something.
+
+import std::io
+import std::process
+import std::result
+import statistics
+import statistics::spread
+
+/// Parses one argument, naming the offending value on failure.
+fn parseNumber(text: String) -> result::Result<f64, String> {
+    match text.$toFloat() {
+        Some(v) => Ok(v),
+        None => Err("'" + text + "' is not a number"),
+    }
+}
+
+/// Collects every argument after the program name. `?` stops at the first
+/// bad one and hands the message back unchanged.
+fn readArguments() -> result::Result<[16:f64], String> {
+    var values: [16:f64] = [0.0; 16]
+    var count = 0
+    for i in 1..process::argCount() {
+        if count == 16 {
+            return Err("at most 16 values, please")
+        }
+        values[count] = parseNumber(process::arg(i))?
+        count += 1
+    }
+    Ok(values)
+}
+
+fn sample() -> [5:f64] {
+    [2.0, 4.0, 4.0, 4.0, 6.0]
+}
+
+fn printSummary(values: [f64]) {
+    match statistics::summarise(values) {
+        Some(s) => {
+            io::println(s)
+            io::println("  total     " + statistics::round(s.total, 3).$str())
+            io::println("  spread    " + spread::range(values).or(0.0).$str())
+        }
+        None => io::println("no values to summarise"),
+    }
+}
+
+fn main() -> i64 {
+    let count = process::argCount() - 1
+    if count == 0 {
+        io::println("no arguments given; using the built-in sample")
+        printSummary(sample())
+        io::println("")
+        io::println("try: rune run -- 1 2 3 4 5")
+        return 0
+    }
+
+    match readArguments() {
+        Ok(values) => {
+            // The buffer is fixed size, so slice off exactly the part that
+            // was filled: `values[0..count]` borrows that run as a `[f64]`.
+            printSummary(values[0..count])
+            0
+        }
+        Err(message) => {
+            io::eprintln("report: " + message)
+            1
+        }
+    }
+}

@@ -1,0 +1,18 @@
+@Doc("""
+Allows the user of the library to specify `port` and `address`.
+
+An example would be:
+
+```rune
+config = Config {
+    port: 8080,
+    address: "0.0.0.0",
+    debug: false
+}
+```
+""")
+pub struct Config {
+    port: i32 = 0,
+    address: String = "",
+    debug: bool = false
+}

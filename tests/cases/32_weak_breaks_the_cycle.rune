@@ -1,0 +1,37 @@
+// The same shape with one edge made `weak` is accepted, and frees cleanly.
+// EXPECT: child sees parent: configuration
+// EXPECT: drop parent
+// EXPECT: drop child
+// EXPECT: balanced true
+import std::io
+import std::process
+
+class Parent {
+    name: String
+    child: Child?
+    fn init(self, name: String) { self.name = name; self.child = nil }
+    fn deinit(self) { io::println("drop parent") }
+}
+
+class Child {
+    weak owner: Parent?
+    fn init(self) { self.owner = nil }
+    fn deinit(self) { io::println("drop child") }
+}
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    {
+        let p = Parent("configuration")
+        let c = Child()
+        p.child = c
+        c.owner = p
+        match c.owner {
+            Some(up) => io::println("child sees parent: " + up.name),
+            None => io::println("orphaned"),
+        }
+    }
+    let after = process::liveObjectCount()
+    io::println("balanced " + (before == after).$str())
+    0
+}

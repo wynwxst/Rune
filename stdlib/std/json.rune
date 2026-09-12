@@ -1,0 +1,1084 @@
+// std::json — reading and writing JSON.
+//
+// The whole module in four calls:
+//
+//     import std::json
+//
+//     let doc = json::parse("{\"name\": \"ada\", \"age\": 36}")?
+//     doc.get("name").unwrap().asText()      // "ada"
+//     json::write(doc)                       // {"name":"ada","age":36}
+//     json::pretty(doc)                      // the same, laid out
+//
+// Or with `[]`, which is bound twice — once for a member name, once for a
+// position — so one subscript reaches into both shapes:
+//
+//     doc["user"]["tags"][0].asText()
+//
+// Those answer `Value` rather than `Option`, and reaching into what is not
+// there gives `null`, so a chain ends rather than aborting halfway.
+//
+// And one macro, for a document written out rather than read in:
+//
+//     json!{ "name": "ada", "age": 36 }
+//
+// A document is a `json::Value`, which is one of seven shapes — the six the
+// grammar has, plus a whole number kept apart from a fractional one so that
+// `3` survives a round trip. Every way of looking inside one answers with an
+// `Option`, because a document is data from somewhere else and its shape is a
+// question rather than an assumption.
+//
+// Files: `load` and `save` read and write one, and every failure — a file
+// that cannot be read, a document that will not parse — is a `json::Error`,
+// which knows the line and column it happened at.
+
+import std::io
+import std::text
+import std::collections::vector
+import std::dictionary
+
+//===--------------------------------------------------------------------===//
+// What went wrong, and where
+//===--------------------------------------------------------------------===//
+pub enum Kind {
+    /// The document ended in the middle of something.
+    Ended,
+    /// A character that cannot start a value.
+    Unexpected,
+    /// A number the grammar does not allow — `01`, `1.`, `.5`, `1e`.
+    BadNumber,
+    /// A string that never closed, or an escape that is not one.
+    BadString,
+    /// Something after the value the document was supposed to be.
+    Trailing,
+    /// Nested deeper than this parser is willing to go.
+    TooDeep,
+    /// The file could not be read or written.
+    File { cause: io::FileError },
+}
+
+/// One failure, with the position it happened at.
+///
+/// `line` and `column` count from one, because that is what an editor shows.
+pub struct Error {
+    pub kind: Kind = Kind::Unexpected,
+    /// Byte offset into the document.
+    pub offset: i64 = 0,
+    pub line: i64 = 1,
+    pub column: i64 = 1,
+    /// What was expected, in words. Empty when the kind says it all.
+    pub detail: String = ""
+}
+
+extend Error {
+    /// The failure as a sentence, with the position in it.
+    ///
+    ///     json: expected ',' or '}' at line 3, column 14
+    pub fn describe(&self) -> String { describeError(*self) }
+}
+
+/// The same sentence, as a function: what the `Display` binding below calls,
+/// because inside a `bind` body `self.describe()` reaches the mark's own
+/// default of that name — which would call `display` straight back.
+pub fn describeError(e: Error) -> String {
+    var out = "json: "
+    match e.kind {
+        Kind::Ended      => out += "the document ended too soon",
+        Kind::Unexpected => out += "unexpected character",
+        Kind::BadNumber  => out += "malformed number",
+        Kind::BadString  => out += "malformed string",
+        Kind::Trailing   => out += "trailing content after the value",
+        Kind::TooDeep    => out += "nested too deeply",
+        Kind::File { cause } => {
+            return "json: " + io::describe(cause)
+        },
+    }
+    if !e.detail.$isEmpty() { out += ": " + e.detail }
+    out + " at line " + e.line.$str() + ", column " + e.column.$str()
+}
+
+bind io::Display to Error {
+    fn display(&self) -> String { describeError(*self) }
+}
+
+/// An error at a byte offset in `source`, with the line and column worked out
+/// from it. This is the only way one is made, so a position is never missing.
+pub fn errorAt(kind: Kind, source: String, offset: i64, detail: String) -> Error {
+    var line = 1
+    var column = 1
+    var i = 0
+    let stop = if offset > source.$length() { source.$length() } else { offset }
+    while i < stop {
+        if source.$byteAt(i) == 10u8 {
+            line += 1
+            column = 1
+        } else {
+            column += 1
+        }
+        i += 1
+    }
+    Error { kind: kind, offset: stop, line: line, column: column,
+            detail: detail }
+}
+
+/// A failure that has no position in a document — reading the file it was
+/// supposed to be in, for one.
+pub fn ofFile(cause: io::FileError) -> Error {
+    Error { kind: Kind::File { cause: cause }, offset: 0, line: 0, column: 0,
+            detail: "" }
+}
+
+//===--------------------------------------------------------------------===//
+// What a document is
+//===--------------------------------------------------------------------===//
+pub class Array {
+    var items: vector::Vector<Value>
+
+    fn init(self) { self.items = vector::Vector<Value>() }
+
+    /// How many values it holds.
+    pub fn length(&self) -> i64 { self.items.length() }
+    pub fn isEmpty(&self) -> bool { self.items.isEmpty() }
+
+    /// The value at `index`, or nothing when the index is past the end.
+    pub fn at(&self, index: i64) -> Value? { self.items.at(index) }
+
+    /// Adds one to the end.
+    pub fn push(&var self, value: Value) { self.items.push(value) }
+}
+
+/// The members of a JSON object.
+///
+/// Insertion order is kept, because a document that is read and written back
+/// should come out looking like the one that went in. A hash tells you where
+/// a member is; the order tells you how it was written, and both are worth
+/// having.
+pub class Object {
+    var order: vector::Vector<String>
+    var members: dictionary::Map<String, Value>
+
+    fn init(self) {
+        self.order = vector::Vector<String>()
+        self.members = dictionary::Map<String, Value>()
+    }
+
+    /// How many members it holds.
+    pub fn length(&self) -> i64 { self.members.length() }
+    pub fn isEmpty(&self) -> bool { self.members.isEmpty() }
+
+    /// True when `name` is a member.
+    pub fn holds(&self, name: String) -> bool { self.members.holds(name) }
+
+    /// The value of `name`, or nothing.
+    pub fn at(&self, name: String) -> Value? { self.members.at(name) }
+
+    /// The member names, in the order they were first set.
+    pub fn keys(&self) -> vector::Vector<String> { self.order }
+
+    /// Sets `name`. Setting one that is already there replaces the value and
+    /// leaves it where it was, so an edit does not reshuffle a document.
+    pub fn put(&var self, name: String, value: Value) {
+        if !self.members.holds(name) { self.order.push(name) }
+        self.members.put(name, value)
+    }
+
+    /// Removes `name`. The order forgets it too.
+    pub fn remove(&var self, name: String) -> Value? {
+        let gone = self.members.remove(name)
+        if gone.hasValue() {
+            var kept = vector::Vector<String>()
+            for k in self.order {
+                if k != name { kept.push(k) }
+            }
+            self.order = kept
+        }
+        gone
+    }
+}
+
+/// One JSON value.
+pub enum Value {
+    Null,
+    Bool(bool),
+    /// A number written without a fractional part or an exponent, and small
+    /// enough to be exact.
+    Int(i64),
+    /// Every other number.
+    Number(f64),
+    Text(String),
+    Array(Array),
+    Object(Object),
+}
+
+//===--------------------------------------------------------------------===//
+// Building one
+//
+// The constructors exist so a document can be written as an expression rather
+// than as a sequence of statements: `array(...)` and `object()` are what a
+// literal would be if the language had one for this.
+//===--------------------------------------------------------------------===//
+
+/// An empty array.
+pub fn array() -> Value { Value::Array(Array()) }
+
+/// An empty object.
+pub fn object() -> Value { Value::Object(Object()) }
+
+/// `null`.
+pub fn null() -> Value { Value::Null }
+
+//===--------------------------------------------------------------------===//
+// Asking what it is
+//
+// Every accessor answers with an `Option` rather than aborting, because a
+// document is data from somewhere else and its shape is a question, never an
+// assumption.
+//===--------------------------------------------------------------------===//
+
+extend Value {
+    /// The name of this shape, for a message: `"null"`, `"number"`, `"array"`.
+    pub fn kind(&self) -> String {
+        match self {
+            Value::Null      => "null",
+            Value::Bool(b)   => "boolean",
+            Value::Int(n)    => "number",
+            Value::Number(n) => "number",
+            Value::Text(s)   => "string",
+            Value::Array(a)  => "array",
+            Value::Object(o) => "object",
+        }
+    }
+
+    pub fn isNull(&self) -> bool {
+        match self { Value::Null => true, _ => false }
+    }
+
+    /// The boolean inside, or nothing when it is not one.
+    pub fn asBool(&self) -> bool? {
+        match self { Value::Bool(b) => b, _ => nil }
+    }
+
+    /// The number inside as an integer. A fractional number is *not* rounded
+    /// — it is simply not an integer, and says so.
+    pub fn asInt(&self) -> i64? {
+        match self {
+            Value::Int(n) => n,
+            Value::Number(f) => {
+                if f == ((f as i64) as f64) { f as i64 } else { nil }
+            },
+            _ => nil,
+        }
+    }
+
+    /// The number inside, as a `f64`. An integer converts.
+    pub fn asFloat(&self) -> f64? {
+        match self {
+            Value::Int(n) => n as f64,
+            Value::Number(f) => f,
+            _ => nil,
+        }
+    }
+
+    /// The string inside, or nothing.
+    pub fn asText(&self) -> String? {
+        match self { Value::Text(s) => s, _ => nil }
+    }
+
+    /// The array inside, or nothing.
+    pub fn asArray(&self) -> Array? {
+        match self { Value::Array(a) => a, _ => nil }
+    }
+
+    /// The object inside, or nothing.
+    pub fn asObject(&self) -> Object? {
+        match self { Value::Object(o) => o, _ => nil }
+    }
+
+    //=== Reaching into it ===============================================//
+
+    /// The member `name`, when this is an object that has one.
+    ///
+    ///     doc.get("user").get("name").asText()
+    ///
+    /// Reaching into something that is not an object, or asking for a member
+    /// that is not there, gives nothing — so a chain of these ends in `nil`
+    /// rather than in an abort.
+    pub fn get(&self, name: String) -> Value? {
+        match self {
+            Value::Object(o) => o.at(name),
+            _ => nil,
+        }
+    }
+
+    /// The element at `index`, when this is an array that has one.
+    pub fn index(&self, position: i64) -> Value? {
+        match self {
+            Value::Array(a) => a.at(position),
+            _ => nil,
+        }
+    }
+
+    /// How many elements or members this holds. Zero for everything else,
+    /// which is what "nothing to walk" means.
+    pub fn length(&self) -> i64 {
+        match self {
+            Value::Array(a)  => a.length(),
+            Value::Object(o) => o.length(),
+            _ => 0,
+        }
+    }
+
+    //=== Building one, a member at a time ===============================//
+
+    /// The same object, with `name` set to `item`.
+    ///
+    ///     json::object().withMember("name", "ada" into Value)
+    ///
+    /// The value handed back is the one that went in: an `Object` is a class,
+    /// so a `Value` holding one holds a reference to it. That is what makes
+    /// these two chainable, and it is what `json!` expands to.
+    pub fn withMember(&self, name: String, item: Value) -> Value {
+        match self.asObject() {
+            Some(o) => { var target = o; target.put(name, item) },
+            None => {},
+        }
+        *self
+    }
+
+    /// The same array, with `item` on the end.
+    pub fn withItem(&self, item: Value) -> Value {
+        match self.asArray() {
+            Some(a) => { var onto = a; onto.push(item) },
+            None => {},
+        }
+        *self
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Subscripting
+//
+// A JSON document is reached into two ways — by member name and by position —
+// and `[]` should mean both. A `bind` may supply one name more than once as
+// long as the versions take different things, so `operator::"[]"` is written
+// twice here and what is between the brackets decides which one runs.
+//
+//     doc["user"]["tags"][0]
+//
+// Each answers a `Value` rather than an `Option`, because a subscript has to
+// produce something: reaching into what is not there gives `Null`, so a chain
+// of them ends in `null` instead of aborting halfway. `get` and `index` above
+// are the same questions with an `Option` for an answer, for when the
+// difference between "absent" and "null" matters.
+//===--------------------------------------------------------------------===//
+
+bind operator::"[]" to Value {
+    fn index(&self, name: String) -> Value { self.get(name) ?? Value::Null }
+}
+
+bind operator::"[]" to Value {
+    fn index(&self, position: i64) -> Value {
+        self.index(position) ?? Value::Null
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Turning a Rune value into a JSON one
+//
+// `into` rather than a pile of overloads: `As` is the mark the language
+// already dispatches conversions through, so `7 into Value` works wherever a
+// `Value` is wanted.
+//===--------------------------------------------------------------------===//
+
+// A value is already one, and saying so is what lets a document that was
+// built or parsed elsewhere go straight into a `json!` beside the literals.
+bind As<Value> to Value  { fn convert(&self) -> Value { *self } }
+
+bind As<Value> to i64    { fn convert(&self) -> Value { Value::Int(self) } }
+bind As<Value> to i32    { fn convert(&self) -> Value { Value::Int(self as i64) } }
+bind As<Value> to f64    { fn convert(&self) -> Value { Value::Number(self) } }
+bind As<Value> to bool   { fn convert(&self) -> Value { Value::Bool(self) } }
+bind As<Value> to String { fn convert(&self) -> Value { Value::Text(self) } }
+
+//===--------------------------------------------------------------------===//
+// Text, into a value
+//
+// A recursive-descent parser over the bytes of the document. There is no
+// separate tokeniser: JSON's tokens are decided by their first byte, so a
+// cursor and a `match` do the whole job, and every failure knows the offset
+// it happened at.
+//===--------------------------------------------------------------------===//
+pub global MAX_DEPTH: i64 = 200
+
+/// Where the parser is in the document.
+struct Cursor {
+    source: String = "",
+    at: i64 = 0,
+    depth: i64 = 0
+}
+
+extend Cursor {
+    fn atEnd(&self) -> bool { self.at >= self.source.$length() }
+
+    /// The byte under the cursor, or `0` at the end — which is not a byte any
+    /// JSON document contains, so it never has to be told apart from one.
+    fn peek(&self) -> u8 {
+        if self.atEnd() { 0u8 } else { self.source.$byteAt(self.at) }
+    }
+
+    fn peekAt(&self, ahead: i64) -> u8 {
+        let i = self.at + ahead
+        if i >= self.source.$length() { 0u8 } else { self.source.$byteAt(i) }
+    }
+
+    fn advance(&var self) { self.at += 1 }
+    /// Past `n` bytes at once, for a token read in one piece.
+    fn skip(&var self, n: i64) { self.at += n }
+    /// Back to a position that was noted earlier.
+    fn seek(&var self, position: i64) { self.at = position }
+    /// One level further in, and back out again.
+    fn enter(&var self) { self.depth += 1 }
+    fn leave(&var self) { self.depth -= 1 }
+
+    /// Skips whitespace. JSON allows exactly four characters, and a tab or a
+    /// newline is not the same as "any Unicode space".
+    fn skipSpace(&var self) {
+        while !self.atEnd() {
+            let b = self.peek()
+            if b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8 {
+                self.at += 1
+            } else {
+                return
+            }
+        }
+    }
+
+    fn fail(&self, kind: Kind, detail: String) -> Error {
+        errorAt(kind, self.source, self.at, detail)
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// The public entry points
+//===--------------------------------------------------------------------===//
+
+/// Reads one JSON value out of `source`.
+///
+/// The whole of `source` has to be that value: anything after it but
+/// whitespace is an error, because a document that continues is a document
+/// that was not understood.
+///
+///     match parseText("{\"a\": 1}") {
+///         Ok(doc) => io::println(doc.get("a").unwrap()),
+///         Err(e)  => io::eprintln(e),
+///     }
+pub fn parseText(source: String) -> Result<Value, Error> {
+    var cursor = Cursor { source: source, at: 0, depth: 0 }
+    cursor.skipSpace()
+    if cursor.atEnd() {
+        return Err(cursor.fail(Kind::Ended, "a document with no value"))
+    }
+    let parsed = parseValue(&var cursor)?
+    cursor.skipSpace()
+    if !cursor.atEnd() {
+        return Err(cursor.fail(Kind::Trailing, ""))
+    }
+    Ok(parsed)
+}
+
+/// The same, but allowing whatever follows the value.
+///
+/// Hands back the value and the offset it ended at, which is what reading a
+/// stream of documents from one buffer needs.
+pub fn parsePrefix(source: String, from: i64) -> Result<(Value, i64),
+                                                  Error> {
+    var cursor = Cursor { source: source, at: from, depth: 0 }
+    cursor.skipSpace()
+    if cursor.atEnd() {
+        return Err(cursor.fail(Kind::Ended, "a document with no value"))
+    }
+    let parsed = parseValue(&var cursor)?
+    Ok((parsed, cursor.at))
+}
+
+//===--------------------------------------------------------------------===//
+// One value
+//===--------------------------------------------------------------------===//
+
+fn parseValue(c: &var Cursor) -> Result<Value, Error> {
+    if c.depth >= MAX_DEPTH {
+        return Err(c.fail(Kind::TooDeep, ""))
+    }
+    c.skipSpace()
+    let b = c.peek()
+
+    if b == 0u8 && c.atEnd() {
+        return Err(c.fail(Kind::Ended, "a value"))
+    }
+    if b == 123u8 { return parseObject(c) }        // {
+    if b == 91u8  { return parseArray(c) }         // [
+    if b == 34u8  { return Ok(Value::Text(parseString(c)?)) }
+    if b == 116u8 { return parseWord(c, "true", Value::Bool(true)) }
+    if b == 102u8 { return parseWord(c, "false", Value::Bool(false)) }
+    if b == 110u8 { return parseWord(c, "null", Value::Null) }
+    if b == 45u8 || (b >= 48u8 && b <= 57u8) { return parseNumber(c) }
+
+    Err(c.fail(Kind::Unexpected,
+               "'" + c.source.$substring(c.at, c.at + 1) + "' cannot start a value"))
+}
+
+/// `true`, `false` or `null` — the three values that are spelled out.
+fn parseWord(c: &var Cursor, word: String,
+             result: Value) -> Result<Value, Error> {
+    let n = word.$length()
+    if c.at + n > c.source.$length() {
+        return Err(c.fail(Kind::Ended, word))
+    }
+    if c.source.$substring(c.at, c.at + n) != word {
+        return Err(c.fail(Kind::Unexpected, "expected " + word))
+    }
+    c.skip(n)
+    Ok(result)
+}
+
+//===--------------------------------------------------------------------===//
+// Numbers
+//===--------------------------------------------------------------------===//
+
+/// JSON's number grammar exactly:
+///
+///     -?  (0 | [1-9][0-9]*)  ( . [0-9]+ )?  ( [eE] [+-]? [0-9]+ )?
+///
+/// A leading zero, a bare `.5`, a trailing `1.` and an empty exponent are all
+/// refused. That strictness is the point: a parser that accepted them would
+/// accept documents other parsers reject.
+fn parseNumber(c: &var Cursor) -> Result<Value, Error> {
+    let start = c.at
+    var isInteger = true
+
+    if c.peek() == 45u8 { c.advance() }              // -
+
+    if c.peek() == 48u8 {
+        c.advance()
+        // `01` is not a number, and neither is `00`.
+        if isDigit(c.peek()) {
+            return Err(c.fail(Kind::BadNumber,
+                              "a number may not have a leading zero"))
+        }
+    } else if isDigit(c.peek()) {
+        while isDigit(c.peek()) { c.advance() }
+    } else {
+        return Err(c.fail(Kind::BadNumber, "expected a digit"))
+    }
+
+    if c.peek() == 46u8 {                            // .
+        isInteger = false
+        c.advance()
+        if !isDigit(c.peek()) {
+            return Err(c.fail(Kind::BadNumber,
+                              "a decimal point needs a digit after it"))
+        }
+        while isDigit(c.peek()) { c.advance() }
+    }
+
+    if c.peek() == 101u8 || c.peek() == 69u8 {       // e E
+        isInteger = false
+        c.advance()
+        if c.peek() == 43u8 || c.peek() == 45u8 { c.advance() }
+        if !isDigit(c.peek()) {
+            return Err(c.fail(Kind::BadNumber,
+                              "an exponent needs a digit"))
+        }
+        while isDigit(c.peek()) { c.advance() }
+    }
+
+    let literal = c.source.$substring(start, c.at)
+    if isInteger {
+        // An integer that fits stays exact. One that does not is still a
+        // number, so it becomes the nearest `f64` rather than an error.
+        match literal.$toInt() {
+            Some(n) => return Ok(Value::Int(n)),
+            None => {},
+        }
+    }
+    match literal.$toFloat() {
+        Some(f) => Ok(Value::Number(f)),
+        None => Err(errorAt(Kind::BadNumber, c.source, start,
+                              "'" + literal + "' is not a number")),
+    }
+}
+
+fn isDigit(b: u8) -> bool { b >= 48u8 && b <= 57u8 }
+
+//===--------------------------------------------------------------------===//
+// Strings
+//===--------------------------------------------------------------------===//
+
+/// A quoted string, escapes resolved.
+///
+/// The cursor is on the opening quote when this is called and just past the
+/// closing one when it returns.
+fn parseString(c: &var Cursor) -> Result<String, Error> {
+    if c.peek() != 34u8 {
+        return Err(c.fail(Kind::BadString, "expected a string"))
+    }
+    c.advance()
+
+    var out = ""
+    // Bytes that need no attention are copied in runs rather than one at a
+    // time, so a string with no escapes in it costs one substring.
+    var runStart = c.at
+    loop {
+        if c.atEnd() {
+            return Err(c.fail(Kind::BadString, "unterminated string"))
+        }
+        let b = c.peek()
+
+        if b == 34u8 {                                // closing quote
+            out += c.source.$substring(runStart, c.at)
+            c.advance()
+            return Ok(out)
+        }
+        if b < 32u8 {
+            return Err(c.fail(Kind::BadString,
+                              "a control character has to be escaped"))
+        }
+        if b != 92u8 {                                // ordinary byte
+            c.advance()
+            continue
+        }
+
+        out += c.source.$substring(runStart, c.at)
+        c.advance()                                   // the backslash
+        if c.atEnd() {
+            return Err(c.fail(Kind::BadString, "unterminated escape"))
+        }
+        let e = c.peek()
+        if e == 34u8       { out += "\""; c.advance() }
+        else if e == 92u8  { out += "\\"; c.advance() }
+        else if e == 47u8  { out += "/";  c.advance() }
+        else if e == 98u8  { out += "\x08"; c.advance() }
+        else if e == 102u8 { out += "\x0c"; c.advance() }
+        else if e == 110u8 { out += "\n"; c.advance() }
+        else if e == 114u8 { out += "\r"; c.advance() }
+        else if e == 116u8 { out += "\t"; c.advance() }
+        else if e == 117u8 {                          // \uXXXX
+            out += parseEscape(c)?
+        } else {
+            return Err(c.fail(Kind::BadString,
+                              "'\\" + c.source.$substring(c.at, c.at + 1) +
+                              "' is not an escape"))
+        }
+        runStart = c.at
+    }
+}
+
+/// A `\uXXXX` escape, and the low half of a surrogate pair when there is one.
+///
+/// The cursor is on the `u`. JSON writes an astral character as two escapes,
+/// so a high surrogate is only half an answer: the pair is joined back into
+/// the one code point it stands for. A surrogate with no partner is left as
+/// the replacement character rather than refused, because a document is data
+/// from somewhere else and one bad character should not lose the rest of it.
+fn parseEscape(c: &var Cursor) -> Result<String, Error> {
+    c.advance()                                       // the `u`
+    let first = readHex4(c)?
+
+    var codepoint = first
+    if first >= 0xD800 && first <= 0xDBFF {
+        // A high surrogate. Its partner follows as another `\u` escape.
+        if c.peek() == 92u8 && c.peekAt(1) == 117u8 {
+            let resume = c.at
+            c.advance()
+            c.advance()
+            let second = readHex4(c)?
+            if second >= 0xDC00 && second <= 0xDFFF {
+                codepoint = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)
+            } else {
+                // Not a partner after all; leave it for the next turn to read.
+                c.seek(resume)
+                codepoint = 0xFFFD
+            }
+        } else {
+            codepoint = 0xFFFD
+        }
+    } else if first >= 0xDC00 && first <= 0xDFFF {
+        codepoint = 0xFFFD                            // a lone low surrogate
+    }
+
+    var cps = text::CodePoints()
+    cps.push(codepoint)
+    Ok(text::fromCodePoints(cps))
+}
+
+fn readHex4(c: &var Cursor) -> Result<i64, Error> {
+    var value = 0
+    var i = 0
+    while i < 4 {
+        if c.atEnd() {
+            return Err(c.fail(Kind::BadString,
+                              "a \\u escape needs four hex digits"))
+        }
+        let b = c.peek()
+        var digit = -1
+        if b >= 48u8 && b <= 57u8      { digit = (b - 48u8) as i64 }
+        else if b >= 97u8 && b <= 102u8 { digit = (b - 97u8) as i64 + 10 }
+        else if b >= 65u8 && b <= 70u8  { digit = (b - 65u8) as i64 + 10 }
+        else {
+            return Err(c.fail(Kind::BadString,
+                              "a \\u escape needs four hex digits"))
+        }
+        value = value * 16 + digit
+        c.advance()
+        i += 1
+    }
+    Ok(value)
+}
+
+//===--------------------------------------------------------------------===//
+// Arrays and objects
+//===--------------------------------------------------------------------===//
+
+fn parseArray(c: &var Cursor) -> Result<Value, Error> {
+    c.advance()                                       // [
+    c.enter()
+    var items = Array()
+
+    c.skipSpace()
+    if c.peek() == 93u8 {                             // ]
+        c.advance()
+        c.leave()
+        return Ok(Value::Array(items))
+    }
+
+    loop {
+        let element = parseValue(c)?
+        items.push(element)
+        c.skipSpace()
+        let b = c.peek()
+        if b == 44u8 {                                // ,
+            c.advance()
+            c.skipSpace()
+            // A trailing comma is not JSON, however common it is elsewhere.
+            if c.peek() == 93u8 {
+                return Err(c.fail(Kind::Unexpected,
+                                  "an array may not end with a comma"))
+            }
+            continue
+        }
+        if b == 93u8 {
+            c.advance()
+            c.leave()
+            return Ok(Value::Array(items))
+        }
+        if c.atEnd() {
+            return Err(c.fail(Kind::Ended, "expected ',' or ']'"))
+        }
+        return Err(c.fail(Kind::Unexpected, "expected ',' or ']'"))
+    }
+}
+
+fn parseObject(c: &var Cursor) -> Result<Value, Error> {
+    c.advance()                                       // {
+    c.enter()
+    var members = Object()
+
+    c.skipSpace()
+    if c.peek() == 125u8 {                            // }
+        c.advance()
+        c.leave()
+        return Ok(Value::Object(members))
+    }
+
+    loop {
+        c.skipSpace()
+        if c.peek() != 34u8 {
+            if c.atEnd() {
+                return Err(c.fail(Kind::Ended, "expected a member name"))
+            }
+            return Err(c.fail(Kind::Unexpected,
+                              "a member name has to be a string"))
+        }
+        let name = parseString(c)?
+
+        c.skipSpace()
+        if c.peek() != 58u8 {                         // :
+            if c.atEnd() {
+                return Err(c.fail(Kind::Ended, "expected ':'"))
+            }
+            return Err(c.fail(Kind::Unexpected, "expected ':'"))
+        }
+        c.advance()
+
+        // A repeated name replaces the earlier value, which is what every
+        // other parser does and what the grammar leaves open.
+        let member = parseValue(c)?
+        members.put(name, member)
+
+        c.skipSpace()
+        let b = c.peek()
+        if b == 44u8 {                                // ,
+            c.advance()
+            c.skipSpace()
+            if c.peek() == 125u8 {
+                return Err(c.fail(Kind::Unexpected,
+                                  "an object may not end with a comma"))
+            }
+            continue
+        }
+        if b == 125u8 {                               // }
+            c.advance()
+            c.leave()
+            return Ok(Value::Object(members))
+        }
+        if c.atEnd() {
+            return Err(c.fail(Kind::Ended, "expected ',' or '}'"))
+        }
+        return Err(c.fail(Kind::Unexpected, "expected ',' or '}'"))
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// A value, back as text
+//===--------------------------------------------------------------------===//
+pub fn compact(v: Value) -> String {
+    var out = ""
+    render(v, false, 0, &var out)
+    out
+}
+
+/// The same document, laid out to be read: one member or element per line,
+/// two spaces per level.
+pub fn pretty(v: Value) -> String {
+    var out = ""
+    render(v, true, 0, &var out)
+    out
+}
+
+/// The same, with a trailing newline — what a file wants.
+pub fn prettyLine(v: Value) -> String { pretty(v) + "\n" }
+
+fn indent(depth: i64) -> String { "  ".$repeat(depth) }
+
+fn render(v: Value, spaced: bool, depth: i64, out: &var String) {
+    match v {
+        Value::Null      => *out += "null",
+        Value::Bool(b)   => *out += if b { "true" } else { "false" },
+        Value::Int(n)    => *out += n.$str(),
+        Value::Number(f) => *out += number(f),
+        Value::Text(s)   => *out += quote(s),
+
+        Value::Array(a) => {
+            if a.isEmpty() { *out += "[]"; return }
+            *out += "["
+            for i in 0..a.length() {
+                if i != 0 { *out += "," }
+                if spaced { *out += "\n" + indent(depth + 1) }
+                render(a.at(i).unwrap(), spaced, depth + 1, out)
+            }
+            if spaced { *out += "\n" + indent(depth) }
+            *out += "]"
+        },
+
+        Value::Object(o) => {
+            if o.isEmpty() { *out += "{}"; return }
+            *out += "{"
+            var first = true
+            // The order the members were set in, so a document read and
+            // written back comes out looking like the one that went in.
+            for name in o.keys() {
+                if !first { *out += "," }
+                first = false
+                if spaced { *out += "\n" + indent(depth + 1) }
+                *out += quote(name)
+                *out += if spaced { ": " } else { ":" }
+                match o.at(name) {
+                    Some(member) => render(member, spaced, depth + 1, out),
+                    // A key in the order with no member is not reachable:
+                    // `put` writes both and `remove` clears both.
+                    None => *out += "null",
+                }
+            }
+            if spaced { *out += "\n" + indent(depth) }
+            *out += "}"
+        },
+    }
+}
+
+/// A number, written so that reading it back gives the same value.
+///
+/// A `f64` that happens to be integral is still a fractional number as far as
+/// the document is concerned — it was written with a `.` or an exponent, or
+/// it came from a `f64` — so it keeps a `.0`. What `Value::Int` holds is what
+/// prints bare.
+pub fn number(f: f64) -> String {
+    // Neither infinity nor NaN is a JSON number; `null` is what the grammar
+    // leaves for a value that cannot be written.
+    if f != f { return "null" }
+    if f > 1.7976931348623157e308 || f < -1.7976931348623157e308 {
+        return "null"
+    }
+    f.$str()
+}
+
+/// A string as a JSON string literal, quotes and escapes included.
+///
+/// Everything below `0x20` has to be escaped, and this uses the short form
+/// where the grammar gives one. `/` is left alone: escaping it is allowed and
+/// never required, and a document reads better without it.
+pub fn quote(s: String) -> String {
+    var out = "\""
+    var i = 0
+    let n = s.$length()
+    while i < n {
+        let b = s.$byteAt(i)
+        if b == 34u8 {                       // "
+            out += "\\\""
+        } else if b == 92u8 {                // \
+            out += "\\\\"
+        } else if b == 10u8 {
+            out += "\\n"
+        } else if b == 13u8 {
+            out += "\\r"
+        } else if b == 9u8 {
+            out += "\\t"
+        } else if b == 8u8 {
+            out += "\\b"
+        } else if b == 12u8 {
+            out += "\\f"
+        } else if b < 32u8 {
+            out += "\\u" + hex4(b as i64)
+        } else {
+            // Everything else goes through as it is, UTF-8 included: a JSON
+            // document is UTF-8, so there is nothing to escape.
+            out += s.$substring(i, i + 1)
+        }
+        i += 1
+    }
+    out + "\""
+}
+
+/// Four lower-case hex digits, for a `\uXXXX` escape.
+pub fn hex4(value: i64) -> String {
+    let digits = "0123456789abcdef"
+    var out = ""
+    var shift = 12
+    while shift >= 0 {
+        let nibble = (value >> shift) & 15
+        out += digits.$substring(nibble, nibble + 1)
+        shift -= 4
+    }
+    out
+}
+
+/// A `Value` prints as its compact JSON text, so a document can go straight
+/// into `io::println` or a format string.
+///
+/// This lives here rather than beside the type because printing *is*
+/// encoding, and `json::value` would otherwise have to import the module that
+/// imports it.
+bind io::Display to Value {
+    fn display(&self) -> String { compact(*self) }
+}
+
+//===--------------------------------------------------------------------===//
+// The four calls
+//===--------------------------------------------------------------------===//
+
+/// Reads one JSON value out of `source`.
+///
+/// The whole of `source` has to be that value: anything after it but
+/// whitespace is an error, because a document that continues is a document
+/// that was not understood.
+pub fn parse(source: String) -> Result<Value, Error> { parseText(source) }
+
+/// The document as JSON with no space in it.
+pub fn write(doc: Value) -> String { compact(doc) }
+
+/// The document in the file at `path`.
+///
+///     match json::load("config.json") {
+///         Ok(doc) => io::println(doc["port"]),
+///         Err(e)  => io::eprintln(e),
+///     }
+pub fn load(path: String) -> Result<Value, Error> {
+    match io::readToString(path) {
+        Ok(source) => parseText(source),
+        Err(cause) => Err(ofFile(cause)),
+    }
+}
+
+/// Writes `doc` to `path`, laid out to be read. `nil` means it worked.
+pub fn save(path: String, doc: Value) -> Error? {
+    match io::writeString(path, prettyLine(doc)) {
+        Ok(n) => nil,
+        Err(cause) => ofFile(cause),
+    }
+}
+
+/// Writes `doc` to `path` as compact JSON.
+pub fn saveCompact(path: String, doc: Value) -> Error? {
+    match io::writeString(path, compact(doc) + "\n") {
+        Ok(n) => nil,
+        Err(cause) => ofFile(cause),
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// json! — a document written the way JSON is written
+//===--------------------------------------------------------------------===//
+
+/// A document, written out.
+///
+///     let doc = json!{
+///         "name": "ada",
+///         "age": 36,
+///         "member": true,
+///         "tags": ["founder", "analyst"],
+///         "address": { "city": "London" },
+///         "retired": null,
+///     }
+///
+/// The braces of the invocation are the object's own, so the common case
+/// reads as JSON does. Everything nested keeps its own delimiters, because a
+/// macro is handed the tokens inside the call and not the ones around it:
+/// `{ ... }` is an object, `[ ... ]` an array, `null` is null, and anything
+/// else is an expression converted with `into`.
+///
+///     json!["a", "b"]              // an array at the top level
+///     json!(42)                    // a number on its own
+///     json!{}                      // an empty object
+///     json!([])                    // an empty array
+///
+/// A value may be any expression that converts, so a document can be built
+/// out of what the program already has:
+///
+///     let name = "ada"
+///     json!{ "name": name, "next": year + 1 }
+pub macro json {
+    // A nested object: the braces are part of what was matched.
+    ({ $($name: literal : $item: expr),* }) => {
+        std::json::object() $( .withMember($name, json!($item)) )*
+    }
+    // A nested array.
+    ([ $($item: expr),* ]) => {
+        std::json::array() $( .withItem(json!($item)) )*
+    }
+    // JSON spells it `null`; the library calls it the same thing.
+    (null) => { std::json::null() }
+    // `json!{ "a": 1 }` — the invocation's own braces, already taken off.
+    ($($name: literal : $item: expr),+) => {
+        std::json::object() $( .withMember($name, json!($item)) )*
+    }
+    // `json![1, 2]` — likewise the invocation's own brackets. One element
+    // and no comma is a value, not an array, so this rule needs the comma.
+    ($first: expr, $($rest: expr),*) => {
+        std::json::array().withItem(json!($first)) $( .withItem(json!($rest)) )*
+    }
+    // `json!{}`. The delimiter is gone by the time the rules are tried, so
+    // an empty array has to be written `json!([])`.
+    () => { std::json::object() }
+    // Anything else: a number, a string, a bool, or an expression that gives
+    // one. The parentheses are the macro's own — `into` binds tighter than
+    // arithmetic, so `year + 1` has to be closed off before it converts.
+    ($item: expr) => { ($item) into std::json::Value }
+}

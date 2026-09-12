@@ -1,0 +1,66 @@
+// The parsing and rendering halves, checked without a socket in sight.
+//
+// The server's own loop is exercised by running it: `rune run -- --limit 1`
+// answers one request and stops. What is checked here is everything that
+// happens between the bytes arriving and the bytes going back out.
+
+import std::testing
+import std::io
+import std::collections::vector
+import webserver::http
+import webserver::routes
+
+/// A request built by hand, so a route can be asked what it says without a
+/// connection being involved.
+fn request(method: String, path: String) -> http::Request {
+    http::Request {
+        method: method, path: path, query: "", version: "HTTP/1.1",
+        headers: vector::Vector<String>(), body: ""
+    }
+}
+
+fn main() -> i64 {
+    //=== Text helpers ===================================================//
+    assertEq!(http::lowered("Content-Type"), "content-type")
+    assertEq!(http::trimmed("  hi \r\n"), "hi")
+    assertEq!(http::headerName("Content-Type: text/html"), "Content-Type")
+    assertEq!(http::headerValue("Content-Type: text/html"), "text/html")
+
+    let parts = http::splitOn("GET /a/b HTTP/1.1", ' ')
+    assertEq!(parts.length(), 3)
+    assertEq!(parts.at(1).or(""), "/a/b")
+
+    //=== Routing ========================================================//
+    assertEq!(routes::answer(request("GET", "/health")).status, 200)
+    assertEq!(routes::answer(request("GET", "/nope")).status, 404)
+    assertEq!(routes::answer(request("POST", "/")).status, 405)
+    assertEq!(routes::answer(request("GET", "/")).contentType,
+              "text/html; charset=utf-8")
+
+    //=== Rendering ======================================================//
+    let rendered = http::render(http::text("hi\n")).toString()
+    testing::isTrue("the status line comes first",
+                    rendered.$find("HTTP/1.1 200 OK") == 0)
+    testing::isTrue("the length is the body's",
+                    rendered.$find("Content-Length: 3") > 0)
+    testing::isTrue("the body follows a blank line",
+                    rendered.$find("\r\n\r\nhi\n") > 0)
+
+    let closed = http::render(http::failure(404, "Not Found")).toString()
+    testing::isTrue("an error closes the connection",
+                    closed.$find("Connection: close") > 0)
+
+    //=== Keep-alive =====================================================//
+    var oneOh = request("GET", "/")
+    oneOh.version = "HTTP/1.0"
+    testing::isFalse("HTTP/1.0 closes unless told otherwise",
+                     oneOh.wantsKeepAlive())
+    testing::isTrue("HTTP/1.1 keeps it open", request("GET", "/").wantsKeepAlive())
+
+    var asked = request("GET", "/")
+    asked.headers.push("Connection: close")
+    testing::isFalse("a client may ask for it to close", asked.wantsKeepAlive())
+    assertEq!(asked.header("connection").or(""), "close")
+
+    testing::summary()
+}

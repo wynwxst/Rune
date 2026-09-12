@@ -1,0 +1,86 @@
+// logger 1.0.0 — the lab's build of the logger.
+//
+// The same interface as 0.9.0 from the main registry, plus a `Trace` level
+// under `Debug` and `summary()`. It is here, in a registry of its own, so
+// that a project can say which logger it means: `lab::logger`.
+
+import std::io
+
+/// How important a line is. A logger prints what is at or above its level.
+pub enum Level { Trace, Debug, Info, Warn, Error }
+
+pub fn levelName(l: Level) -> String {
+    match l {
+        Level::Trace => "trace",
+        Level::Debug => "debug",
+        Level::Info => "info",
+        Level::Warn => "warn",
+        Level::Error => "error",
+    }
+}
+
+fn rank(l: Level) -> i64 { l as i64 }
+
+/// A logger: a class, so one can be shared by everything that logs.
+pub class Logger {
+    pub prefix: String
+    pub threshold: Level
+    /// How many lines were printed, and how many were dropped as too quiet.
+    pub printed: i64
+    pub dropped: i64
+    /// Where the lines go: standard error by default.
+    pub toStdout: bool
+
+    fn init(&self, prefix: String, threshold: Level) {
+        self.prefix = prefix
+        self.threshold = threshold
+        self.printed = 0
+        self.dropped = 0
+        self.toStdout = false
+    }
+
+    /// The line, when `level` clears the threshold.
+    pub fn log(&var self, level: Level, message: String) {
+        if rank(level) < rank(self.threshold) {
+            self.dropped += 1
+            return
+        }
+        self.printed += 1
+        let line = "[" + self.prefix + " " + levelName(level) + "] " + message
+        if self.toStdout { io::println(line) } else { io::eprintln(line) }
+    }
+
+    pub fn trace(&var self, message: String) { self.log(Level::Trace, message) }
+    pub fn debug(&var self, message: String) { self.log(Level::Debug, message) }
+    pub fn info(&var self, message: String) { self.log(Level::Info, message) }
+    pub fn warn(&var self, message: String) { self.log(Level::Warn, message) }
+    pub fn error(&var self, message: String) { self.log(Level::Error, message) }
+
+    /// The same logger, one level less talkative.
+    pub fn quieter(&var self) {
+        self.threshold = match self.threshold {
+            Level::Trace => Level::Debug,
+            Level::Debug => Level::Info,
+            Level::Info => Level::Warn,
+            _ => Level::Error,
+        }
+    }
+
+    /// The same logger, one level more talkative.
+    pub fn louder(&var self) {
+        self.threshold = match self.threshold {
+            Level::Error => Level::Warn,
+            Level::Warn => Level::Info,
+            Level::Info => Level::Debug,
+            _ => Level::Trace,
+        }
+    }
+
+    /// What happened so far: `3 printed, 1 dropped`.
+    pub fn summary(&self) -> String {
+        self.printed.$str() + " printed, " + self.dropped.$str() + " dropped"
+    }
+}
+
+/// A logger that prints everything at `Info` and above to standard error.
+pub fn standard(prefix: String) -> Logger { Logger(prefix, Level::Info) }

@@ -1,0 +1,42 @@
+// A spawned thread accounts for exactly what it allocates, and a `Handle` is
+// one live object for as long as it is held — which is what it is.
+// EXPECT: main: 0
+// EXPECT: while the handle is held: 1
+// EXPECT: after the handle goes: 0
+// EXPECT: after three more: 0
+import std::io
+import std::thread
+import std::process
+
+fn work(n: i32) -> i64 {
+    let text = n.$str()
+    text.$length()
+}
+
+fn main() -> i64 {
+    let base = process::liveObjectCount()
+
+    // The same work on this thread balances.
+    { let s = 1.$str() }
+    io::println("main: " + (process::liveObjectCount() - base).$str())
+
+    // A `Handle` is an object, so holding one counts as one.
+    {
+        var h = thread::spawn(work, 1i32)
+        h.join()
+        io::println("while the handle is held: " +
+                    (process::liveObjectCount() - base).$str())
+    }
+    io::println("after the handle goes: " +
+                (process::liveObjectCount() - base).$str())
+
+    {
+        var a = thread::spawn(work, 1i32)
+        var b = thread::spawn(work, 2i32)
+        var c = thread::spawn(work, 3i32)
+        a.join(); b.join(); c.join()
+    }
+    io::println("after three more: " +
+                (process::liveObjectCount() - base).$str())
+    0
+}

@@ -1,0 +1,115 @@
+# The packages this registry holds. Written by `rune pkg server --addPackage`;
+# every release is one entry, and the archive it names is under packages/.
+
+[registry]
+name = "ecosystem"
+format = 1
+updated = "2026-09-11T15:14:04Z"
+
+[[release]]
+name = "geometry"
+version = "0.3.0"
+description = "Points and vectors on the plane: distances, dot products, and the arithmetic between them"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/geometry/geometry-0.3.0.tar"
+sha256 = "60177d7ea83c8a66403eb089a6e29657f99b6804c060b87c75825113995fdd9f"
+size = 6656
+added = "2026-09-11T15:14:04Z"
+dependencies = []
+
+[[release]]
+name = "logger"
+version = "0.9.0"
+description = "A small leveled logger: a prefix, a threshold, and a count of what got through"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/logger/logger-0.9.0.tar"
+sha256 = "2149945ddcd859b902645f724c1607d421536457e68e1a352499cf6f49428c5a"
+size = 7680
+added = "2026-09-11T15:14:04Z"
+dependencies = []
+
+[[release]]
+name = "plot"
+version = "0.5.0"
+description = "Charts made of characters: bars, sparklines and scatter plots for a terminal"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/plot/plot-0.5.0.tar"
+sha256 = "289bfc3d70d3632f4bee46a97fa13052db3eb8788e9f33e2666ef52375da1baf"
+size = 7680
+added = "2026-09-11T15:14:04Z"
+dependencies = ["geometry 0.3", "stats 2.0"]
+
+[[release]]
+name = "report"
+version = "1.2.0"
+description = "Text reports with a title, sections, summary statistics and charts, rendered for a terminal"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/report/report-1.2.0.tar"
+sha256 = "8440a24c5a3580769d48c1db5269bcea2efc0154793a16eeccec3e3020050be6"
+size = 8704
+added = "2026-09-11T15:14:04Z"
+dependencies = ["plot 0.5", "stats 2.1", "units 1.1"]
+
+[[release]]
+name = "shapes"
+version = "1.0.0"
+description = "Circles, rectangles and polygons over geometry: area, perimeter, containment and bounding boxes"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/shapes/shapes-1.0.0.tar"
+sha256 = "c758ff2daf02c231b78165da7770dc62d7c31261077729965da8e440b32df58c"
+size = 9728
+added = "2026-09-11T15:14:04Z"
+dependencies = ["geometry 0.3"]
+
+[[release]]
+name = "stats"
+version = "2.0.0"
+description = "Summary statistics over a slice of numbers: mean, median, spread, extremes"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/stats/stats-2.0.0.tar"
+sha256 = "7bc9df7d737887dc5ad63cb2ce6ec14aae0cc852e5b5a6e2fa0afeedbd2151d6"
+size = 7168
+added = "2026-09-11T15:14:04Z"
+dependencies = []
+
+[[release]]
+name = "stats"
+version = "2.1.0"
+description = "Summary statistics over a slice of numbers: mean, median, spread, extremes, percentiles and histograms"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/stats/stats-2.1.0.tar"
+sha256 = "2d65ac3547a5a218651d339eabf0c00d9bf7c279d3ac7191bc451e6750b67d6e"
+size = 10240
+added = "2026-09-11T15:14:04Z"
+dependencies = []
+
+[[release]]
+name = "units"
+version = "1.0.0"
+description = "Lengths with their unit attached, so a metre is never added to a mile by accident"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/units/units-1.0.0.tar"
+sha256 = "5caa21361fbcbc56514ff1592cf8683971561478a34164f96f19c775873722b0"
+size = 7680
+added = "2026-09-11T15:14:04Z"
+dependencies = []
+
+[[release]]
+name = "units"
+version = "1.1.0"
+description = "Lengths and temperatures with their unit attached, so a metre is never added to a mile by accident"
+authors = ["The Rune examples"]
+license = "MIT"
+archive = "packages/units/units-1.1.0.tar"
+sha256 = "41945ead7d19bbf77cd08c0197c82c0c7c6f9b3d184a9086444817d70140724d"
+size = 9728
+added = "2026-09-11T15:14:04Z"
+dependencies = []

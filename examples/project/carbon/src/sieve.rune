@@ -1,0 +1,31 @@
+@type(Executable)
+import std::*
+class Sieve {
+    var is_prime: [1000:bool] = [true;1000]
+    fn init(self){}
+
+    fn MarkMultiplesNotPrime(&self, p: i64){
+        var n = p * 2
+        while n < 1000 {
+            self.is_prime[n] = false
+            n += p
+        }
+        
+    }
+}
+
+
+fn main() -> i64 {
+    s = Sieve()
+    var no_primes: i64 = 0
+    
+    for n in 2..1000 {
+        if s.is_prime[n] {
+            no_primes += 1
+            io::println(n.display())
+            s.MarkMultiplesNotPrime(n as i64)
+        }
+    }
+    println!("{no_primes} primes counted!")
+    0
+}

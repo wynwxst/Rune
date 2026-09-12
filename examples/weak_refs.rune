@@ -1,0 +1,116 @@
+// Weak references, and the shapes reference counting can and cannot free.
+//
+// At `--safety full` the compiler refuses a class that can reach itself
+// through strong fields, because a ring of those never gets freed. That rule
+// looks at *types*, so it also refuses a list that never actually loops —
+// which is why this file asks for `minimal` and takes responsibility for the
+// shapes below itself.
+//
+//     runec --safety minimal -o weak_refs examples/weak_refs.rune && ./weak_refs
+
+import std::io
+import std::process
+
+//===--------------------------------------------------------------------===//
+// The problem: two strong references in a loop never reach zero
+//===--------------------------------------------------------------------===//
+
+class Parent {
+    pub name: String
+    pub child: Child?          // strong: the parent owns the child
+    fn init(self, name: String) { self.name = name }
+    fn deinit(self) { io::println("  releasing parent " + self.name) }
+}
+
+class Child {
+    pub name: String
+    weak parent: Parent        // weak: the child only observes the parent
+    fn init(self, name: String) { self.name = name }
+    fn deinit(self) { io::println("  releasing child " + self.name) }
+}
+
+/// Reading a weak field always produces an Option, because the target may
+/// already be gone.
+fn parentName(c: Child) -> String {
+    match c.parent {
+        Some(p) => p.name,
+        None => "(no parent)",
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// A doubly linked list: forwards strong, backwards weak
+//===--------------------------------------------------------------------===//
+
+class Node {
+    pub value: i64
+    pub next: Node?
+    weak prev: Node
+    fn init(self, value: i64) { self.value = value }
+    fn deinit(self) { io::println("  releasing node " + self.value.$str()) }
+}
+
+fn buildChain(count: i64) -> Node {
+    let head = Node(0)
+    var tail = head
+    for i in 1..count {
+        let node = Node(i)
+        tail.next = node       // strong forward link
+        node.prev = tail       // weak backward link, so nothing cycles
+        tail = node
+    }
+    head
+}
+
+fn walkForwards(head: Node) -> String {
+    var out = ""
+    var current: Node? = head
+    loop {
+        match current {
+            Some(n) => {
+                out += n.value.$str() + " "
+                current = n.next
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    let start = process::liveObjectCount()
+
+    io::println("-- parent and child --")
+    {
+        let parent = Parent("Ada")
+        let child = Child("Bea")
+        parent.child = child
+        child.parent = parent
+
+        io::println("child's parent = " + parentName(child))
+        io::println("live inside    = " +
+                    (process::liveObjectCount() - start).$str())
+    }
+    io::println("live after     = " + (process::liveObjectCount() - start).$str())
+
+    io::println("")
+    io::println("-- weak references empty out --")
+    let orphan = Child("Cal")
+    {
+        let temporary = Parent("Dee")
+        orphan.parent = temporary
+        io::println("while alive    = " + parentName(orphan))
+    }
+    io::println("after release  = " + parentName(orphan))
+
+    io::println("")
+    io::println("-- doubly linked list --")
+    {
+        let head = buildChain(4)
+        io::println("forwards       = " + walkForwards(head))
+    }
+    io::println("live at end    = " + (process::liveObjectCount() - start).$str())
+    0
+}

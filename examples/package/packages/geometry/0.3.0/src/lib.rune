@@ -1,0 +1,54 @@
+// geometry — the plane, and what can be done on it.
+
+import std::io
+import std::math
+
+/// A position.
+pub struct Point { pub x: f64, pub y: f64 }
+
+/// A displacement: what one point is from another.
+pub struct Vector { pub dx: f64, pub dy: f64 }
+
+pub fn point(x: f64, y: f64) -> Point { Point { x: x, y: y } }
+pub fn vector(dx: f64, dy: f64) -> Vector { Vector { dx: dx, dy: dy } }
+pub fn origin() -> Point { Point { x: 0.0, y: 0.0 } }
+
+/// The straight-line distance between two points.
+pub fn distance(a: Point, b: Point) -> f64 { (b - a).length() }
+
+extend Point {
+    /// This point moved by `v`.
+    pub fn moved(&self, v: Vector) -> Point { Point { x: self.x + v.dx, y: self.y + v.dy } }
+}
+
+extend Vector {
+    pub fn length(&self) -> f64 { math::lengthOf(self.dx, self.dy) }
+    pub fn dot(&self, other: Vector) -> f64 { self.dx * other.dx + self.dy * other.dy }
+    pub fn scaled(&self, k: f64) -> Vector { Vector { dx: self.dx * k, dy: self.dy * k } }
+    /// The same direction, length one. The zero vector stays zero.
+    pub fn unit(&self) -> Vector {
+        let n = self.length()
+        if n == 0.0 { return *self }
+        self.scaled(1.0 / n)
+    }
+    /// The angle from the x axis, in radians.
+    pub fn angle(&self) -> f64 { math::angleOf(self.dy, self.dx) }
+}
+
+/// `b - a` is the vector from `a` to `b`.
+bind operator::sub to Point {
+    fn sub(&self, other: Point) -> Vector { Vector { dx: self.x - other.x, dy: self.y - other.y } }
+}
+bind operator::add to Vector {
+    fn add(&self, other: Vector) -> Vector { Vector { dx: self.dx + other.dx, dy: self.dy + other.dy } }
+}
+bind operator::eq to Point {
+    fn eq(&self, other: Point) -> bool { self.x == other.x && self.y == other.y }
+}
+
+bind io::Display to Point {
+    fn display(&self) -> String { "(" + self.x.$str() + ", " + self.y.$str() + ")" }
+}
+bind io::Display to Vector {
+    fn display(&self) -> String { "<" + self.dx.$str() + ", " + self.dy.$str() + ">" }
+}

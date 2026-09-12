@@ -1,0 +1,10 @@
+// Two borrows of the same value, one of them able to write.
+// EXPECT-ERROR: cannot borrow 'p' while it is borrowed
+struct Point { var x: i64, var y: i64 }
+
+fn main() -> i64 {
+    var p = Point { x: 1, y: 2 }
+    let a = &var p
+    let b = &p
+    a.x + b.y
+}

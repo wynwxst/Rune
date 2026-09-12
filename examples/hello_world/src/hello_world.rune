@@ -1,0 +1,30 @@
+// The greeter itself. A component: it declares no output of its own, so it is
+// compiled into whichever target names it.
+
+/// Greets a person in whichever language you ask for.
+pub class hello {
+    pub name: String
+
+    fn init(self, name: String) { self.name = name }
+
+    @Doc("""
+    Greets in Spanish.
+
+    `Hola` is the everyday greeting, used at any hour and with anyone.
+    """)
+    pub fn spanish(&self) -> String { "Hola, " + self.name }
+
+    @Doc("""
+    Greets in English.
+
+    The most ordinary greeting there is, and the one to reach for when nothing else fits.
+    """)
+    pub fn english(&self) -> String { "Hello, " + self.name }
+
+    /// Greets in French, described by a comment rather than a decorator.
+    pub fn french(&self) -> String { "Bonjour, " + self.name }
+
+    pub fn chinese(&self) -> String { "Nihao, " + self.name }
+    pub fn korean(&self) -> String { "Annyeong, " + self.name }
+    pub fn italian(&self) -> String { "Ciao, " + self.name }
+}

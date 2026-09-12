@@ -1,0 +1,264 @@
+//@type(LLVM)
+// Find out why println macro is dead
+// Make easier llvm-ir target
+// Make Byte alias'd to u8
+// Fix namespace
+// Add @as
+// Add support for extend deinit for structs/enums/traits
+// Allow enums/variables to have same name, means enums must be referred to explicitly
+import site::config::{Config}
+import std::{process,io}
+pub global SOL_SOCKET: i32 = 0xffff
+pub global INET_ADDRSTRLEN: i32 = 16
+pub type socklen_t = u32
+
+/// Address family enum
+pub enum AddressFamily {
+    AF_UNSPEC    = 0,
+    AF_UNIX      = 1,
+    AF_INET      = 2,
+
+    AF_IMPLINK   = 3,
+    AF_PUP       = 4,
+    AF_CHAOS     = 5,
+    AF_NS        = 6,
+    AF_ISO       = 7,
+    AF_OSI       = AF_ISO,
+    AF_ECMA      = 8,
+    AF_DATAKIT   = 9,
+    AF_CCITT     = 10,
+    AF_SNA       = 11,
+    AF_DECnet    = 12,
+    AF_DLI       = 13,
+    AF_LAT       = 14,
+    AF_HYLINK    = 15,
+    AF_APPLETALK = 16,
+    AF_ROUTE     = 17,
+    AF_LINK      = 18,
+
+    pseudo_AF_XTP  = 19,
+    AF_COIP        = 20,
+    AF_CNT         = 21,
+    pseudo_AF_RTIP = 22,
+    AF_IPX         = 23,
+    AF_SIP         = 24,
+    pseudo_AF_PIP  = 25,
+
+    /* 26 is unused */
+
+    AF_NDRV       = 27,
+    AF_ISDN       = 28,
+    AF_E164       = AF_ISDN,
+    pseudo_AF_KEY  = 29,
+
+    AF_INET6      = 30,
+    AF_NATM       = 31,
+    AF_SYSTEM     = 32,
+    AF_NETBIOS    = 33,
+    AF_PPP        = 34,
+    pseudo_AF_HDRCMPLT = 35,
+    AF_RESERVED_36 = 36,
+    AF_IEEE80211  = 37,
+    AF_UTUN       = 38,
+
+    /* 39 is unused */
+
+    AF_VSOCK      = 40,
+    AF_MAX        = 41
+}
+
+/// Socket types
+pub enum SocketTypes {
+    SOCK_STREAM = 1,
+    SOCK_DGRAM = 2,
+    SOCK_RAW = 3,
+    SOCK_RDM = 4,
+    SOCK_SEQPACKET = 5
+}
+
+/// Socket Options
+pub enum SocketOption {
+    SO_DEBUG       = 0x0001,
+    SO_ACCEPTCONN  = 0x0002,
+    SO_REUSEADDR   = 0x0004,
+    SO_KEEPALIVE   = 0x0008,
+    SO_DONTROUTE   = 0x0010,
+    SO_BROADCAST   = 0x0020,
+
+    SO_USELOOPBACK = 0x0040,
+
+    /*
+     * macOS historically has two SO_LINGER values:
+     * 0x0080 for ticks and 0x1080 for seconds.
+     *
+     * For a portable enum, use the POSIX-style seconds value.
+     */
+    SO_LINGER      = 0x1080,
+
+    SO_OOBINLINE   = 0x0100,
+
+    SO_REUSEPORT   = 0x0200,
+    SO_TIMESTAMP   = 0x0400,
+    SO_TIMESTAMP_MONOTONIC = 0x0800,
+
+    SO_ACCEPTFILTER = 0x1000,
+
+    SO_DONTTRUNC   = 0x2000,
+    SO_WANTMORE    = 0x4000,
+    SO_WANTOOBFLAG = 0x8000
+};
+
+pub type sa_family_t = u8
+pub type in_port_t = u16
+pub type in_addr_t = u32
+
+pub struct in_addr {
+    s_addr: in_addr_t
+}
+
+pub struct SocketAddress {
+    sin_len: u8,
+    sin_family: sa_family_t,
+    sin_port: in_port_t,
+    sin_addr: in_addr,
+    sin_zero: [8:u8]
+}
+
+
+
+extern "C" {
+    fn socket(adrfam: AddressFamily, sokty: SocketTypes, flag: i32) -> i32
+    /* int     setsockopt(int, int, int, const void *, socklen_t); */
+    fn setsockopt(fd: i32, set: i32, opt: SocketOption, flag: *var u8, flag_size: socklen_t) -> i32
+
+    /*int     bind(int, const struct sockaddr *, socklen_t) __DARWIN_ALIAS(bind);*/
+    @alias("cbind")
+    fn bind(fd: i32, addr: *var SocketAddress, len: socklen_t) -> i32
+    fn listen(fd: i32, count: i32) -> i32
+
+    fn htons(inp: u16) -> u16
+    /* int		 inet_pton(int, const char *, void *); */
+    fn inet_pton(af: AddressFamily, addr: CString, set: *var in_addr) -> i32
+
+    fn perror(func: CString) -> Never
+    fn close(fd: i32) -> i32
+}
+
+@Doc("Wrapper around perror, prints only if `config.debug` is `true`")
+@safe("Purely wrapper to print errors")
+pub fn Perror(value: CString,cfg: Config) {
+    if cfg.debug {
+        perror(value)
+    }
+    
+}
+
+/// Struct containing filedescriptor.
+///
+/// The descriptor is a `@resource`: `deinit` has to hand it back, and the
+/// compiler says so at `safety = "full"` if it does not. So a `Bound` closes
+/// itself when the binding holding it goes out of scope, and passing one on
+/// hands it over rather than making a second owner of the same descriptor.
+pub struct Bound {
+    @resource server_fd: i32 = -1
+}
+
+extend Bound {
+    @safe("Closing server fd if valid")
+    fn deinit(&var self){
+        if (self.server_fd >= 0){
+            close(self.server_fd)
+            self.server_fd = -1
+        }
+    }
+}
+
+/// Various errors in the `bind` process
+pub enum BindError {
+    NoConfig,
+    InvalidPort,
+    FailedSock,
+    FailedSockOpt,
+    InvalidAddress,
+    FailedBind
+}
+
+@Doc("""
+Binds an address based on configuration. Example usage **after** setting configuration would look like:
+```rune
+import site
+// ...
+site::Bind::bindToAddress(cfg: config)
+```
+
+Note that this needs to be paired with `Listen` as well
+""")
+@safe("")
+pub fn bindToAddress(cfg: Config) -> Result<Bound,BindError> {
+    var reuse = 1i32
+    if cfg.port == 0 && cfg.address.$length() == 0 {
+        return BindError::NoConfig
+    }
+
+    if (cfg.port < 1 || cfg.port > 65535){
+        return BindError::InvalidPort
+    }
+
+    bound = Bound{server_fd: socket(AF_INET,SOCK_STREAM,0)}
+
+    if (bound.server_fd < 0){
+        Perror("socket",cfg)
+        return BindError::FailedSock
+    }
+
+    if setsockopt(
+        bound.server_fd,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        &var reuse as *var u8,
+        std::mem::size_of<i32>() as socklen_t
+        ) < 0 {
+            Perror("setsockopt",cfg)
+            return BindError::FailedSockOpt
+    }
+
+    var server_addr: SocketAddress
+
+    server_addr.sin_family = AF_INET as u8
+    server_addr.sin_port = htons(cfg.port as u16)
+
+    if inet_pton(AF_INET, cfg.address.$cstr(), 
+        &var server_addr.sin_addr as *var in_addr) != 1 {
+            return BindError::InvalidAddress
+    }
+
+    //io::println(format!("{}|{}",bound.server_fd,std::mem::size_of<SocketAddress>() as socklen_t))
+
+    if cbind(bound.server_fd,
+        &var server_addr as *var SocketAddress,
+        std::mem::size_of<SocketAddress>() as socklen_t
+        ) < 0 {
+            Perror("bind",cfg)
+            return BindError::FailedBind
+    }
+    bound
+}
+
+@Doc("Simple wrapper over the C function `listen`")
+@safe("listen is verified to be valid")
+// `bound` is borrowed rather than taken: the caller goes on owning the
+// descriptor, and only one thing may own it.
+pub fn Listen(bound: &Bound, cfg: Config) -> bool {
+    if listen(bound.server_fd, 128) < 0 {
+        Perror("listen",cfg)
+        false
+    } else {
+
+        if cfg.debug {
+            println!("Listening on {}:{}",cfg.address,cfg.port)
+        }
+        
+        true
+    }
+
+}

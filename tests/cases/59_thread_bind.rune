@@ -1,0 +1,8 @@
+// `Send` is an answer, not a promise: binding it by hand would put the whole
+// guarantee behind a line nobody has to justify.
+// EXPECT-ERROR: cannot be bound by hand
+import std::thread
+class Counter { var n: i64
+    fn init(self, n: i64) { self.n = n } }
+bind thread::Send to Counter {}
+fn main() -> i64 { 0 }

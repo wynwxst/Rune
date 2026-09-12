@@ -1,0 +1,501 @@
+@type(Object)
+
+// The Rune runtime, written in Rune.
+//
+// Everything here works on raw memory. No value in this file is reference
+// counted — that would be circular, since this *is* the reference counting —
+// so every type below is a raw pointer or a scalar, and every function is
+// `@export`ed under the name the code generator emits calls to.
+//
+//     runec --no-stdlib -o core.o runetime/core.rune
+
+extern "C" {
+    // Every size here is C's `size_t`, which is `usize` — pointer-sized, not
+    // always 64-bit. Declaring these `u64` passes a doubled argument on a
+    // 32-bit target and misreads what comes back.
+    fn calloc(count: usize, size: usize) -> *var u8
+    fn malloc(size: usize) -> *var u8
+    fn realloc(block: *var u8, size: usize) -> *var u8
+    fn free(block: *var u8)
+    fn memcpy(dst: *var u8, src: *u8, size: usize) -> *var u8
+    fn memset(block: *var u8, value: i32, size: usize) -> *var u8
+    fn memcmp(a: *u8, b: *u8, size: usize) -> i32
+    fn strlen(s: *u8) -> usize
+    fn abort()
+    fn exit(code: i32)
+    fn getenv(name: CString) -> *var u8
+    // The weak table is the one piece of runtime state every thread shares.
+    fn rune_weak_lock()
+    fn rune_weak_unlock()
+}
+
+//===--------------------------------------------------------------------===//
+// Atomics
+//
+// A reference count is shared the moment a program has two threads, so every
+// change to one has to be a single indivisible step. These are the compiler's
+// own; each is one instruction on every target Rune supports.
+//===--------------------------------------------------------------------===//
+
+/// Adds `delta` and hands back the value as it was *before*. That is what
+/// lets exactly one releaser know it was the one that reached zero.
+@intrinsic("atomic_add")
+fn atomicAdd(slot: *var i64, delta: i64) -> i64
+
+@intrinsic("atomic_load")
+fn atomicLoad(slot: *var i64) -> i64
+
+@intrinsic("atomic_store")
+fn atomicStore(slot: *var i64, value: i64)
+
+//===--------------------------------------------------------------------===//
+// Layouts
+//
+// These mirror exactly what the code generator emits, so the offsets are part
+// of the compiler's contract, not an implementation detail of this file.
+//===--------------------------------------------------------------------===//
+
+/// Header on every reference-counted allocation.
+struct Object {
+    refcount: i64
+    typeinfo: *var u8
+}
+
+/// What a class's static metadata looks like.
+struct TypeInfo {
+    name: *var u8
+    size: u64
+    deinit: *var u8         // @cfunction(*var u8), or null
+    base: *var u8           // *TypeInfo of the superclass, or null
+    vtable: *var u8
+    vtableCount: u32
+}
+
+/// A String is an Object with a byte buffer hanging off it.
+struct StringObject {
+    header: Object
+    length: i64
+    capacity: i64
+    data: *var u8
+}
+
+//===--------------------------------------------------------------------===//
+// Reference counting
+//===--------------------------------------------------------------------===//
+
+// A runtime object has no entry point, so nothing runs global initialisers
+// for it: every global here starts as zero, and anything constant is a
+// function instead.
+global var liveObjects: i64 = 0
+
+/// Written over a destroyed object's count when RUNE_DEBUG_RC is set, so a
+/// use-after-free reports instead of corrupting whatever reused the memory.
+fn poison() -> i64 { -2401053088876138496 }
+
+/// 0 = not looked up yet, 1 = off, 2 = on.
+global var debugRC: i32 = 0
+
+@safe("getenv only reads the environment block")
+fn wantsDebugRC() -> bool {
+    if debugRC == 0 {
+        let v = unsafe { getenv("RUNE_DEBUG_RC") }
+        debugRC = if isNull(v) { 1 } else { 2 }
+    }
+    debugRC == 2
+}
+
+@safe("a null pointer compares equal to zero without being read")
+pub fn isNull(p: *var u8) -> bool { unsafe { p as u64 == 0 } }
+
+@export("rune_alloc")
+@safe("calloc returns either a block of at least `size` bytes, or null")
+pub fn alloc(size: u64, info: *var u8) -> *var u8 {
+    var want = size as usize
+    let header = 16 as usize
+    if want < header { want = header }
+    let block = unsafe { calloc(1 as usize, want) }
+    if isNull(block) {
+        reportOutOfMemory()
+        return block
+    }
+    let o = unsafe { block as *var Object }
+    unsafe {
+        o[0].refcount = 1
+        o[0].typeinfo = info
+    }
+    unsafe { atomicAdd(&var liveObjects as *var i64, 1) }
+    block
+}
+
+/// The refcount an object carries when it must never be freed.
+///
+/// A string literal is the case this exists for: one object per literal, made
+/// once and shared by every evaluation. Counting it would be pointless work,
+/// and reporting it at exit would be a lie, so it is neither counted nor
+/// reported.
+fn immortalMark() -> i64 { 4611686018427387904 }   // 1 << 62
+
+@safe("reads the header of an object the caller already has")
+fn isImmortal(o: *var Object) -> bool {
+    unsafe { o[0].refcount } >= immortalMark()
+}
+
+/// Takes an object out of the counting scheme for good: it will not be freed,
+/// and it stops showing up in the live count.
+@export("rune_make_immortal")
+@safe("the object is live when this is called, and never freed afterwards")
+pub fn makeImmortal(obj: *var u8) {
+    if isNull(obj) { return }
+    let o = unsafe { obj as *var Object }
+    if isImmortal(o) { return }
+    unsafe { o[0].refcount = immortalMark() }
+    unsafe { atomicAdd(&var liveObjects as *var i64, -1) }
+}
+
+/// Claims a reference to an object that cannot be reached from another
+/// thread. The compiler emits this by default, and the shared pair below only
+/// for the types that can actually be shared — which is what keeps the common
+/// case at the cost of an ordinary add.
+@export("rune_retain")
+@safe("a null object is returned untouched; anything else carries a header")
+pub fn retain(obj: *var u8) -> *var u8 {
+    if isNull(obj) { return obj }
+    let o = unsafe { obj as *var Object }
+    if isImmortal(o) { return obj }
+    checkAlive(o, "retain")
+    unsafe { o[0].refcount += 1 }
+    obj
+}
+
+/// The same, for an object two threads may hold at once.
+///
+/// `String`, `Arc` and anything marked `@sync` go through this pair; the
+/// compiler picks between them from the static type, so neither ever has to
+/// ask at run time which kind of object it has.
+@export("rune_retain_shared")
+@safe("a null object is returned untouched; anything else carries a header")
+pub fn retainShared(obj: *var u8) -> *var u8 {
+    if isNull(obj) { return obj }
+    let o = unsafe { obj as *var Object }
+    if isImmortal(o) { return obj }
+    checkAlive(o, "retain")
+    unsafe { atomicAdd(&var o[0].refcount as *var i64, 1) }
+    obj
+}
+
+@export("rune_refcount")
+@safe("reads the header of a live object")
+pub fn refcount(obj: *var u8) -> i64 {
+    if isNull(obj) { return 0 }
+    unsafe { atomicLoad(&var (obj as *var Object)[0].refcount as *var i64) }
+}
+
+@export("rune_release")
+@safe("the count reaches zero exactly once, which is when the object is freed")
+pub fn release(obj: *var u8) {
+    if isNull(obj) { return }
+    let o = unsafe { obj as *var Object }
+    if isImmortal(o) { return }
+    checkAlive(o, "release")
+    unsafe { o[0].refcount -= 1 }
+    if unsafe { o[0].refcount } > 0 { return }
+    teardown(obj, o)
+}
+
+/// The shared counterpart of `release`.
+@export("rune_release_shared")
+@safe("the count reaches zero exactly once, which is when the object is freed")
+pub fn releaseShared(obj: *var u8) {
+    if isNull(obj) { return }
+    let o = unsafe { obj as *var Object }
+    if isImmortal(o) { return }
+    checkAlive(o, "release")
+    // The count as it was *before* this release. Exactly one thread sees `1`,
+    // and that thread owns the teardown — reading the count back afterwards
+    // would be a race, because another thread may already have freed it.
+    let before = unsafe { atomicAdd(&var o[0].refcount as *var i64, -1) }
+    if before > 1 { return }
+    teardown(obj, o)
+}
+
+/// Everything that happens once a count reaches zero. Shared by both
+/// releases, so there is one teardown rather than two to keep in step.
+@safe("reached only by the release that took the count to zero")
+fn teardown(obj: *var u8, o: *var Object) {
+
+    // Empty every weak reference aimed at this object before the memory goes.
+    weakClearTarget(obj)
+
+    // The class's own teardown: user `deinit`, then field releases, then the
+    // superclass's. The compiler generated it; this just calls it.
+    let info = unsafe { o[0].typeinfo }
+    if !isNull(info) {
+        let ti = unsafe { info as *var TypeInfo }
+        let d = unsafe { ti[0].deinit }
+        if !isNull(d) {
+            let run = unsafe { d as @cfunction(*var u8) -> () }
+            unsafe { run(obj) }
+        }
+    }
+    unsafe { atomicAdd(&var liveObjects as *var i64, -1) }
+    if wantsDebugRC() {
+        unsafe { o[0].refcount = poison() }
+        return
+    }
+    unsafe { free(obj) }
+}
+
+@export("rune_live_object_count")
+pub fn liveObjectCount() -> i64 {
+    unsafe { atomicLoad(&var liveObjects as *var i64) }
+}
+
+//===--------------------------------------------------------------------===//
+// Foreign I/O
+//===--------------------------------------------------------------------===//
+
+extern "C" {
+    // `write` rather than the FILE* family: no globals, and the same symbol on
+    // every platform (`stderr` is a macro for `__stderrp` on Apple).
+    fn write(fd: i32, data: *u8, size: usize) -> isize
+}
+
+/// Writes a NUL-terminated literal straight to a file descriptor. 2 is
+/// standard error, which is where everything in this file goes.
+@safe("the literal is NUL-terminated, and strlen finds its end")
+fn say(text: CString) {
+    let bytes = unsafe { strlen(text as *u8) }
+    unsafe { write(2, text as *u8, bytes) }
+}
+
+fn reportOutOfMemory() {
+    say("rune: out of memory\n")
+    unsafe { abort() }
+}
+
+/// With RUNE_DEBUG_RC set, a destroyed object keeps its poisoned header so a
+/// later touch reports here rather than corrupting whatever reused it.
+@safe("only reads the header, and only to compare it")
+fn checkAlive(o: *var Object, what: CString) {
+    if !wantsDebugRC() { return }
+    if unsafe { o[0].refcount } != poison() { return }
+    say("\n\x1b[1;31m●\x1b[0m rune: ")
+    say(what)
+    say(" of an already-destroyed object\n")
+    unsafe { abort() }
+}
+
+//===--------------------------------------------------------------------===//
+// Raw memory, for std::mem
+//===--------------------------------------------------------------------===//
+
+@export("rune_raw_alloc")
+@safe("hands back whatever malloc gave, null included")
+pub fn rawAlloc(size: u64) -> *var u8 { unsafe { malloc(size as usize) } }
+
+@export("rune_raw_realloc")
+@safe("realloc accepts a null block and treats it as a fresh allocation")
+pub fn rawRealloc(block: *var u8, size: u64) -> *var u8 {
+    unsafe { realloc(block, size as usize) }
+}
+
+@export("rune_raw_free")
+@safe("free ignores a null block")
+pub fn rawFree(block: *var u8) { unsafe { free(block) } }
+
+@export("rune_raw_copy")
+@safe("the caller sizes both blocks; that is where the invariant lives")
+pub fn rawCopy(dst: *var u8, src: *u8, size: u64) {
+    if size == 0 { return }
+    unsafe { memcpy(dst, src, size as usize) }
+}
+
+@export("rune_raw_zero")
+@safe("the caller sizes the block; that is where the invariant lives")
+pub fn rawZero(block: *var u8, size: u64) {
+    if size == 0 || isNull(block) { return }
+    unsafe { memset(block, 0, size as usize) }
+}
+
+/// True when every one of `size` bytes at `block` is zero. A container uses
+/// this to tell "nothing was ever written here" from a value it stored, which
+/// only means anything for a type whose all-zero pattern is not a value.
+@export("rune_raw_is_zero")
+@safe("reads exactly the bytes the caller sized, and only to compare them")
+pub fn rawIsZero(block: *u8, size: u64) -> bool {
+    if size == 0 { return true }
+    if isNull(unsafe { block as *var u8 }) { return true }
+    var i: u64 = 0
+    while i < size {
+        if unsafe { block[i as i64] } != 0 { return false }
+        i += 1
+    }
+    true
+}
+
+//===--------------------------------------------------------------------===//
+// Weak references
+//
+// A weak field holds a bare pointer. The runtime remembers where those slots
+// are so it can empty them when the object they name goes away — which is
+// what makes reading one safe.
+//===--------------------------------------------------------------------===//
+
+struct WeakSlot {
+    slot: *var u8       // the field's address: a `*var *var u8`
+    next: *var u8       // *WeakSlot
+}
+
+struct WeakEntry {
+    target: *var u8
+    slots: *var u8      // *WeakSlot
+    next: *var u8       // *WeakEntry
+}
+
+fn weakBuckets() -> i64 { 256 }
+global var weakTable: *var u8 = 0 as *var u8   // *[256]*WeakEntry
+
+@safe("the address is only hashed, never read through")
+fn weakBucket(target: *var u8) -> i64 {
+    let bits = unsafe { target as u64 }
+    ((bits >> 4) % (weakBuckets() as u64)) as i64
+}
+
+/// The bucket array, allocated on first use. Callers index it directly, which
+/// is how they both read and write a bucket head.
+@safe("allocates the table once, and hands back its first cell")
+fn weakHeads() -> *var *var u8 {
+    if isNull(weakTable) {
+        let bytes = (weakBuckets() as usize) * 8
+        weakTable = unsafe { calloc(1 as usize, bytes) }
+        if isNull(weakTable) { reportOutOfMemory() }
+    }
+    unsafe { weakTable as *var *var u8 }
+}
+
+@safe("walks a list this file built, whose links it also maintains")
+fn weakFind(target: *var u8) -> *var u8 {
+    let heads = weakHeads()
+    let bucket = weakBucket(target)
+    var e = unsafe { heads[bucket] }
+    while !isNull(e) {
+        let entry = unsafe { e as *var WeakEntry }
+        if unsafe { entry[0].target as u64 } == unsafe { target as u64 } { return e }
+        e = unsafe { entry[0].next }
+    }
+    e
+}
+
+@export("rune_weak_store")
+@safe("the slot belongs to a live object, and the list is this file's own")
+pub fn weakStore(slot: *var u8, target: *var u8) {
+    if isNull(slot) { return }
+    unsafe { rune_weak_lock() }
+    defer unsafe { rune_weak_unlock() }
+    weakUnregister(slot)
+    let cell = unsafe { slot as *var *var u8 }
+    unsafe { cell[0] = target }
+    if isNull(target) { return }
+
+    var e = weakFind(target)
+    if isNull(e) {
+        e = unsafe { calloc(1 as usize, 24 as usize) }
+        if isNull(e) { reportOutOfMemory() }
+        let entry = unsafe { e as *var WeakEntry }
+        let heads = weakHeads()
+        let bucket = weakBucket(target)
+        unsafe {
+            entry[0].target = target
+            entry[0].slots = 0 as *var u8
+            entry[0].next = heads[bucket]
+            heads[bucket] = e
+        }
+    }
+    let entry = unsafe { e as *var WeakEntry }
+    let s = unsafe { calloc(1 as usize, 16 as usize) }
+    if isNull(s) { reportOutOfMemory() }
+    let node = unsafe { s as *var WeakSlot }
+    unsafe {
+        node[0].slot = slot
+        node[0].next = entry[0].slots
+        entry[0].slots = s
+    }
+}
+
+@export("rune_weak_load")
+@safe("a registered slot is emptied before its target is freed")
+pub fn weakLoad(slot: *var u8) -> *var u8 {
+    if isNull(slot) { return slot }
+    unsafe { (slot as *var *var u8)[0] }
+}
+
+@export("rune_weak_clear")
+@safe("removes the slot from the list before its owner goes away")
+pub fn weakClear(slot: *var u8) {
+    unsafe { rune_weak_lock() }
+    defer unsafe { rune_weak_unlock() }
+    weakUnregister(slot)
+}
+
+@safe("unlinks one node from a list this file built")
+fn weakUnregister(slot: *var u8) {
+    if isNull(slot) || isNull(weakTable) { return }
+    let cell = unsafe { slot as *var *var u8 }
+    let target = unsafe { cell[0] }
+    if isNull(target) { return }
+    let e = weakFind(target)
+    if isNull(e) { return }
+    let entry = unsafe { e as *var WeakEntry }
+    var prev = 0 as *var u8
+    var cur = unsafe { entry[0].slots }
+    while !isNull(cur) {
+        let node = unsafe { cur as *var WeakSlot }
+        let next = unsafe { node[0].next }
+        if unsafe { node[0].slot as u64 } == unsafe { slot as u64 } {
+            if isNull(prev) {
+                unsafe { entry[0].slots = next }
+            } else {
+                unsafe { (prev as *var WeakSlot)[0].next = next }
+            }
+            unsafe { free(cur) }
+            return
+        }
+        prev = cur
+        cur = next
+    }
+}
+
+/// Empties every weak reference aimed at `target`, called just before it dies.
+@safe("each slot recorded here belongs to an object that is still alive")
+fn weakClearTarget(target: *var u8) {
+    if isNull(weakTable) { return }
+    unsafe { rune_weak_lock() }
+    defer unsafe { rune_weak_unlock() }
+    let heads = weakHeads()
+    let bucket = weakBucket(target)
+    var prev = 0 as *var u8
+    var e = unsafe { heads[bucket] }
+    while !isNull(e) {
+        let entry = unsafe { e as *var WeakEntry }
+        let next = unsafe { entry[0].next }
+        if unsafe { entry[0].target as u64 } == unsafe { target as u64 } {
+            var node = unsafe { entry[0].slots }
+            while !isNull(node) {
+                let n = unsafe { node as *var WeakSlot }
+                let after = unsafe { n[0].next }
+                unsafe { (n[0].slot as *var *var u8)[0] = 0 as *var u8 }
+                unsafe { free(node) }
+                node = after
+            }
+            if isNull(prev) {
+                unsafe { heads[bucket] = next }
+            } else {
+                unsafe { (prev as *var WeakEntry)[0].next = next }
+            }
+            unsafe { free(e) }
+            return
+        }
+        prev = e
+        e = next
+    }
+}

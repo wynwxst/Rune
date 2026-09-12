@@ -1,0 +1,26 @@
+// `some Shape` across a `.rul` boundary. The importer re-parses the
+// library's source for its signatures, so the opaque type is re-created on
+// this side — and the library's own body fixes what it stands for, exactly
+// as it would in one compilation. A generic instantiated over it here mangles
+// the opaque type by its owner, so the symbol is the same one the library
+// would have produced.
+// LIB: libsome lib/libsome.rune
+// EXPECT: 9.0
+// EXPECT: square 3.0
+// EXPECT: 0
+// EXPECT: 2
+// EXPECT: 4
+// EXPECT: 5.0
+
+import libsome
+import std::io
+import std::collections::vector
+
+fn main() -> i64 {
+    let s = libsome::square(3.0)
+    io::println(s.area())
+    io::println(s)
+    for n in libsome::evens(3) { io::println(n) }
+    io::println(libsome::total(vec!(libsome::square(1.0), libsome::square(2.0))))
+    0
+}

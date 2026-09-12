@@ -1,0 +1,123 @@
+// Borrows, raw pointers, and how the safety system reacts to each.
+//
+//     runec -o pointers examples/pointers.rune && ./pointers
+
+import std::io
+
+//===--------------------------------------------------------------------===//
+// Borrows: `&T` reads, `&var T` writes
+//===--------------------------------------------------------------------===//
+
+struct Counter { value: i64, step: i64 }
+
+/// Reads through a shared borrow. The caller keeps ownership.
+fn peek(c: &Counter) -> i64 {
+    c.value
+}
+
+/// Writes through a mutable borrow. Note the `*` to reach the pointee.
+fn advance(c: &var Counter) {
+    (*c).value += (*c).step
+}
+
+/// A borrow of a scalar. Field and method access auto-dereference, so the
+/// explicit `*` is only needed when the whole value is the target.
+fn doubled(n: &i64) -> i64 {
+    *n * 2
+}
+
+/// Slices are borrows of a run of elements: a pointer plus a length.
+fn sum(values: [i64]) -> i64 {
+    var total = 0
+    for v in values { total += v }
+    total
+}
+
+fn largest(values: [i64]) -> i64? {
+    if values.$isEmpty() { return nil }
+    var best = values[0]
+    for v in values {
+        if v > best { best = v }
+    }
+    best
+}
+
+//===--------------------------------------------------------------------===//
+// Raw pointers: `*T` and `*var T`
+//===--------------------------------------------------------------------===//
+//
+// Raw pointers are not checked, so every use of one is an unsafe operation.
+// A function that performs them is marked `@unsafe`; a wrapper that has
+// actually established the invariant says so with `@safe("reason")`.
+
+@unsafe
+fn writeThrough(target: *var i64, value: i64) {
+    *target = value
+}
+
+@unsafe
+fn readThrough(source: *i64) -> i64 {
+    *source
+}
+
+/// The pointer is taken from a local that is alive for the whole call, so the
+/// dereference inside cannot dangle. That is exactly what `@safe` records.
+@safe("the pointer comes from a local that outlives the call below")
+fn roundTrip(start: i64) -> i64 {
+    var slot = start
+    writeThrough(&var slot as *var i64, start * 2)
+    readThrough(&slot as *i64)
+}
+
+/// An `unsafe { }` block opts out for one expression rather than a whole
+/// function, which keeps the unchecked region as small as possible.
+fn scopedOptOut(start: i64) -> i64 {
+    var slot = start
+    unsafe {
+        writeThrough(&var slot as *var i64, start + 1)
+    }
+    slot
+}
+
+//===--------------------------------------------------------------------===//
+// Classes are already references
+//===--------------------------------------------------------------------===//
+
+class Buffer {
+    pub name: String
+    pub used: i64
+    fn init(self, name: String) { self.name = name }
+}
+
+/// No `&` needed: a class value *is* a reference, and passing one shares the
+/// same instance rather than copying it.
+fn fill(b: Buffer, amount: i64) {
+    b.used += amount
+}
+
+//===--------------------------------------------------------------------===//
+
+fn main() -> i64 {
+    var counter = Counter { value: 10, step: 5 }
+    io::println("peek       = " + peek(&counter).$str())
+    advance(&var counter)
+    advance(&var counter)
+    io::println("advanced   = " + peek(&counter).$str())
+
+    let n = 21
+    io::println("doubled    = " + doubled(&n).$str())
+
+    let values: [5:i64] = [3, 9, 4, 1, 7]
+    io::println("sum        = " + sum(values).$str())
+    io::println("largest    = " + largest(values).or(-1).$str())
+    io::println("empty max  = " + largest([0; 0]).or(-1).$str())
+
+    io::println("roundTrip  = " + roundTrip(21).$str())
+    io::println("scoped     = " + scopedOptOut(41).$str())
+
+    let shared = Buffer("frame")
+    fill(shared, 3)
+    fill(shared, 4)
+    io::println("shared     = " + shared.name + " used " + shared.used.$str())
+    0
+}

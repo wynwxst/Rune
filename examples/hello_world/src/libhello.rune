@@ -1,0 +1,12 @@
+@type(Library)
+// Extends the greeter with two more languages.
+
+import hello_world
+
+/// A greeter that also knows the classical languages.
+pub class ancientHello : hello_world::hello {
+    fn init(self, name: String) { super.init(name) }
+
+    pub fn latin(&self) -> String { "Salve, " + self.name }
+    pub fn greek(&self) -> String { "Chaire, " + self.name }
+}

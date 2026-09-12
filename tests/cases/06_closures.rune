@@ -1,0 +1,26 @@
+// Closures capture by value; functions are first-class values.
+// EXPECT: tripled=42
+// EXPECT: captured=hello, world
+// EXPECT: applied=25
+// EXPECT: composed=10
+import std::io
+
+fn apply(f: @function(i64) -> i64, value: i64) -> i64 { f(value) }
+
+fn square(n: i64) -> i64 { n * n }
+
+fn main() -> i64 {
+    scale = 3
+    triple = ||(n: i64) -> i64 { n * scale }
+    io::println("tripled=" + triple(14).$str())
+
+    greeting = "hello"
+    greet = ||(who: String) -> String { greeting + ", " + who }
+    io::println("captured=" + greet("world"))
+
+    io::println("applied=" + apply(square, 5).$str())
+
+    addOne = ||(n: i64) -> i64 { n + 1 }
+    io::println("composed=" + apply(addOne, apply(square, 3)).$str())
+    0
+}

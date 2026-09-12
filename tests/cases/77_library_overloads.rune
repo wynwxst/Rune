@@ -1,0 +1,19 @@
+// Overloaded bindings survive the library boundary: a `.rul` carries its
+// source, so both versions are read back and the importer chooses between
+// them exactly as the library itself would.
+// LIB: libindex lib/libindex.rune
+// EXPECT: 6
+// EXPECT: 4
+// EXPECT: grid: 3x4
+// EXPECT: *****
+import std::io
+import libindex
+
+fn main() -> i64 {
+    g = libindex::Grid { w: 3, h: 4 }
+    io::println(g[2])
+    io::println(g["h"])
+    io::println(g.describe("grid"))
+    io::println(g.describe(5))
+    0
+}

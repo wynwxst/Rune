@@ -1,0 +1,178 @@
+// A `for` loop drives anything bound to `Iterator`, and asks a `Sequence` for
+// one first. Both marks are in the prelude, because `for` is syntax.
+// EXPECT: 3
+// EXPECT: 2
+// EXPECT: 1
+// EXPECT: --
+// EXPECT: 2
+// EXPECT: 1
+// EXPECT: down still has 2
+// EXPECT: --
+// EXPECT: hi hi
+// EXPECT: 7 7 7
+// EXPECT: 7 7 7
+// EXPECT: --
+// EXPECT: 1 2 3
+// EXPECT: ada grace
+// EXPECT: 1=one 2=two
+// EXPECT: 11 12 21 22
+// EXPECT: h é l l o
+// EXPECT: --
+// EXPECT: 5 4 3
+// EXPECT: 4 3 1
+// EXPECT: 3/3 3/2
+// EXPECT: --
+// EXPECT: 60 2 4
+// SAFETY: full
+import std::io
+import std::text
+import std::collections::vector
+
+//=== A hand-written iterator ==============================================//
+
+struct Countdown { pub remaining: i64 }
+
+bind Iterator to Countdown {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.remaining <= 0 { return nil }
+        self.remaining -= 1
+        self.remaining + 1
+    }
+}
+
+//=== A generic one, and a container that hands it out =====================//
+
+struct Repeat<T> { pub value: T, pub left: i64 }
+
+bind<T> Iterator to Repeat<T> {
+    type Item = T
+    fn next(&var self) -> Self::Item? {
+        if self.left <= 0 { return nil }
+        self.left -= 1
+        self.value
+    }
+}
+
+struct Bag<T> { pub one: T, pub times: i64 }
+
+bind<T> Sequence to Bag<T> {
+    type Iter = Repeat<T>
+    fn iterate(&self) -> Repeat<T> {
+        Repeat<T> { value: self.one, left: self.times }
+    }
+}
+
+//=== Bounds name the two marks like any other =============================//
+
+fn count<S: Sequence>(s: S) -> i64 {
+    var n = 0
+    for _ in s { n += 1 }
+    n
+}
+
+fn drain<I: Iterator>(it: I) -> i64 {
+    var n = 0
+    for _ in it { n += 1 }
+    n
+}
+
+/// Words with single spaces between them, and none at either end.
+class Line {
+    pub text: String
+    fn init(self) { self.text = "" }
+    pub fn add(&var self, word: String) {
+        if self.text != "" { self.text += " " }
+        self.text += word
+    }
+}
+
+fn main() -> i64 {
+    for n in (Countdown { remaining: 3 }) { io::println(n.$str()) }
+    io::println("--")
+
+    // The loop advances a copy: a struct iterator is a value like any other.
+    var down = Countdown { remaining: 2 }
+    for n in down { io::println(n.$str()) }
+    io::println("down still has " + down.remaining.$str())
+    io::println("--")
+
+    var l = Line()
+    for s in (Repeat<String> { value: "hi", left: 2 }) { l.add(s) }
+    io::println(l.text)
+
+    let bag = Bag<i64> { one: 7, times: 3 }
+    l = Line()
+    for n in bag { l.add(n.$str()) }
+    io::println(l.text)
+    l = Line()
+    for n in bag { l.add(n.$str()) }        // a fresh cursor each time
+    io::println(l.text)
+    io::println("--")
+
+    var v = vector::Vector<i64>()
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    l = Line()
+    for n in v { l.add(n.$str()) }
+    io::println(l.text)
+
+    var names = vector::Vector<String>()
+    names.push("ada")
+    names.push("grace")
+    l = Line()
+    for n in names { l.add(n) }
+    io::println(l.text)
+
+    // Destructuring: the loop binding is a pattern.
+    var pairs = vector::Vector<(i64, String)>()
+    pairs.push((1, "one"))
+    pairs.push((2, "two"))
+    l = Line()
+    for (k, s) in pairs { l.add(k.$str() + "=" + s) }
+    io::println(l.text)
+
+    // Two cursors over one container do not interfere.
+    var v2 = vector::Vector<i64>()
+    v2.push(1)
+    v2.push(2)
+    l = Line()
+    for a in v2 { for b in v2 { l.add(a.$str() + b.$str()) } }
+    io::println(l.text)
+
+    l = Line()
+    for c in text::chars("héllo") { l.add(c.$str()) }
+    io::println(l.text)
+    io::println("--")
+
+    l = Line()
+    for n in (Countdown { remaining: 5 }) {
+        l.add(n.$str())
+        if n == 3 { break }
+    }
+    io::println(l.text)
+
+    l = Line()
+    for n in (Countdown { remaining: 4 }) {
+        if n == 2 { continue }
+        l.add(n.$str())
+    }
+    io::println(l.text)
+
+    l = Line()
+    outer: for a in (Countdown { remaining: 3 }) {
+        for b in (Countdown { remaining: 3 }) {
+            if b == 1 { break :outer }
+            l.add(a.$str() + "/" + b.$str())
+        }
+    }
+    io::println(l.text)
+    io::println("--")
+
+    var sum = 0
+    for n in vector::from([10i64, 20i64, 30i64]) { sum += n }
+    io::println(sum.$str() + " " + count(v2).$str() + " " +
+                drain(Countdown { remaining: 4 }).$str())
+    0
+}

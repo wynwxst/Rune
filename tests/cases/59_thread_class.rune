@@ -1,0 +1,12 @@
+// A class is a shared, mutable reference: passing one to a thread hands out a
+// second way to reach the same object, which is the thing this refuses.
+// EXPECT-ERROR: cannot cross between threads
+import std::thread
+class Counter { var n: i64
+    fn init(self, n: i64) { self.n = n } }
+fn bump(c: Counter) -> i64 { c.n += 1; c.n }
+fn main() -> i64 {
+    var h = thread::spawn(bump, Counter(0))
+    h.join()
+    0
+}

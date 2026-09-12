@@ -1,0 +1,68 @@
+// A connection over the loopback: one thread listens, the main thread
+// connects, and each reads a line the other wrote. Port 0 asks the system for
+// a free one, so nothing here can collide with whatever else is running.
+// EXPECT: server got: ping
+// EXPECT: client got: pong
+import std::io
+import std::net
+import std::thread
+import std::time
+import std::process
+
+/// The port the server ended up on, so the client knows where to knock.
+global port: thread::Mutex<i64> = thread::Mutex<i64>(0)
+
+fn serve(unused: i64) -> i64 {
+    var listener = match net::listen("127.0.0.1", 0i32) {
+        Ok(l) => l,
+        Err(e) => { io::eprintln("listen: " + net::describe(e)); return 1 },
+    }
+    var slot = port
+    slot.set(listener.port() as i64)
+
+    match listener.accept() {
+        Ok(c) => {
+            var conn = c
+            var lines = io::BufferedReader<net::TcpStream>(conn)
+            match lines.readLine() {
+                Some(line) => io::println("server got: " + line),
+                None => io::println("server got nothing"),
+            }
+            lines.writeText("pong\n")
+            0
+        },
+        Err(e) => { io::eprintln("accept: " + net::describe(e)); 1 },
+    }
+}
+
+fn main() -> i64 {
+    var server = thread::spawn(serve, 0)
+
+    // Wait for the listener to say where it is.
+    var slot = port
+    var waited = 0
+    while slot.get() == 0 && waited < 200 {
+        thread::sleep(time::milliseconds(10))
+        waited += 1
+    }
+    if slot.get() == 0 {
+        io::eprintln("the server never started")
+        return 1
+    }
+
+    match net::connect("127.0.0.1", slot.get() as i32) {
+        Ok(c) => {
+            var conn = c
+            conn.setNoDelay(true)
+            conn.writeText("ping\n")
+            var lines = io::BufferedReader<net::TcpStream>(conn)
+            match lines.readLine() {
+                Some(line) => io::println("client got: " + line),
+                None => io::println("client got nothing"),
+            }
+        },
+        Err(e) => io::eprintln("connect: " + net::describe(e)),
+    }
+    server.join()
+    0
+}

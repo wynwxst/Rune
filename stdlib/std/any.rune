@@ -1,0 +1,79 @@
+// std::any — a value whose type is only known at run time.
+//
+// `Any` is a builtin type, so nothing here has to be imported: the methods
+// below are inherent to it and are in scope wherever an `Any` is.
+//
+//     let boxed: Any = 42            // anything at all converts, implicitly
+//     boxed.typeName()               // "i64"
+//     boxed is i64                   // true
+//     boxed.get::<i64>()             // Some(42)
+//     boxed.get::<String>()          // nil
+//     boxed.expect::<i64>()          // 42, and aborts if it were not one
+//
+// How it is represented
+// ---------------------
+// An `Any` is one pointer: the value itself when it is a class, and a
+// reference-counted box around it otherwise. Either way the object header in
+// front of it names the type, and that name is what every question here is
+// answered from — so the answer comes from the value, never from a promise
+// the program made about it.
+//
+// Because the descriptor a type gets is one symbol across the whole program,
+// `is`, `holds` and `get` are a pointer comparison in the ordinary case.
+//
+// What it costs
+// -------------
+// Boxing allocates, once, when the value goes in — except for a class, which
+// is already an object and is only retained. Coming back out copies the value
+// and retains whatever it holds. A `Unique<T>` cannot go in at all: an `Any`
+// takes a reference of its own, and a `Unique` has room for one owner.
+//
+// Reaching for `Any` is worth a second thought. When the set of types is
+// closed, an enum says so and `match` makes the compiler check you covered
+// it. When they share behaviour, `dyn Mark` dispatches without asking what
+// the type is. `Any` is for the case where neither is true — a heterogeneous
+// container, a value crossing a boundary that has no type to speak of — and
+// where the check therefore has to happen at run time.
+
+extend Any {
+    /// The fully qualified name of the type the value actually has:
+    /// `"i64"`, `"String"`, `"app::Point"`, `"[3:f64]"`.
+    ///
+    /// Two types share this name only if they are the same type — the module
+    /// path and any generic arguments are part of it.
+    @intrinsic("any_type_name")
+    pub fn typeName(&self) -> String
+
+    /// True when the value inside is a `T`.
+    ///
+    /// For a class this is the `is` question, so a `Dog` also holds as an
+    /// `Animal`. For everything else it is exact: a `u32` does not hold as an
+    /// `i64`, even though one converts to the other.
+    ///
+    ///     if boxed.holds::<String>() { ... }
+    ///
+    /// `boxed is String` is the same test written as an operator.
+    @intrinsic("any_holds")
+    pub fn holds<T>(&self) -> bool
+
+    /// The value as a `T`, or `nil` when it is something else. This is the
+    /// one to reach for: the test and the extraction happen together, so
+    /// there is no way to read the value as a type it does not have.
+    ///
+    ///     match boxed.get::<i64>() {
+    ///         Option::Some(n) => io::println(n * 2),
+    ///         Option::None => io::println("not a number"),
+    ///     }
+    ///
+    ///     let n = boxed.get::<i64>() ?? 0
+    @intrinsic("any_get")
+    pub fn get<T>(&self) -> T?
+
+    /// The value as a `T`. Aborts when it is something else, naming both the
+    /// type that was there and the one that was wanted.
+    ///
+    /// Use it where the type is an invariant of the program rather than
+    /// something to be checked; use `get` everywhere else.
+    @intrinsic("any_expect")
+    pub fn expect<T>(&self) -> T
+}

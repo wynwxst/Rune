@@ -1,0 +1,38 @@
+// Marks bind to builtin types, which is what lets `println` be generic.
+// EXPECT: 42
+// EXPECT: 2.5
+// EXPECT: true
+// EXPECT: text
+// EXPECT: (1.0, 2.0)
+// EXPECT: Point(1.0, 2.0)
+// EXPECT: 7 | (1.0, 2.0)
+// EXPECT: squared 49
+import std::io
+
+struct Point { x: f64, y: f64 }
+
+bind io::Display to Point {
+    fn display(&self) -> String { "(" + self.x.$str() + ", " + self.y.$str() + ")" }
+    fn describe(&self) -> String { "Point" + self.display() }
+}
+
+extend i64 {
+    fn squared(&self) -> i64 { self * self }
+}
+
+fn pair<A: io::Display, B: io::Display>(a: A, b: B) -> String {
+    a.display() + " | " + b.display()
+}
+
+fn main() -> i64 {
+    io::println(42)
+    io::println(2.5)
+    io::println(true)
+    io::println("text")
+    let p = Point { x: 1.0, y: 2.0 }
+    io::println(p)
+    io::debug(p)
+    io::println(pair(7, p))
+    io::println("squared " + 7.squared().$str())
+    0
+}

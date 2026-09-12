@@ -1,0 +1,10 @@
+// A `where` clause is a bound like any other, and is checked at the call the
+// same way. What it adds is a subject that need not be a parameter name.
+// EXPECT-ERROR: is not bound to mark 'Display'
+import std::io
+struct Plain { z: i64 }
+fn show<U>(v: U) -> String where U: io::Display { v.display() }
+fn main() -> i64 {
+    io::println(show(Plain { z: 1 }))
+    0
+}

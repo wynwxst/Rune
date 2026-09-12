@@ -1,0 +1,11 @@
+// `expect` names both types on the way out.
+// EXPECT: before
+// EXPECT-PANIC: this `Any` holds f64, not i64
+import std::io
+
+fn main() -> i64 {
+    let boxed: Any = 3.5
+    io::println("before")
+    io::println(boxed.expect::<i64>().$str())
+    0
+}

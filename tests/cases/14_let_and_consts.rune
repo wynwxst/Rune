@@ -1,0 +1,29 @@
+// `let` states immutability explicitly; array lengths may be constant folded.
+// EXPECT: 6 30
+// EXPECT: 12 4 8
+// EXPECT: cannot reassign: true
+import std::io
+
+let WIDTH: i64 = 4
+let HEIGHT: i64 = 3
+
+fn main() -> i64 {
+    let a = 1
+    let b: i64 = 2
+    var c = 0
+    c = a + b + 3
+    let (x, y) = (10, 20)
+    io::println(c.$str() + " " + (x + y).$str())
+
+    let grid: [WIDTH * HEIGHT:i64] = [0; WIDTH * HEIGHT]
+    var small: [2 + 2:i64]
+    let mask: [1 << 3:u8] = [0; 8]
+    io::println(grid.$length().$str() + " " + small.$length().$str() + " " +
+                mask.$length().$str())
+
+    // `let` bindings really are immutable; `var` is the way to opt in.
+    var mutable = 1
+    mutable = 2
+    io::println("cannot reassign: " + (mutable == 2).$str())
+    0
+}

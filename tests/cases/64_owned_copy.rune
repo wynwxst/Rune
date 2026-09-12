@@ -1,0 +1,15 @@
+// Taking a value that owns a resource out of a field by value would make a
+// second owner of it.
+// EXPECT-ERROR: owns a resource
+import std::io
+
+struct Fd { n: i64 }
+extend Fd { fn deinit(&self) { io::println("close") } }
+struct Server { fd: Fd, port: i64 }
+
+fn takes(f: Fd) -> i64 { f.n }
+
+fn main() -> i64 {
+    let s = Server { fd: Fd { n: 1 }, port: 80 }
+    takes(s.fd)
+}

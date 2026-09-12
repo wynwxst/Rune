@@ -1,0 +1,15 @@
+// Versions that differ in what they take are overloads; versions that take
+// the same things are still two answers to one question, and reported.
+// EXPECT-ERROR: are equally specific
+import std::io
+
+struct P { pub n: i64 }
+mark Show { fn show(&self) -> String }
+
+bind Show to P { fn show(&self) -> String { "a" } }
+bind Show to P { fn show(&self) -> String { "b" } }
+
+fn main() -> i64 {
+    io::println(P { n: 1 }.show())
+    0
+}

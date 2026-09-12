@@ -1,0 +1,24 @@
+// `a != b` is exactly `!(a == b)`, NaN included. NaN compares equal to
+// nothing at all — itself included — which is what makes `v != v` the test
+// for one, and what an *ordered* `!=` would get wrong.
+// EXPECT: true
+// EXPECT: false
+// EXPECT: true
+// EXPECT: false
+// EXPECT: false
+// EXPECT: false
+// EXPECT: true
+import std::io
+import std::math
+
+fn main() -> i64 {
+    let n = math::nan()
+    io::println((n != n).$str())        // true: not equal to itself
+    io::println((n == n).$str())        // false
+    io::println(math::isNan(n).$str())  // which is how this is written
+    io::println((n < 1.0).$str())       // every ordering is false
+    io::println((n > 1.0).$str())
+    io::println((n == 1.0).$str())
+    io::println((n != 1.0).$str())      // ... but inequality is true
+    0
+}

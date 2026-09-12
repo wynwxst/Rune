@@ -1,0 +1,4 @@
+
+pub fn cmp<T>(lhs: T, rhs: T) -> bool {
+    lhs == rhs
+}
