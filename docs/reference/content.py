@@ -17,9 +17,9 @@ def H(text):
     return {"kind": "heading", "text": text}
 
 
-def S(code, mode="decls", title=None, safety=""):
+def S(code, mode="decls", title=None, safety="", memory=""):
     return {"kind": "sample", "code": code, "mode": mode, "title": title,
-            "safety": safety}
+            "safety": safety, "memory": memory}
 
 
 def T(headers, rows, caption=None):
@@ -6998,6 +6998,233 @@ fn main() -> i64 {
               "memory safety", "borrow checker", "ownership", "move",
               "escape analysis", "reference counting elision"]))
 
+# ===========================================================================
+# Single ownership: the Zombie borrow checker
+# ===========================================================================
+SECTIONS.append(Sec(
+    "zombie", "guarantees", "Single ownership without a count",
+    "Reference counting is the default, but it is not the only choice. Built "
+    "with `--memory zombie`, a program keeps no counts at all: every value has "
+    "exactly one owner, is handed on by moving, and is destroyed the moment "
+    "its owner's scope ends. A second, precise borrow checker — Zombie — "
+    "proves that every borrow is finished before the value it points at is "
+    "gone, so nothing dangles and nothing is freed twice.",
+    [
+        H("Turning it on"),
+        P("`--memory zombie` on the command line, or `memory = \"zombie\"` under "
+          "`[build]` in `Rune.toml`, compiles the whole program — and its "
+          "standard library — under single ownership. `--memory arc` (the "
+          "default) is reference counting, unchanged. A library is tagged with "
+          "the mode it was built for, and mixing the two in one program is a "
+          "hard error, because the object code of each assumes its own "
+          "convention."),
+        SH("runec --memory zombie -o app app.rune\n"
+           "rune build            # with memory = \"zombie\" in Rune.toml"),
+        N("Zombie is a whole second memory model, not a stricter setting of the "
+          "first. Its findings are always errors — at every `--safety` level "
+          "— because the generated code has no counts to fall back on: the "
+          "checker's verdict is what makes it sound.", label="A model, not a dial"),
+
+        H("Values move; borrows look"),
+        P("Anything the heap owns — a class, a `String`, a closure, a mark "
+          "object — has one owner. Assigning it, passing it by value, "
+          "returning it or capturing it by value all move it, and the binding "
+          "it came from is empty afterwards. A borrow, `&x` or `&var x`, reaches "
+          "the value without owning it, and takes nothing away."),
+        S('''import std::io
+
+class Greeting {
+    text: String
+    fn init(self, text: String) { self.text = text }
+}
+
+// `&self`: borrows the greeting, so the caller keeps it.
+fn shout(g: &Greeting) -> String { g.text + "!" }
+
+fn main() -> i64 {
+    let hello = Greeting("hello")
+    io::println(shout(&hello))      // borrowed: `hello` is still ours
+    let moved = hello               // moved: `hello` is empty from here
+    io::println(moved.text)
+    0
+}''', mode="run", memory="zombie", title="A value borrowed, then moved"),
+        P("Use a value after it has been moved and the checker stops the build, "
+          "naming where it went."),
+        S('''import std::io
+
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+fn take(b: Box) -> i64 { b.v }
+
+fn main() -> i64 {
+    let x = Box(1)
+    let a = take(x)         // `x` is moved into `take`
+    let b = take(x)         // and cannot be used again
+    io::println((a + b).$str())
+    0
+}''', mode="diag", memory="zombie", title="Use after move"),
+        P("When a copy is what you meant, ask for one. `$clone()` builds a "
+          "second value that owns everything the first did — a fresh "
+          "`String`, a new object with each field cloned in turn."),
+        S('''import std::io
+
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+
+fn main() -> i64 {
+    let a = Box(7)
+    let b = a.$clone()      // an independent copy
+    b.v = 8
+    io::println(a.v.$str() + " " + b.v.$str())   // 7 8
+    0
+}''', mode="run", memory="zombie", title="An explicit copy"),
+
+        H("The checker is precise"),
+        P("A borrow lasts until its last use, not to the end of the block, so a "
+          "value can be borrowed, finished with, and then moved or changed. Two "
+          "borrows of different fields never clash. And a method that takes "
+          "`&var self` may still read the receiver while its own arguments are "
+          "worked out — the receiver is reserved when the call is written "
+          "and becomes exclusive only when it runs — so `self`-reading "
+          "arguments to a mutating method are fine."),
+        S('''import std::io
+
+struct Point { var x: i64, var y: i64 }
+
+class Counter {
+    var n: i64
+    fn init(self) { self.n = 0 }
+    fn count(&self) -> i64 { self.n }
+    fn add(&var self, by: i64) { self.n += by }
+}
+
+fn main() -> i64 {
+    var p = Point { x: 1, y: 2 }
+    let a = &var p.x
+    let b = &var p.y        // a different field: no conflict
+    *a += *b
+    io::println(p.x.$str())              // 3
+
+    var c = Counter()
+    c.add(c.count() + 5)    // reads `self` for the argument, then mutates it
+    io::println(c.count().$str())        // 5
+    0
+}''', mode="run", memory="zombie", title="Last-use, disjoint fields, and two-phase borrows"),
+        P("Taking `&var` and `&` of the same value at once is refused, because a "
+          "writer has to be the only one that can reach it."),
+        S('''struct Point { var x: i64, var y: i64 }
+fn main() -> i64 {
+    var p = Point { x: 1, y: 2 }
+    var a = &var p
+    let b = &p              // a reader while `a` can still write
+    a.x + b.y
+}''', mode="diag", memory="zombie", title="Two borrows, one of them mutable"),
+
+        H("Where a reference is borrowed from"),
+        P("A returned reference has to point somewhere that outlives the call. "
+          "The checker works out where from on its own, from the body, so most "
+          "functions say nothing. When you want the boundary written down — "
+          "to pin a public interface, or where a result could come from more "
+          "than one argument — a `from` clause names the place, as a plain "
+          "path rather than an invented lifetime name."),
+        S('''fn longest(a: &String, b: &String) -> &String from (a, b) {
+    if a.$length() > b.$length() { a } else { b }
+}''', mode="decls", memory="zombie", title="`from` names the places a result may borrow"),
+        G("Type       ::= ... | RefType OriginClause?\n"
+          "OriginClause ::= 'from' ( Place | '(' Place (',' Place)* ')' )\n"
+          "Place      ::= ( 'self' | ident ) ( '.' ident )*   |   'global'"),
+        P("Returning a borrow of a local is refused whatever the annotation: the "
+          "local is gone the moment the function returns."),
+        S('''fn dangling() -> &i64 {
+    let n = 5
+    &n
+}
+fn main() -> i64 { *dangling() }''', mode="diag", memory="zombie",
+          title="A borrow that does not outlive the call"),
+
+        H("Views: which fields a method touches"),
+        P("A `&var self` method that only touches some of the object's fields "
+          "can say so with a view, `{ field, ... }` after the receiver. A caller "
+          "may then hold a borrow of another field across the call. The checker "
+          "infers a view for every method on its own; writing one pins it as "
+          "part of the interface and lets a caller be checked without reading "
+          "the body."),
+        S('''import std::io
+
+class Ledger {
+    var total: i64
+    var note: String
+    fn init(self) { self.total = 0; self.note = "" }
+
+    // Promises to touch `total` and nothing else.
+    fn add(&var self { total }, n: i64) { self.total += n }
+
+    fn label(&self) -> &String from self { &self.note }
+}
+
+fn main() -> i64 {
+    var l = Ledger()
+    let tag = l.label()     // a borrow of `note`
+    l.add(10)               // touches only `total`: allowed alongside `tag`
+    io::println(tag + " " + l.total.$str())
+    0
+}''', mode="run", memory="zombie", title="A view keeps a method out of the fields it does not name"),
+
+        H("Internal references"),
+        P("A field may borrow from another field of the same value, written "
+          "`from self.field`. Such a struct owns everything it needs: it can be "
+          "moved, returned and passed on, because moving it moves the handle to "
+          "the borrowed data, not the data itself. The borrowed-from field has "
+          "to own something on the heap — a `String`, a class — and be "
+          "declared before the field that points into it."),
+        S('''import std::io
+
+struct Message {
+    text: String
+    body: &String from self.text     // points into this value's own `text`
+}
+
+fn parse(text: String) -> Message {
+    let body = &text
+    Message { text: text, body: body }
+}
+
+fn main() -> i64 {
+    let m = parse("hello world")     // moved out of `parse`, borrow and all
+    io::println(m.body.$length().$str())   // 11
+    0
+}''', mode="run", memory="zombie", title="A struct that borrows from itself"),
+
+        H("What single ownership does without"),
+        P("Two things that only make sense with a count are gone. A `weak` field "
+          "cannot tell when its target has been freed without one, so it is an "
+          "error; keep an index or a borrow instead. And a type that exists to "
+          "be shared — `thread::Arc`, `mem::retain`/`release` — is marked "
+          "unavailable, with the alternative named in the message."),
+        S('''class Parent { name: String  fn init(self, n: String) { self.name = n } }
+class Child {
+    weak owner: Parent?
+    fn init(self) { self.owner = nil }
+}
+fn main() -> i64 { 0 }''', mode="diag", memory="zombie",
+          title="`weak` needs a count"),
+        N("Two escape hatches exist for the code the checker cannot vouch for. "
+          "`@zombie(\"reason\")` on a function tells the checker to trust its "
+          "body, the way `@safe` does for an unsafe call; its signature is still "
+          "the contract callers are held to. And `unsafe { }` leaves raw "
+          "pointers untracked, exactly as under reference counting.",
+          label="When you know better"),
+        N("The core of the standard library is being brought over to compile "
+          "under both memory models; until it is, some modules that lean on "
+          "shared containers are checked but not yet clean under `--memory "
+          "zombie`. The language, the checker and the code generator are "
+          "complete — this is library work, tracked in the roadmap.",
+          label="Standard library", tone="warn"),
+    ],
+    keywords=["zombie", "single ownership", "borrow checker", "move", "moved",
+              "from", "lifetime", "view", "internal reference", "clone",
+              "no reference counting", "memory zombie",
+              "two-phase borrow", "dangling", "use after move"]))
+
+
 
 # ===========================================================================
 # Modules and visibility
@@ -10122,6 +10349,8 @@ SECTIONS.append(Sec(
            ["`--runtime-dir <dir>`", "where `libruneruntime.a` is"],
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
            ["`--safety <level>`", "`none`, `minimal` or `full` (default)"],
+           ["`--memory <mode>`", "`arc` (default) or `zombie`; see **Single "
+            "ownership without a count**"],
            ["`-I <dir>`", "add a module search path"],
            ["`-L <dir>` / `-l <name>`", "native library path / library"],
            ["`--module <name>`", "set the module name"],
@@ -10341,6 +10570,7 @@ license = "MIT"
 
 [build]
 safety = "full"                 # none | minimal | full
+memory = "arc"                  # arc | zombie (single ownership, no count)
 emit = "exe"                    # exe | lib | obj | asm | llvm-ir
 optimize = 0                    # 0..3, or use --release
 debug = true
@@ -10432,14 +10662,14 @@ $ rune test"""),
           "once."),
         T(["Command", "Does"],
           [["`rune pkg init [dir] [--name N]`", "make a registry here, or in *dir*, named after it or *N*"],
-           ["`rune pkg server --addPackage <project> [--dir D]`",
+           ["`rune registry --addPackage <project> [--dir D]`",
             "pack a project and add it to the registry's index"],
-           ["`rune pkg server --serve [--port N] [--dir D]`",
+           ["`rune registry --serve [--port N] [--dir D]`",
             "serve the registry over HTTP (default port 7878)"],
-           ["`rune pkg server add <url> [--name N]`",
+           ["`rune registry add <url> [--name N]`",
             "use a registry from this machine — `http://`, `file://`, or a path — under its own name, or the alias *N*"],
-           ["`rune pkg server list`", "the registries this machine uses"],
-           ["`rune pkg server remove <name>`", "stop using one; what came from it stays installed"],
+           ["`rune registry list`", "the registries this machine uses"],
+           ["`rune registry remove <name>`", "stop using one; what came from it stays installed"],
            ["`rune search <regex>`", "packages whose name or description match"],
            ["`rune desc <name>`", "versions, authors, dependencies, where it is from, whether it is installed"],
            ["`rune add <name>[@req]`", "depend on it: install, write `Rune.toml`, pin in `Rune.lock`"],
@@ -10459,9 +10689,9 @@ $ rune test"""),
           "— commit it, and a build on another machine fetches exactly the "
           "same versions, from the cache when it has them."),
         SH("""$ rune pkg init registry --name work
-$ rune pkg server --addPackage ../geometry --dir registry
-$ rune pkg server --serve --dir registry &
-$ rune pkg server add http://localhost:7878
+$ rune registry --addPackage ../geometry --dir registry
+$ rune registry --serve --dir registry &
+$ rune registry add http://localhost:7878
 ● Added registry 'work' at http://localhost:7878 (1 release)
 $ rune search geo
 geometry  v0.2.0     Points and distances
@@ -10473,7 +10703,7 @@ $ rune deps
 app v0.1.0
 └─ geometry v0.2.0 (0.2.0) [work]
 $ rune doc geometry"""),
-        N("A registry added with `rune pkg server add` is not monitored: "
+        N("A registry added with `rune registry add` is not monitored: "
           "nothing reviews what it serves. The archive's checksum is checked "
           "against the index on every install, which catches a corrupted or "
           "tampered file, not a malicious package. Read what you depend on.",
@@ -10483,7 +10713,7 @@ $ rune doc geometry"""),
               "test", "package", "toolchain", "incremental", "parallel",
               "jobs", "cache", "rebuild", "time", "fingerprint", "registry",
               "search", "add", "remove", "update", "deps", "installed",
-              "Rune.lock", "version", "pkg server", "registry name",
+              "Rune.lock", "version", "registry", "registry name",
               "--registry", "rune doc"]))
 
 
@@ -10678,16 +10908,16 @@ dashboard v0.1.0
           "own with `--name`, and the name is how the two are told apart "
           "from then on. Once added, a registry stays added — "
           "`~/.rune/registries.toml` keeps it for every project on the "
-          "machine — until `rune pkg server remove` drops it."),
-        SH("""$ rune pkg server add http://packages.example.org
+          "machine — until `rune registry remove` drops it."),
+        SH("""$ rune registry add http://packages.example.org
 ● Added registry 'example' at http://packages.example.org (214 releases)
-$ rune pkg server add file:///Volumes/shared/lab --name lab
+$ rune registry add file:///Volumes/shared/lab --name lab
 ● Added registry 'lab' at file:///Volumes/shared/lab (3 releases)
   ─  note: it calls itself 'research-lab'; here it is `lab`, as in `rune add lab::<package>`
-$ rune pkg server list
+$ rune registry list
 example  http://packages.example.org    214 releases
 lab      file:///Volumes/shared/lab     3 releases  calls itself 'research-lab'
-$ rune pkg server remove lab
+$ rune registry remove lab
 ● Removed registry 'lab' (file:///Volumes/shared/lab)"""),
         P("Two registries may both have a `logger`. Left to itself, `rune add "
           "logger` takes the newest version any of them offers; "
@@ -10739,10 +10969,10 @@ dashboard v0.1.0
           "`--force` says to replace it."),
         SH("""$ rune pkg init registry --name ecosystem
 ● Created registry 'ecosystem' in /work/registry
-$ rune pkg server --addPackage ../geometry --dir registry
+$ rune registry --addPackage ../geometry --dir registry
 ○ Packing geometry v0.3.0
 ● Added geometry v0.3.0 (7.5 KB, sha256 2980aae944e4…)
-$ rune pkg server --addPackage ../shapes --dir registry
+$ rune registry --addPackage ../shapes --dir registry
 $ cat registry/index.toml
 [registry]
 name = "ecosystem"
@@ -10769,15 +10999,15 @@ dependencies = ["geometry 0.3"]"""),
         P("Because it is files, there are three ways to make it reachable, and "
           "they need nothing in common:"),
         T(["Reach it as", "Set up with", "Good for"],
-          [["a directory", "`rune pkg server add /shared/registry`", "a team on one machine or a shared drive"],
-           ["`file://…`", "`rune pkg server add file:///shared/registry`", "the same, spelled as a URL"],
-           ["`http://host:port`", "`rune pkg server --serve --dir registry --port 7878`, then `rune pkg server add http://host:7878`", "a network; any static web server works too"]],
+          [["a directory", "`rune registry add /shared/registry`", "a team on one machine or a shared drive"],
+           ["`file://…`", "`rune registry add file:///shared/registry`", "the same, spelled as a URL"],
+           ["`http://host:port`", "`rune registry --serve --dir registry --port 7878`, then `rune registry add http://host:7878`", "a network; any static web server works too"]],
           caption="Mirroring a registry is copying the directory."),
-        SH("""$ rune pkg server --serve --dir registry
+        SH("""$ rune registry --serve --dir registry
 ● Serving /work/registry at http://localhost:7878/
-  ─  note: add it to a client with `rune pkg server add http://<this host>:7878`; Ctrl-C stops it
+  ─  note: add it to a client with `rune registry add http://<this host>:7878`; Ctrl-C stops it
 
-$ rune pkg server add http://localhost:7878
+$ rune registry add http://localhost:7878
 ● Added registry 'ecosystem' at http://localhost:7878 (2 releases)
 ● this registry is not monitored: nothing here reviews what it serves, so read a package before you depend on it
 $ rune search 'geo|shape'
@@ -10798,7 +11028,7 @@ shapes    v1.0.0     Circles, rectangles and polygons over geometry: area, perim
           "`packages/stats/2.1.0/` — and rebuilds the whole registry from "
           "them with `python3 ecosystem.py build`."),
         SH("""$ sed -i 's/^version = "2.0.0"/version = "2.1.0"/' stats/Rune.toml
-$ rune pkg server --addPackage stats --dir registry
+$ rune registry --addPackage stats --dir registry
 ● Added stats v2.1.0 (9.0 KB, sha256 d00426eaff5b…)
 $ cd ../dashboard && rune update
 ○ Fetching stats v2.1.0
@@ -10807,7 +11037,7 @@ $ cd ../dashboard && rune update
 ● 1 installed package version is not used by any project; `rune remove` with no arguments uninstalls it"""),
         N("Every install checks the archive against the checksum the index "
           "recorded, which catches a corrupted or tampered file. It does not "
-          "vouch for the package: a registry added with `rune pkg server "
+          "vouch for the package: a registry added with `rune registry "
           "add` is whoever runs it, and nothing reviews what it serves. Read "
           "what you depend on, and keep `Rune.lock` so what you read is what "
           "you build.", label="Trust", tone="warn"),
@@ -10856,7 +11086,7 @@ ecosystem: every package tests clean and both apps run"""),
     keywords=["package", "registry", "publish", "release", "version",
               "semver", "Rune.toml", "Rune.lock", "rune add", "rune pkg",
               "rune search", "dependencies", "ecosystem", "install",
-              "pkg server", "addPackage", "serve", "registry name", "alias",
+              "registry", "addPackage", "serve", "registry name", "alias",
               "--registry", "registry::package", "rune doc", "server list",
               "server remove"]))
 
@@ -11448,6 +11678,7 @@ fn main() -> i64 {
            ["`endian`", "`little` or `big`"],
            ["`target`", "the full triple being built for"],
            ["`safety`", "`none`, `minimal` or `full`"],
+           ["`memory`", "`arc` or `zombie`"],
            ["`opt_level`", "`\"0\"` through `\"3\"`"]]),
         P("Those are compared against a string. Everything else is a name that "
           "is either set or not, written on its own:"),

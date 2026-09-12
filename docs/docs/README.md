@@ -312,6 +312,18 @@ Rune is memory safe by default and lets you turn that off deliberately, per buil
 - [What it buys at run time](Safety_Levels/what_it_buys_at_run_time.md)
 - [What is still your responsibility](Safety_Levels/what_is_still_your_responsibility.md)
 
+## Single ownership without a count
+
+Reference counting is the default, but it is not the only choice. Built with `--memory zombie`, a program keeps no counts at all: every value has exactly one owner, is handed on by moving, and is destroyed the moment its owner's scope ends. A second, precise borrow checker — Zombie — proves that every borrow is finished before the value it points at is gone, so nothing dangles and nothing is freed twice.
+
+- [Turning it on](Single_Ownership_Without_A_Count/turning_it_on.md)
+- [Values move; borrows look](Single_Ownership_Without_A_Count/values_move_borrows_look.md)
+- [The checker is precise](Single_Ownership_Without_A_Count/the_checker_is_precise.md)
+- [Where a reference is borrowed from](Single_Ownership_Without_A_Count/where_a_reference_is_borrowed_from.md)
+- [Views: which fields a method touches](Single_Ownership_Without_A_Count/views_which_fields_a_method_touches.md)
+- [Internal references](Single_Ownership_Without_A_Count/internal_references.md)
+- [What single ownership does without](Single_Ownership_Without_A_Count/what_single_ownership_does_without.md)
+
 ## Modules, imports and visibility
 
 One file is one module. There are no headers and no forward declarations: the compiler resolves a module's own names in any order, and `pub` decides what anyone else can see.

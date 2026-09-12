@@ -357,8 +357,19 @@ escaping borrows as the thing `Unique<T>` and reference counting exist to
 avoid. Rune's position — safety as a dial, ARC as the default — makes the
 third defensible in a way it is not for Rust.
 
-**Verdict: not yet.** But the question should be answered deliberately rather
-than by never asking it.
+**Verdict: answered — as an opt-in second memory model, not a change to the
+default.** `--memory zombie` turns reference counting off entirely and checks
+single ownership with a place-based, flow-sensitive borrow checker (the
+Polonius model: origins are sets of loans, propagated location-sensitively).
+Boundaries are inferred, so most functions need no annotation; a `from` place
+clause, `&var self { fields }` views, and internal references (`&T from
+self.field`) are the written forms, and they name *places*, never invented
+lifetime variables. See the reference's *Single ownership* section and
+`docs/language.md` §16. ARC stays the default and is unchanged; the two do not
+mix in one program. What remains is the standard-library audit — bringing the
+core containers over so they compile cleanly under both models — plus
+`thread::scope` and the runtime-checked fallbacks (`mem::Checked`, `mem::Arena`)
+the diagnostics point to.
 
 ### 13. Concurrency beyond threads
 

@@ -9,6 +9,7 @@
 | `endian` | `little` or `big` |
 | `target` | the full triple being built for |
 | `safety` | `none`, `minimal` or `full` |
+| `memory` | `arc` or `zombie` |
 | `opt_level` | `"0"` through `"3"` |
 
 Those are compared against a string. Everything else is a name that is either set or not, written on its own:

@@ -1914,6 +1914,66 @@ singly linked list would otherwise be rejected. Where a structure should be
 incapable of looping at all, own it through `Unique` and the question does not
 arise.
 
+### `--memory zombie`: single ownership, no count
+
+Reference counting is the default, not the only choice. Built with
+`--memory zombie` (or `memory = "zombie"` under `[build]`), a program keeps no
+counts at all. Every value that the heap owns — a class, a `String`, a closure,
+a mark object — has **exactly one owner**; handing it on *moves* it and leaves
+the source empty, and it is destroyed the moment its owner's scope ends. A
+second, precise borrow checker — **Zombie** — proves that every borrow is gone
+before the value it points at is, so nothing dangles and nothing is freed
+twice. `--memory arc` (the default) is reference counting, unchanged; a library
+records which mode it was built for, and mixing the two is refused.
+
+```rune
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+fn take(b: Box) -> i64 { b.v }
+
+let x = Box(1)
+let a = take(x)         // `x` moves into `take`
+let b = take(x)         // error: 'x' has been moved out of
+```
+
+`&x` and `&var x` borrow without owning, and `$clone()` asks for an independent
+copy where one is meant. Zombie's findings are always errors, at every
+`--safety` level, because the generated code has no count to fall back on: the
+checker's verdict is what makes it sound.
+
+The checker is flow-sensitive and place-based, after the model of Rust's
+Polonius. A borrow lasts until its **last use**, not to the end of the block;
+two borrows of *different* fields never clash; and a `&var self` method may
+read its receiver while its arguments are worked out (`c.add(c.count())`),
+because the receiver is reserved when the call is written and exclusive only
+when it runs. A reference conditionally returned from one branch and rebuilt in
+another — the case NLL rejects — is accepted.
+
+Where a returned reference is borrowed from is **inferred from the body**, so
+most functions carry no annotation. When the boundary should be written down —
+to pin a public interface, or where a result could come from more than one
+argument — a `from` clause names the place, as a plain path rather than an
+invented lifetime name:
+
+```rune
+fn longest(a: &String, b: &String) -> &String from (a, b)   // borrows from either
+fn first(&self) -> &Item from self.items                    // from a field of self
+fn banner() -> &String from global                          // from a global
+```
+
+Two more spellings follow from the same idea. A **view** on a `&var self`
+method, `fn bump(&var self { counter })`, promises it touches only those
+fields, so a caller may hold a borrow of another field across the call; views
+are inferred and written only to pin them. And an **internal reference**,
+`body: &String from self.text`, lets a struct field borrow from another field
+of the same value — the struct still owns everything and can be moved, because
+moving it moves the handle, not the borrowed data.
+
+Two things that need a count are gone under Zombie: a `weak` field (which
+cannot know its target is freed without one) and the types that exist to be
+shared (`thread::Arc`, `mem::retain`/`release`), each reported with the
+alternative to reach for. `@zombie("reason")` trusts a body the checker cannot
+follow, and `unsafe { }` leaves raw pointers untracked, as always.
+
 ---
 
 ## 16b. What a file produces

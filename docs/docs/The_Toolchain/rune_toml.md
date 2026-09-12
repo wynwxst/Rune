@@ -13,6 +13,7 @@ license = "MIT"
 
 [build]
 safety = "full"                 # none | minimal | full
+memory = "arc"                  # arc | zombie (single ownership, no count)
 emit = "exe"                    # exe | lib | obj | asm | llvm-ir
 optimize = 0                    # 0..3, or use --release
 debug = true

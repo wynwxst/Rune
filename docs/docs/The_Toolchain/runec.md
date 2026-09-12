@@ -16,6 +16,7 @@
 | `--runtime-dir <dir>` | where `libruneruntime.a` is |
 | `--link-arg <arg>` | appended to the link command verbatim |
 | `--safety <level>` | `none`, `minimal` or `full` (default) |
+| `--memory <mode>` | `arc` (default) or `zombie`; see **Single ownership without a count** |
 | `-I <dir>` | add a module search path |
 | `-L <dir>` / `-l <name>` | native library path / library |
 | `--module <name>` | set the module name |

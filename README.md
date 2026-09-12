@@ -131,6 +131,7 @@ edition = "2025"
 
 [build]
 safety = "full"        # none | minimal | full
+memory = "arc"         # arc | zombie: reference counting, or single ownership
 emit = "exe"           # exe | lib | obj | asm | llvm-ir
 optimize = 0
 debug = true
@@ -305,6 +306,32 @@ Rune uses **automatic reference counting**, inserted by the compiler.
   closing a ring needs a second reference, and none can be produced.
 
 There is no garbage collector and no runtime pause.
+
+### Single ownership, without a count
+
+Reference counting is the default, not the only choice. Built with
+`--memory zombie` (or `memory = "zombie"` under `[build]`), a program keeps no
+counts at all: every value the heap owns has exactly one owner, is handed on by
+*moving*, and is destroyed when its owner's scope ends. A second, precise
+borrow checker — **Zombie** — proves that every borrow is finished before the
+value it points at is gone, so nothing dangles and nothing is freed twice.
+
+```rune
+let x = Box(1)
+let a = take(x)         // `x` moves into `take`
+take(x)                 // error: 'x' has been moved out of
+```
+
+It is flow-sensitive and place-based, after Rust's Polonius: borrows end at
+last use, disjoint fields never clash, `v.push(v.len())` is fine. Where a
+returned reference borrows from is inferred; write it down with a `from` place
+clause (`-> &String from (a, b)`, `from self.text`, `from global`) only to pin
+an interface. Views (`&var self { field }`) and internal references
+(`body: &String from self.text`) fall out of the same idea. `weak` and the
+shared-only types (`thread::Arc`) are unavailable under Zombie and say so.
+`--memory arc` is reference counting, unchanged, and a library records which
+mode it was built for. See the reference's *Single ownership* section for the
+full story.
 
 ## Safety
 
@@ -605,6 +632,7 @@ runec [options] <input.rune>...
   --check            type-check only
   -O0 -O1 -O2 -O3    optimisation level
   --safety <level>   none | minimal | full
+  --memory <mode>    arc | zombie (reference counting, or the Zombie checker)
   --overflow-checks  trap on integer overflow (the default at -O0)
   --no-overflow-checks
                      wrap instead (the default at -O1 and above)
