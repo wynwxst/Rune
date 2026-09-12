@@ -1,0 +1,11 @@
+// A value cannot be handed on while something still borrows it.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: cannot move 'b' while it is borrowed
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+fn take(b: Box) -> i64 { b.v }
+fn main() -> i64 {
+    let b = Box(1)
+    let r = &b.v
+    let n = take(b)
+    *r + n
+}

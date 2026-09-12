@@ -158,6 +158,9 @@ struct ResolvedTarget {
 struct Options {
   bool Release = false;
   bool Verbose = false;
+  /// `--memory <mode>`, or the root manifest's `[build] memory`. Applies to
+  /// every package in the build: a program is one memory model throughout.
+  std::string Memory = "arc";
   bool CheckOnly = false;
   bool RunAll = false;         ///< `rune run --all`
   /// `--emit <kind>`, or `[build] emit`. When set, this package's own roots
@@ -251,6 +254,7 @@ fs::path buildDir(const Manifest &m, const Options &o) {
 /// Adds the flags a manifest asks for to a `runec` command line.
 void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o) {
   cmd += " --safety " + m.Safety;
+  cmd += " --memory " + o.Memory;
   unsigned opt = o.Release ? std::max(2u, m.OptLevel) : m.OptLevel;
   cmd += " -O" + std::to_string(opt);
   if (m.Debug && !o.Release)
@@ -1858,6 +1862,7 @@ int commandDoc(const Options &opts) {
     std::string cmd = quote(compiler) + " --emit-docs --module " +
                       quote(moduleName);
     cmd += " --safety " + m.Safety;
+    cmd += " --memory " + opts.Memory;
     cmd += " -I " + quote((target / "deps").string());
     if (againstLibrary)
       cmd += " -I " + quote(target.string());
@@ -1998,6 +2003,9 @@ PACKAGES
 
 OPTIONS
     --release            Optimise (-O2) and omit debug information
+    --memory <mode>      arc | zombie: reference counting, or single ownership
+                         proven by the Zombie borrow checker (default: the
+                         manifest's [build] memory, else arc)
     -j, --jobs <n>       Compile at most <n> things at once (default: cores)
     --cfg <name>         Set <name> for `@Config(...)`, on top of [build] cfg
     --target <name>      Build for a [target.<name>] toolchain, or a triple
@@ -2036,6 +2044,7 @@ int main(int argc, char **argv) {
   std::string newName;
   bool wantLib = false;
   bool afterSeparator = false;
+  bool memoryFromFlag = false;
 
   // The package commands take their own flags — `--serve`, `--port`,
   // `--refresh` — so they see the arguments as written, less the few every
@@ -2075,6 +2084,11 @@ int main(int argc, char **argv) {
     }
     if (a == "--") { afterSeparator = true; continue; }
     if (a == "--release") { opts.Release = true; continue; }
+    if (a == "--memory" && i + 1 < argc) {
+      opts.Memory = argv[++i];
+      memoryFromFlag = true;
+      continue;
+    }
     if (a == "-v" || a == "--verbose") { opts.Verbose = true; continue; }
     if (a == "--no-color") { gColor = false; continue; }
     if (a == "--lib") { wantLib = true; continue; }
@@ -2175,6 +2189,13 @@ int main(int argc, char **argv) {
       // command line says otherwise. `[build] emit` works the same way.
       if (opts.TargetName.empty())
         opts.TargetName = root.DefaultTarget;
+      if (!memoryFromFlag)
+        opts.Memory = root.Memory;
+      if (opts.Memory != "arc" && opts.Memory != "zombie") {
+        failLine("unknown `memory` mode: '" + opts.Memory + "'");
+        note("one of arc or zombie");
+        return 1;
+      }
       if (!opts.EmitSet && !root.Emit.empty()) {
         if (!parseEmitKind(root.Emit, opts.Emit)) {
           failLine("unknown `emit` in Rune.toml: '" + root.Emit + "'");

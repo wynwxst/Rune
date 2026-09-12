@@ -118,6 +118,16 @@ public:
   /// True when a bitwise copy is a valid copy (no ARC traffic needed).
   bool isTriviallyCopyable() const { return !isRefCounted(); }
 
+  /// True when a value of this type is a handle to something on the heap
+  /// that stays put when the handle moves: a class, a `String`, a closure, a
+  /// `dyn Mark` or an `Any` box. What such a handle owns is what an internal
+  /// reference (`&T from self.field`) may point into.
+  bool isHeapHandle() const {
+    return K == TypeKind::Class || K == TypeKind::String ||
+           K == TypeKind::Function || K == TypeKind::DynMark ||
+           K == TypeKind::Any;
+  }
+
   /// True when the type contains a generic parameter anywhere inside it.
   bool containsGenericParam() const;
 
@@ -294,6 +304,8 @@ int variantIndexNamed(const Type *t, const char *name);
 /// True when a value of `from` may be used where `to` is expected without an
 /// explicit cast (identity, never-to-anything, and safe widening).
 bool isImplicitlyConvertible(Type *from, Type *to);
+/// True when values of `t` carry a `deinit` somewhere inside.
+bool typeHasDeinit(Type *t);
 
 /// True when `as` may convert between the two (numeric conversions, pointer
 /// casts, enum/integer conversions).

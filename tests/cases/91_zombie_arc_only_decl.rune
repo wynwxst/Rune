@@ -1,0 +1,7 @@
+// A declaration that only makes sense with reference counting says so, and
+// says what to use instead.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: 'Shared' is only available with reference counting
+@zombie_unavailable("share the value through `&` inside `thread::scope`")
+class Shared { v: i64  fn init(self) { self.v = 0 } }
+fn main() -> i64 { let s = Shared(); s.v }

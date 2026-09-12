@@ -1,0 +1,21 @@
+// A `&var self` receiver is reserved while the arguments are evaluated and
+// only becomes exclusive at the call, so `v.push(v.len())` is fine.
+// FLAGS: --memory zombie
+// EXPECT: 3
+import std::io
+
+class Stack {
+    var n: i64
+    fn init(self) { self.n = 0 }
+    fn len(&self) -> i64 { self.n }
+    fn push(&var self, v: i64) { self.n += v }
+}
+
+fn main() -> i64 {
+    var s = Stack()
+    s.push(1)
+    s.push(s.len())
+    s.push(s.len() - s.len() + 1)
+    io::println(s.len().$str())
+    0
+}

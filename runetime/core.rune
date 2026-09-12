@@ -202,6 +202,27 @@ pub fn release(obj: *var u8) {
     teardown(obj, o)
 }
 
+/// Destroys an object that has exactly one owner, which is what every object
+/// has under `--memory zombie`: no count is consulted, the object is simply
+/// torn down. The count is still checked, at `--safety full`, because a
+/// count above one there means something retained behind the checker's
+/// back — a bug worth a loud stop rather than a quiet leak.
+@export("rune_drop")
+@safe("the caller is the object's one owner, which the borrow checker proved")
+pub fn drop(obj: *var u8, checked: bool) {
+    if isNull(obj) { return }
+    let o = unsafe { obj as *var Object }
+    if isImmortal(o) { return }
+    checkAlive(o, "drop")
+    if checked && unsafe { o[0].refcount } != 1 {
+        say("\n\x1b[1;31m●\x1b[0m rune: object dropped while still shared: a ")
+        say("reference count moved behind the borrow checker's back\n")
+        unsafe { abort() }
+    }
+    unsafe { o[0].refcount = 0 }
+    teardown(obj, o)
+}
+
 /// The shared counterpart of `release`.
 @export("rune_release_shared")
 @safe("the count reaches zero exactly once, which is when the object is freed")

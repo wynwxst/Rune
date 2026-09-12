@@ -720,6 +720,7 @@ Type *Sema::checkDeclRef(DeclRefExpr *r, Type *expected) {
   case SymbolKind::Value: {
     r->Resolved = sym->D;
     r->Category = ValueCategory::LValue;
+    checkAvailableUnderZombie(sym->D, r->Range);
     if (auto *v = dyn_cast<VarDecl>(sym->D)) {
       noteCapture(v, r->Range);
       // Once a `uniq` local has been moved out of, the name no longer refers
@@ -921,6 +922,30 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
   }
   if (lt->isError() || rt->isError())
     return Types.errorType();
+
+  // A borrowed number, boolean, character or string takes part in `+`, `==`
+  // and the rest as the value it points at: `*` is read for the program,
+  // since nothing else could be meant. (An overloaded operator on a `&T`
+  // is looked for first — below — so this only applies to the builtins.)
+  auto autoDeref = [&](ExprPtr &side, Type *&t) {
+    if (!t->is(TypeKind::Pointer) || t->isRawPointer() || t->isWeakPointer())
+      return;
+    Type *inner = t->pointee();
+    if (!inner || !(inner->isNumeric() || inner->isBool() ||
+                    inner->is(TypeKind::Char) || inner->is(TypeKind::String)))
+      return;
+    if (lookupMethod(t, binaryOpMarkMethod(b->Op)))
+      return;
+    auto d = std::make_unique<DerefExpr>();
+    d->Range = side->Range;
+    d->Ty = inner;
+    d->Category = ValueCategory::LValue;
+    d->Operand = std::move(side);
+    side = std::move(d);
+    t = inner;
+  };
+  autoDeref(b->LHS, lt);
+  autoDeref(b->RHS, rt);
 
   // Whatever is behind a `some` may well add or compare; the caller is not
   // allowed to know that.
@@ -1692,6 +1717,34 @@ bool Sema::matchCallArguments(CallExpr *c, const std::vector<Param> &params,
   std::vector<Expr *> slots(formalCount, nullptr);
   std::vector<Expr *> extras; // variadic tail
   c->ArgOrder.assign(formalCount, static_cast<unsigned>(-1));
+  // A place handed to a `&T` parameter is borrowed for the call without an
+  // `&` at the call site — the same courtesy a method receiver gets. The
+  // argument is rewritten into the borrow it means, so nothing downstream
+  // has to know.
+  auto autoBorrow = [&](size_t fi, Type *got, Type *want) -> Type * {
+    if (!got || !want || got->isError() || !want->is(TypeKind::Pointer) ||
+        want->isRawPointer() || want->isMutablePointer() ||
+        want->isWeakPointer() || got->is(TypeKind::Pointer))
+      return got;
+    if (!isImplicitlyConvertible(got, want->pointee()) &&
+        got != want->pointee())
+      return got;
+    unsigned ai = fi < c->ArgOrder.size() ? c->ArgOrder[fi]
+                                          : static_cast<unsigned>(-1);
+    if (ai == static_cast<unsigned>(-1) || ai >= c->Args.size() ||
+        c->Args[ai].Value.get() != slots[fi])
+      return got;
+    auto borrow = std::make_unique<BorrowExpr>();
+    borrow->Range = slots[fi]->Range;
+    borrow->IsMutable = false;
+    borrow->Operand = std::move(c->Args[ai].Value);
+    borrow->Ty = Types.pointerTo(got, false, false);
+    borrow->Category = ValueCategory::RValue;
+    c->Args[ai].Value = std::move(borrow);
+    c->Args[ai].AutoBorrow = true;
+    slots[fi] = c->Args[ai].Value.get();
+    return slots[fi]->Ty;
+  };
 
   size_t positional = 0;
   bool sawLabel = false;
@@ -1765,6 +1818,7 @@ bool Sema::matchCallArguments(CallExpr *c, const std::vector<Param> &params,
     Type *want = fi < paramTypes.size() ? paramTypes[fi] : Types.errorType();
     if (slots[fi]) {
       Type *got = checkExpr(slots[fi], want);
+      got = autoBorrow(fi, got, want);
       requireConvertible(slots[fi], got, want,
                          fmt("argument '{}' of '{}'",
                                 fi < formals.size() ? formals[fi]->Name
@@ -2012,6 +2066,7 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
         }
         ref->Resolved = cls;
         c->ConstructsClass = cls;
+        checkAvailableUnderZombie(cls, c->Callee->Range);
         FunctionDecl *init = nullptr;
         for (ClassDecl *k = cls; k && !init; k = k->Super)
           init = k->Init;

@@ -143,7 +143,7 @@ bool evalComparison(const BinaryExpr *b, const ConfigSet &cfg,
     auto d = diags.error(key->Range, "`{}` is not something `@Config` can "
                                      "compare", name);
     d.note("comparable keys are os, arch, family, pointer_width, endian, "
-           "target, safety, opt_level and overflow_checks");
+           "target, safety, memory, opt_level and overflow_checks");
     d.note("a name set with `--cfg` is written on its own, not compared");
     suggest(d, name, cfg);
     d.code(112);
@@ -240,6 +240,7 @@ ConfigSet ConfigSet::forOptions(const CompilerOptions &opts) {
       std::to_string(llvm::Triple::getArchPointerBitWidth(triple.getArch()));
   cfg.Values["endian"] = triple.isLittleEndian() ? "little" : "big";
   cfg.Values["safety"] = safetyName(opts.Safety);
+  cfg.Values["memory"] = memoryModeName(opts.Memory);
   cfg.Values["opt_level"] = std::to_string(opts.OptLevel);
   cfg.Values["overflow_checks"] = opts.overflowChecksEnabled() ? "on" : "off";
 

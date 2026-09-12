@@ -1,0 +1,10 @@
+// A result reached through a raw pointer has no origin the checker can
+// see; the signature has to say.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: returns a borrow but does not say from what
+struct Cell { v: i64 }
+fn peek(c: &Cell) -> &i64 {
+    let p = &c.v as *i64
+    unsafe { &*p }
+}
+fn main() -> i64 { let c = Cell { v: 3 }; *peek(&c) }

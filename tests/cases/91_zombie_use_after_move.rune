@@ -1,0 +1,10 @@
+// Under Zombie a class has one owner: passing it by value moves it.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: 'x' has been moved out of
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+fn take(b: Box) -> i64 { b.v }
+fn main() -> i64 {
+    let x = Box(1)
+    let n = take(x)
+    take(x) + n
+}

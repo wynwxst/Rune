@@ -146,6 +146,7 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
 
   if (const TomlValue *build = doc.get("build")) {
     if (const TomlValue *v = build->find("safety")) out.Safety = v->stringOr("full");
+    if (const TomlValue *v = build->find("memory")) out.Memory = v->stringOr("arc");
     if (const TomlValue *v = build->find("emit")) out.Emit = v->stringOr("");
     if (const TomlValue *v = build->find("optimize"))
       out.OptLevel = static_cast<unsigned>(std::min<int64_t>(3, std::max<int64_t>(0, v->intOr(0))));
@@ -302,6 +303,9 @@ std::string defaultManifestText(const std::string &name, bool isLibrary) {
      << "[build]\n"
      << "# none | minimal | full — how much checking the compiler inserts.\n"
      << "safety = \"full\"\n"
+     << "# arc | zombie — reference counting, or single ownership proven by\n"
+     << "# the Zombie borrow checker with no counting at all.\n"
+     << "memory = \"arc\"\n"
      << "optimize = 0\n"
      << "debug = true\n"
      << "warnings-as-errors = false\n"

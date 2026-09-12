@@ -9,7 +9,7 @@ namespace rune {
 namespace {
 
 constexpr char kMagic[8] = {'R', 'U', 'N', 'E', 'L', 'I', 'B', '\1'};
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 
 void putU32(std::ostream &os, uint32_t v) {
   char b[4] = {static_cast<char>(v & 0xFF), static_cast<char>((v >> 8) & 0xFF),
@@ -62,7 +62,7 @@ std::string publicInterfaceOf(const std::string &source) {
 bool writeLibrary(const std::string &path, const std::string &objectPath,
                   const std::string &moduleName,
                   const std::vector<std::pair<std::string, std::string>> &units,
-                  DiagnosticEngine &diags) {
+                  MemoryMode memory, DiagnosticEngine &diags) {
   std::ifstream obj(objectPath, std::ios::binary);
   if (!obj) {
     diags.fatal("cannot read the object file '{}'", objectPath);
@@ -79,6 +79,7 @@ bool writeLibrary(const std::string &path, const std::string &objectPath,
   }
   out.write(kMagic, sizeof(kMagic));
   putU32(out, kVersion);
+  putU32(out, memory == MemoryMode::Zombie ? 1u : 0u);
   putU32(out, static_cast<uint32_t>(moduleName.size()));
   out.write(moduleName.data(), static_cast<std::streamsize>(moduleName.size()));
   putU32(out, static_cast<uint32_t>(units.size()));
@@ -115,6 +116,12 @@ bool readLibrary(const std::string &path, LibraryContents &out,
         .note("rebuild the dependency with this toolchain");
     return false;
   }
+  uint32_t memory = 0;
+  if (!getU32(in, memory) || memory > 1) {
+    diags.fatal("'{}' is truncated", path);
+    return false;
+  }
+  out.Memory = memory == 1 ? MemoryMode::Zombie : MemoryMode::Arc;
   uint32_t nameLen = 0;
   if (!getU32(in, nameLen) || !getBytes(in, nameLen, out.ModuleName)) {
     diags.fatal("'{}' is truncated", path);

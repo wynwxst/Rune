@@ -1,0 +1,11 @@
+// Once part of a value has moved out, the whole is no longer there to use.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: 'p' cannot be used whole: 'p.a' was moved out of it
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+struct Pair { a: Box, b: Box }
+fn both(p: Pair) -> i64 { p.a.v + p.b.v }
+fn main() -> i64 {
+    let p = Pair { a: Box(1), b: Box(2) }
+    let a = p.a
+    both(p) + a.v
+}

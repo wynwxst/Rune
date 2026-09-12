@@ -1,0 +1,25 @@
+// The checker works out which fields a method touches, so a method that
+// only writes `counter` may be called while `names` is borrowed. Nothing
+// is annotated.
+// FLAGS: --memory zombie
+// EXPECT: 3
+import std::io
+
+class Factory {
+    var counter: i64
+    var names: [3:String]
+    fn init(self) { self.counter = 0; self.names = ["a", "b", "c"] }
+    fn bump(&var self) { self.counter += 1 }
+    fn count(&var self) -> i64 {
+        for n in &self.names {
+            if n.$len() > 0 { self.bump() }
+        }
+        self.counter
+    }
+}
+
+fn main() -> i64 {
+    var f = Factory()
+    io::println(f.count().$str())
+    0
+}

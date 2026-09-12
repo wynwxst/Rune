@@ -40,6 +40,9 @@ enum class BuiltinMethod : uint8_t {
   SequenceLength, SequenceIsEmpty,
   /// `.str()` on any primitive: renders it as a String.
   ToString,
+  /// `.$clone()`: a memberwise copy that owns its own everything — a fresh
+  /// `String`, a new object with each field cloned in turn.
+  Clone,
   /// Integer arithmetic that says what it does when the result does not fit,
   /// whatever the build's overflow setting: `n.$wrappingAdd(m)` wraps,
   /// `n.$saturatingAdd(m)` clamps, and `n.$checkedAdd(m)` is `nil`.
@@ -134,8 +137,38 @@ struct Stmt : Node {
   using Node::Node;
 };
 
+/// A field path written in source: `stats.hits`, or the tail of `self.map`.
+/// Sema resolves it to field indices, one per step.
+struct FieldPathRepr {
+  std::vector<std::string> Path;
+  SourceRange Range;
+  std::vector<unsigned> Resolved;           ///< set by Sema; one index per step
+};
+
+/// One place a `from` clause names: a parameter (with an optional field path
+/// under it), `self.field` inside a type declaration, a local binding, or
+/// `global`. Sema fills in what the root turned out to be.
+struct OriginPlace {
+  std::vector<std::string> Path;            ///< `["self", "map"]`, `["global"]`
+  SourceRange Range;
+  enum class RootKind : uint8_t { Unresolved, Param, SelfField, Local, Global };
+  RootKind Root = RootKind::Unresolved;     ///< set by Sema
+  int ParamIndex = -1;                      ///< `Param`: index into the signature
+  VarDecl *Local = nullptr;                 ///< `Local`: the binding named
+  std::vector<unsigned> FieldPath;          ///< field indices after the root
+};
+
+/// `from place`, `from (a, b.c)`, `from global` — where a reference type is
+/// borrowed from, written after the type. See Zombie.h for what it means.
+struct OriginClause {
+  std::vector<OriginPlace> Places;
+  SourceRange Range;
+};
+
 struct TypeRepr : Node {
   Type *Resolved = nullptr;                 ///< set by Sema
+  /// The `from` clause, when one was written on this type.
+  std::unique_ptr<OriginClause> Origin;
   using Node::Node;
 };
 
@@ -189,6 +222,11 @@ struct Param {
   bool SelfMutable = false;
   bool IsMutable = false;   ///< `var x: T` parameter
   bool IsVariadic = false;  ///< trailing `...` in an extern declaration
+  /// `&var self { counter, log }` / `list: &var List { items }`: the fields
+  /// this function touches through the parameter, as a promise to callers.
+  /// Empty means no view was written; `HasView` tells that apart from `{ }`.
+  std::vector<FieldPathRepr> View;
+  bool HasView = false;
   Type *Ty = nullptr;       ///< set by Sema
   VarDecl *Binding = nullptr;
 };
@@ -198,6 +236,9 @@ struct Argument {
   std::string Label;        ///< empty when positional
   ExprPtr Value;
   SourceRange LabelRange;
+  /// Sema wrapped the argument in a borrow because the parameter is `&T`
+  /// and the argument was a `T`.
+  bool AutoBorrow = false;
 };
 
 //===----------------------------------------------------------------------===//
@@ -242,6 +283,9 @@ struct TupleTypeRepr : TypeRepr {
 /// `@function(arg...) -> ret`; without the arrow, the function returns `()`.
 struct FunctionTypeReprNode : TypeRepr {
   std::vector<TypeReprPtr> Params;
+  /// Parallel to `Params`: the name written before each, or empty. Names
+  /// exist only so a `from` clause on the result can point at one.
+  std::vector<std::string> ParamNames;
   TypeReprPtr ReturnType;
   /// `@cfunction(...)`: a bare pointer rather than a closure.
   bool IsCFunction = false;
@@ -853,6 +897,14 @@ struct VarDecl : ValueDecl {
   /// lifetime already says exactly when it goes. Only set at `--safety full`,
   /// where the pass runs.
   bool NoEscape = false;
+  /// Set by the Zombie borrow checker: this binding is an alias of borrowed
+  /// content (a pattern binding out of `&self`, an element of a borrowed
+  /// array). It holds a copy of the value but owns nothing — never dropped,
+  /// never emptied when read.
+  bool ZombieAlias = false;
+  /// Set by the Zombie borrow checker on a local whose value is handed on
+  /// somewhere, so codegen knows the slot may be empty at scope end.
+  bool ZombieMoved = false;
   /// Slot assigned by CodeGen.
   void *Storage = nullptr;
   VarDecl() : ValueDecl(NodeKind::LocalVar) {}
@@ -878,6 +930,14 @@ struct FunctionDecl : ValueDecl {
   bool IsUnsafe = false;             ///< carries @unsafe
   bool IsSafeJustified = false;      ///< carries @safe("...")
   std::string SafetyReason;
+  /// `@zombie("reason")`: the borrow checker does not read this body. Its
+  /// signature — `from` clauses and views — is still the contract callers
+  /// are checked against.
+  bool IsZombieTrusted = false;
+  std::string ZombieReason;
+  /// Set once the `from` clauses and views in the signature have been
+  /// resolved; several paths assemble a signature and each may ask.
+  bool OriginsResolved = false;
   bool IsExtern = false;
   std::string ExternABI;
   bool IsVariadic = false;
@@ -925,6 +985,11 @@ struct FieldDecl : ValueDecl {
   unsigned Index = 0;
   bool IsMutable = true;
   bool IsWeak = false;
+  /// `body: &String from self.text` — the field borrows from a sibling that
+  /// owns a heap object. Set by Sema (SemaOrigins.cpp); read by the borrow
+  /// checker, and by codegen, which stores such a field as the handle it
+  /// points at rather than as a pointer to a slot.
+  bool InternalRef = false;
   /// For a weak field, the class it refers to. `Ty` is then `Option<that>`,
   /// because reading a weak reference can always come back empty.
   Type *WeakTarget = nullptr;

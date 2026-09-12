@@ -1,0 +1,23 @@
+// Under Zombie a borrow ends at its last use, not at the end of the block.
+// FLAGS: --memory zombie
+// EXPECT: 1
+// EXPECT: 6
+import std::io
+
+class Counter {
+    var n: i64
+    fn init(self, n: i64) { self.n = n }
+    fn add(&var self, v: i64) { self.n += v }
+    fn peek(&self) -> &i64 { &self.n }
+}
+
+fn main() -> i64 {
+    var c = Counter(1)
+    let r = c.peek()          // shared borrow of the counter
+    let seen = *r             // its last use
+    c.add(2)                  // fine: nothing reads through `r` after this
+    io::println(seen.$str())
+    c.add(3)
+    io::println(c.n.$str())
+    0
+}

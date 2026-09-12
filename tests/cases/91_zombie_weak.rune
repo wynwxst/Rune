@@ -1,0 +1,6 @@
+// A weak reference only knows its target is gone through a count.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: `weak` needs a reference count
+class Parent { name: String  fn init(self, n: String) { self.name = n } }
+class Child { weak owner: Parent?  fn init(self) { self.owner = nil } }
+fn main() -> i64 { 0 }

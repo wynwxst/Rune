@@ -1,0 +1,5 @@
+// A `from` clause names a parameter, a field under one, or `global`.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: 'zzz' is not a parameter of this function
+fn nope(a: &i64) -> &i64 from zzz { a }
+fn main() -> i64 { 0 }

@@ -1,0 +1,31 @@
+// Moves are followed path by path: a value moved on one branch, parts moved
+// out of a struct, and a binding filled again after a move.
+// FLAGS: --memory zombie
+// EXPECT: 1
+// EXPECT: 4
+// EXPECT: 5
+// EXPECT: 9
+import std::io
+
+class Box {
+    var v: i64
+    fn init(self, v: i64) { self.v = v }
+}
+struct Pair { a: Box, b: Box }
+
+fn take(b: Box) -> i64 { b.v }
+
+fn main() -> i64 {
+    var x = Box(1)
+    if x.v > 0 {
+        io::println(take(x).$str())     // moved here on this branch only
+    }
+    x = Box(4)                           // and filled again
+    io::println(take(x).$str())
+    let p = Pair { a: Box(5), b: Box(9) }
+    let a = p.a                          // a part moves out
+    io::println(a.v.$str())
+    let b = p.b                          // the other part is still there
+    io::println(b.v.$str())
+    0
+}

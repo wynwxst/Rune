@@ -1,0 +1,11 @@
+// An exclusive borrow is the only way to reach the value while it lasts.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: cannot use 'p.x' while it is borrowed as `&var`
+struct Point { var x: i64, var y: i64 }
+fn main() -> i64 {
+    var p = Point { x: 1, y: 2 }
+    var r = &var p.x
+    let seen = p.x
+    *r += 1
+    seen
+}

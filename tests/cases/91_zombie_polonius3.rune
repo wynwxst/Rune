@@ -1,0 +1,32 @@
+// A reference conditionally returned — Polonius's "problem case #3". NLL
+// rejects the write after the `if`; Zombie follows the paths and accepts it.
+// FLAGS: --memory zombie
+// EXPECT: 7
+// EXPECT: 1
+import std::io
+
+struct Slot { var value: i64 }
+struct Table { var a: Slot, var b: Slot }
+
+fn find(t: &var Table, first: bool) -> &var Slot from t {
+    if first { return &var t.a }
+    &var t.b
+}
+
+fn getOrSet(t: &var Table, first: bool) -> &var Slot from t {
+    let found = find(t, first)
+    if found.value > 0 {
+        return found
+    }
+    t.a.value = 7
+    &var t.a
+}
+
+fn main() -> i64 {
+    var t = Table { a: Slot { value: 0 }, b: Slot { value: 1 } }
+    let s = getOrSet(&var t, true)
+    io::println(s.value.$str())
+    let u = getOrSet(&var t, false)
+    io::println(u.value.$str())
+    0
+}

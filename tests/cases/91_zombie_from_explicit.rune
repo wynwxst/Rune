@@ -1,0 +1,26 @@
+// `from` names where a result borrows from; inference agrees with it.
+// FLAGS: --memory zombie
+// EXPECT: longer
+// EXPECT: 3
+import std::io
+
+fn longest(a: &String, b: &String) -> &String from (a, b) {
+    if a.$len() > b.$len() { a } else { b }
+}
+
+struct Item { v: i64 }
+struct Bag { items: [3:Item], count: i64 }
+
+fn first(b: &Bag) -> &Item from b.items { &b.items[0] }
+
+fn main() -> i64 {
+    let x = "longer"
+    let y = "short"
+    let l = longest(&x, &y)
+    io::println(l)
+    var bag = Bag { items: [Item { v: 3 }, Item { v: 2 }, Item { v: 1 }], count: 3 }
+    let f = first(&bag)
+    bag.count = 4                 // fine: `f` borrows only `bag.items`
+    io::println(f.v.$str())
+    0
+}

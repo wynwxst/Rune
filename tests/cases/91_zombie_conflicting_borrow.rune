@@ -1,0 +1,10 @@
+// A borrow that can write has to be the only one.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: cannot borrow 'p' while 'p' is borrowed as `&var`
+struct Point { var x: i64, var y: i64 }
+fn main() -> i64 {
+    var p = Point { x: 1, y: 2 }
+    var a = &var p
+    let b = &p
+    a.x + b.y
+}

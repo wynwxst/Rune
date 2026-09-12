@@ -542,6 +542,10 @@ const char *CodeGen::releaseFnFor(Type *t) {
 void CodeGen::emitRetain(Value *v, Type *t) {
   if (!v || !t || !t->isRefCounted())
     return;
+  // Under Zombie nothing is ever counted: what would have been a second
+  // reference is a move, and the consumer says so (`takeOwnership`).
+  if (zombie())
+    return;
   switch (t->kind()) {
   case TypeKind::Class:
   case TypeKind::String:
@@ -591,20 +595,39 @@ void CodeGen::emitRetain(Value *v, Type *t) {
 void CodeGen::emitRelease(Value *v, Type *t) {
   if (!v || !t || !t->isRefCounted())
     return;
+  // Under Zombie a release is a drop: the one owner is letting go, so the
+  // object is torn down without a count being consulted. At `--safety full`
+  // the runtime still checks the count is 1, which catches anything that
+  // retained behind the checker's back.
+  auto dropObject = [&](Value *obj) {
+    if (zombie()) {
+      B->CreateCall(runtimeFn("rune_drop", B->getVoidTy(),
+                              {PtrTy, B->getInt1Ty()}),
+                    {obj, B->getInt1(Opts.Safety == SafetyLevel::Full)});
+    } else {
+      B->CreateCall(runtimeFn(releaseFnFor(t), B->getVoidTy(), {PtrTy}),
+                    {obj});
+    }
+  };
   switch (t->kind()) {
   case TypeKind::Class:
   case TypeKind::String:
   case TypeKind::Any:
-    B->CreateCall(runtimeFn(releaseFnFor(t), B->getVoidTy(), {PtrTy}), {v});
+    dropObject(v);
     break;
   case TypeKind::Function: {
     Value *env = B->CreateExtractValue(v, 1, "env");
-    B->CreateCall(runtimeFn("rune_release", B->getVoidTy(), {PtrTy}), {env});
+    if (zombie())
+      B->CreateCall(runtimeFn("rune_drop", B->getVoidTy(),
+                              {PtrTy, B->getInt1Ty()}),
+                    {env, B->getInt1(Opts.Safety == SafetyLevel::Full)});
+    else
+      B->CreateCall(runtimeFn("rune_release", B->getVoidTy(), {PtrTy}), {env});
     break;
   }
   case TypeKind::DynMark: {
     Value *object = B->CreateExtractValue(v, 0, "dyn.object");
-    B->CreateCall(runtimeFn(releaseFnFor(t), B->getVoidTy(), {PtrTy}), {object});
+    dropObject(object);
     break;
   }
   case TypeKind::Tuple: {
@@ -1344,7 +1367,267 @@ Value *CodeGen::track(Value *v, Type *t) {
   entry.CreateStore(Constant::getNullValue(ty), slot);
   B->CreateStore(v, slot);
   fs().Temps.push_back({slot, t});
+  if (zombie())
+    fs().TempOf[v] = slot;
   return v;
+}
+
+//===----------------------------------------------------------------------===//
+// Cloning
+//===----------------------------------------------------------------------===//
+
+Value *CodeGen::emitClone(Value *v, Type *t) {
+  if (!v || !t)
+    return v;
+  switch (t->kind()) {
+  case TypeKind::String:
+    return B->CreateCall(runtimeFn("rune_string_copy", PtrTy, {PtrTy}), {v},
+                         "clone");
+  case TypeKind::Tuple: {
+    Value *out = UndefValue::get(lower(t));
+    const auto &elems = t->tupleElements();
+    for (unsigned i = 0; i < elems.size(); ++i)
+      out = B->CreateInsertValue(
+          out, emitClone(B->CreateExtractValue(v, i), elems[i]), i);
+    return out;
+  }
+  case TypeKind::Struct: {
+    Value *out = UndefValue::get(lower(t));
+    auto fields = allFieldsOf(t->nominal());
+    for (unsigned i = 0; i < fields.size(); ++i)
+      out = B->CreateInsertValue(
+          out, emitClone(B->CreateExtractValue(v, i), fields[i]->Ty), i);
+    return out;
+  }
+  case TypeKind::Array: {
+    Value *out = UndefValue::get(lower(t));
+    for (uint64_t i = 0; i < t->arraySize(); ++i)
+      out = B->CreateInsertValue(
+          out,
+          emitClone(B->CreateExtractValue(v, static_cast<unsigned>(i)),
+                    t->element()),
+          static_cast<unsigned>(i));
+    return out;
+  }
+  case TypeKind::Class:
+  case TypeKind::Enum:
+    return B->CreateCall(cloneFnFor(t), {v}, "clone");
+  default:
+    return v; // trivially copyable
+  }
+}
+
+Function *CodeGen::cloneFnFor(Type *t) {
+  auto it = CloneFns.find(t);
+  if (it != CloneFns.end())
+    return it->second;
+  NominalDecl *nd = t->nominal();
+  std::string symbol = typeSymbolFor(nd);
+  llvm::Type *ty = lower(t);
+  auto *ft = FunctionType::get(ty, {ty}, false);
+  auto *f = Function::Create(ft, GlobalValue::LinkOnceODRLinkage,
+                             "rune.clone." + symbol, *M);
+  CloneFns[t] = f;
+
+  auto *saveBB = B->GetInsertBlock();
+  auto saveIt = saveBB ? B->GetInsertPoint() : BasicBlock::iterator();
+  FunctionState st;
+  st.Fn = f;
+  st.ReturnType = t;
+  FnStack.push_back(st);
+  fs().Scopes.push_back(LexicalScope{});
+  auto *entry = BasicBlock::Create(*Ctx, "entry", f);
+  B->SetInsertPoint(entry);
+  Value *src = f->getArg(0);
+
+  if (auto *c = dyn_cast<ClassDecl>(static_cast<Decl *>(nd))) {
+    // A fresh object of the same class, every field cloned in turn.
+    StructType *layout = layoutOf(nd, t);
+    GlobalVariable *info = emitTypeInfo(nd);
+    uint64_t size = M->getDataLayout().getTypeAllocSize(layout).getFixedValue();
+    Value *obj = B->CreateCall(
+        runtimeFn("rune_alloc", PtrTy, {B->getInt64Ty(), PtrTy}),
+        {ConstantInt::get(B->getInt64Ty(), size), info});
+    (void)c;
+    auto fields = allFieldsOf(nd);
+    for (unsigned i = 0; i < fields.size(); ++i) {
+      Type *ft2 = fields[i]->Ty;
+      Value *from = B->CreateLoad(lower(ft2),
+                                  B->CreateStructGEP(layout, src, 1 + i));
+      B->CreateStore(emitClone(from, ft2),
+                     B->CreateStructGEP(layout, obj, 1 + i));
+    }
+    B->CreateRet(obj);
+  } else {
+    // An enum: copy the tag, then clone the active variant's payload.
+    auto *e = cast<EnumDecl>(static_cast<Decl *>(nd));
+    StructType *layout = layoutOf(nd, t);
+    Value *tmp = createEntryAlloca(layout, "enum.src");
+    B->CreateStore(src, tmp);
+    Value *out = createEntryAlloca(layout, "enum.clone");
+    B->CreateStore(src, out); // tag and bits; payload fields are redone below
+    if (layout->getNumElements() >= 2) {
+      Value *tag = B->CreateLoad(B->getInt32Ty(),
+                                 B->CreateStructGEP(layout, tmp, 0));
+      auto *doneBB = BasicBlock::Create(*Ctx, "clone.done", f);
+      SwitchInst *sw = B->CreateSwitch(
+          tag, doneBB, static_cast<unsigned>(e->Variants.size()));
+      for (unsigned i = 0; i < e->Variants.size(); ++i) {
+        const auto &variant = e->Variants[i];
+        std::vector<Type *> payloadTypes;
+        for (const auto &tt : variant->TupleTypes)
+          payloadTypes.push_back(tt->Resolved);
+        for (const auto &fd : variant->Fields)
+          payloadTypes.push_back(fd->Ty);
+        bool any = false;
+        for (Type *pt : payloadTypes)
+          if (pt && pt->isRefCounted())
+            any = true;
+        if (!any)
+          continue;
+        auto *bb = BasicBlock::Create(*Ctx, "clone." + variant->Name, f);
+        sw->addCase(B->getInt32(static_cast<uint32_t>(variant->Value)), bb);
+        B->SetInsertPoint(bb);
+        llvm::Type *pt = variantPayloadType(e, i);
+        Value *srcPayload = B->CreateStructGEP(layout, tmp, 1);
+        Value *dstPayload = B->CreateStructGEP(layout, out, 1);
+        for (unsigned j = 0; j < payloadTypes.size(); ++j) {
+          Type *ft2 = payloadTypes[j];
+          if (!ft2 || !ft2->isRefCounted())
+            continue;
+          Value *from = B->CreateLoad(lower(ft2),
+                                      B->CreateStructGEP(pt, srcPayload, j));
+          B->CreateStore(emitClone(from, ft2),
+                         B->CreateStructGEP(pt, dstPayload, j));
+        }
+        B->CreateBr(doneBB);
+      }
+      B->SetInsertPoint(doneBB);
+    }
+    B->CreateRet(B->CreateLoad(layout, out));
+  }
+  fs().Scopes.pop_back();
+  FnStack.pop_back();
+  if (saveBB)
+    B->SetInsertPoint(saveBB, saveIt);
+  return f;
+}
+
+//===----------------------------------------------------------------------===//
+// Ownership under Zombie
+//===----------------------------------------------------------------------===//
+
+void CodeGen::adopt(Value *v) {
+  auto it = fs().TempOf.find(v);
+  if (it == fs().TempOf.end())
+    return;
+  // The statement's cleanup will find nothing in the slot.
+  Value *slot = it->second;
+  llvm::Type *ty = cast<AllocaInst>(slot)->getAllocatedType();
+  B->CreateStore(Constant::getNullValue(ty), slot);
+  fs().TempOf.erase(it);
+}
+
+Expr *CodeGen::movedPlaceOf(Expr *e) {
+  while (e) {
+    switch (e->Kind) {
+    case NodeKind::DeclRef:
+    case NodeKind::SelfRef:
+    case NodeKind::Member:
+    case NodeKind::Index:
+    case NodeKind::Deref:
+      // A field, an element or a name: a place, unless it is really a call
+      // (an overloaded `[]` or `*`, a method used as a value).
+      if (auto *i = dyn_cast<IndexExpr>(e))
+        if (i->OverloadResolved || isa<RangeExpr>(i->Index.get()))
+          return nullptr;
+      if (auto *d = dyn_cast<DerefExpr>(e))
+        if (d->OverloadResolved)
+          return nullptr;
+      if (auto *m = dyn_cast<MemberExpr>(e))
+        if (m->FieldIndex < 0 && !m->IsTupleIndex)
+          return nullptr;
+      if (auto *r = dyn_cast<DeclRefExpr>(e))
+        if (!r->Resolved || (!isa<VarDecl>(r->Resolved) &&
+                             !isa<GlobalVarDecl>(r->Resolved)))
+          return nullptr;
+      return e;
+    case NodeKind::Cast: {
+      auto *c = cast<CastExpr>(e);
+      // A class upcast reads the same handle; a numeric cast is a fresh
+      // value and a raw-pointer cast owns nothing.
+      if (c->Ty && c->Ty->isRefCounted() && c->Operand->Ty &&
+          c->Operand->Ty->isRefCounted()) {
+        e = c->Operand.get();
+        continue;
+      }
+      return nullptr;
+    }
+    case NodeKind::Move:
+      e = cast<MoveExpr>(e)->Operand.get();
+      continue;
+    case NodeKind::UnsafeBlock: {
+      auto *u = cast<UnsafeBlockExpr>(e);
+      if (u->Body && u->Body->Stmts.empty() && u->Body->Tail) {
+        e = u->Body->Tail.get();
+        continue;
+      }
+      return nullptr;
+    }
+    default:
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+void CodeGen::emptyPlace(Expr *e, Type *t) {
+  if (!e || !t)
+    return;
+  // A binding that only aliases borrowed content owns nothing to give up.
+  if (auto *r = dyn_cast<DeclRefExpr>(e))
+    if (auto *v = dyn_cast<VarDecl>(r->Resolved)) {
+      if (v->ZombieAlias)
+        return;
+      // A value with a `deinit` has no empty state: its slot carries a flag
+      // saying whether it still owns anything.
+      if (Value *flag = liveFlagFor(v)) {
+        B->CreateStore(B->getFalse(), flag);
+        if (!t->isRefCounted())
+          return;
+      }
+    }
+  if (auto *sr = dyn_cast<SelfExpr>(e))
+    if (sr->Binding && sr->Binding->ZombieAlias)
+      return;
+  if (!t->isRefCounted())
+    return;
+  Value *addr = emitLValue(e);
+  if (!addr)
+    return;
+  B->CreateStore(Constant::getNullValue(lower(t)), addr);
+}
+
+void CodeGen::takeOwnership(Expr *e, Value *v, Type *t) {
+  if (!zombie()) {
+    emitRetain(v, t);
+    return;
+  }
+  if (!v || !t)
+    return;
+  if (Expr *place = movedPlaceOf(e)) {
+    emptyPlace(place, t);
+    return;
+  }
+  adopt(v);
+}
+
+bool CodeGen::handleBorrow(Type *t) const {
+  // In both memory models: a shared borrow of an object is the object.
+  // Only a `&var` names the slot, since it may put a new object there.
+  return t && t->is(TypeKind::Pointer) && !t->isRawPointer() &&
+         !t->isMutablePointer() && !t->isWeakPointer() && t->pointee() &&
+         t->pointee()->isHeapHandle();
 }
 
 void CodeGen::emitStatementCleanup(bool consume) {
@@ -1638,14 +1921,17 @@ Value *CodeGen::declareLocalSlot(VarDecl *v, const std::string &name) {
   // with a destructor needs one — everything else is either copied, in which
   // case nothing is lost, or reference counted, where the count is the answer.
   Value *liveFlag = nullptr;
-  if (v->MovedSomewhere && hasValueDeinit(v->Ty)) {
+  if ((v->MovedSomewhere || (zombie() && v->ZombieMoved)) &&
+      hasValueDeinit(v->Ty)) {
     // Zeroed in the entry block for the same reason: the flag is read
     // wherever the scope ends, including on a path that never reached the
     // declaration. False there means "owns nothing yet", which is right.
     liveFlag = createEntryAllocaZeroed(B->getInt1Ty(), name + ".owns");
     fs().LiveFlags[v] = liveFlag;
   }
-  if (!fs().Scopes.empty())
+  // An alias of borrowed content owns nothing: the scope has nothing to
+  // destroy for it.
+  if (!fs().Scopes.empty() && !(zombie() && v->ZombieAlias))
     fs().Scopes.back().Locals.push_back({slot, v->Ty, liveFlag});
   return slot;
 }
@@ -1753,6 +2039,19 @@ Value *CodeGen::coerce(Value *v, Type *from, Type *to) {
     return slice;
   }
 
+  // A borrow of something that copies freely, where the value is wanted:
+  // read through it.
+  if (from->is(TypeKind::Pointer) && !from->isRawPointer() && from->pointee() &&
+      !to->is(TypeKind::Pointer) && !from->pointee()->isRefCounted() &&
+      !handleBorrow(from)) {
+    Value *loaded = B->CreateLoad(lower(from->pointee()), v, "deref");
+    return coerce(loaded, from->pointee(), to);
+  }
+  // Under Zombie a shared `&Class` is the handle while a `&var Class` names
+  // the slot holding it: one becomes the other through a load.
+  if (handleBorrow(to) && from->is(TypeKind::Pointer) && !handleBorrow(from) &&
+      !from->isRawPointer())
+    return B->CreateLoad(PtrTy, v, "borrowed.obj");
   // Pointers, classes and strings are all machine pointers already.
   if (from->isPointerLike() && to->isPointerLike())
     return v;
@@ -2650,14 +2949,21 @@ void CodeGen::emitFunctionBody(FunctionDecl *fn) {
     B->CreateStore(arg, slot);
     fs().Slots[p.Binding] = slot;
     // `self` is borrowed for the duration of the call, so it is not retained
-    // and must not be released on the way out.
-    if (!p.IsSelf) {
+    // and must not be released on the way out. Under Zombie a `self` taken
+    // by value (not `init`, whose object the caller keeps) was moved in, and
+    // the method owns it like any other parameter.
+    bool owns = !p.IsSelf;
+    if (p.IsSelf && zombie() && !p.SelfByRef &&
+        fn->Flavour != FunctionFlavour::Initialiser)
+      owns = true;
+    if (owns) {
       emitRetain(arg, p.Ty);
       // A parameter owns what it was passed, so it destroys it on the way
       // out — unless the body hands it on, which is what the flag says.
       // It starts true: an argument arrives already made.
       Value *liveFlag = nullptr;
-      if (p.Binding->MovedSomewhere && hasValueDeinit(p.Ty)) {
+      if ((p.Binding->MovedSomewhere || (zombie() && p.Binding->ZombieMoved)) &&
+          hasValueDeinit(p.Ty)) {
         liveFlag = createEntryAlloca(B->getInt1Ty(), p.Name + ".owns");
         B->CreateStore(B->getTrue(), liveFlag);
         fs().LiveFlags[p.Binding] = liveFlag;
@@ -2735,7 +3041,8 @@ void CodeGen::emitClosureBody(FunctionDecl *lifted) {
     emitRetain(arg, p.Ty);
     fs().Slots[p.Binding] = slot;
     Value *liveFlag = nullptr;
-    if (p.Binding->MovedSomewhere && hasValueDeinit(p.Ty)) {
+    if ((p.Binding->MovedSomewhere || (zombie() && p.Binding->ZombieMoved)) &&
+        hasValueDeinit(p.Ty)) {
       liveFlag = createEntryAlloca(B->getInt1Ty(), p.Name + ".owns");
       B->CreateStore(B->getTrue(), liveFlag);
       fs().LiveFlags[p.Binding] = liveFlag;

@@ -65,7 +65,29 @@ private:
   }
 
   //=== Types ============================================================//
+  static std::string originStr(const OriginClause *o) {
+    if (!o)
+      return "";
+    std::string s = " from ";
+    if (o->Places.size() != 1)
+      s += "(";
+    for (size_t i = 0; i < o->Places.size(); ++i) {
+      if (i) s += ", ";
+      for (size_t j = 0; j < o->Places[i].Path.size(); ++j) {
+        if (j) s += ".";
+        s += o->Places[i].Path[j];
+      }
+    }
+    if (o->Places.size() != 1)
+      s += ")";
+    return s;
+  }
+
   std::string typeStr(const TypeRepr *t) {
+    return typeStrNoOrigin(t) + (t ? originStr(t->Origin.get()) : "");
+  }
+
+  std::string typeStrNoOrigin(const TypeRepr *t) {
     if (!t)
       return "<inferred>";
     switch (t->Kind) {
@@ -113,6 +135,8 @@ private:
       std::string s = "@function(";
       for (size_t i = 0; i < f->Params.size(); ++i) {
         if (i) s += ", ";
+        if (i < f->ParamNames.size() && !f->ParamNames[i].empty())
+          s += f->ParamNames[i] + ": ";
         s += typeStr(f->Params[i].get());
       }
       s += ")";
@@ -174,6 +198,17 @@ private:
           ps += ": " + typeStr(p.TypeAnnotation.get());
           if (p.IsMutable) ps += " [var]";
           if (p.DefaultValue) ps += " = <default>";
+        }
+        if (p.HasView) {
+          ps += " { ";
+          for (size_t i = 0; i < p.View.size(); ++i) {
+            if (i) ps += ", ";
+            for (size_t j = 0; j < p.View[i].Path.size(); ++j) {
+              if (j) ps += ".";
+              ps += p.View[i].Path[j];
+            }
+          }
+          ps += " }";
         }
         line(ps);
       }

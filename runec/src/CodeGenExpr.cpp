@@ -77,14 +77,17 @@ Value *CodeGen::emitMemberAddress(MemberExpr *m) {
 
   if (eff->is(TypeKind::Pointer)) {
     addr = emitRValue(m->Base.get());
+    // Under Zombie a shared `&Node` is the object itself.
+    bool isObject = handleBorrow(eff);
     eff = eff->pointee();
     while (eff->is(TypeKind::Pointer)) {
       addr = B->CreateLoad(PtrTy, addr);
+      isObject = handleBorrow(eff);
       eff = eff->pointee();
     }
     // A class reference is itself a pointer, so `&Node` names a slot holding
     // the object's address rather than the object. One more load reaches it.
-    if (eff->is(TypeKind::Class))
+    if (eff->is(TypeKind::Class) && !isObject)
       addr = B->CreateLoad(PtrTy, addr, "borrowed.obj");
   } else if (eff->is(TypeKind::Class)) {
     addr = emitRValue(m->Base.get());
@@ -224,6 +227,14 @@ Value *CodeGen::emitLValue(Expr *e) {
     // object, not the address of what it yields. Materialise it below.
     if (d->OverloadResolved)
       break;
+    // A shared `&Class` under Zombie is the object, not a slot holding it:
+    // the value has no address of its own, so it is given one here.
+    if (handleBorrow(d->Operand->Ty)) {
+      Value *obj = emitRValue(d->Operand.get());
+      Value *tmp = createEntryAlloca(lower(e->Ty), "borrowed.slot");
+      B->CreateStore(obj, tmp);
+      return tmp;
+    }
     // Otherwise the pointer value is already the address we want.
     return emitRValue(d->Operand.get());
   }
@@ -281,11 +292,15 @@ void CodeGen::emitInto(Expr *e, Value *slot, Type *slotType, bool raw) {
   Value *v = emitRValue(e);
   if (!v || !slotType || slotType->isVoid())
     return;
+  Value *produced = v;
   v = coerce(v, e->Ty, slotType);
 
   // A store through a raw pointer is exactly that: no counting, and no
   // assumption that the slot already held anything. `mem::retain` and
-  // `mem::release` are how the caller keeps the books in that case.
+  // `mem::release` are how the caller keeps the books in that case. Under
+  // Zombie the value still moves in: the source gives it up either way.
+  if (zombie() && AdoptedResult != e)
+    takeOwnership(e, produced, e->Ty);
   if (!raw && AdoptedResult != e) {
     // Retain before releasing the old value: they may be the same object.
     emitRetain(v, slotType);
@@ -393,7 +408,14 @@ Value *CodeGen::emitClosureValue(ClosureExpr *c) {
       src = it->second;
     }
     Value *v = B->CreateLoad(lower(cap.Ty), src);
-    emitRetain(v, cap.Ty);
+    if (zombie()) {
+      // Moved into the closure: the outer binding is empty from here — an
+      // alias binding, which owns nothing, is simply copied.
+      if (cap.Var && !cap.Var->ZombieAlias && cap.Ty && cap.Ty->isRefCounted())
+        B->CreateStore(Constant::getNullValue(lower(cap.Ty)), src);
+    } else {
+      emitRetain(v, cap.Ty);
+    }
     B->CreateStore(v, B->CreateStructGEP(envTy, env, 1 + i));
   }
 
@@ -604,6 +626,10 @@ std::vector<Value *> CodeGen::buildArguments(CallExpr *c, FunctionDecl *fn,
       continue;
     }
     Value *v = emitRValue(value);
+    // Under Zombie an argument passed by value is moved in: the callee owns
+    // it from here. A borrow (`&T`) is a copy of a pointer and owns nothing.
+    if (zombie() && want && !want->is(TypeKind::Pointer))
+      takeOwnership(value, v, value->Ty);
     if (want)
       v = coerce(v, value->Ty, want);
     args.push_back(v);
@@ -619,6 +645,8 @@ std::vector<Value *> CodeGen::buildArguments(CallExpr *c, FunctionDecl *fn,
       continue;
     Expr *e = c->Args[i].Value.get();
     Value *v = emitRValue(e);
+    if (zombie())
+      takeOwnership(e, v, e->Ty);
     Type *t = e->Ty;
     if (t && t->isFloat() && t->floatWidth() < 64)
       v = B->CreateFPExt(v, B->getDoubleTy());
@@ -705,6 +733,11 @@ Value *CodeGen::emitBuiltinMethod(CallExpr *c) {
     Value *v = emitRValue(member->Base.get());
     Type *t = member->Base->Ty;
     while (t->is(TypeKind::Pointer)) {
+      // A shared `&String` under Zombie is the string itself.
+      if (handleBorrow(t)) {
+        t = t->pointee();
+        continue;
+      }
       v = B->CreateLoad(lower(t->pointee()), v);
       t = t->pointee();
     }
@@ -725,12 +758,19 @@ Value *CodeGen::emitBuiltinMethod(CallExpr *c) {
   auto loc = [&] { return locationString(c->Range); };
 
   switch (c->Builtin) {
+  case BuiltinMethod::Clone:
+    return track(emitClone(recvValue(), recvTy), c->Ty);
   case BuiltinMethod::ToString: {
     Value *v = recvValue();
     const char *fn = "rune_string_from_i64";
     llvm::Type *argTy = B->getInt64Ty();
-    if (recvTy->is(TypeKind::String))
-      return v; // already a String
+    if (recvTy->is(TypeKind::String)) {
+      // Already a String. Under Zombie the caller must get a string of
+      // its own, since the receiver keeps the one it has.
+      if (zombie())
+        return track(emitClone(v, recvTy), c->Ty);
+      return v;
+    }
     if (recvTy->isFloat()) {
       fn = "rune_string_from_f64";
       argTy = B->getDoubleTy();
@@ -947,6 +987,47 @@ Value *CodeGen::emitCall(CallExpr *c) {
       }
       return nullptr;
     }
+    // Raw storage keeps its books through these four, and they mean the
+    // same thing under either memory model: what goes in is owned by the
+    // slot, what comes out is owned by the caller.
+    if (arg && (which == "store" || which == "take" || which == "drop_at" ||
+                which == "replace")) {
+      Expr *slotExpr = c->Args.empty() ? nullptr : c->Args[0].Value.get();
+      Value *slot = slotExpr ? emitRValue(slotExpr) : nullptr;
+      if (!slot)
+        return nullptr;
+      llvm::Type *ty = lower(arg);
+      if (which == "store") {
+        Expr *ve = c->Args.size() > 1 ? c->Args[1].Value.get() : nullptr;
+        Value *v = ve ? emitRValue(ve) : nullptr;
+        if (!v)
+          return nullptr;
+        takeOwnership(ve, v, arg);   // ARC retains; Zombie moves
+        B->CreateStore(coerce(v, ve->Ty, arg), slot);
+        return nullptr;
+      }
+      if (which == "take") {
+        Value *v = B->CreateLoad(ty, slot, "taken");
+        if (arg->isRefCounted())
+          B->CreateStore(Constant::getNullValue(ty), slot);
+        return track(v, arg);
+      }
+      if (which == "drop_at") {
+        emitRelease(B->CreateLoad(ty, slot), arg);
+        if (arg->isRefCounted())
+          B->CreateStore(Constant::getNullValue(ty), slot);
+        return nullptr;
+      }
+      // replace: the old value is the caller's, the new one the slot's.
+      Expr *ve = c->Args.size() > 1 ? c->Args[1].Value.get() : nullptr;
+      Value *v = ve ? emitRValue(ve) : nullptr;
+      if (!v)
+        return nullptr;
+      takeOwnership(ve, v, arg);
+      Value *old = B->CreateLoad(ty, slot, "replaced");
+      B->CreateStore(coerce(v, ve->Ty, arg), slot);
+      return track(old, arg);
+    }
     if (arg && (which == "size_of" || which == "align_of")) {
       llvm::Type *lowered = lower(arg);
       const llvm::DataLayout &dl = M->getDataLayout();
@@ -958,8 +1039,20 @@ Value *CodeGen::emitCall(CallExpr *c) {
     // Structural hash and equality. The compiler knows the layout, so a
     // container can key on any type at all — no `Hashable` mark to bind, and
     // no `Display` standing in for one.
+    // `hash` and `equals` take their operands as `&T`, so what arrives is a
+    // borrow: the value behind it is what they work on. A handle borrow is
+    // the value already; anything else is loaded from the address.
+    auto behindBorrow = [&](Expr *e) -> Value * {
+      Value *p = emitRValue(e);
+      if (!p)
+        return nullptr;
+      Type *bt = e->Ty;
+      if (bt && bt->is(TypeKind::Pointer) && !handleBorrow(bt))
+        return B->CreateLoad(lower(bt->pointee()), p, "arg");
+      return p;
+    };
     if (arg && which == "hash") {
-      Value *v = c->Args.empty() ? nullptr : emitRValue(c->Args[0].Value.get());
+      Value *v = c->Args.empty() ? nullptr : behindBorrow(c->Args[0].Value.get());
       if (!v)
         return ConstantInt::get(lower(c->Ty), 0);
       return emitHash(v, arg, ConstantInt::get(B->getInt64Ty(), 0));
@@ -967,8 +1060,8 @@ Value *CodeGen::emitCall(CallExpr *c) {
     if (arg && which == "equals") {
       if (c->Args.size() < 2)
         return B->getInt1(false);
-      Value *a = emitRValue(c->Args[0].Value.get());
-      Value *b = emitRValue(c->Args[1].Value.get());
+      Value *a = behindBorrow(c->Args[0].Value.get());
+      Value *b = behindBorrow(c->Args[1].Value.get());
       if (!a || !b)
         return B->getInt1(false);
       return emitEquals(a, b, arg);
@@ -1188,7 +1281,8 @@ Value *CodeGen::emitCall(CallExpr *c) {
       } else {
         self = emitRValue(member->Base.get());
         if (member->Base->Ty && member->Base->Ty->is(TypeKind::Pointer) &&
-            selfParam && !selfParam->is(TypeKind::Pointer))
+            selfParam && !selfParam->is(TypeKind::Pointer) &&
+            !handleBorrow(member->Base->Ty))
           self = B->CreateLoad(lower(selfParam), self);
       }
 
@@ -1995,6 +2089,10 @@ Value *CodeGen::emitCast(CastExpr *c) {
 Value *CodeGen::emitTry(TryExpr *t) {
   Type *operandTy = t->Operand->Ty;
   Value *value = emitRValue(t->Operand.get());
+  // Under Zombie the whole value moves into the `?`: its error leaves with
+  // the function, its payload becomes this expression's own temporary.
+  if (zombie())
+    takeOwnership(t->Operand.get(), value, operandTy);
   const bool isOption = isOptionType(operandTy);
   const char *goodName = isOption ? "Some" : "Ok";
   int goodIndex = variantIndexNamed(operandTy, goodName);
@@ -2053,7 +2151,10 @@ Value *CodeGen::emitTry(TryExpr *t) {
   B->SetInsertPoint(goodBB);
   Value *payload = emitVariantPayload(value, operandTy, goodIndex, 0, t->Ty);
   // The payload belongs to the value we just took it out of, which the
-  // statement still owns, so hand it back borrowed.
+  // statement still owns, so hand it back borrowed — under Zombie the
+  // statement owns the payload itself now, until something adopts it.
+  if (zombie())
+    return track(payload, t->Ty);
   return payload;
 }
 
@@ -2249,9 +2350,21 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
     if (seqTy->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(seqTy)), seqSlot);
     Value *sv = emitRValue(f->Sequence.get());
-    emitRetain(sv, seqTy);
-    B->CreateStore(sv, seqSlot);
-    fs().Scopes.back().Locals.push_back({seqSlot, seqTy});
+    if (zombie()) {
+      // The container is borrowed for the loop when it is somebody's
+      // place, and owned by the loop when it was made for it.
+      if (movedPlaceOf(f->Sequence.get())) {
+        B->CreateStore(sv, seqSlot);
+      } else {
+        adopt(sv);
+        B->CreateStore(sv, seqSlot);
+        fs().Scopes.back().Locals.push_back({seqSlot, seqTy});
+      }
+    } else {
+      emitRetain(sv, seqTy);
+      B->CreateStore(sv, seqSlot);
+      fs().Scopes.back().Locals.push_back({seqSlot, seqTy});
+    }
 
     Value *self = selfArgumentFor(f->IterateMethod, seqSlot, seqTy);
     B->CreateStore(B->CreateCall(functionTypeFor(f->IterateMethod),
@@ -2260,8 +2373,12 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
   } else {
     // The sequence is the cursor. The loop advances a copy of it, which is
     // what a value type means; a class iterator is shared, and advances.
+    // Under Zombie the cursor moves into the loop.
     Value *iv = emitRValue(f->Sequence.get());
-    emitRetain(iv, iterTy);
+    if (zombie())
+      takeOwnership(f->Sequence.get(), iv, iterTy);
+    else
+      emitRetain(iv, iterTy);
     B->CreateStore(iv, iterSlot);
   }
   fs().Scopes.back().Locals.push_back({iterSlot, iterTy});
@@ -2306,7 +2423,13 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
   Value *payload = emitVariantPayload(B->CreateLoad(lower(optTy), optSlot),
                                       optTy, variantIndexNamed(optTy, "Some"),
                                       0, elemTy);
-  emitRetain(payload, elemTy);
+  if (zombie()) {
+    // The element moves out of the step; the step then holds nothing.
+    if (optTy->isRefCounted())
+      B->CreateStore(Constant::getNullValue(lower(optTy)), optSlot);
+  } else {
+    emitRetain(payload, elemTy);
+  }
   B->CreateStore(payload, elemSlot);
   fs().Scopes.back().Locals.push_back({elemSlot, elemTy});
   emitPatternBind(f->Binding.get(), elemSlot, elemTy);
@@ -2418,12 +2541,15 @@ Value *CodeGen::emitFor(ForExpr *f) {
             ? std::vector<Value *>{cur}
             : std::vector<Value *>{B->getInt64(0), cur});
     Value *v = B->CreateLoad(lower(elemTy), src);
+    // Under Zombie the element is looked at where it is: the loop variable
+    // is an alias of the array's slot, and owns nothing.
     emitRetain(v, elemTy);
     B->CreateStore(v, elemSlot);
   } else {
     B->CreateStore(cur, elemSlot);
   }
-  fs().Scopes.back().Locals.push_back({elemSlot, elemTy});
+  if (!zombie())
+    fs().Scopes.back().Locals.push_back({elemSlot, elemTy});
   emitPatternBind(f->Binding.get(), elemSlot, elemTy);
 
   LoopFrame frame;
@@ -2548,7 +2674,15 @@ void CodeGen::emitPatternBind(Pattern *pat, Value *addr, Type *t) {
       return;
     Value *slot = declareLocalSlot(b->Binding, b->Name);
     Value *v = B->CreateLoad(lower(t), addr);
-    emitRetain(v, t);
+    if (zombie()) {
+      // The binding takes the value: what it was taken from is emptied —
+      // unless the binding is an alias of borrowed content, which just
+      // looks at the value where it is.
+      if (!b->Binding->ZombieAlias && t->isRefCounted())
+        B->CreateStore(Constant::getNullValue(lower(t)), addr);
+    } else {
+      emitRetain(v, t);
+    }
     B->CreateStore(v, slot);
     // The binding owns what it was given from here. A binding something can
     // hand on carries a flag saying whether it still does; this is where it
@@ -2982,7 +3116,9 @@ Value *CodeGen::emitRValue(Expr *e) {
     // slot, or a return. Empty the slot and give the reference it held to the
     // statement's temp stack: whatever receives the value retains it, the
     // cleanup drops the slot's old claim, and the count comes out unchanged.
-    if (r->MovedOut) {
+    // Under Zombie the consumer empties the place it moves from
+    // (`takeOwnership`); the balancing trick below is ARC's.
+    if (r->MovedOut && !zombie()) {
       // A value with a destructor is copied out bit for bit and the binding
       // simply stops owning it: whatever receives it will destroy it, and the
       // flag stops this scope from doing so as well.
@@ -3153,6 +3289,11 @@ Value *CodeGen::emitRValue(Expr *e) {
     // the last owner gave the value away to no one.
     auto *m = cast<MoveExpr>(e);
     Value *v = emitRValue(m->Operand.get());
+    // Under Zombie the consumer empties the source (`movedPlaceOf` looks
+    // through the `move`); a `move` that feeds nothing is dropped as a
+    // discarded value.
+    if (zombie())
+      return v;
     if (m->MovedFrom && m->Operand->Ty) {
       auto it = fs().Slots.find(m->MovedFrom);
       if (it != fs().Slots.end()) {
@@ -3186,8 +3327,15 @@ Value *CodeGen::emitRValue(Expr *e) {
     return track(B->CreateLoad(lower(e->Ty), slot), e->Ty);
   }
 
-  case NodeKind::Borrow:
-    return emitLValue(cast<BorrowExpr>(e)->Operand.get());
+  case NodeKind::Borrow: {
+    auto *b = cast<BorrowExpr>(e);
+    // Under Zombie a shared borrow of a class, a `String`, a closure or a
+    // mark object is the handle: the object is what is borrowed, and it
+    // stays where it is however the handle moves.
+    if (handleBorrow(e->Ty))
+      return emitRValue(b->Operand.get());
+    return emitLValue(b->Operand.get());
+  }
 
   case NodeKind::Deref: {
     auto *deref = cast<DerefExpr>(e);
@@ -3207,6 +3355,9 @@ Value *CodeGen::emitRValue(Expr *e) {
       return track(B->CreateCall(fn, {self}), e->Ty);
     }
     Value *ptr = emitRValue(deref->Operand.get());
+    // A shared `&Class` under Zombie is the object: `*r` is `r`.
+    if (handleBorrow(deref->Operand->Ty))
+      return ptr;
     if (Opts.Safety != SafetyLevel::None) {
       Function *f = fs().Fn;
       auto *okBB = BasicBlock::Create(*Ctx, "deref.ok", f);

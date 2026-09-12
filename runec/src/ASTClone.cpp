@@ -85,6 +85,21 @@ Attribute cloneAttribute(const Attribute &a) {
   return c;
 }
 
+/// A `from` clause is source, not resolution: only the paths are copied.
+std::unique_ptr<OriginClause> cloneOrigin(const OriginClause *o) {
+  if (!o)
+    return nullptr;
+  auto c = std::make_unique<OriginClause>();
+  c->Range = o->Range;
+  for (const OriginPlace &place : o->Places) {
+    OriginPlace cp;
+    cp.Path = place.Path;
+    cp.Range = place.Range;
+    c->Places.push_back(std::move(cp));
+  }
+  return c;
+}
+
 Param cloneParam(const Param &p) {
   Param c;
   c.Name = p.Name;
@@ -94,12 +109,28 @@ Param cloneParam(const Param &p) {
   c.SelfMutable = p.SelfMutable;
   c.IsMutable = p.IsMutable;
   c.IsVariadic = p.IsVariadic;
+  c.HasView = p.HasView;
+  for (const FieldPathRepr &f : p.View) {
+    FieldPathRepr cf;
+    cf.Path = f.Path;
+    cf.Range = f.Range;
+    c.View.push_back(std::move(cf));
+  }
   c.TypeAnnotation = cloneTypeRepr(p.TypeAnnotation.get());
   c.DefaultValue = cloneExpr(p.DefaultValue.get());
   return c;
 }
 
+TypeReprPtr cloneTypeReprNoOrigin(const TypeRepr *t);
+
 TypeReprPtr cloneTypeRepr(const TypeRepr *t) {
+  TypeReprPtr c = cloneTypeReprNoOrigin(t);
+  if (c && t)
+    c->Origin = cloneOrigin(t->Origin.get());
+  return c;
+}
+
+TypeReprPtr cloneTypeReprNoOrigin(const TypeRepr *t) {
   if (!t)
     return nullptr;
   switch (t->Kind) {
@@ -141,6 +172,7 @@ TypeReprPtr cloneTypeRepr(const TypeRepr *t) {
     const auto *f = cast<FunctionTypeReprNode>(t);
     auto c = alloc<FunctionTypeReprNode>(t);
     c->Params = cloneTypeList(f->Params);
+    c->ParamNames = f->ParamNames;
     c->ReturnType = cloneTypeRepr(f->ReturnType.get());
     return c;
   }
@@ -603,6 +635,8 @@ std::unique_ptr<FunctionDecl> cloneFunction(const FunctionDecl *f) {
   c->IsUnsafe = f->IsUnsafe;
   c->IsSafeJustified = f->IsSafeJustified;
   c->SafetyReason = f->SafetyReason;
+  c->IsZombieTrusted = f->IsZombieTrusted;
+  c->ZombieReason = f->ZombieReason;
   c->LinkName = f->LinkName;
   c->IsExtern = f->IsExtern;
   c->ExternABI = f->ExternABI;

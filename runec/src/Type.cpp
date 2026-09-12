@@ -1,5 +1,8 @@
 #include "rune/Type.h"
 
+#include <functional>
+#include <set>
+
 #include "rune/AST.h"
 
 namespace rune {
@@ -543,6 +546,13 @@ bool TypeContext::unify(Type *pattern, Type *concrete,
   if (pattern->is(TypeKind::Slice) && concrete->is(TypeKind::Array))
     return unify(pattern->element(), concrete->element(), out);
 
+  // A value handed to a `&T` parameter is borrowed for the call, so
+  // `fn show<T>(v: &T)` accepts a `String` and reads `T` off it.
+  if (pattern->is(TypeKind::Pointer) && !pattern->isRawPointer() &&
+      !pattern->isMutablePointer() && !pattern->isWeakPointer() &&
+      !concrete->is(TypeKind::Pointer))
+    return unify(pattern->pointee(), concrete, out);
+
   // A plain `fn` used as a value types as a closure until something wants a
   // bare pointer. Inference only has to line the shapes up; whether the
   // conversion is actually allowed is settled afterwards, against the
@@ -739,6 +749,49 @@ std::string runtimeTypeName(const Type *t) {
   }
 }
 
+/// True when values of `t` carry a `deinit` somewhere inside: copying one
+/// out of a borrow would run it twice.
+bool typeHasDeinit(Type *t) {
+  std::set<Type *> seen;
+  std::function<bool(Type *)> go = [&](Type *x) -> bool {
+    if (!x || !seen.insert(x).second)
+      return false;
+    switch (x->kind()) {
+    case TypeKind::Struct:
+    case TypeKind::Enum: {
+      NominalDecl *nd = x->nominal();
+      if (!nd)
+        return false;
+      if (nd->Deinit)
+        return true;
+      for (const auto &f : nd->Fields)
+        if (go(f->Ty))
+          return true;
+      if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+        for (const auto &v : e->Variants) {
+          for (const auto &tt : v->TupleTypes)
+            if (go(tt->Resolved))
+              return true;
+          for (const auto &f : v->Fields)
+            if (go(f->Ty))
+              return true;
+        }
+      return false;
+    }
+    case TypeKind::Array:
+      return go(x->element());
+    case TypeKind::Tuple:
+      for (Type *e : x->tupleElements())
+        if (go(e))
+          return true;
+      return false;
+    default:
+      return false;
+    }
+  };
+  return go(t);
+}
+
 bool isImplicitlyConvertible(Type *from, Type *to) {
   if (!from || !to)
     return false;
@@ -816,6 +869,25 @@ bool isImplicitlyConvertible(Type *from, Type *to) {
     return from->pointee() == to->pointee() &&
            from->isRawPointer() == to->isRawPointer() &&
            (from->isMutablePointer() || !to->isMutablePointer());
+
+  // A borrow of something that copies freely — a number, a boolean, a
+  // character, a plain struct of those — converts to the value: `*` is
+  // understood. Anything owned stays behind the borrow; `$clone()` copies it.
+  if (from->is(TypeKind::Pointer) && !from->isRawPointer() &&
+      !from->isWeakPointer() && from->pointee() && !to->is(TypeKind::Pointer) &&
+      !from->pointee()->isRefCounted() && !typeHasDeinit(from->pointee()) &&
+      (from->pointee() == to || isImplicitlyConvertible(from->pointee(), to)))
+    return true;
+
+  // A class, a `String`, a closure or a mark object converts to a shared
+  // borrow of itself: `&Dog` *is* the object, so `self` in a `&self` method
+  // — which has the bare class type — fits a `&Dog` field or result, and
+  // an owned handle can be lent without spelling `&`.
+  if (to->is(TypeKind::Pointer) && !to->isRawPointer() &&
+      !to->isMutablePointer() && !to->isWeakPointer() && !from->is(TypeKind::Pointer) &&
+      from->isHeapHandle() && to->pointee() &&
+      (to->pointee() == from || isImplicitlyConvertible(from, to->pointee())))
+    return true;
 
   // Tuples convert element by element, so `(1, "x")` is a `(i64, Any)` when
   // that is what the context asked for.

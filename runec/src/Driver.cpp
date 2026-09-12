@@ -34,6 +34,8 @@ CODE GENERATION
     --safety <level>     none | minimal | full   (default full)
     --overflow-checks    Trap when integer arithmetic overflows (default at -O0)
     --no-overflow-checks Wrap instead (default at -O1 and above)
+    --memory <mode>      arc | zombie   (default arc): reference counting, or
+                         single ownership proven by the Zombie borrow checker
 
 MODULES AND LINKING
     -I <dir>             Add <dir> to the module search path
@@ -61,6 +63,7 @@ INSPECTION
     --dump-ast           Print the parse tree
     --dump-symbols       Print the symbol table
     --dump-types         Print inferred types for every expression
+    --dump-zombie        Print the borrow checker's view of every body
     -v, --verbose        Report each pipeline stage
     --time               Report how long each stage took
     --version            Print the version and exit
@@ -79,6 +82,12 @@ bool parseSafety(const std::string &s, SafetyLevel &out) {
   return false;
 }
 
+bool parseMemory(const std::string &s, MemoryMode &out) {
+  if (s == "arc") { out = MemoryMode::Arc; return true; }
+  if (s == "zombie") { out = MemoryMode::Zombie; return true; }
+  return false;
+}
+
 std::string stemOf(const std::string &path) {
   size_t slash = path.find_last_of("/\\");
   std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -87,6 +96,10 @@ std::string stemOf(const std::string &path) {
 }
 
 } // namespace
+
+const char *memoryModeName(MemoryMode mode) {
+  return mode == MemoryMode::Zombie ? "zombie" : "arc";
+}
 
 int runCompilerMain(int argc, char **argv) {
   CompilerOptions opts;
@@ -142,6 +155,16 @@ int runCompilerMain(int argc, char **argv) {
       }
       continue;
     }
+    if (a == "--memory") {
+      std::string v = needsValue(i, "--memory");
+      if (!parseMemory(v, opts.Memory)) {
+        std::cerr << "runec: unknown memory mode '" << v
+                  << "' (expected arc or zombie)\n";
+        return 2;
+      }
+      continue;
+    }
+    if (a == "--zombie-stdlib") { opts.ZombieStdlib = true; continue; }
     if (a == "--overflow-checks") { opts.Overflow = OverflowChecks::On; continue; }
     if (a == "--no-overflow-checks") { opts.Overflow = OverflowChecks::Off; continue; }
     if (a == "-I") { opts.ImportPaths.push_back(needsValue(i, "-I")); continue; }
@@ -167,6 +190,7 @@ int runCompilerMain(int argc, char **argv) {
     if (a == "--dump-ast") { opts.Dump = DumpKind::AST; continue; }
     if (a == "--dump-symbols") { opts.Dump = DumpKind::Symbols; continue; }
     if (a == "--dump-types") { opts.Dump = DumpKind::Types; continue; }
+    if (a == "--dump-zombie") { opts.Dump = DumpKind::Zombie; continue; }
     if (a == "-v" || a == "--verbose") { opts.Verbose = true; continue; }
     if (a == "--time") { opts.TimeReport = true; continue; }
     if (a == "--docs-stdlib") { opts.DocsStdlib = true; continue; }

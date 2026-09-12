@@ -1,0 +1,10 @@
+// A view is a promise about which fields the body reaches.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: which is outside its view
+class Factory {
+    var counter: i64
+    var log: i64
+    fn init(self) { self.counter = 0; self.log = 0 }
+    fn bump(&var self { counter }) { self.counter += 1; self.log += 1 }
+}
+fn main() -> i64 { var f = Factory(); f.bump(); f.counter }

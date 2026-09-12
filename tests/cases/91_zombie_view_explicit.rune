@@ -1,0 +1,24 @@
+// An explicit view pins the contract: callers rely on `{ counter }` and the
+// body is checked against it.
+// FLAGS: --memory zombie
+// EXPECT: 2
+import std::io
+
+class Factory {
+    var counter: i64
+    var names: [2:String]
+    fn init(self) { self.counter = 0; self.names = ["a", "b"] }
+    fn bump(&var self { counter }) { self.counter += 1 }
+    fn count(&var self) -> i64 {
+        for n in &self.names {
+            if n.$len() > 0 { self.bump() }
+        }
+        self.counter
+    }
+}
+
+fn main() -> i64 {
+    var f = Factory()
+    io::println(f.count().$str())
+    0
+}

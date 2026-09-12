@@ -1,0 +1,12 @@
+// An internal reference has to borrow from the sibling it names, in this
+// same value.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: 'body' must borrow from the 'text' of this same value
+struct Message {
+    text: String
+    body: &String from self.text
+}
+fn wrong(text: String, other: &String) -> Message {
+    Message { text: text, body: other }
+}
+fn main() -> i64 { 0 }

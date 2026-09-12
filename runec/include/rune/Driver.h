@@ -25,6 +25,21 @@ enum class OverflowChecks {
   Off,
 };
 
+/// How the program keeps its heap alive.
+///
+/// `Arc` is automatic reference counting: every class, `String`, closure and
+/// mark object carries a count, copies retain and scope exits release, and
+/// the ownership pass in `Ownership.cpp` is advisory. `Zombie` is single
+/// ownership checked at compile time: no count is ever touched, an owned value
+/// moves, and the borrow checker in `Zombie*.cpp` proves that every borrow is
+/// gone before what it points at is. Under `Zombie` the checker's findings are
+/// what makes the generated code sound, so they are errors at every
+/// `--safety` level.
+enum class MemoryMode {
+  Arc,
+  Zombie,
+};
+
 enum class OutputKind {
   Executable, ///< Link into a runnable program.
   Object,     ///< Emit a .o only.
@@ -41,6 +56,7 @@ enum class DumpKind {
   AST,
   Symbols,
   Types,
+  Zombie,  ///< The borrow checker's own view of each body: places, loans, drops.
 };
 
 struct CompilerOptions {
@@ -65,6 +81,11 @@ struct CompilerOptions {
   DumpKind Dump = DumpKind::Nothing;
   SafetyLevel Safety = SafetyLevel::Full;
   OverflowChecks Overflow = OverflowChecks::Default;
+  MemoryMode Memory = MemoryMode::Arc;
+  /// `--zombie-stdlib`: report the borrow checker's findings inside the
+  /// standard library as well as in the program. Off until the library is
+  /// clean under Zombie; its bodies are still read for their summaries.
+  bool ZombieStdlib = false;
 
   unsigned OptLevel = 0;
   unsigned ErrorLimit = 20;
@@ -96,7 +117,12 @@ struct CompilerOptions {
     }
     return OptLevel == 0 && Safety != SafetyLevel::None;
   }
+
+  bool zombie() const { return Memory == MemoryMode::Zombie; }
 };
+
+/// The spelling `--memory` and `[build] memory` use.
+const char *memoryModeName(MemoryMode mode);
 
 /// Runs the whole pipeline for `opts`. Returns a process exit code.
 int compileWithOptions(const CompilerOptions &opts);

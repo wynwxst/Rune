@@ -1,0 +1,31 @@
+// `?` leaves early through the same drops as a `return`, and `defer` runs
+// before them.
+// FLAGS: --memory zombie
+// EXPECT: done
+// EXPECT: 4
+// EXPECT: done
+// EXPECT: empty
+import std::io
+
+fn parse(s: String) -> Result<i64, String> {
+    if s.$len() == 0 { return Err("empty") }
+    Ok(s.$len())
+}
+
+fn tryIt(s: String) -> Result<i64, String> {
+    defer io::println("done")
+    let n = parse(s)?
+    Ok(n + 1)
+}
+
+fn main() -> i64 {
+    match tryIt("abc") {
+        Ok(v) => io::println(v.$str()),
+        Err(e) => io::println(e),
+    }
+    match tryIt("") {
+        Ok(v) => io::println(v.$str()),
+        Err(e) => io::println(e),
+    }
+    0
+}

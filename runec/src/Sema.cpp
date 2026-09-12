@@ -4,6 +4,9 @@
 
 #include "rune/ASTWalk.h"
 #include "rune/Ownership.h"
+#include "rune/Zombie.h"
+
+#include <chrono>
 #include "rune/Parallel.h"
 
 #include <set>
@@ -25,8 +28,10 @@ static bool sameType(Type *a, Type *b);
 //===----------------------------------------------------------------------===//
 
 Sema::Sema(const SourceManager &sm, DiagnosticEngine &diags, TypeContext &types,
-           SafetyLevel safety)
-    : SM(sm), Diags(diags), Types(types), Safety(safety) {}
+           SafetyLevel safety, MemoryMode memory, DumpKind dump,
+           bool zombieStdlib)
+    : SM(sm), Diags(diags), Types(types), Safety(safety), Memory(memory),
+      Dump(dump), ZombieStdlib(zombieStdlib) {}
 
 Sema::~Sema() = default;
 
@@ -369,6 +374,19 @@ bool Sema::check() {
 void Sema::checkOwnershipOfQueued() {
   if (OwnershipQueue.empty())
     return;
+
+  // Under Zombie the queue goes to the borrow checker, which orders and
+  // parallelises the bodies itself: a body needs its callees' summaries.
+  if (Memory == MemoryMode::Zombie) {
+    const auto start = std::chrono::steady_clock::now();
+    zombie::checkProgram(OwnershipQueue, {}, Diags, Dump, ZombieStdlib);
+    ZombieMillis += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    OwnershipQueue.clear();
+    OwnershipQueued.clear();
+    return;
+  }
 
   std::vector<std::vector<Diagnostic>> found(OwnershipQueue.size());
   parallelFor(OwnershipQueue.size(), [&](size_t i) {
@@ -2241,6 +2259,10 @@ Type *Sema::resolveType(TypeRepr *repr) {
       noteDeclaredAt(b, sym->D, "declared here", "this names a value, not a type");
       break;
     }
+    checkAvailableUnderZombie(sym->D, repr->Range);
+    if (false) {
+      break;
+    }
     result = typeOfNominal(nd, n->GenericArgs, repr->Range);
     break;
   }
@@ -2615,6 +2637,15 @@ void Sema::registerMethods(NominalDecl *nd) {
 void Sema::applyWeakField(FieldDecl *f) {
   if (!f->IsWeak || !f->Ty || f->Ty->isError())
     return;
+  if (Memory == MemoryMode::Zombie) {
+    auto d = Diags.error(f->Range, "`weak` needs a reference count, and "
+                                   "`--memory zombie` has none");
+    d.note("a weak reference reads as empty once its target is gone, which "
+           "only a count can know");
+    d.note("keep an index into a `std::mem::Arena<T>`, or a `&` borrow that "
+           "the checker follows");
+    d.code(288);
+  }
   // `weak parent: Node` and `weak parent: Node?` both mean the same thing:
   // the reference does not keep the target alive, and reading it may find
   // nothing, so the field's type is always an Option.
@@ -2741,6 +2772,7 @@ void Sema::resolveShapes(Module *m) {
           f->Ty = resolveTypeOrError(f->TypeAnnotation.get(), Types.errorType());
       }
     }
+    resolveFieldAnnotations(nd);
     ActiveSelfType = nullptr;
     registerMethods(nd);
   }
@@ -3156,6 +3188,11 @@ void Sema::resolveSignatures(Module *m) {
     fn->Ty = Types.functionOf(params, ret, fn->IsVariadic);
     if (fn->MangledName.empty())
       fn->MangledName = mangleFunction(fn, fn->TypeArguments);
+    // A signature without a body — an extern, a mark requirement — is only
+    // ever seen here, so its clauses are resolved now; one with a body is
+    // done when the body is, once the parameters are bound.
+    if (!fn->Body)
+      resolveSignatureAnnotations(fn);
 
     ActiveGenericParams = savedGenerics;
     ActiveSelfType = savedSelf;
@@ -3760,6 +3797,9 @@ void Sema::checkFunction(FunctionDecl *fn, Type *selfType, ClassDecl *selfClass)
   // already bound.
   if (!BodiesChecked.insert(fn).second)
     return;
+  // What the signature says about borrows — `from` clauses and views — is
+  // resolved here, where every parameter has its type and its binding.
+  resolveSignatureAnnotations(fn);
 
   auto savedGenerics = ActiveGenericParams;
   Type *savedSelf = ActiveSelfType;
@@ -4114,6 +4154,21 @@ bool Sema::requireMutable(Expr *e, const char *action) {
     if (const auto *m = dyn_cast<MemberExpr>(root)) {
       if (m->Base->Ty && m->Base->Ty->is(TypeKind::Class))
         return true; // class fields are reachable through a shared reference
+      // A field reached through a borrow: it is the borrow's mutability that
+      // decides, not the binding holding it. `t: &var Table` may write
+      // `t.a` however `t` itself was bound.
+      Type *bt = m->Base->Ty;
+      if (m->AutoDerefs > 0 && bt && bt->is(TypeKind::Pointer) &&
+          !bt->isRawPointer()) {
+        if (!bt->isMutablePointer()) {
+          Diags.error(e->Range, "cannot {} through '{}'", action,
+                      bt->toString())
+              .note("borrow it mutably with `&var` to allow writes")
+              .code(231);
+          return false;
+        }
+        return true;
+      }
       root = m->Base.get();
       continue;
     }
@@ -4484,11 +4539,33 @@ bool Sema::findCycle(ClassDecl *start, ClassDecl *at,
 // called once before `main`.
 //===----------------------------------------------------------------------===//
 
+/// `@zombie_unavailable("alternative")`: the declaration exists so that using
+/// it under `--memory zombie` says what to reach for instead.
+void Sema::checkAvailableUnderZombie(Decl *d, SourceRange at) {
+  if (Memory != MemoryMode::Zombie || !d)
+    return;
+  const Attribute *a = d->findAttr("zombie_unavailable");
+  if (!a)
+    return;
+  auto e = Diags.error(at, "'{}' is only available with reference counting",
+                       d->Name);
+  e.note("under `--memory zombie` nothing is counted, so a value has one "
+         "owner and cannot be shared");
+  if (!a->Args.empty())
+    if (auto *s = dyn_cast<StringLitExpr>(a->Args[0].get()))
+      e.note("{}", s->Value);
+  e.code(292);
+}
+
 bool Sema::isBuiltinDecorator(const std::string &name) {
   static const std::set<std::string> kBuiltin = {
       "unsafe", "safe",  "inline", "noinline", "export",
       "alias",  "intrinsic", "link", "linkpath", "type",
       "Doc",    "doc",   "sync",   "as",     "resource",
+      // The Zombie borrow checker's own: `@zombie("reason")` trusts a body,
+      // `@zombie_unavailable("alternative")` marks a declaration that only
+      // exists under reference counting.
+      "zombie", "zombie_unavailable",
       // Answered before checking, by `applyConfig`. A declaration still
       // carrying one here is one this build kept, so there is nothing left to
       // do but recognise the name.
@@ -5264,6 +5341,59 @@ bool Sema::builtinOperatorApplies(const std::string &op, Type *lhs, Type *rhs) {
   return false;
 }
 
+/// True when `$clone()` can build a second copy of a value of `t`: nothing
+/// borrowed, no closure, no mark object or `Any`, and every part likewise.
+bool Sema::typeIsClonable(Type *t) {
+  std::set<Type *> seen;
+  std::function<bool(Type *)> go = [&](Type *x) -> bool {
+    if (!x || x->isError())
+      return false;
+    if (!seen.insert(x).second)
+      return true;
+    switch (x->kind()) {
+    case TypeKind::Bool: case TypeKind::Int: case TypeKind::Float:
+    case TypeKind::Char: case TypeKind::String: case TypeKind::Void:
+    case TypeKind::CString:
+      return true;
+    case TypeKind::Array:
+      return go(x->element());
+    case TypeKind::Tuple:
+      for (Type *e : x->tupleElements())
+        if (!go(e))
+          return false;
+      return true;
+    case TypeKind::Struct:
+    case TypeKind::Enum:
+    case TypeKind::Class: {
+      NominalDecl *nd = x->nominal();
+      if (!nd || x->isOpaque())
+        return false;
+      std::vector<NominalDecl *> chain{nd};
+      if (auto *c = dyn_cast<ClassDecl>(static_cast<Decl *>(nd)))
+        for (ClassDecl *sc = c->Super; sc; sc = sc->Super)
+          chain.push_back(sc);
+      for (NominalDecl *n : chain)
+        for (const auto &f : n->Fields)
+          if (f->IsWeak || !go(f->Ty))
+            return false;
+      if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+        for (const auto &v : e->Variants) {
+          for (const auto &tt : v->TupleTypes)
+            if (!go(tt->Resolved))
+              return false;
+          for (const auto &f : v->Fields)
+            if (!go(f->Ty))
+              return false;
+        }
+      return true;
+    }
+    default:
+      return false; // borrows, raw pointers, closures, `dyn`, `Any`
+    }
+  };
+  return go(t);
+}
+
 BuiltinMethod Sema::lookupBuiltinMethod(Type *receiver, const std::string &name,
                                         std::vector<Type *> &params,
                                         Type *&result) {
@@ -5317,6 +5447,13 @@ BuiltinMethod Sema::lookupBuiltinMethod(Type *receiver, const std::string &name,
       result = entry.Checked ? optionOf(receiver, SourceRange()) : receiver;
       return entry.Which;
     }
+  }
+  // Anything made of values, strings and objects can be copied outright:
+  // `$clone()` is how a second, independent value is asked for when the
+  // first has one owner.
+  if (name == "clone" && typeIsClonable(receiver)) {
+    result = receiver;
+    return BuiltinMethod::Clone;
   }
   // Every primitive can render itself, which is what makes string building
   // with `+` practical without overloaded functions.
@@ -5760,6 +5897,7 @@ NominalDecl *Sema::instantiateNominal(NominalDecl *tmpl,
         f->Ty = resolveTypeOrError(f->TypeAnnotation.get(), Types.errorType());
     }
   }
+  resolveFieldAnnotations(inst);
   checkFieldDefaults(inst);
   registerMethods(inst);
   if (auto *c = dyn_cast<ClassDecl>(static_cast<Decl *>(inst)))
@@ -6086,6 +6224,8 @@ void Sema::checkVarStmt(VarStmtNode *v) {
   Type *declared = v->TypeAnnotation
                        ? resolveTypeOrError(v->TypeAnnotation.get(), nullptr)
                        : nullptr;
+  if (v->TypeAnnotation)
+    resolveLocalAnnotations(v->TypeAnnotation.get());
   Type *initTy = nullptr;
   if (v->Init) {
     initTy = checkExpr(v->Init.get(), declared);

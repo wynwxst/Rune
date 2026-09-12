@@ -1,0 +1,15 @@
+// Two exclusive borrows of different fields of one value do not clash.
+// FLAGS: --memory zombie
+// EXPECT: 3 2
+import std::io
+
+struct Point { var x: i64, var y: i64 }
+
+fn main() -> i64 {
+    var p = Point { x: 1, y: 2 }
+    var a = &var p.x
+    var b = &var p.y
+    *a += *b
+    io::println(p.x.$str() + " " + p.y.$str())
+    0
+}

@@ -1,0 +1,12 @@
+// A borrow stored outside the scope of what it borrows.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: 'inner' does not live long enough
+fn main() -> i64 {
+    let outer = 1
+    var keep = &outer
+    {
+        let inner = 5
+        keep = &inner
+    }
+    *keep
+}

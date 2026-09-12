@@ -1,0 +1,13 @@
+// A move inside a loop is a move on every turn, and the second turn finds
+// nothing there.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: the move happens on every turn of the loop
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+fn take(b: Box) -> i64 { b.v }
+fn main() -> i64 {
+    let y = Box(2)
+    var i = 0
+    var total = 0
+    while i < 2 { total += take(y); i += 1 }
+    total
+}

@@ -71,6 +71,9 @@ private:
   std::map<NominalDecl *, llvm::StructType *> NominalLayouts;
   std::map<NominalDecl *, llvm::GlobalVariable *> TypeInfos;
   std::map<NominalDecl *, llvm::Function *> ClassDeinits;
+  /// `rune.clone.<type>` — a fresh copy of an object or an enum, generated
+  /// on demand for `$clone()`.
+  std::map<Type *, llvm::Function *> CloneFns;
   std::map<std::string, llvm::GlobalVariable *> StringLiterals;
   std::map<FunctionDecl *, llvm::Function *> Functions;
   std::map<GlobalVarDecl *, llvm::GlobalVariable *> Globals;
@@ -143,6 +146,10 @@ private:
     std::vector<LoopFrame> Loops;
     /// Temporaries owned by the statement being emitted.
     std::vector<std::pair<llvm::Value *, Type *>> Temps;
+    /// Under Zombie: which temporary slot holds a tracked value, so a
+    /// consumer that keeps the value can take it back out of the statement's
+    /// cleanup (`adopt`).
+    std::map<llvm::Value *, llvm::Value *> TempOf;
     std::map<VarDecl *, llvm::Value *> Slots;
     /// `i1` flags for the locals whose value can be handed on; see OwnedSlot.
     std::map<VarDecl *, llvm::Value *> LiveFlags;
@@ -191,6 +198,26 @@ private:
   //=== Reference counting ================================================//
   void emitRetain(llvm::Value *v, Type *t);
   void emitRelease(llvm::Value *v, Type *t);
+
+  //=== Ownership under `--memory zombie` =================================//
+  // Nothing is counted: every owned value has one owner, and handing it on
+  // is a move. Where ARC retains, Zombie either empties the place the value
+  // came from or takes a fresh temporary away from the statement's cleanup.
+  bool zombie() const { return Opts.Memory == MemoryMode::Zombie; }
+  /// `v`, just produced from `e` of type `t`, is being kept by something
+  /// (a slot, a parameter, a field). ARC: retain. Zombie: the source gives
+  /// it up — a place is emptied, a temporary is adopted.
+  void takeOwnership(Expr *e, llvm::Value *v, Type *t);
+  /// Takes a tracked temporary out of the statement's cleanup.
+  void adopt(llvm::Value *v);
+  /// Empties the place `e` names once its value has been moved out.
+  void emptyPlace(Expr *e, Type *t);
+  /// The place expression a consuming read of `e` actually moves from —
+  /// through casts and blocks — or null when `e` produces a fresh value.
+  Expr *movedPlaceOf(Expr *e);
+  /// `&T` for a class, `String`, closure or mark object is the handle itself,
+  /// not the address of a slot holding it. A `&var T` is the slot.
+  bool handleBorrow(Type *t) const;
   /// Releases every reference held inside an aggregate stored at `addr`.
   void emitReleaseFields(llvm::Value *addr, Type *t);
 
@@ -276,6 +303,9 @@ private:
   void emitClosureBody(FunctionDecl *lifted);
   llvm::GlobalVariable *emitTypeInfo(NominalDecl *nd);
   llvm::Function *emitClassDeinit(ClassDecl *c);
+  /// A copy of `v` that owns its own everything: `$clone()`.
+  llvm::Value *emitClone(llvm::Value *v, Type *t);
+  llvm::Function *cloneFnFor(Type *t);
   llvm::GlobalVariable *declareGlobal(GlobalVarDecl *g);
   /// Lowers `std::asm`'s two intrinsics. `resultType` is null for the one that
   /// returns nothing; `hasSideEffects` marks the assembly as something that

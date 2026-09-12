@@ -135,31 +135,31 @@ bind<A, B, C> Display to (A, B, C) where A: Display, B: Display, C: Display {
 
 /// Writes `value` to standard output with no trailing newline.
 @safe("the runtime owns and bounds-checks the output buffer")
-pub fn print<T: Display>(value: T) {
+pub fn print<T: Display>(value: &T) {
     rune_print(value.display())
 }
 
 /// Writes `value` to standard output followed by a newline.
 @safe("the runtime owns and bounds-checks the output buffer")
-pub fn println<T: Display>(value: T) {
+pub fn println<T: Display>(value: &T) {
     rune_println(value.display())
 }
 
 /// Writes `value` to standard error with no trailing newline.
 @safe("the runtime owns and bounds-checks the output buffer")
-pub fn eprint<T: Display>(value: T) {
+pub fn eprint<T: Display>(value: &T) {
     rune_eprint(value.display())
 }
 
 /// Writes `value` to standard error followed by a newline.
 @safe("the runtime owns and bounds-checks the output buffer")
-pub fn eprintln<T: Display>(value: T) {
+pub fn eprintln<T: Display>(value: &T) {
     rune_eprintln(value.display())
 }
 
 /// Writes the debugging form of `value`, followed by a newline.
 @safe("the runtime owns and bounds-checks the output buffer")
-pub fn debug<T: Display>(value: T) {
+pub fn debug<T: Display>(value: &T) {
     rune_println(value.describe())
 }
 

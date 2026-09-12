@@ -13,7 +13,7 @@ struct Dependency {
   std::string Name;
   std::string Path;     ///< relative to the manifest's directory
   std::string Version;
-  /// The registry it must come from, by the name `rune pkg server list`
+  /// The registry it must come from, by the name `rune registry list`
   /// shows; empty means whichever configured registry has it.
   std::string Registry;
 };
@@ -82,6 +82,11 @@ struct Manifest {
 
   // [build]
   std::string Safety = "full";  ///< none | minimal | full
+  /// `memory`: "arc" (reference counting, the default) or "zombie" (single
+  /// ownership proven by the borrow checker, no counting at all). Read from
+  /// the root package only: one program is one memory model, and every
+  /// dependency is built for the root's.
+  std::string Memory = "arc";
   /// [build] emit = "llvm-ir" — what `rune build` produces for this package
   /// when the command line does not say. Empty means an executable.
   std::string Emit;

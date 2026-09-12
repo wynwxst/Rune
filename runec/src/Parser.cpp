@@ -670,6 +670,100 @@ std::vector<WhereClause> Parser::parseWhereClauses() {
   return clauses;
 }
 
+/// `a.b.c` — a dotted path of names, as a view entry or the tail of a `from`
+/// place. The first step may be `self`.
+bool Parser::parseFieldPath(std::vector<std::string> &path, SourceRange &range) {
+  size_t start = Pos;
+  if (check(Tok::KwSelfValue)) {
+    path.push_back("self");
+    advance();
+  } else if (check(Tok::Identifier)) {
+    path.push_back(cur().Text);
+    advance();
+  } else {
+    expect(Tok::Identifier, "a place");
+    return false;
+  }
+  while (check(Tok::Dot)) {
+    advance();
+    if (check(Tok::Identifier)) {
+      path.push_back(cur().Text);
+      advance();
+    } else if (check(Tok::IntLiteral)) {
+      path.push_back(cur().Text);          // a tuple field, by index
+      advance();
+    } else {
+      expect(Tok::Identifier, "a field path");
+      return false;
+    }
+  }
+  range = rangeFrom(start);
+  return true;
+}
+
+/// `{ counter, stats.hits }` after a parameter: the view it promises to stay
+/// within. Nothing is consumed when no brace follows.
+void Parser::parseView(Param &p) {
+  if (!check(Tok::LBrace))
+    return;
+  advance();
+  p.HasView = true;
+  skipNewlines();
+  while (!check(Tok::RBrace) && !atEnd()) {
+    FieldPathRepr f;
+    if (!parseFieldPath(f.Path, f.Range)) {
+      synchronize();
+      break;
+    }
+    p.View.push_back(std::move(f));
+    skipNewlines();
+    if (!match(Tok::Comma))
+      break;
+    skipNewlines();
+  }
+  expect(Tok::RBrace, "a view");
+}
+
+/// `from place`, `from (a, b.c)`, `from global` after a reference type. The
+/// word is contextual: it is only looked for here, so a parameter or a field
+/// may still be called `from`.
+std::unique_ptr<OriginClause> Parser::parseOriginClause() {
+  if (!check(Tok::Identifier) || cur().Text != "from")
+    return nullptr;
+  size_t start = Pos;
+  advance();
+  auto clause = std::make_unique<OriginClause>();
+  auto one = [&]() {
+    OriginPlace place;
+    if (check(Tok::KwGlobal)) {
+      place.Path.push_back("global");
+      place.Range = cur().Range;
+      advance();
+    } else if (!parseFieldPath(place.Path, place.Range)) {
+      return false;
+    }
+    clause->Places.push_back(std::move(place));
+    return true;
+  };
+  if (check(Tok::LParen)) {
+    advance();
+    skipNewlines();
+    while (!check(Tok::RParen) && !atEnd()) {
+      if (!one())
+        break;
+      skipNewlines();
+      if (!match(Tok::Comma))
+        break;
+      skipNewlines();
+    }
+    expect(Tok::RParen, "a `from` clause");
+  } else {
+    one();
+  }
+  clause->Range = rangeFrom(start);
+  return clause;
+}
+
 bool Parser::parseParamList(std::vector<Param> &out, bool allowSelf,
                             bool &isVariadic) {
   isVariadic = false;
@@ -703,6 +797,7 @@ bool Parser::parseParamList(std::vector<Param> &out, bool allowSelf,
       p.SelfMutable = sawMut || !sawAmp;
       p.Name = "self";
       advance();
+      parseView(p);
       p.Range = rangeFrom(start);
       out.push_back(std::move(p));
       first = false;
@@ -741,6 +836,7 @@ bool Parser::parseParamList(std::vector<Param> &out, bool allowSelf,
     }
     if (expect(Tok::Colon, "a parameter declaration"))
       p.TypeAnnotation = parseType();
+    parseView(p);
     if (match(Tok::Eq))
       p.DefaultValue = parseExpr();
 
@@ -806,6 +902,14 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(std::vector<Attribute> attrs
       if (!a.Args.empty())
         if (auto *s = dyn_cast<StringLitExpr>(a.Args[0].get()))
           fn->SafetyReason = s->Value;
+    }
+    // `@zombie("reason")`: the borrow checker takes this body on trust. The
+    // reason is checked for in Sema, the way `@safe` without one warns.
+    if (a.Name == "zombie") {
+      fn->IsZombieTrusted = true;
+      if (!a.Args.empty())
+        if (auto *s = dyn_cast<StringLitExpr>(a.Args[0].get()))
+          fn->ZombieReason = s->Value;
     }
   }
 
@@ -1636,6 +1740,7 @@ TypeReprPtr Parser::parseTypeNoSuffix() {
       advance();
     }
     p->Pointee = parseType();
+    p->Origin = parseOriginClause();
     p->Range = rangeFrom(start);
     return p;
   }
@@ -1672,6 +1777,7 @@ TypeReprPtr Parser::parseTypeNoSuffix() {
     auto s = makeNode<SliceTypeRepr>(here());
     s->Element = parseType();
     expect(Tok::RBracket, "a slice type");
+    s->Origin = parseOriginClause();      // a slice is a borrow of its buffer
     s->Range = rangeFrom(start);
     return s;
   }
@@ -1719,6 +1825,15 @@ TypeReprPtr Parser::parseTypeNoSuffix() {
     if (expect(Tok::LParen, "a function type")) {
       skipNewlines();
       while (!check(Tok::RParen) && !atEnd()) {
+        // `name: T` names the parameter so a `from` on the result can point
+        // at it; the name means nothing else.
+        std::string name;
+        if (check(Tok::Identifier) && peek(1).is(Tok::Colon)) {
+          name = cur().Text;
+          advance();
+          advance();
+        }
+        f->ParamNames.push_back(std::move(name));
         f->Params.push_back(parseType());
         skipNewlines();
         if (!match(Tok::Comma))
@@ -1741,6 +1856,9 @@ TypeReprPtr Parser::parseTypeNoSuffix() {
   } else if (check(Tok::Lt)) {
     n->GenericArgs = parseGenericArgs();
   }
+  // A struct that holds references borrows from wherever they came from;
+  // `Cursor from text` says where, the way `&T from text` does.
+  n->Origin = parseOriginClause();
   n->Range = rangeFrom(start);
   return n;
 }

@@ -1,0 +1,7 @@
+// A `from` clause is a contract: the body may borrow from less, never more.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: but the signature says the result borrows from a
+fn pick(a: &i64, b: &i64) -> &i64 from a {
+    if *a > *b { a } else { b }
+}
+fn main() -> i64 { let x = 1; let y = 2; *pick(&x, &y) }

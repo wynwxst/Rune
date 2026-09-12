@@ -1,0 +1,8 @@
+// A field can only borrow from a sibling that owns a heap object.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: it is stored inline and moves with the value
+struct Bad {
+    items: [4:i64]
+    first: &i64 from self.items
+}
+fn main() -> i64 { 0 }

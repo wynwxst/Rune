@@ -154,6 +154,13 @@ private:
   //=== Types =============================================================//
   TypeReprPtr parseType();
   TypeReprPtr parseTypeNoSuffix();
+  /// The `from …` clause after a reference type, or null when there is none.
+  std::unique_ptr<OriginClause> parseOriginClause();
+  /// `a.b.c`; the first step may be `self`. False (with a report) when the
+  /// current token cannot start one.
+  bool parseFieldPath(std::vector<std::string> &path, SourceRange &range);
+  /// `{ field, other.sub }` after a parameter, when there is one.
+  void parseView(Param &p);
   std::vector<TypeReprPtr> parseGenericArgs();
   std::vector<std::string> parsePath(SourceRange &range);
 

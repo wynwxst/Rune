@@ -14,6 +14,7 @@
 #include "rune/Parallel.h"
 #include "rune/Parser.h"
 #include "rune/Sema.h"
+#include "rune/Zombie.h"
 #include "rune/Source.h"
 #include "rune/Type.h"
 
@@ -103,6 +104,13 @@ public:
     Entries.push_back({name, ms});
   }
 
+  /// Records a part of a phase already timed under another name, shown
+  /// indented beneath it and left out of the total.
+  void within(const char *name, double ms) {
+    if (Enabled)
+      Sub.push_back({name, ms});
+  }
+
   void report(std::ostream &os) const {
     if (!Enabled)
       return;
@@ -112,6 +120,8 @@ public:
       total += e.second;
       width = std::max(width, e.first.size());
     }
+    for (const auto &e : Sub)
+      width = std::max(width, e.first.size() + 2);
     os << "\n  time report (" << parallelism() << " thread"
        << (parallelism() == 1 ? "" : "s") << " available)\n";
     auto line = [&](const std::string &name, double ms) {
@@ -123,8 +133,12 @@ public:
            << " %";
       os << "\n";
     };
-    for (const auto &e : Entries)
+    for (const auto &e : Entries) {
       line(e.first, e.second);
+      if (e.first == "check")
+        for (const auto &sub : Sub)
+          line("  " + sub.first, sub.second);
+    }
     os << "    " << std::string(width + 2 + 20, '-') << "\n";
     line("total", total);
     os.unsetf(std::ios::floatfield);
@@ -134,6 +148,7 @@ private:
   using Clock = std::chrono::steady_clock;
   bool Enabled;
   std::vector<std::pair<std::string, double>> Entries;
+  std::vector<std::pair<std::string, double>> Sub;
 };
 
 std::string stemOf(const std::string &path) {
@@ -442,6 +457,18 @@ int compileWithOptions(const CompilerOptions &opts) {
         libraryError = true;
         return;
       }
+      // The object code inside bakes in one memory model — retains and
+      // releases, or their absence and the moved-in argument convention —
+      // so a library from the other model would link and then miscount.
+      if (lib.Memory != opts.Memory) {
+        diags.fatal("'{}' was built with `--memory {}`; this build is "
+                    "`--memory {}`", libPath.string(),
+                    memoryModeName(lib.Memory), memoryModeName(opts.Memory))
+            .note("rebuild the dependency with the same memory mode")
+            .code(291);
+        libraryError = true;
+        return;
+      }
       for (const auto &unit : lib.Interfaces) {
         unsigned id = sm.addBuffer(libPath.string() + " (" + unit.first + ")",
                                    unit.second);
@@ -624,10 +651,22 @@ int compileWithOptions(const CompilerOptions &opts) {
     diags.status(fmt("checking {} module(s)", modules.size()));
 
   TypeContext typeCtx(targetPointerBits(opts));
-  Sema sema(sm, diags, typeCtx, opts.Safety);
+  Sema sema(sm, diags, typeCtx, opts.Safety, opts.Memory, opts.Dump,
+            opts.ZombieStdlib);
   for (const auto &m : modules)
     sema.addModule(m.get());
   timer.phase("check", [&] { sema.check(); });
+  if (opts.Memory == MemoryMode::Zombie) {
+    timer.within("zombie", sema.zombieMillis());
+    const zombie::Stats &zs = zombie::lastStats();
+    timer.within("  lower (thread ms)", zs.LowerMs);
+    timer.within("  summaries", zs.SummariesMs);
+    timer.within("  moves", zs.MovesMs);
+    timer.within("  loans", zs.LoansMs);
+    timer.within("  infer", zs.InferMs);
+    timer.within(("  bodies " + std::to_string(zs.Bodies) + ", skipped " +
+                  std::to_string(zs.Skipped)).c_str(), 0);
+  }
 
   if (opts.Dump == DumpKind::Symbols) {
     sema.dumpSymbols(std::cout);
@@ -1121,7 +1160,8 @@ int compileWithOptions(const CompilerOptions &opts) {
       units.emplace_back(modules[i]->Name, sm.file(modules[i]->FileID).Buffer);
     bool ok = false;
     timer.phase("archive", [&] {
-      ok = writeLibrary(outPath, objPath.string(), opts.ModuleName, units, diags);
+      ok = writeLibrary(outPath, objPath.string(), opts.ModuleName, units,
+                        opts.Memory, diags);
     });
     if (!ok)
       return 1;

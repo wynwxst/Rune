@@ -166,6 +166,38 @@ pub fn isZeroed(block: *u8, bytes: usize) -> bool {
 pub fn slice_of<T>(block: *var T, count: usize) -> [T]
 
 //===--------------------------------------------------------------------===//
+// Ownership in raw storage
+//===--------------------------------------------------------------------===//
+//
+// A container that keeps its elements in memory the compiler cannot see moves
+// values in and out of that memory with these. They mean the same thing under
+// both memory models — what goes in belongs to the slot, what comes out
+// belongs to the caller — which is what lets one container source serve both
+// `--memory arc` and `--memory zombie`. (The `std::collections` rewrite that
+// uses them is Milestone C of the Zombie work; see docs/roadmap.md.)
+
+/// Puts `value` into the slot at `slot`, which the slot then owns. Whatever
+/// the slot held before is not released — see `drop_at`.
+@unsafe
+@intrinsic("store")
+pub fn store<T>(slot: *var T, value: T)
+
+/// Takes the value out of the slot at `slot`, leaving it empty.
+@unsafe
+@intrinsic("take")
+pub fn take<T>(slot: *var T) -> T
+
+/// Destroys the value in the slot at `slot` and leaves the slot empty.
+@unsafe
+@intrinsic("drop_at")
+pub fn drop_at<T>(slot: *var T)
+
+/// Puts `value` into `place` and hands back what was there.
+@safe("the place is a live borrow, and every write into it is balanced")
+@intrinsic("replace")
+pub fn replace<T>(place: &var T, value: T) -> T
+
+//===--------------------------------------------------------------------===//
 // Reference counting, for containers that hold their own storage
 //===--------------------------------------------------------------------===//
 

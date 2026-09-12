@@ -1,0 +1,24 @@
+// A struct that borrows from its own field. Moving the struct moves the
+// handle, not the object, so the borrow inside stays good.
+// FLAGS: --memory zombie
+// EXPECT: 11
+import std::io
+
+struct Message {
+    text: String
+    body: &String from self.text
+}
+
+fn parse(text: String) -> Message {
+    let body = &text
+    Message { text: text, body: body }
+}
+
+fn consume(m: Message) -> i64 { m.body.$len() }
+
+fn main() -> i64 {
+    let m = parse("hello world")
+    let n = consume(m)
+    io::println(n.$str())
+    0
+}

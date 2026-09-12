@@ -1,0 +1,9 @@
+// Fields are destroyed in reverse declaration order, so the reference has to
+// come after what it points at.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: so it must be declared after it
+struct Order {
+    body: &String from self.text
+    text: String
+}
+fn main() -> i64 { 0 }

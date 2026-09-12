@@ -1,0 +1,6 @@
+// Nothing can prove no other function reaches a global meanwhile.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: a global cannot be borrowed as `&var`
+global var total: i64 = 0
+fn add(t: &var i64) { *t += 1 }
+fn main() -> i64 { add(&var total); total }

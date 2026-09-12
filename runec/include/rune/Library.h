@@ -14,6 +14,7 @@
 //
 //   magic      8 bytes  "RUNELIB\1"
 //   version    u32
+//   memory     u32      0 = reference counting, 1 = Zombie (single ownership)
 //   nameLen    u32      module name, UTF-8
 //   name       bytes
 //   unitCount  u32      number of interface units
@@ -29,6 +30,7 @@
 #define RUNE_LIBRARY_H
 
 #include "rune/Diagnostics.h"
+#include "rune/Driver.h"
 
 #include <string>
 #include <utility>
@@ -38,6 +40,10 @@ namespace rune {
 
 struct LibraryContents {
   std::string ModuleName;
+  /// The memory model the object code was compiled for. Reference-counted
+  /// code retains its parameters and releases on the way out; Zombie code
+  /// does neither, so the two cannot share a link. Checked on import.
+  MemoryMode Memory = MemoryMode::Arc;
   /// One entry per module compiled into the library: its dotted module path
   /// and the Rune source that declares it.
   std::vector<std::pair<std::string, std::string>> Interfaces;
@@ -48,7 +54,7 @@ struct LibraryContents {
 bool writeLibrary(const std::string &path, const std::string &objectPath,
                   const std::string &moduleName,
                   const std::vector<std::pair<std::string, std::string>> &units,
-                  DiagnosticEngine &diags);
+                  MemoryMode memory, DiagnosticEngine &diags);
 
 /// Reads a `.rul`. Returns false and reports if the file is missing or
 /// malformed.

@@ -219,7 +219,8 @@ void bindGenerics(const std::vector<GenericParam> &generics, TypeContext &types,
 class Sema {
 public:
   Sema(const SourceManager &sm, DiagnosticEngine &diags, TypeContext &types,
-       SafetyLevel safety);
+       SafetyLevel safety, MemoryMode memory = MemoryMode::Arc,
+       DumpKind dump = DumpKind::Nothing, bool zombieStdlib = false);
   ~Sema();
 
   /// Registers a parsed module so imports can find it. Ownership stays with
@@ -236,6 +237,9 @@ public:
   /// Prints the resolved module scope (`--dump-symbols`).
   void dumpSymbols(std::ostream &os) const;
 
+  /// How long the Zombie checker took, for `--time`.
+  double zombieMillis() const { return ZombieMillis; }
+
 
 
 private:
@@ -243,6 +247,12 @@ private:
   DiagnosticEngine &Diags;
   TypeContext &Types;
   SafetyLevel Safety;
+  /// `--memory`: which memory model the program is being compiled for. Under
+  /// `Zombie` the queued bodies go to the borrow checker instead of the
+  /// ownership pass, and the flat move tracking below stays out of its way.
+  MemoryMode Memory;
+  DumpKind Dump;
+  bool ZombieStdlib;
   SemaResult Result;
 
   std::vector<Module *> Modules;
@@ -325,6 +335,45 @@ private:
   std::set<FunctionDecl *> OwnershipQueued;
   /// Runs the queue, on as many threads as there are.
   void checkOwnershipOfQueued();
+  double ZombieMillis = 0;
+
+  //=== Origins and views (`from` clauses, `{ fields }`) =================//
+  // Written annotations the Zombie borrow checker reads. They are resolved
+  // in Sema because that is where names become declarations; the checker
+  // only ever sees the resolved form. See SemaOrigins.cpp.
+
+  /// Resolves every `from` clause and view in `fn`'s signature. Safe to call
+  /// more than once; the second call does nothing.
+  void resolveSignatureAnnotations(FunctionDecl *fn);
+  /// Resolves `from self.…` on the fields of a struct, class or enum.
+  void resolveFieldAnnotations(NominalDecl *nd);
+  /// Resolves a `from` clause written on a local binding's type.
+  void resolveLocalAnnotations(TypeRepr *repr);
+  /// E0292 when `d` carries `@zombie_unavailable` and this is a Zombie build.
+  void checkAvailableUnderZombie(Decl *d, SourceRange at);
+  /// True when `$clone()` applies to values of `t`.
+  bool typeIsClonable(Type *t);
+  /// The context a `from` place is resolved against.
+  struct OriginContext {
+    const std::vector<Param> *Params = nullptr;          ///< a signature
+    const FunctionTypeReprNode *FnType = nullptr;        ///< a function type
+    NominalDecl *Self = nullptr;                         ///< a field: `self.…`
+    /// With `Self`: the fields `self.x` is looked up in when they are not
+    /// the nominal's own — an enum variant's.
+    const std::vector<std::unique_ptr<FieldDecl>> *SelfFields = nullptr;
+    bool Locals = false;                                 ///< a binding
+  };
+  void resolveOriginClauses(TypeRepr *repr, const OriginContext &ctx);
+  bool resolveOriginPlace(OriginPlace &place, const OriginContext &ctx);
+  /// Resolves `names[from..]` as fields starting at `root`, appending an
+  /// index per step. Reports and returns false at the first name that is
+  /// not a field of the type reached so far.
+  bool resolveFieldPath(Type *root, const std::vector<std::string> &names,
+                        size_t from, std::vector<unsigned> &out,
+                        SourceRange at);
+  /// The field called `name` on `t` (through borrows and up a class's
+  /// superclass chain), or null.
+  FieldDecl *fieldOf(Type *t, const std::string &name);
 
   //=== Method / mark tables =============================================//
   // Keyed by Type rather than by declaration, so a mark can be bound to a

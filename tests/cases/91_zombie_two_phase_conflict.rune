@@ -1,0 +1,15 @@
+// A `&var` receiver is only reserved while the arguments run — an argument
+// that borrows the receiver and is still needed at the call clashes with it.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: cannot borrow
+class Stack {
+    var n: i64
+    fn init(self) { self.n = 0 }
+    fn first(&self) -> &i64 { &self.n }
+    fn pushRef(&var self, v: &i64) { self.n += *v }
+}
+fn main() -> i64 {
+    var s = Stack()
+    s.pushRef(s.first())
+    s.n
+}

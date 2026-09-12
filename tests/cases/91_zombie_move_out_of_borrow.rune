@@ -1,0 +1,7 @@
+// What a borrow reaches is owned elsewhere: taking it by value is refused.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: cannot move 'w.b' out of a borrow
+class Box { var v: i64  fn init(self, v: i64) { self.v = v } }
+struct Wrap { b: Box }
+fn steal(w: &Wrap) -> Box { w.b }
+fn main() -> i64 { let w = Wrap { b: Box(1) }; steal(&w).v }

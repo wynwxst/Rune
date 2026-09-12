@@ -1,0 +1,10 @@
+// Writing to a place that is still borrowed.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: cannot assign to 'p.x' while it is borrowed
+struct Point { var x: i64, var y: i64 }
+fn main() -> i64 {
+    var p = Point { x: 1, y: 2 }
+    let r = &p.x
+    p.x = 5
+    *r
+}
