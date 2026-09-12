@@ -510,7 +510,7 @@ bool resolvePackages(const std::string &rootDir, std::vector<PackageNode> &out,
     fs::path depDir;
     if (d.Path.empty()) {
       // A version names a package from a registry: installed once under
-      // `~/.rune/pkg/`, pinned by the root project's Rune.lock, and fetched
+      // `~/.rune/registry/`, pinned by the root project's Rune.lock, and fetched
       // now if it is not there yet.
       depDir = pm::resolveRegistryDependency(m, d, gVerboseBuild);
       if (depDir.empty())
@@ -761,7 +761,7 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
     out = target / (step.Name + opts.Target.exeSuffix());
     // A binary gets a module name of its own, distinct from the package's.
     // The package name then belongs to the library alone, so a binary that
-    // says `import <pkg>` resolves outward to the real `.rul` instead of to
+    // says `import <registry>` resolves outward to the real `.rul` instead of to
     // the module it is already inside. Components are re-imported per binary,
     // which is how it already worked.
     moduleName = m.producesLibrary()
@@ -1732,7 +1732,7 @@ int commandDocPackage(const Options &opts) {
   if (dir.empty()) {
     failLine(error);
     if (!registry.empty() || error.find("no registry") != std::string::npos)
-      note("`rune search " + name + "` looks for it; `rune pkg server list` "
+      note("`rune search " + name + "` looks for it; `rune registry list` "
            "shows the registries");
     return 1;
   }
@@ -1981,16 +1981,16 @@ PACKAGES
     remove [<name>...]   Drop a dependency; with no names, uninstall unused packages
     update [<name>...]   Move dependencies to the newest versions their requirements allow
     deps                 Print the dependency tree
-    installed            List what is installed under ~/.rune/pkg and who uses it
-    pkg init [dir] [--name N]
+    installed            List what is installed under ~/.rune/registry and who uses it
+    registry init [dir] [--name N]
                          Make a package registry (static files, ready to serve)
-    pkg server --serve [--port N] [--dir D]
-    pkg server --addPackage <project> [--dir D]
-    pkg server add <url> [--name N]
+    registry --serve [--port N] [--dir D]
+    registry --addPackage <project> [--dir D]
+    registry add <url> [--name N]
                          Use a registry from this machine, under its own name
                          or the alias --name gives it
-    pkg server list      The registries this machine uses
-    pkg server remove <name>
+    registry list      The registries this machine uses
+    registry remove <name>
                          Stop using one
 
     A package is <name>, or <registry>::<name> to take it from one registry;
@@ -2040,7 +2040,7 @@ int main(int argc, char **argv) {
   // The package commands take their own flags — `--serve`, `--port`,
   // `--refresh` — so they see the arguments as written, less the few every
   // command shares.
-  if (command == "pkg" || command == "search" || command == "desc" ||
+  if (command == "registry" || command == "search" || command == "desc" ||
       command == "installed" || command == "add" || command == "remove" ||
       command == "update" || command == "deps") {
     std::vector<std::string> rest;
@@ -2057,7 +2057,7 @@ int main(int argc, char **argv) {
       if (a == "-h" || a == "--help") { printUsage(std::cout); return 0; }
       rest.push_back(a);
     }
-    if (command == "pkg") return pm::commandPkg(rest, opts.Verbose);
+    if (command == "registry") return pm::commandRegistry(rest, opts.Verbose);
     if (command == "search") return pm::commandSearch(rest, opts.Verbose);
     if (command == "desc") return pm::commandDesc(rest, opts.Verbose);
     if (command == "installed") return pm::commandInstalled(rest, opts.Verbose);

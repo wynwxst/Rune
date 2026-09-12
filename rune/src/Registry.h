@@ -8,7 +8,7 @@
 //   packages/<name>/<name>-<version>.tar   the package, packed
 //
 // Static files are the whole of the design. Serving one is serving files
-// (`rune pkg server --serve` does, over HTTP, in a few hundred lines);
+// (`rune registry server --serve` does, over HTTP, in a few hundred lines);
 // mirroring one is copying a directory; a registry on a shared drive needs no
 // server at all, because a `file://` URL or a plain path works as one. The
 // index is one file fetched once and cached, so `search` and `desc` cost
@@ -17,13 +17,13 @@
 // one is downloaded, which is what lets them all download at once.
 //
 // Every registry has a name — the one its own `index.toml` declares — and a
-// client may know it by another (`rune pkg server add <url> --name alias`).
+// client may know it by another (`rune registry server add <url> --name alias`).
 // The name is how commands tell registries apart: `rune add work::geometry`
 // takes the package from that registry alone, `rune search --registry work`
 // looks nowhere else, and a manifest records the choice as
 // `geometry = { version = "1.0", registry = "work" }`.
 //
-// Installed packages live under `~/.rune/pkg/<name>/<version>/`, once each
+// Installed packages live under `~/.rune/registry/<name>/<version>/`, once each
 // however many projects use them. Each keeps a list of the projects that
 // reference it, so a version nobody uses any more can be found and removed.
 // A project pins what it resolved in `Rune.lock`, and its `Rune.toml` names
@@ -193,7 +193,7 @@ bool loadMergedIndex(Index &out, bool refresh, std::string &error);
 // What is installed
 //===----------------------------------------------------------------------===//
 
-/// `~/.rune/pkg/<name>/<version>`.
+/// `~/.rune/registry/<name>/<version>`.
 std::filesystem::path installDir(const std::string &name, const Version &v);
 /// The projects referencing an installed version, one root per line in its
 /// `.rune-refs`.
@@ -282,8 +282,8 @@ void setLockProject(const std::filesystem::path &root);
 // Commands
 //===----------------------------------------------------------------------===//
 
-/// `rune pkg ...`: the registry server side.
-int commandPkg(const std::vector<std::string> &args, bool verbose);
+/// `rune registry ...`: the registry server side.
+int commandRegistry(const std::vector<std::string> &args, bool verbose);
 int commandSearch(const std::vector<std::string> &args, bool verbose);
 int commandDesc(const std::vector<std::string> &args, bool verbose);
 int commandInstalled(const std::vector<std::string> &args, bool verbose);

@@ -795,7 +795,7 @@ std::string registryFrontPage(const fs::path &root) {
                      "border-bottom:1px solid #ddd}code{font-size:.92em}</style>"
                      "<h1>" + htmlEscape(index.Name) + "</h1>"
                      "<p>A Rune package registry. Add it with "
-                     "<code>rune pkg server add &lt;this url&gt;</code>, then "
+                     "<code>rune registry add &lt;this url&gt;</code>, then "
                      "<code>rune search</code>, <code>rune add &lt;name&gt;</code>.</p>"
                      "<table><tr><th>Package</th><th>Latest</th><th>Description</th></tr>";
   std::set<std::string> seen;
@@ -916,7 +916,7 @@ int serveDirectory(const fs::path &root, int port, bool verbose) {
   }
   okLine("Serving " + fs::absolute(root).lexically_normal().string() +
          " at http://localhost:" + std::to_string(port) + "/");
-  note("add it to a client with `rune pkg server add http://<this host>:" +
+  note("add it to a client with `rune registry add http://<this host>:" +
        std::to_string(port) + "`; Ctrl-C stops it");
   for (;;) {
     struct sockaddr_storage peer;
@@ -984,7 +984,7 @@ bool Index::parse(const std::string &text, std::string &error) {
 }
 
 std::string Index::serialise() const {
-  std::string out = "# The packages this registry holds. Written by `rune pkg server "
+  std::string out = "# The packages this registry holds. Written by `rune registry "
                     "--addPackage`;\n# every release is one entry, and the "
                     "archive it names is under packages/.\n\n[registry]\nname = " +
                     tomlString(Name) + "\nformat = 1\nupdated = " +
@@ -1136,8 +1136,8 @@ std::vector<RegistrySource> loadRegistries() {
 
 bool saveRegistries(const std::vector<RegistrySource> &list, std::string &error) {
   std::string out = "# Registries `rune search`, `rune add` and friends read.\n"
-                    "# Added with `rune pkg server add <url>`; `rune pkg server "
-                    "list` shows them,\n# `rune pkg server remove <name>` drops "
+                    "# Added with `rune registry add <url>`; `rune registry "
+                    "list` shows them,\n# `rune registry remove <name>` drops "
                     "one. `name` is what commands and manifests\n# use; "
                     "`declared` is what the registry calls itself.\n";
   for (const RegistrySource &r : list) {
@@ -1669,7 +1669,7 @@ fs::path resolveRegistryDependency(const Manifest &m, const Dependency &d,
   std::string error;
   if (!loadMergedIndex(index, /*refresh=*/false, error)) {
     failLine("dependency '" + d.Name + "' needs a registry: " + error);
-    note("add one with `rune pkg server add <url>`, or give the dependency a `path`");
+    note("add one with `rune registry add <url>`, or give the dependency a `path`");
     return {};
   }
   Manifest rootManifest;
@@ -1929,8 +1929,8 @@ int pkgInit(const fs::path &dir, const std::string &name) {
     return 1;
   }
   okLine("Created registry '" + name + "' in " + fs::absolute(dir).lexically_normal().string());
-  note("add packages with `rune pkg server --addPackage <project>`, serve it with "
-       "`rune pkg server --serve`");
+  note("add packages with `rune registry --addPackage <project>`, serve it with "
+       "`rune registry --serve`");
   return 0;
 }
 
@@ -2076,7 +2076,7 @@ int pkgListSources(bool verbose) {
   std::vector<RegistrySource> list = loadRegistries();
   if (list.empty()) {
     okLine("no registries are configured");
-    note("add one with `rune pkg server add <url>`");
+    note("add one with `rune registry add <url>`");
     return 0;
   }
   size_t width = 4;
@@ -2108,7 +2108,7 @@ int pkgRemoveSource(const std::string &nameOrUrl) {
   const RegistrySource *found = findRegistry(list, nameOrUrl);
   if (!found) {
     failLine("no registry called '" + nameOrUrl + "' is configured");
-    note("`rune pkg server list` shows them");
+    note("`rune registry list` shows them");
     return 1;
   }
   RegistrySource gone = *found;
@@ -2139,15 +2139,15 @@ int pkgRemoveSource(const std::string &nameOrUrl) {
 
 } // namespace
 
-int commandPkg(const std::vector<std::string> &args, bool verbose) {
+int commandRegistry(const std::vector<std::string> &args, bool verbose) {
   auto usage = [&]() {
-    plain("usage: rune pkg init [dir] [--name N]       make a registry here, or in dir\n"
-          "       rune pkg new <dir> [--name N]        make a registry in a new dir\n"
-          "       rune pkg server --serve [--port N] [--dir D]\n"
-          "       rune pkg server --addPackage <project> [--dir D] [--force]\n"
-          "       rune pkg server add <url> [--name N] use a registry from this machine\n"
-          "       rune pkg server list                 the registries this machine uses\n"
-          "       rune pkg server remove <name>        stop using one");
+    plain("usage: rune registry init [dir] [--name N]       make a registry here, or in dir\n"
+          "       rune registry new <dir> [--name N]        make a registry in a new dir\n"
+          "       rune registry --serve [--port N] [--dir D]\n"
+          "       rune registry --addPackage <project> [--dir D] [--force]\n"
+          "       rune registry add <url> [--name N] use a registry from this machine\n"
+          "       rune registry list                 the registries this machine uses\n"
+          "       rune registry remove <name>        stop using one");
     return 2;
   };
   if (args.empty())
@@ -2185,7 +2185,7 @@ int commandPkg(const std::vector<std::string> &args, bool verbose) {
     }
     return pkgInit(dir, name);
   }
-  if (sub == "server") {
+
     bool serve = false, force = false, list = false;
     int port = 7878;
     fs::path dir = ".";
@@ -2202,16 +2202,16 @@ int commandPkg(const std::vector<std::string> &args, bool verbose) {
         addPackage = args[++i];
       } else if ((a == "--name" || a == "-n") && i + 1 < args.size()) name = args[++i];
       else if (a == "add") {
-        if (i + 1 >= args.size()) { failLine("`rune pkg server add` needs a URL"); return 2; }
+        if (i + 1 >= args.size()) { failLine("`rune registry add` needs a URL"); return 2; }
         addUrl = args[++i];
       } else if (a == "remove" || a == "--remove") {
-        if (i + 1 >= args.size()) { failLine("`rune pkg server remove` needs a registry's name"); return 2; }
+        if (i + 1 >= args.size()) { failLine("`rune registry remove` needs a registry's name"); return 2; }
         removeName = args[++i];
       } else {
         failLine("unknown argument '" + a + "'");
         return usage();
       }
-    }
+    
     if (!addUrl.empty())
       return pkgAddSource(addUrl, name);
     if (list)
@@ -2253,7 +2253,7 @@ bool takeRegistryFlag(const std::vector<std::string> &args, std::string &registr
   }
   if (!registry.empty() && !findRegistry(loadRegistries(), registry)) {
     failLine("no registry called '" + registry + "' is configured");
-    note("`rune pkg server list` shows them");
+    note("`rune registry list` shows them");
     return false;
   }
   return true;
@@ -2266,7 +2266,7 @@ bool qualify(const std::string &spec, const std::string &flag,
   splitQualified(spec, registry, rest);
   if (!registry.empty() && !findRegistry(loadRegistries(), registry)) {
     failLine("no registry called '" + registry + "' is configured");
-    note("`rune pkg server list` shows them");
+    note("`rune registry list` shows them");
     return false;
   }
   if (!registry.empty() && !flag.empty() && registry != flag) {
@@ -2310,7 +2310,7 @@ int commandSearch(const std::vector<std::string> &args, bool verbose) {
   if (!loadMergedIndex(index, refresh, error)) {
     failLine(error);
     if (loadRegistries().empty())
-      note("add one with `rune pkg server add <url>`");
+      note("add one with `rune registry add <url>`");
     return 1;
   }
   std::regex re;
@@ -2504,7 +2504,7 @@ int commandAdd(const std::string &projectDir, const std::vector<std::string> &ar
   if (!loadMergedIndex(index, /*refresh=*/true, error)) {
     failLine(error);
     if (loadRegistries().empty())
-      note("add one with `rune pkg server add <url>`");
+      note("add one with `rune registry add <url>`");
     return 1;
   }
   // What the project already asks for stays; what it asks for now joins it.

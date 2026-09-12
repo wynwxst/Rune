@@ -7,11 +7,11 @@ A registry is a directory of static files: an `index.toml` that lists every rele
 | Command | Does |
 | --- | --- |
 | `rune pkg init [dir] [--name N]` | make a registry here, or in *dir*, named after it or *N* |
-| `rune pkg server --addPackage <project> [--dir D]` | pack a project and add it to the registry's index |
-| `rune pkg server --serve [--port N] [--dir D]` | serve the registry over HTTP (default port 7878) |
-| `rune pkg server add <url> [--name N]` | use a registry from this machine — `http://`, `file://`, or a path — under its own name, or the alias *N* |
-| `rune pkg server list` | the registries this machine uses |
-| `rune pkg server remove <name>` | stop using one; what came from it stays installed |
+| `rune registry --addPackage <project> [--dir D]` | pack a project and add it to the registry's index |
+| `rune registry --serve [--port N] [--dir D]` | serve the registry over HTTP (default port 7878) |
+| `rune registry add <url> [--name N]` | use a registry from this machine — `http://`, `file://`, or a path — under its own name, or the alias *N* |
+| `rune registry list` | the registries this machine uses |
+| `rune registry remove <name>` | stop using one; what came from it stays installed |
 | `rune search <regex>` | packages whose name or description match |
 | `rune desc <name>` | versions, authors, dependencies, where it is from, whether it is installed |
 | `rune add <name>[@req]` | depend on it: install, write `Rune.toml`, pin in `Rune.lock` |
@@ -27,9 +27,9 @@ Installed packages live under `~/.rune/pkg/<name>/<version>/`, once each however
 
 ```sh
 $ rune pkg init registry --name work
-$ rune pkg server --addPackage ../geometry --dir registry
-$ rune pkg server --serve --dir registry &
-$ rune pkg server add http://localhost:7878
+$ rune registry --addPackage ../geometry --dir registry
+$ rune registry --serve --dir registry &
+$ rune registry add http://localhost:7878
 ● Added registry 'work' at http://localhost:7878 (1 release)
 $ rune search geo
 geometry  v0.2.0     Points and distances
@@ -46,4 +46,4 @@ $ rune doc geometry
 > [!WARNING]
 > **Trust**
 >
-> A registry added with `rune pkg server add` is not monitored: nothing reviews what it serves. The archive's checksum is checked against the index on every install, which catches a corrupted or tampered file, not a malicious package. Read what you depend on.
+> A registry added with `rune registry add` is not monitored: nothing reviews what it serves. The archive's checksum is checked against the index on every install, which catches a corrupted or tampered file, not a malicious package. Read what you depend on.
