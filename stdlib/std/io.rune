@@ -314,7 +314,7 @@ pub class File {
     pub fn isOpen(&self) -> bool { !mem::isNull(self.handle) }
 
     /// The name it was opened under.
-    pub fn name(&self) -> String { self.path }
+    pub fn name(&self) -> String { self.path.$clone() }
 
     /// Closes it now. Calling this twice is harmless.
     @safe("the handle is nulled before anything else can reach it again")
@@ -399,23 +399,23 @@ pub class File {
 //===--------------------------------------------------------------------===//
 
 @safe("fopen either returns a handle or reports why it did not")
-fn openWith(path: String, mode: CString) -> Result<File, FileError> {
+fn openWith(path: &String, mode: CString) -> Result<File, FileError> {
     let handle = unsafe { fopen(path.$cstr(), mode) }
     if mem::isNull(handle) { return Err(lastError()) }
-    Ok(File(handle, path))
+    Ok(File(handle, path.$clone()))
 }
 
 /// Opens an existing file for reading.
-pub fn open(path: String) -> Result<File, FileError> { openWith(path, "rb") }
+pub fn open(path: &String) -> Result<File, FileError> { openWith(path, "rb") }
 
 /// Makes a new file, or empties one that is already there.
-pub fn create(path: String) -> Result<File, FileError> { openWith(path, "wb") }
+pub fn create(path: &String) -> Result<File, FileError> { openWith(path, "wb") }
 
 /// Opens for writing at the end, making the file if it is missing.
-pub fn append(path: String) -> Result<File, FileError> { openWith(path, "ab") }
+pub fn append(path: &String) -> Result<File, FileError> { openWith(path, "ab") }
 
 /// The whole file as text, in one call.
-pub fn readToString(path: String) -> Result<String, FileError> {
+pub fn readToString(path: &String) -> Result<String, FileError> {
     match open(path) {
         Ok(f) => Ok(f.readAll()),
         Err(e) => Err(e),
@@ -423,7 +423,7 @@ pub fn readToString(path: String) -> Result<String, FileError> {
 }
 
 /// Writes `text` as the file's entire contents.
-pub fn writeString(path: String, text: String) -> Result<i64, FileError> {
+pub fn writeString(path: &String, text: String) -> Result<i64, FileError> {
     match create(path) {
         Ok(f) => f.write(text),
         Err(e) => Err(e),
@@ -431,7 +431,7 @@ pub fn writeString(path: String, text: String) -> Result<i64, FileError> {
 }
 
 /// Adds `text` to the end of a file.
-pub fn appendString(path: String, text: String) -> Result<i64, FileError> {
+pub fn appendString(path: &String, text: String) -> Result<i64, FileError> {
     match append(path) {
         Ok(f) => f.write(text),
         Err(e) => Err(e),
@@ -439,7 +439,7 @@ pub fn appendString(path: String, text: String) -> Result<i64, FileError> {
 }
 
 /// True when the path can be opened for reading.
-pub fn exists(path: String) -> bool {
+pub fn exists(path: &String) -> bool {
     match open(path) {
         Ok(f) => true,
         Err(e) => false,
@@ -448,7 +448,7 @@ pub fn exists(path: String) -> bool {
 
 /// Deletes a file. The error, if there was one — `nil` means it is gone.
 @safe("remove either unlinks the path or reports why it did not")
-pub fn delete(path: String) -> FileError? {
+pub fn delete(path: &String) -> FileError? {
     if unsafe { remove(path.$cstr()) } == 0 { return nil }
     lastError()
 }
@@ -456,7 +456,7 @@ pub fn delete(path: String) -> FileError? {
 /// Creates a directory. Succeeds when it already exists, so a generator can
 /// call it without checking first.
 @safe("mkdir either creates the directory or reports why it did not")
-pub fn makeDirectory(path: String) -> FileError? {
+pub fn makeDirectory(path: &String) -> FileError? {
     let rc = unsafe { mkdir(path.$cstr(), 493 as u32) }   // 0755
     if rc == 0 { return nil }
     let e = lastError()
@@ -471,7 +471,7 @@ pub fn makeDirectory(path: String) -> FileError? {
 /// False for anything else, a missing path included, so this answers "can I
 /// list it" rather than "does it exist".
 @safe("stat either answers or reports that it could not, and touches nothing")
-pub fn isDirectory(path: String) -> bool {
+pub fn isDirectory(path: &String) -> bool {
     unsafe { rune_path_is_dir(path.$cstr()) } == 1
 }
 
@@ -495,7 +495,7 @@ pub struct DirEntry {
 ///         Err(e) => io::println(io::describe(e)),
 ///     }
 @safe("the handle is opened, walked and closed here; nothing escapes")
-pub fn readDirectory(path: String) -> Result<vector::Vector<DirEntry>, FileError> {
+pub fn readDirectory(path: &String) -> Result<vector::Vector<DirEntry>, FileError> {
     let handle = unsafe { rune_dir_open(path.$cstr()) }
     if mem::isNull(handle) { return lastError() }
     var out = vector::Vector<DirEntry>()
@@ -518,7 +518,7 @@ pub fn readDirectory(path: String) -> Result<vector::Vector<DirEntry>, FileError
 /// Directories are walked but not listed — the result is files only, which is
 /// what a caller looking for content wants. A cycle through a symbolic link
 /// would not end, so the walk stops at `depth` levels down.
-pub fn walkDirectory(path: String, depth: i64) -> vector::Vector<String> {
+pub fn walkDirectory(path: &String, depth: i64) -> vector::Vector<String> {
     var out = vector::Vector<String>()
     if depth < 0 { return out }
     match readDirectory(path) {
@@ -542,15 +542,15 @@ pub fn walkDirectory(path: String, depth: i64) -> vector::Vector<String> {
 ///
 /// An empty side is dropped rather than leaving a leading or trailing slash,
 /// so `joinPath("", "a")` is `"a"`.
-pub fn joinPath(left: String, right: String) -> String {
-    if left.$isEmpty() { return right }
-    if right.$isEmpty() { return left }
+pub fn joinPath(left: &String, right: &String) -> String {
+    if left.$isEmpty() { return right.$clone() }
+    if right.$isEmpty() { return left.$clone() }
     if left.$byteAt(left.$length() - 1) == 47 { return left + right }
     left + "/" + right
 }
 
 /// Creates a directory and every missing parent above it.
-pub fn makeDirectories(path: String) -> FileError? {
+pub fn makeDirectories(path: &String) -> FileError? {
     var soFar = ""
     var i = 0
     while i < path.$length() {
@@ -812,14 +812,14 @@ pub mark Reader {
     /// `0` means the source is finished — not that nothing was ready. A
     /// stream with nothing ready reports `WouldBlock` instead, so the two
     /// cases never have to be told apart by guessing.
-    fn read(&var self, sink: Bytes, most: i64) -> Result<i64, StreamError>
+    fn read(&var self, sink: &var Bytes, most: i64) -> Result<i64, StreamError>
 
     /// Everything left, appended to `sink`. Says how many bytes that was.
     ///
     /// Reads until the source says it is finished, so this is for a source
     /// that ends. A socket that stays open needs `read` and a rule of its own
     /// for when to stop.
-    fn readAll(&var self, sink: Bytes) -> Result<i64, StreamError> {
+    fn readAll(&var self, sink: &var Bytes) -> Result<i64, StreamError> {
         var total = 0
         loop {
             match self.read(sink, 8192) {
@@ -843,7 +843,7 @@ pub mark Reader {
     ///
     /// `Closed` when the source ends first — a short read is a failure here,
     /// which is the whole difference from `read`.
-    fn readExact(&var self, sink: Bytes, count: i64) -> Result<i64, StreamError> {
+    fn readExact(&var self, sink: &var Bytes, count: i64) -> Result<i64, StreamError> {
         var left = count
         while left > 0 {
             match self.read(sink, left) {
@@ -919,7 +919,7 @@ pub fn copy<R: Reader, W: Writer>(source: &var R,
     var chunk = Bytes()
     loop {
         chunk.clear()
-        match source.read(chunk, 8192) {
+        match source.read(&var chunk, 8192) {
             Ok(n) => {
                 if n == 0 { return Ok(moved) }
                 match target.writeAll(chunk) {
@@ -979,7 +979,7 @@ pub class BufferedReader<R: Reader> {
     /// Pulls one more chunk in. `false` means the source is finished.
     fn fill(&var self) -> bool {
         if self.finished { return false }
-        match self.source.read(self.held, 8192) {
+        match self.source.read(&var self.held, 8192) {
             Ok(n) => {
                 if n == 0 { self.finished = true; return false }
                 true
@@ -1063,7 +1063,7 @@ pub class FileStream {
     fn init(self, file: File) { self.file = file }
 
     /// The file underneath.
-    pub fn inner(&self) -> File { self.file }
+    pub fn inner(&self) -> &File from self { &self.file }
 }
 
 /// The same file, in the shape `Reader`, `Writer` and `Stream` take.
@@ -1073,7 +1073,7 @@ extend File {
 
 bind Reader to FileStream {
     @safe("fread is given the buffer's own spare room and never exceeds it")
-    fn read(&var self, sink: Bytes, most: i64) -> Result<i64, StreamError> {
+    fn read(&var self, sink: &var Bytes, most: i64) -> Result<i64, StreamError> {
         if !self.file.isOpen() { return Err(StreamError::Closed) }
         if most <= 0 { return Ok(0) }
         let at = sink.writePoint(most)

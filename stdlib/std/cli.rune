@@ -236,14 +236,14 @@ pub class Parser {
         }
     }
 
-    fn findLong(&self, name: String) -> Result<Spec, Error> {
+    fn findLong(&self, name: &String) -> Result<Spec, Error> {
         for spec in self.options {
             if spec.name == name { return Ok(spec) }
         }
         Err(Error::UnknownOption("--" + name))
     }
 
-    fn findShort(&self, letter: String) -> Result<Spec, Error> {
+    fn findShort(&self, letter: &String) -> Result<Spec, Error> {
         for spec in self.options {
             if spec.short == letter { return Ok(spec) }
         }
@@ -273,8 +273,9 @@ pub class Parser {
             var left = if spec.short.$isEmpty() { "    " } else { "-" + spec.short + ", " }
             left += "--" + spec.name
             if !spec.isFlag { left += " <" + spec.name + ">" }
+            let leftWidth = left.$length()
             lefts.push(left)
-            if left.$length() > width { width = left.$length() }
+            if leftWidth > width { width = leftWidth }
         }
         for p in self.positionals {
             if p.name.$length() + 2 > width { width = p.name.$length() + 2 }
@@ -341,7 +342,7 @@ pub class Arguments {
     }
 
     /// True when the flag was given.
-    pub fn has(&self, name: String) -> bool { self.flags.at(name) ?? false }
+    pub fn has(&self, name: &String) -> bool { self.flags.at(name) ?? false }
 
     /// The option's value — the last one, if it was given more than once —
     /// or its default, or `nil`.
@@ -384,7 +385,7 @@ pub class Arguments {
     }
 
     /// Every positional, declared and rest alike.
-    pub fn allPositionals(&self) -> vector::Vector<String> { self.positionalsGiven }
+    pub fn allPositionals(&self) -> vector::Vector<String> { self.positionalsGiven.$clone() }
 }
 
 /// Why a command line was not accepted — or that it asked for help.
@@ -406,7 +407,7 @@ pub enum Error {
 }
 
 /// The error as a sentence.
-pub fn describe(e: Error) -> String {
+pub fn describe(e: &Error) -> String {
     match e {
         Error::Help => "help requested",
         Error::Version => "version requested",
@@ -419,5 +420,5 @@ pub fn describe(e: Error) -> String {
 }
 
 bind io::Display to Error {
-    fn display(&self) -> String { describe(*self) }
+    fn display(&self) -> String { describe(self) }
 }

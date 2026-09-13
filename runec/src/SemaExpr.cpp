@@ -934,7 +934,10 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
     if (!inner || !(inner->isNumeric() || inner->isBool() ||
                     inner->is(TypeKind::Char) || inner->is(TypeKind::String)))
       return;
-    if (lookupMethod(t, binaryOpMarkMethod(b->Op)))
+    // A nominal type might overload the operator on the reference itself;
+    // a builtin — String, a number, a bool, a character — never does, so
+    // its borrow always reads through to the value.
+    if (inner->isNominal() && lookupMethod(t, binaryOpMarkMethod(b->Op)))
       return;
     auto d = std::make_unique<DerefExpr>();
     d->Range = side->Range;
@@ -1252,6 +1255,21 @@ Type *Sema::checkAssign(AssignExpr *a) {
   Type *rt = checkExpr(a->RHS.get(), lt);
   if (lt->isError() || rt->isError())
     return Types.voidType();
+
+  // A borrowed number or string on the right reads through to its value,
+  // the same courtesy `a + b` gets: `total += *r` is meant by `total += r`.
+  if (rt->is(TypeKind::Pointer) && !rt->isRawPointer() && !rt->isWeakPointer() &&
+      rt->pointee() && (rt->pointee()->isNumeric() ||
+                        rt->pointee()->is(TypeKind::String))) {
+    Type *inner = rt->pointee();
+    auto d = std::make_unique<DerefExpr>();
+    d->Range = a->RHS->Range;
+    d->Ty = inner;
+    d->Category = ValueCategory::LValue;
+    d->Operand = std::move(a->RHS);
+    a->RHS = std::move(d);
+    rt = inner;
+  }
 
   bool ok = false;
   if (lt->is(TypeKind::String) && rt->is(TypeKind::String) && op == BinaryOp::Add)

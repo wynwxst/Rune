@@ -2327,11 +2327,13 @@ PlaceId Lowerer::lowerIf(IfExpr *i) {
       read(fr, scrut, i->Cond.get(), i->Cond->Range);
       emit(std::move(fr));
     }
+    bool scrutBorrowed = i->Cond->Ty && i->Cond->Ty->is(TypeKind::Pointer);
     switchTo(scrut, {thenB, elseB}, i->Cond->Range);
     setBlock(thenB);
     pushScope();
     bindPattern(i->BindingPat.get(), scrut,
-                owned || !B.Places.throughDeref(scrut), i->BindingPat->Range);
+                (owned || !B.Places.throughDeref(scrut)) && !scrutBorrowed,
+                i->BindingPat->Range);
     PlaceId v = lowerBlock(i->Then.get(), dst != kNone);
     if (!Dead && dst != kNone)
       assignInto(dst, v, i->Then->Tail.get(), i->Then->Range);
@@ -2373,7 +2375,12 @@ PlaceId Lowerer::lowerMatch(MatchExpr *m) {
     read(fr, scrut, m->Scrutinee.get(), m->Scrutinee->Range);
     emit(std::move(fr));
   }
-  bool ownedScrut = owned || (scrut != kNone && !B.Places.throughDeref(scrut));
+  // A scrutinee of reference type is matched through the reference, so its
+  // payload is borrowed content — an alias, never a move — even though the
+  // reference local itself carries no `Deref` projection.
+  bool scrutBorrowed = m->Scrutinee->Ty && m->Scrutinee->Ty->is(TypeKind::Pointer);
+  bool ownedScrut = (owned || (scrut != kNone && !B.Places.throughDeref(scrut))) &&
+                    !scrutBorrowed;
   BlockId join = newBlock();
   // One block per arm; Sema has already made sure one of them matches.
   std::vector<BlockId> arms;
@@ -2431,11 +2438,12 @@ PlaceId Lowerer::lowerLoop(Expr *e) {
         read(fr, scrut, w->Cond.get(), w->Cond->Range);
         emit(std::move(fr));
       }
+      bool scrutBorrowed = w->Cond->Ty && w->Cond->Ty->is(TypeKind::Pointer);
       switchTo(scrut, {body, exit}, w->Cond->Range);
       setBlock(body);
       pushScope();
       bindPattern(w->BindingPat.get(), scrut,
-                  owned || !B.Places.throughDeref(scrut),
+                  (owned || !B.Places.throughDeref(scrut)) && !scrutBorrowed,
                   w->BindingPat->Range);
       lowerBlock(w->Body.get(), false);
       if (!Dead)

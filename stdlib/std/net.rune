@@ -172,7 +172,7 @@ extend TcpStream {
     pub fn isOpen(&self) -> bool { self.descriptor >= 0 }
 
     /// The address at the other end, as text.
-    pub fn peerAddress(&self) -> String { self.peer }
+    pub fn peerAddress(&self) -> String { self.peer.$clone() }
 
     /// The port at the other end.
     pub fn port(&self) -> i32 { self.peerPort }
@@ -274,7 +274,7 @@ pub fn adoptFrom(descriptor: i64, peer: String, port: i32) -> TcpStream {
 
 bind io::Reader to TcpStream {
     @safe("recv is given the buffer's own spare room and never exceeds it")
-    fn read(&var self, sink: io::Bytes, most: i64) -> Result<i64, io::StreamError> {
+    fn read(&var self, sink: &var io::Bytes, most: i64) -> Result<i64, io::StreamError> {
         if self.descriptor < 0 { return Err(io::StreamError::Closed) }
         if most <= 0 { return Ok(0) }
         let at = sink.writePoint(most)
@@ -334,7 +334,7 @@ extend TcpListener {
     pub fn isOpen(&self) -> bool { self.descriptor >= 0 }
 
     /// The address it was asked for.
-    pub fn address(&self) -> String { self.address }
+    pub fn address(&self) -> String { self.address.$clone() }
 
     /// The port it actually got. Asking for port 0 lets the system pick one,
     /// and this is how to find out which.

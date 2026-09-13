@@ -19,6 +19,7 @@
 // everywhere else in the library, so it has to be the one thing that can be
 // compiled on its own.
 
+import std::mem
 extern "C" {
     fn rune_panic_unwrap(what: CString, location: CString) -> Never
 }
@@ -65,7 +66,7 @@ pub enum Option<T> {
     /// producing it is expensive.
     pub fn or(&self, fallback: T) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(v) => v.$clone(),
             Option::None => fallback,
         }
     }
@@ -77,7 +78,7 @@ pub enum Option<T> {
     ///     let name = cached.orElse(||() -> String { readFromDisk() })
     pub fn orElse(&self, produce: @function() -> T) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(v) => v.$clone(),
             Option::None => produce(),
         }
     }
@@ -86,7 +87,7 @@ pub enum Option<T> {
     @safe("the runtime prints the location and aborts; it never returns")
     pub fn unwrap(&self) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(v) => v.$clone(),
             Option::None => rune_panic_unwrap("Option", "Option::unwrap"),
         }
     }
@@ -98,7 +99,7 @@ pub enum Option<T> {
     @safe("the runtime prints the message and aborts; it never returns")
     pub fn expect(&self, message: CString) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(v) => v.$clone(),
             Option::None => rune_panic_unwrap(message, "Option::expect"),
         }
     }
@@ -113,7 +114,7 @@ pub enum Option<T> {
     ///     let width = header.map(||(h: Row) -> i64 { h.columns })
     pub fn map<U>(&self, f: @function(T) -> U) -> Option<U> {
         match self {
-            Option::Some(v) => Option::<U>::Some(f(v)),
+            Option::Some(v) => Option::<U>::Some(f(v.$clone())),
             Option::None => Option::<U>::None,
         }
     }
@@ -123,7 +124,7 @@ pub enum Option<T> {
     /// `map` followed by `or`, in one step.
     pub fn mapOr<U>(&self, fallback: U, f: @function(T) -> U) -> U {
         match self {
-            Option::Some(v) => f(v),
+            Option::Some(v) => f(v.$clone()),
             Option::None => fallback,
         }
     }
@@ -136,7 +137,7 @@ pub enum Option<T> {
     ///     let port = config.andThen(||(c: Config) -> i64? { c.port })
     pub fn andThen<U>(&self, f: @function(T) -> Option<U>) -> Option<U> {
         match self {
-            Option::Some(v) => f(v),
+            Option::Some(v) => f(v.$clone()),
             Option::None => Option::<U>::None,
         }
     }
@@ -145,7 +146,7 @@ pub enum Option<T> {
     ///
     ///     let positive = count.filter(||(n: i64) -> bool { n > 0 })
     pub fn filter(&self, keep: @function(T) -> bool) -> Option<T> {
-        if self.isSuchThat(keep) { *self } else { Option::<T>::None }
+        if self.isSuchThat(keep) { self.$clone() } else { Option::<T>::None }
     }
 
     /// This option if it holds a value, otherwise `other`.
@@ -156,7 +157,7 @@ pub enum Option<T> {
     ///     let found = fromFlag.otherwise(fromEnv).otherwise(fromFile)
     pub fn otherwise(&self, other: Option<T>) -> Option<T> {
         match self {
-            Option::Some(v) => Option::<T>::Some(v),
+            Option::Some(v) => Option::<T>::Some(v.$clone()),
             Option::None => other,
         }
     }
@@ -170,7 +171,7 @@ pub enum Option<T> {
     pub fn zip<U>(&self, other: Option<U>) -> Option<(T, U)> {
         match self {
             Option::Some(a) => match other {
-                Option::Some(b) => Option::<(T, U)>::Some((a, b)),
+                Option::Some(b) => Option::<(T, U)>::Some((a.$clone(), b)),
                 Option::None => Option::<(T, U)>::None,
             },
             Option::None => Option::<(T, U)>::None,
@@ -189,16 +190,12 @@ pub enum Option<T> {
     ///         Option::None => (),
     ///     }
     pub fn take(&var self) -> Option<T> {
-        held = *self
-        *self = Option::<T>::None
-        held
+        mem::replace(self, Option::<T>::None)
     }
 
     /// Stores `value` here and hands back whatever was here before.
     pub fn replace(&var self, value: T) -> Option<T> {
-        held = *self
-        *self = Option::<T>::Some(value)
-        held
+        mem::replace(self, Option::<T>::Some(value))
     }
 
     /// Empties this option, handing back what was in it.

@@ -72,7 +72,7 @@ pub class Map<K, V> {
     /// Probing walks forward from the hash, wrapping at the end. A removed
     /// slot is passed over when searching — something after it may have
     /// probed past it — and remembered as the first place to insert.
-    fn probe(&self, key: K, forInsert: bool) -> i64 {
+    fn probe(&self, key: &K, forInsert: bool) -> i64 {
         if self.slots == 0 { return 0 - 1 }
         let mask = self.slots - 1
         var i = (mem::hash(key) as i64) & mask
@@ -101,7 +101,7 @@ pub class Map<K, V> {
     //=== Reading ========================================================//
 
     /// The value stored under `key`, or nothing.
-    pub fn at(&self, key: K) -> V? {
+    pub fn at(&self, key: &K) -> V? {
         let i = self.probe(key, false)
         if i < 0 { return nil }
         if self.state.get(i) != stateLive() { return nil }
@@ -109,10 +109,10 @@ pub class Map<K, V> {
     }
 
     /// True when `key` is present.
-    pub fn holds(&self, key: K) -> bool { self.at(key).hasValue() }
+    pub fn holds(&self, key: &K) -> bool { self.at(key).hasValue() }
 
     /// The value under `key`, or `fallback` when there is none.
-    pub fn atOr(&self, key: K, fallback: V) -> V {
+    pub fn atOr(&self, key: &K, fallback: V) -> V {
         match self.at(key) {
             Some(v) => v,
             None => fallback,
@@ -144,7 +144,7 @@ pub class Map<K, V> {
     ///
     /// The slot is marked removed rather than emptied, because emptying it
     /// would cut the probe chain for anything that walked past it.
-    pub fn remove(&var self, key: K) -> V? {
+    pub fn remove(&var self, key: &K) -> V? {
         let i = self.probe(key, false)
         if i < 0 { return nil }
         if self.state.get(i) != stateLive() { return nil }
@@ -183,14 +183,15 @@ pub class Map<K, V> {
         var wanted = self.slots * 2
         if wanted < 8 { wanted = 8 }
 
-        let oldKeys = self.keys
-        let oldVals = self.vals
-        let oldState = self.state
+        // Swap fresh buffers in and take the old ones out in one step: under
+        // single ownership `self.keys` cannot simply be read out of `&var self`
+        // (that would leave the field empty), and `replace` is exactly the
+        // move-out-and-put-back that says so. Under counting it is the same
+        // store-and-return.
+        let oldKeys = mem::replace(&var self.keys, mem::Buffer<K>(wanted))
+        let oldVals = mem::replace(&var self.vals, mem::Buffer<V>(wanted))
+        let oldState = mem::replace(&var self.state, mem::Buffer<i64>(wanted))
         let oldSlots = self.slots
-
-        self.keys = mem::Buffer<K>(wanted)
-        self.vals = mem::Buffer<V>(wanted)
-        self.state = mem::Buffer<i64>(wanted)
         self.slots = wanted
         self.live = 0
         self.gone = 0
@@ -330,7 +331,7 @@ pub class Set<T> {
     pub fn isEmpty(&self) -> bool { self.items.isEmpty() }
 
     /// True when `value` is present.
-    pub fn holds(&self, value: T) -> bool { self.items.holds(value) }
+    pub fn holds(&self, value: &T) -> bool { self.items.holds(value) }
 
     /// Adds `value`. Returns false when it was already there.
     pub fn add(&var self, value: T) -> bool {
@@ -338,7 +339,7 @@ pub class Set<T> {
     }
 
     /// Removes `value`. Returns false when it was not there.
-    pub fn remove(&var self, value: T) -> bool {
+    pub fn remove(&var self, value: &T) -> bool {
         self.items.remove(value).hasValue()
     }
 

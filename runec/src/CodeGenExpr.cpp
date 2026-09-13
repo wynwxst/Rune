@@ -3412,7 +3412,12 @@ Value *CodeGen::emitRValue(Expr *e) {
     if (e->Ty->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(e->Ty)), slot);
     emitBlock(u->Body.get(), slot, e->Ty);
-    return track(B->CreateLoad(lower(e->Ty), slot), e->Ty);
+    Value *result = B->CreateLoad(lower(e->Ty), slot);
+    // `unsafe { slot[i] }` reads a borrow out of raw memory: the storage keeps
+    // owning it, so it must not join the statement's drop list.
+    if (zombie() && readsUntrackedMemory(e))
+      return result;
+    return track(result, e->Ty);
   }
 
   case NodeKind::If: {

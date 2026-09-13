@@ -1379,7 +1379,29 @@ Value *CodeGen::track(Value *v, Type *t) {
 Value *CodeGen::emitClone(Value *v, Type *t) {
   if (!v || !t)
     return v;
+  if (t->isOpaque() && t->canonical() != t)
+    return emitClone(v, t->canonical());
+  // Under reference counting a clone is a *share*: claim a reference to every
+  // heap part and hand back the same bits. That is exactly what returning a
+  // value has always meant, so a container read written `slot[i].$clone()`
+  // keeps the identity the plain `slot[i]` gave it — two lookups of one key
+  // are still the one object. Only single ownership, which has no count to
+  // share, makes `$clone` the deep, independent copy below.
+  if (!zombie()) {
+    emitRetain(v, t);
+    return v;
+  }
   switch (t->kind()) {
+  case TypeKind::Function:
+  case TypeKind::DynMark:
+  case TypeKind::Any:
+    // No deep copy exists for these; a "clone" shares them. Under counting
+    // that is a retain; under single ownership `emitRetain` is a no-op, so a
+    // program that reaches this holds two owners of one closure — which
+    // the drop check catches at run time. Cloning one is rare and the borrow
+    // checker steers away from it.
+    emitRetain(v, t);
+    return v;
   case TypeKind::String:
     return B->CreateCall(runtimeFn("rune_string_copy", PtrTy, {PtrTy}), {v},
                          "clone");
@@ -1410,11 +1432,35 @@ Value *CodeGen::emitClone(Value *v, Type *t) {
     return out;
   }
   case TypeKind::Class:
-  case TypeKind::Enum:
+  case TypeKind::Enum: {
+    // A type that writes its own `clone` is cloned by calling it: the
+    // synthesised memberwise copy would be wrong for a container over raw
+    // storage the compiler cannot see into.
+    if (FunctionDecl *user = userCloneOf(t)) {
+      Function *f = declareFunction(user);
+      const Param *selfP = user->Params.empty() ? nullptr : &user->Params[0];
+      Value *self = v;
+      if (selfP && selfP->IsSelf && selfP->SelfByRef &&
+          !t->isPointerLike()) {
+        Value *slot = createEntryAlloca(lower(t), "clone.self");
+        B->CreateStore(v, slot);
+        self = slot;
+      }
+      return B->CreateCall(f, {self}, "clone");
+    }
     return B->CreateCall(cloneFnFor(t), {v}, "clone");
+  }
   default:
     return v; // trivially copyable
   }
+}
+
+/// A type's own `clone(&self) -> Self`, or null when it has none.
+FunctionDecl *CodeGen::userCloneOf(Type *t) {
+  if (!t || !t->isNominal())
+    return nullptr;
+  FunctionDecl *m = Sema::userClone(t);
+  return m;
 }
 
 Function *CodeGen::cloneFnFor(Type *t) {
@@ -1608,12 +1654,52 @@ void CodeGen::emptyPlace(Expr *e, Type *t) {
   B->CreateStore(Constant::getNullValue(lower(t)), addr);
 }
 
+/// True when `e`'s value is read out of raw memory — a `*var T` index or a
+/// deref of a raw pointer, seen through the wrappers `movedPlaceOf` looks
+/// past. Such a read aliases memory the compiler does not track: the slot goes
+/// on owning what it holds (only `mem::store`/`take`/`drop_at` hand ownership
+/// across that boundary), so a Zombie consumer must neither empty the slot nor
+/// adopt the value for a drop — it is a plain borrow. The checker guarantees a
+/// genuine move out of raw memory never reaches here (E0274).
+bool CodeGen::readsUntrackedMemory(Expr *e) {
+  while (e) {
+    switch (e->Kind) {
+    case NodeKind::Index:
+      return cast<IndexExpr>(e)->ThroughRawPointer;
+    case NodeKind::Deref: {
+      auto *d = cast<DerefExpr>(e);
+      return !d->OverloadResolved && d->Operand->Ty &&
+             d->Operand->Ty->isRawPointer();
+    }
+    case NodeKind::Cast:
+      e = cast<CastExpr>(e)->Operand.get();
+      continue;
+    case NodeKind::Move:
+      e = cast<MoveExpr>(e)->Operand.get();
+      continue;
+    case NodeKind::UnsafeBlock: {
+      auto *u = cast<UnsafeBlockExpr>(e);
+      if (u->Body && u->Body->Stmts.empty() && u->Body->Tail) {
+        e = u->Body->Tail.get();
+        continue;
+      }
+      return false;
+    }
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
 void CodeGen::takeOwnership(Expr *e, Value *v, Type *t) {
   if (!zombie()) {
     emitRetain(v, t);
     return;
   }
   if (!v || !t)
+    return;
+  if (readsUntrackedMemory(e))
     return;
   if (Expr *place = movedPlaceOf(e)) {
     emptyPlace(place, t);
@@ -2951,10 +3037,13 @@ void CodeGen::emitFunctionBody(FunctionDecl *fn) {
     // `self` is borrowed for the duration of the call, so it is not retained
     // and must not be released on the way out. Under Zombie a `self` taken
     // by value (not `init`, whose object the caller keeps) was moved in, and
-    // the method owns it like any other parameter.
+    // the method owns it like any other parameter — except `deinit`, whose
+    // `self` is the object already being torn down: dropping it here would
+    // destroy it a second time, so it stays borrowed like `init`'s.
     bool owns = !p.IsSelf;
     if (p.IsSelf && zombie() && !p.SelfByRef &&
-        fn->Flavour != FunctionFlavour::Initialiser)
+        fn->Flavour != FunctionFlavour::Initialiser &&
+        fn->Flavour != FunctionFlavour::Deinitialiser)
       owns = true;
     if (owns) {
       emitRetain(arg, p.Ty);

@@ -61,7 +61,7 @@ pub fn is_counted<T>() -> bool
 /// distinct objects are two distinct keys even when their fields agree. An
 /// aggregate hashes its parts, and an enum its tag and live payload.
 @intrinsic("hash")
-pub fn hash<T>(value: T) -> u64
+pub fn hash<T>(value: &T) -> u64
 
 /// True when `a` and `b` are structurally equal, worked out from the layout.
 ///
@@ -69,7 +69,7 @@ pub fn hash<T>(value: T) -> u64
 /// aggregate. This is the comparison `hash` is consistent with, and it needs
 /// no bound on `T`.
 @intrinsic("equals")
-pub fn equals<T>(a: T, b: T) -> bool
+pub fn equals<T>(a: &T, b: &T) -> bool
 
 //===--------------------------------------------------------------------===//
 // Allocators
@@ -233,8 +233,9 @@ pub class Handle<T> {
 
     fn init(self, value: T) { self.value = value }
 
-    /// A copy of the value.
-    pub fn get(&self) -> T { self.value }
+    /// A copy of the value: a share under counting, a clone under single
+    /// ownership.
+    pub fn get(&self) -> T { self.value.$clone() }
 
     /// Replaces the value. Every handle sharing it sees the change.
     pub fn set(&var self, value: T) { self.value = value }
@@ -245,7 +246,7 @@ pub class Handle<T> {
 // operator written as punctuation.
 bind<T> operator::"*" to Handle<T> {
     @alias("Asterisk")
-    fn deref(&self) -> T { self.value }
+    fn deref(&self) -> T { self.value.$clone() }
 
     @alias("AsteriskEquals")
     fn derefSet(&var self, value: T) { self.value = value }
@@ -304,9 +305,10 @@ pub class Buffer<T> {
             Some(value) => {
                 var i = 0
                 while i < self.count {
+                    // A fresh copy per slot: a share of the one value under
+                    // counting, an independent clone under single ownership.
                     unsafe {
-                        (self.block as *var T)[i] = value
-                        retain<T>(value)
+                        store<T>(&var (self.block as *var T)[i] as *var T, value.$clone())
                     }
                     i += 1
                 }
@@ -318,9 +320,9 @@ pub class Buffer<T> {
     fn deinit(self) {
         var i = 0
         while i < self.count {
-            // `release` ignores a null reference, so a slot still zeroed from
+            // `drop_at` ignores a null reference, so a slot still zeroed from
             // the constructor costs nothing here.
-            unsafe { release<T>((self.block as *var T)[i]) }
+            unsafe { drop_at<T>(&var (self.block as *var T)[i] as *var T) }
             i += 1
         }
         allocator.deallocate(self.block)
@@ -368,7 +370,7 @@ pub class Buffer<T> {
     @safe("the slot is checked for range and for contents before the read")
     pub fn at(&self, index: i64) -> T? {
         if !self.occupied(index) { return nil }
-        unsafe { (self.block as *var T)[index] }
+        Some(unsafe { (self.block as *var T)[index] }.$clone())
     }
 
     /// The value at `index`, whatever its bytes are, or nothing when there is
@@ -381,7 +383,7 @@ pub class Buffer<T> {
     @safe("the index is compared against the count before the read")
     pub fn read(&self, index: i64) -> T? {
         if !self.holds(index) { return nil }
-        unsafe { (self.block as *var T)[index] }
+        Some(unsafe { (self.block as *var T)[index] }.$clone())
     }
 
     /// The value at `index`. Aborts when there is no such slot, or when
@@ -408,10 +410,10 @@ pub class Buffer<T> {
     pub fn put(&var self, index: i64, value: T) -> bool {
         if !self.holds(index) { return false }
         let slot = unsafe { self.block as *var T }
+        // Drop what was there, then move `value` in.
         unsafe {
-            release<T>(slot[index])
-            slot[index] = value
-            retain<T>(value)
+            drop_at<T>(&var slot[index] as *var T)
+            store<T>(&var slot[index] as *var T, value)
         }
         true
     }
@@ -426,7 +428,7 @@ pub class Buffer<T> {
         if !self.holds(index) { return false }
         let stride = size_of<T>()
         unsafe {
-            release<T>((self.block as *var T)[index])
+            drop_at<T>(&var (self.block as *var T)[index] as *var T)
             zero(offset(self.block, index as usize * stride), stride)
         }
         true
@@ -436,7 +438,9 @@ pub class Buffer<T> {
     pub fn fill(&var self, value: T) {
         var i = 0
         while i < self.count {
-            self.put(i, value)
+            // A copy per slot — a share under counting, a clone under single
+            // ownership — so the argument survives the loop.
+            self.put(i, value.$clone())
             i += 1
         }
     }

@@ -240,6 +240,10 @@ public:
   /// How long the Zombie checker took, for `--time`.
   double zombieMillis() const { return ZombieMillis; }
 
+  /// A type's own `clone(&self) -> Self`, or null. Static so the code
+  /// generator can call it directly.
+  static FunctionDecl *userClone(Type *t);
+
 
 
 private:

@@ -205,7 +205,7 @@ pub mark Iterator {
         var it = self
         loop {
             match it.next() {
-                Option::Some(value) => if keep(value) { return value },
+                Option::Some(value) => if keep(value.$clone()) { return value },
                 Option::None => return nil,
             }
         }
@@ -353,7 +353,7 @@ pub mark Iterator {
                 loop {
                     match it.next() {
                         Option::Some(value) => {
-                            if better(value, winner) { winner = value }
+                            if better(value.$clone(), winner.$clone()) { winner = value }
                         },
                         Option::None => break,
                     }

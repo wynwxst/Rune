@@ -106,7 +106,7 @@ pub fn foldCase(c: Character) -> Character {
 
 /// Appends the full canonical decomposition of `cp` to `out`.
 @safe("both out-parameters are locals of this function")
-fn decomposeInto(out: CodePoints, cp: i64) {
+fn decomposeInto(out: &var CodePoints, cp: i64) {
     if isHangulSyllable(cp) {
         let index = cp - hangulBase()
         let block = jamoVCount() * jamoTCount()
@@ -134,7 +134,7 @@ fn decomposeInto(out: CodePoints, cp: i64) {
 
 /// Puts combining marks into canonical order: a stable sort by combining
 /// class, which is exactly what the standard's reordering step asks for.
-fn canonicalOrder(cps: CodePoints) {
+fn canonicalOrder(cps: &var CodePoints) {
     var i = 1
     while i < cps.length() {
         let here = cps.get(i)
@@ -164,8 +164,8 @@ fn canonicalOrder(cps: CodePoints) {
 
 /// The canonical composition step: walk the decomposed sequence and fold each
 /// mark into the last starter it can combine with.
-fn composeInPlace(cps: CodePoints) -> CodePoints {
-    let out = CodePoints()
+fn composeInPlace(cps: &CodePoints) -> CodePoints {
+    var out = CodePoints()
     if cps.isEmpty() { return out }
 
     var starter = cps.get(0)
@@ -210,13 +210,13 @@ fn composeInPlace(cps: CodePoints) -> CodePoints {
     out.push(starter)
     // The marks that could not be folded in were pushed ahead of the starter
     // they follow, so put the sequence back in order.
-    reorderAfterCompose(out)
+    reorderAfterCompose(&var out)
     out
 }
 
 /// `composeInPlace` emits unfoldable marks before the starter they belong to;
 /// this moves each starter back in front of them.
-fn reorderAfterCompose(cps: CodePoints) {
+fn reorderAfterCompose(cps: &var CodePoints) {
     if cps.length() < 2 { return }
     let last = cps.length() - 1
     let starter = cps.get(last)
@@ -253,7 +253,7 @@ pub fn codePoints(text: String) -> CodePoints {
 }
 
 /// Rebuilds a String from code points.
-pub fn fromCodePoints(cps: CodePoints) -> String {
+pub fn fromCodePoints(cps: &CodePoints) -> String {
     var out = ""
     var i = 0
     while i < cps.length() {
@@ -269,14 +269,14 @@ pub fn fromCodePoints(cps: CodePoints) -> String {
 ///     let b = "\u{e9}"            // é
 ///     text::normalize(a, Form::Composed) == b     // true
 pub fn normalize(text: String, form: Form) -> String {
-    let decomposed = CodePoints()
+    var decomposed = CodePoints()
     let source = codePoints(text)
     var i = 0
     while i < source.length() {
-        decomposeInto(decomposed, source.get(i))
+        decomposeInto(&var decomposed, source.get(i))
         i += 1
     }
-    canonicalOrder(decomposed)
+    canonicalOrder(&var decomposed)
     match form {
         Form::Decomposed => fromCodePoints(decomposed),
         Form::Composed => fromCodePoints(composeInPlace(decomposed)),
@@ -317,7 +317,7 @@ pub fn compare(a: String, b: String) -> i64 {
     compareLevel(left, right, 3)
 }
 
-fn compareLevel(left: CodePoints, right: CodePoints, level: i64) -> i64 {
+fn compareLevel(left: &CodePoints, right: &CodePoints, level: i64) -> i64 {
     var i = 0
     var j = 0
     loop {
@@ -331,7 +331,7 @@ fn compareLevel(left: CodePoints, right: CodePoints, level: i64) -> i64 {
 }
 
 /// The next code point that matters at `level`, and where to look next.
-fn nextAt(cps: CodePoints, from: i64, level: i64) -> (i64, i64) {
+fn nextAt(cps: &CodePoints, from: i64, level: i64) -> (i64, i64) {
     var i = from
     while i < cps.length() {
         let cp = cps.get(i)
@@ -419,7 +419,7 @@ bind Iterator to Chars {
 //===--------------------------------------------------------------------===//
 
 /// True when `text` begins with `prefix`. An empty prefix always matches.
-pub fn startsWith(text: String, prefix: String) -> bool {
+pub fn startsWith(text: &String, prefix: &String) -> bool {
     n = prefix.$length()
     if n == 0 { return true }
     if n > text.$length() { return false }
@@ -427,7 +427,7 @@ pub fn startsWith(text: String, prefix: String) -> bool {
 }
 
 /// True when `text` ends with `suffix`. An empty suffix always matches.
-pub fn endsWith(text: String, suffix: String) -> bool {
+pub fn endsWith(text: &String, suffix: &String) -> bool {
     n = suffix.$length()
     if n == 0 { return true }
     len = text.$length()
@@ -436,7 +436,7 @@ pub fn endsWith(text: String, suffix: String) -> bool {
 }
 
 /// True when `needle` appears anywhere in `text`.
-pub fn contains(text: String, needle: String) -> bool {
+pub fn contains(text: &String, needle: &String) -> bool {
     needle.$length() == 0 || text.$find(needle) >= 0
 }
 
@@ -444,7 +444,7 @@ pub fn contains(text: String, needle: String) -> bool {
 ///
 /// `$find` is the compiler's, and answers -1 when there is nothing; this is
 /// the same question with an answer that cannot be mistaken for a position.
-pub fn find(text: String, needle: String) -> i64? {
+pub fn find(text: &String, needle: &String) -> i64? {
     at = text.$find(needle)
     if at < 0 { nil } else { at }
 }

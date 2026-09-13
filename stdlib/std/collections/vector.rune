@@ -51,8 +51,10 @@ pub class Vector<T> {
     pub fn at(&self, index: i64) -> T? {
         if index < 0 || index >= self.count as i64 { return nil }
         let slot = unsafe { self.block as *var T }
-        // Returning claims a reference for the caller; the slot keeps its own.
-        unsafe { slot[index] }
+        // A copy for the caller; the slot keeps its own. Under counting a
+        // clone is a share, under single ownership a deep copy — `$clone` is
+        // both, so reading never empties the slot in either mode.
+        Some(unsafe { slot[index] }.$clone())
     }
 
     /// The element at `index`. Aborts if there is none there.
@@ -79,7 +81,7 @@ pub class Vector<T> {
     /// `push`, `reserve` or `clear` — growing may move the storage, and a
     /// slice taken before then still points at where it was.
     @safe("the slice covers exactly the elements below the count, which every write keeps live")
-    pub fn asSlice(&self) -> [T] {
+    pub fn asSlice(&self) -> [T] from self {
         unsafe { mem::slice_of<T>(self.block as *var T, self.count) }
     }
 
@@ -90,11 +92,9 @@ pub class Vector<T> {
     pub fn push(&var self, value: T) {
         self.reserve(self.count as i64 + 1)
         let slot = unsafe { self.block as *var T }
-        unsafe {
-            slot[self.count as i64] = value
-            // The vector now holds a reference of its own.
-            mem::retain<T>(value)
-        }
+        // `store` moves `value` into the slot: a share under counting, a
+        // handover under single ownership — the vector owns it now either way.
+        unsafe { mem::store<T>(&var slot[self.count as i64] as *var T, value) }
         self.count += 1
     }
 
@@ -104,11 +104,9 @@ pub class Vector<T> {
         if self.count == 0 { return nil }
         self.count -= 1
         let slot = unsafe { self.block as *var T }
-        let value = unsafe { slot[self.count as i64] }
-        // Returning claims a reference for the caller, so the slot gives up
-        // the one it took in `push`.
-        unsafe { mem::release<T>(value) }
-        value
+        // `take` moves the element out and empties the slot; the caller owns
+        // it now, and the vector no longer counts it below its new length.
+        Some(unsafe { mem::take<T>(&var slot[self.count as i64] as *var T) })
     }
 
     /// Replaces the element at `index`. Returns false if there is none there.
@@ -116,10 +114,10 @@ pub class Vector<T> {
     pub fn set(&var self, index: i64, value: T) -> bool {
         if index < 0 || index >= self.count as i64 { return false }
         let slot = unsafe { self.block as *var T }
+        // Drop what was there, then move `value` in.
         unsafe {
-            mem::release<T>(slot[index])
-            slot[index] = value
-            mem::retain<T>(value)
+            mem::drop_at<T>(&var slot[index] as *var T)
+            mem::store<T>(&var slot[index] as *var T, value)
         }
         true
     }
@@ -130,7 +128,7 @@ pub class Vector<T> {
         let slot = unsafe { self.block as *var T }
         var i = 0
         while i < self.count as i64 {
-            unsafe { mem::release<T>(slot[i]) }
+            unsafe { mem::drop_at<T>(&var slot[i] as *var T) }
             i += 1
         }
         self.count = 0
@@ -210,8 +208,21 @@ pub fn from<T>(values: [T]) -> Vector<T> {
 /// is not undefined — the cursor asks for one index per turn and stops when
 /// the index falls off the end — but which elements it sees is whatever the
 /// vector holds when it asks.
+///
+/// The cursor's tie to its vector is the one thing the two memory models spell
+/// differently. Under reference counting it *shares* the vector — a second
+/// owner that keeps the storage alive, so a cursor may outlive the binding it
+/// was made from. Under single ownership there is no count to share, so the
+/// cursor *borrows* the vector (`from self` on `iterate`), and the checker
+/// keeps the vector alive for exactly as long as the cursor walks it.
+@Config(memory == "arc")
 pub struct VectorIter<T> {
     source: Vector<T>
+    index: i64
+}
+@Config(memory == "zombie")
+pub struct VectorIter<T> {
+    source: &Vector<T>
     index: i64
 }
 
@@ -231,8 +242,10 @@ bind<T> Sequence to Vector<T> {
     ///
     ///     for value in v { io::println(value) }
     ///
-    /// `for` calls this itself; there is rarely a reason to.
-    fn iterate(&self) -> VectorIter<T> {
+    /// `for` calls this itself; there is rarely a reason to. The `from self`
+    /// records that the cursor reads out of this vector — inert under
+    /// counting, load-bearing under single ownership.
+    fn iterate(&self) -> VectorIter<T> from self {
         VectorIter<T> { source: self, index: 0 }
     }
 }

@@ -73,7 +73,7 @@ extend Error {
     /// The failure as a sentence, with the position in it.
     ///
     ///     json: expected ',' or '}' at line 3, column 14
-    pub fn describe(&self) -> String { describeError(*self) }
+    pub fn describe(&self) -> String { describeError(self.$clone()) }
 }
 
 /// The same sentence, as a function: what the `Display` binding below calls,
@@ -97,12 +97,12 @@ pub fn describeError(e: Error) -> String {
 }
 
 bind io::Display to Error {
-    fn display(&self) -> String { describeError(*self) }
+    fn display(&self) -> String { describeError(self.$clone()) }
 }
 
 /// An error at a byte offset in `source`, with the line and column worked out
 /// from it. This is the only way one is made, so a position is never missing.
-pub fn errorAt(kind: Kind, source: String, offset: i64, detail: String) -> Error {
+pub fn errorAt(kind: Kind, source: &String, offset: i64, detail: String) -> Error {
     var line = 1
     var column = 1
     var i = 0
@@ -172,12 +172,12 @@ pub class Object {
     pub fn at(&self, name: String) -> Value? { self.members.at(name) }
 
     /// The member names, in the order they were first set.
-    pub fn keys(&self) -> vector::Vector<String> { self.order }
+    pub fn keys(&self) -> vector::Vector<String> { self.order.$clone() }
 
     /// Sets `name`. Setting one that is already there replaces the value and
     /// leaves it where it was, so an edit does not reshuffle a document.
     pub fn put(&var self, name: String, value: Value) {
-        if !self.members.holds(name) { self.order.push(name) }
+        if !self.members.holds(name) { self.order.push(name.$clone()) }
         self.members.put(name, value)
     }
 
@@ -341,7 +341,7 @@ extend Value {
             Some(o) => { var target = o; target.put(name, item) },
             None => {},
         }
-        *self
+        self.$clone()
     }
 
     /// The same array, with `item` on the end.
@@ -350,7 +350,7 @@ extend Value {
             Some(a) => { var onto = a; onto.push(item) },
             None => {},
         }
-        *self
+        self.$clone()
     }
 }
 
@@ -391,7 +391,7 @@ bind operator::"[]" to Value {
 
 // A value is already one, and saying so is what lets a document that was
 // built or parsed elsewhere go straight into a `json!` beside the literals.
-bind As<Value> to Value  { fn convert(&self) -> Value { *self } }
+bind As<Value> to Value  { fn convert(&self) -> Value { self.$clone() } }
 
 bind As<Value> to i64    { fn convert(&self) -> Value { Value::Int(self) } }
 bind As<Value> to i32    { fn convert(&self) -> Value { Value::Int(self as i64) } }
@@ -925,7 +925,7 @@ pub fn number(f: f64) -> String {
 /// Everything below `0x20` has to be escaped, and this uses the short form
 /// where the grammar gives one. `/` is left alone: escaping it is allowed and
 /// never required, and a document reads better without it.
-pub fn quote(s: String) -> String {
+pub fn quote(s: &String) -> String {
     var out = "\""
     var i = 0
     let n = s.$length()
@@ -977,7 +977,7 @@ pub fn hex4(value: i64) -> String {
 /// encoding, and `json::value` would otherwise have to import the module that
 /// imports it.
 bind io::Display to Value {
-    fn display(&self) -> String { compact(*self) }
+    fn display(&self) -> String { compact(self.$clone()) }
 }
 
 //===--------------------------------------------------------------------===//

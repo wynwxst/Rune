@@ -49,7 +49,7 @@ fn main() -> i64 {
         Ok(f) => {
             var s = f.asStream()
             var all = io::Bytes()
-            match s.readAll(all) {
+            match s.readAll(&var all) {
                 Ok(n) => io::println("read " + n.$str() + " bytes"),
                 Err(e) => io::println(io::describeStream(e)),
             }

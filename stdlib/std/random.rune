@@ -214,18 +214,18 @@ fn ready() {
 }
 
 /// The next 64 random bits from the shared generator.
-pub fn next() -> u64 { ready(); shared.next() }
+pub fn next() -> u64 { ready(); unsafe { shared.next() } }
 /// A whole number from 0 up to but not including `bound`.
-pub fn below(bound: i64) -> i64 { ready(); shared.below(bound) }
+pub fn below(bound: i64) -> i64 { ready(); unsafe { shared.below(bound) } }
 /// A whole number from `low` to `high`, both included.
-pub fn between(low: i64, high: i64) -> i64 { ready(); shared.between(low, high) }
+pub fn between(low: i64, high: i64) -> i64 { ready(); unsafe { shared.between(low, high) } }
 /// A number from 0.0 up to but not including 1.0.
-pub fn float() -> f64 { ready(); shared.float() }
+pub fn float() -> f64 { ready(); unsafe { shared.float() } }
 /// True with probability `p`.
-pub fn chance(p: f64) -> bool { ready(); shared.chance(p) }
+pub fn chance(p: f64) -> bool { ready(); unsafe { shared.chance(p) } }
 /// True or false, evenly.
-pub fn coin() -> bool { ready(); shared.coin() }
+pub fn coin() -> bool { ready(); unsafe { shared.coin() } }
 /// One of `items`, or `nil` when there are none.
-pub fn choose<T>(items: [T]) -> T? { ready(); shared.choose(items) }
+pub fn choose<T>(items: [T]) -> T? { ready(); unsafe { shared.choose(items) } }
 /// Puts the vector in a random order, in place.
-pub fn shuffle<T>(items: vector::Vector<T>) { ready(); shared.shuffle(items) }
+pub fn shuffle<T>(items: vector::Vector<T>) { ready(); unsafe { shared.shuffle(items) } }

@@ -5343,6 +5343,28 @@ bool Sema::builtinOperatorApplies(const std::string &op, Type *lhs, Type *rhs) {
 
 /// True when `$clone()` can build a second copy of a value of `t`: nothing
 /// borrowed, no closure, no mark object or `Any`, and every part likewise.
+FunctionDecl *Sema::userClone(Type *t) {
+  if (!t || !t->isNominal())
+    return nullptr;
+  NominalDecl *nd = t->nominal();
+  if (!nd)
+    return nullptr;
+  auto isClone = [](FunctionDecl *m) {
+    if (!m || m->Name != "clone")
+      return false;
+    int nonSelf = 0;
+    bool self = false;
+    for (const Param &p : m->Params) {
+      if (p.IsSelf) self = true; else ++nonSelf;
+    }
+    return self && nonSelf == 0;
+  };
+  for (auto &m : nd->Methods)
+    if (isClone(m.get()))
+      return m.get();
+  return nullptr;
+}
+
 bool Sema::typeIsClonable(Type *t) {
   std::set<Type *> seen;
   std::function<bool(Type *)> go = [&](Type *x) -> bool {
@@ -5368,6 +5390,10 @@ bool Sema::typeIsClonable(Type *t) {
       NominalDecl *nd = x->nominal();
       if (!nd || x->isOpaque())
         return false;
+      // A type that writes its own `clone(&self) -> Self` is clonable
+      // whatever it holds — a container over raw memory is the case.
+      if (lookupMethod(x, "clone"))
+        return true;
       std::vector<NominalDecl *> chain{nd};
       if (auto *c = dyn_cast<ClassDecl>(static_cast<Decl *>(nd)))
         for (ClassDecl *sc = c->Super; sc; sc = sc->Super)
@@ -5398,7 +5424,17 @@ BuiltinMethod Sema::lookupBuiltinMethod(Type *receiver, const std::string &name,
                                         std::vector<Type *> &params,
                                         Type *&result) {
   params.clear();
-  if (!receiver || receiver->isOpaque())
+  if (!receiver)
+    return BuiltinMethod::None;
+  // `$clone()` on an opaque `some Mark` is a share: there is no concrete type
+  // to deep-copy, so it behaves like cloning a `dyn` — a retain under counting,
+  // a second owner under single ownership. Every other builtin member is
+  // hidden behind the opaque veil, so this is settled before that guard.
+  if (name == "clone" && receiver->isOpaque()) {
+    result = receiver;
+    return BuiltinMethod::Clone;
+  }
+  if (receiver->isOpaque())
     return BuiltinMethod::None;
 
   if (receiver->is(TypeKind::String)) {
@@ -5408,7 +5444,7 @@ BuiltinMethod Sema::lookupBuiltinMethod(Type *receiver, const std::string &name,
     if (name == "at") { params = {Types.i64()}; result = Types.charType(); return BuiltinMethod::StringAt; }
     if (name == "byteAt") { params = {Types.i64()}; result = Types.u8(); return BuiltinMethod::StringByteAt; }
     if (name == "substring") { params = {Types.i64(), Types.i64()}; result = Types.stringType(); return BuiltinMethod::StringSubstring; }
-    if (name == "find") { params = {Types.stringType()}; result = Types.i64(); return BuiltinMethod::StringFind; }
+    if (name == "find") { params = {Types.pointerTo(Types.stringType(), false, false)}; result = Types.i64(); return BuiltinMethod::StringFind; }
     if (name == "repeat") { params = {Types.i64()}; result = Types.stringType(); return BuiltinMethod::StringRepeat; }
     if (name == "toInt") {
       result = optionOf(Types.i64(), SourceRange());
@@ -5448,10 +5484,23 @@ BuiltinMethod Sema::lookupBuiltinMethod(Type *receiver, const std::string &name,
       return entry.Which;
     }
   }
-  // Anything made of values, strings and objects can be copied outright:
-  // `$clone()` is how a second, independent value is asked for when the
-  // first has one owner.
-  if (name == "clone" && typeIsClonable(receiver)) {
+  // `$clone()` asks for a second, independent value. It applies to anything
+  // with a value to copy — a number, a String, a tuple, an array, or a
+  // nominal type (a struct, enum or class); a class that owns raw storage
+  // writes its own `clone`, which codegen calls. It does not apply to a
+  // borrow, a raw pointer, a closure, a `dyn` or an `Any`, none of which
+  // owns a value to copy.
+  // Everything that owns a value can be copied. A number, a String, a tuple,
+  // an array, a struct/enum/class are cloned deeply; a closure, a `dyn Mark`
+  // or an `Any` are shared (they have no deep copy), which under counting is
+  // a retain and under single ownership is the one thing that cannot be done
+  // — a `$clone()` of one of those is an error the borrow checker will
+  // report where it is reached. What cannot be cloned at all is a bare
+  // reference, a raw pointer, a `CString` or an unresolved type parameter.
+  if (name == "clone" && receiver &&
+      !(receiver->is(TypeKind::Pointer) || receiver->is(TypeKind::CString) ||
+        receiver->isGeneric() || receiver->is(TypeKind::Mark) ||
+        receiver->isVoid() || receiver->is(TypeKind::Never))) {
     result = receiver;
     return BuiltinMethod::Clone;
   }

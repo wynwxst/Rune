@@ -215,6 +215,11 @@ private:
   /// The place expression a consuming read of `e` actually moves from —
   /// through casts and blocks — or null when `e` produces a fresh value.
   Expr *movedPlaceOf(Expr *e);
+  /// True when `e`'s value is read out of raw memory (a `*var T` index or a
+  /// raw-pointer deref, through the wrappers `movedPlaceOf` looks past). Such
+  /// a read is a borrow — the memory keeps owning what it holds — so a Zombie
+  /// consumer neither empties the slot nor tracks the value for a drop.
+  static bool readsUntrackedMemory(Expr *e);
   /// `&T` for a class, `String`, closure or mark object is the handle itself,
   /// not the address of a slot holding it. A `&var T` is the slot.
   bool handleBorrow(Type *t) const;
@@ -306,6 +311,7 @@ private:
   /// A copy of `v` that owns its own everything: `$clone()`.
   llvm::Value *emitClone(llvm::Value *v, Type *t);
   llvm::Function *cloneFnFor(Type *t);
+  FunctionDecl *userCloneOf(Type *t);
   llvm::GlobalVariable *declareGlobal(GlobalVarDecl *g);
   /// Lowers `std::asm`'s two intrinsics. `resultType` is null for the one that
   /// returns nothing; `hasSideEffects` marks the assembly as something that
