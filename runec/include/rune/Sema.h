@@ -220,7 +220,7 @@ class Sema {
 public:
   Sema(const SourceManager &sm, DiagnosticEngine &diags, TypeContext &types,
        SafetyLevel safety, MemoryMode memory = MemoryMode::Arc,
-       DumpKind dump = DumpKind::Nothing, bool zombieStdlib = false);
+       DumpKind dump = DumpKind::Nothing, bool zombieStdlib = true);
   ~Sema();
 
   /// Registers a parsed module so imports can find it. Ownership stays with

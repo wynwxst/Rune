@@ -36,6 +36,8 @@ CODE GENERATION
     --no-overflow-checks Wrap instead (default at -O1 and above)
     --memory <mode>      arc | zombie   (default arc): reference counting, or
                          single ownership proven by the Zombie borrow checker
+    --no-zombie-stdlib   Silence Zombie findings inside the standard library
+                         (they are reported by default)
 
 MODULES AND LINKING
     -I <dir>             Add <dir> to the module search path
@@ -165,6 +167,7 @@ int runCompilerMain(int argc, char **argv) {
       continue;
     }
     if (a == "--zombie-stdlib") { opts.ZombieStdlib = true; continue; }
+    if (a == "--no-zombie-stdlib") { opts.ZombieStdlib = false; continue; }
     if (a == "--overflow-checks") { opts.Overflow = OverflowChecks::On; continue; }
     if (a == "--no-overflow-checks") { opts.Overflow = OverflowChecks::Off; continue; }
     if (a == "-I") { opts.ImportPaths.push_back(needsValue(i, "-I")); continue; }

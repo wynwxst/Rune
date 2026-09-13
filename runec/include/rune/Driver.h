@@ -82,10 +82,11 @@ struct CompilerOptions {
   SafetyLevel Safety = SafetyLevel::Full;
   OverflowChecks Overflow = OverflowChecks::Default;
   MemoryMode Memory = MemoryMode::Arc;
-  /// `--zombie-stdlib`: report the borrow checker's findings inside the
-  /// standard library as well as in the program. Off until the library is
-  /// clean under Zombie; its bodies are still read for their summaries.
-  bool ZombieStdlib = false;
+  /// Report the Zombie borrow checker's findings inside the standard library
+  /// as well as in the program. On by default now that the library is clean,
+  /// so a regression there is caught; `--no-zombie-stdlib` silences it (the
+  /// bodies are still read for their summaries either way).
+  bool ZombieStdlib = true;
 
   unsigned OptLevel = 0;
   unsigned ErrorLimit = 20;
