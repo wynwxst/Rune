@@ -29,11 +29,11 @@ bool Type::isRefCounted() const {
     result = true;
     break;
   case TypeKind::Array:
-    result = Elem && Elem->isRefCounted();
+    result = Elem && (Elem->isRefCounted() || Elem->isSharedHeapBorrow());
     break;
   case TypeKind::Tuple:
     for (Type *e : Elems)
-      if (e->isRefCounted()) { result = true; break; }
+      if (e->isRefCounted() || e->isSharedHeapBorrow()) { result = true; break; }
     break;
   case TypeKind::Struct:
   case TypeKind::Enum: {
@@ -42,7 +42,7 @@ bool Type::isRefCounted() const {
     RefCountedCache = 0;
     if (auto *nd = Nominal) {
       for (const auto &f : nd->Fields)
-        if (f->Ty && f->Ty->isRefCounted()) { result = true; break; }
+        if (f->Ty && (f->Ty->isRefCounted() || f->Ty->isSharedHeapBorrow())) { result = true; break; }
       if (!result && nd->Kind == NodeKind::Enum) {
         const auto *ed = static_cast<const EnumDecl *>(
             static_cast<const Decl *>(nd));
@@ -50,10 +50,10 @@ bool Type::isRefCounted() const {
           // Both shapes carry payloads: `Word(String)` keeps its types in
           // TupleTypes, `Rect { .. }` in Fields.
           for (const auto &tt : v->TupleTypes)
-            if (tt->Resolved && tt->Resolved->isRefCounted()) { result = true; break; }
+            if (tt->Resolved && (tt->Resolved->isRefCounted() || tt->Resolved->isSharedHeapBorrow())) { result = true; break; }
           if (!result)
             for (const auto &f : v->Fields)
-              if (f->Ty && f->Ty->isRefCounted()) { result = true; break; }
+              if (f->Ty && (f->Ty->isRefCounted() || f->Ty->isSharedHeapBorrow())) { result = true; break; }
           if (result)
             break;
         }

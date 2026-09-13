@@ -128,6 +128,17 @@ public:
            K == TypeKind::Any;
   }
 
+  /// A shared borrow of a heap handle — `&Vector`, `&String`, a plain `&Dog`.
+  /// Such a value *is* the object pointer, so under reference counting a field
+  /// holding one is a strong reference (retained when stored, released when its
+  /// container is dropped); under single ownership it is a checked borrow that
+  /// is never dropped. This is what lets one iterator source (`&Vector<T>`)
+  /// serve both memory models.
+  bool isSharedHeapBorrow() const {
+    return K == TypeKind::Pointer && !isRawPointer() && !isMutablePointer() &&
+           !isWeakPointer() && pointee() && pointee()->isHeapHandle();
+  }
+
   /// True when the type contains a generic parameter anywhere inside it.
   bool containsGenericParam() const;
 

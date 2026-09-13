@@ -480,8 +480,15 @@ Value *CodeGen::emitStructLit(StructLitExpr *s) {
   for (const auto &lf : s->Fields) {
     if (!lf.Value)
       continue;
+    Type *ft = fields[lf.FieldIndex]->Ty;
     Value *fieldPtr = B->CreateStructGEP(layout, slot, lf.FieldIndex);
-    emitInto(lf.Value.get(), fieldPtr, fields[lf.FieldIndex]->Ty);
+    emitInto(lf.Value.get(), fieldPtr, ft);
+    // A stored shared borrow is a strong reference under counting, so the
+    // slot must own +1 on it like any counted field — `emitInto` does not,
+    // since the borrow itself arrives at +0. (No-op under Zombie, where the
+    // field is a checked borrow that is never dropped.)
+    if (!zombie() && ft && ft->isSharedHeapBorrow())
+      emitRetain(B->CreateLoad(lower(ft->pointee()), fieldPtr), ft->pointee());
   }
   Value *v = B->CreateLoad(lower(t), slot);
   // The slot owns +1 on every reference-counted field; hand that to the

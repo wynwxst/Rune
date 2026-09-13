@@ -566,16 +566,24 @@ void CodeGen::emitRetain(Value *v, Type *t) {
   }
   case TypeKind::Tuple: {
     const auto &elems = t->tupleElements();
-    for (unsigned i = 0; i < elems.size(); ++i)
+    for (unsigned i = 0; i < elems.size(); ++i) {
       if (elems[i]->isRefCounted())
         emitRetain(B->CreateExtractValue(v, i), elems[i]);
+      else if (elems[i]->isSharedHeapBorrow())
+        emitRetain(B->CreateExtractValue(v, i), elems[i]->pointee());
+    }
     break;
   }
   case TypeKind::Struct: {
     auto fields = allFieldsOf(t->nominal());
-    for (unsigned i = 0; i < fields.size(); ++i)
-      if (fields[i]->Ty && fields[i]->Ty->isRefCounted())
+    for (unsigned i = 0; i < fields.size(); ++i) {
+      if (!fields[i]->Ty) continue;
+      if (fields[i]->Ty->isRefCounted())
         emitRetain(B->CreateExtractValue(v, i), fields[i]->Ty);
+      else if (fields[i]->Ty->isSharedHeapBorrow())
+        // A stored borrow is a strong reference under counting.
+        emitRetain(B->CreateExtractValue(v, i), fields[i]->Ty->pointee());
+    }
     break;
   }
   case TypeKind::Array: {
@@ -632,16 +640,25 @@ void CodeGen::emitRelease(Value *v, Type *t) {
   }
   case TypeKind::Tuple: {
     const auto &elems = t->tupleElements();
-    for (unsigned i = 0; i < elems.size(); ++i)
+    for (unsigned i = 0; i < elems.size(); ++i) {
       if (elems[i]->isRefCounted())
         emitRelease(B->CreateExtractValue(v, i), elems[i]);
+      else if (!zombie() && elems[i]->isSharedHeapBorrow())
+        emitRelease(B->CreateExtractValue(v, i), elems[i]->pointee());
+    }
     break;
   }
   case TypeKind::Struct: {
     auto fields = allFieldsOf(t->nominal());
-    for (unsigned i = 0; i < fields.size(); ++i)
-      if (fields[i]->Ty && fields[i]->Ty->isRefCounted())
+    for (unsigned i = 0; i < fields.size(); ++i) {
+      if (!fields[i]->Ty) continue;
+      if (fields[i]->Ty->isRefCounted())
         emitRelease(B->CreateExtractValue(v, i), fields[i]->Ty);
+      else if (!zombie() && fields[i]->Ty->isSharedHeapBorrow())
+        // A stored borrow held a strong reference under counting; let it go.
+        // Under single ownership it is a plain borrow and is never dropped.
+        emitRelease(B->CreateExtractValue(v, i), fields[i]->Ty->pointee());
+    }
     break;
   }
   case TypeKind::Array: {

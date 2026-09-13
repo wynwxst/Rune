@@ -209,18 +209,13 @@ pub fn from<T>(values: [T]) -> Vector<T> {
 /// the index falls off the end — but which elements it sees is whatever the
 /// vector holds when it asks.
 ///
-/// The cursor's tie to its vector is the one thing the two memory models spell
-/// differently. Under reference counting it *shares* the vector — a second
-/// owner that keeps the storage alive, so a cursor may outlive the binding it
-/// was made from. Under single ownership there is no count to share, so the
-/// cursor *borrows* the vector (`from self` on `iterate`), and the checker
-/// keeps the vector alive for exactly as long as the cursor walks it.
-@Config(memory == "arc")
-pub struct VectorIter<T> {
-    source: Vector<T>
-    index: i64
-}
-@Config(memory == "zombie")
+/// The cursor holds a reference to its vector, written the same way in both
+/// memory models. Under single ownership `from self` on `iterate` makes it a
+/// checked borrow — the vector outlives the cursor. Under reference counting a
+/// stored borrow of a heap object is simply a second owner (retained while the
+/// cursor holds it, released when the cursor is gone), so the vector stays
+/// alive and a cursor may outlive the binding it was made from — one source,
+/// no divergence.
 pub struct VectorIter<T> {
     source: &Vector<T>
     index: i64
