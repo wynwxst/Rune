@@ -1,0 +1,16 @@
+// A caller-side `from` on a parameter is a requirement: the argument must
+// borrow from the named place, and nothing else (E0283).
+// FLAGS: --memory zombie
+// EXPECT-ERROR: must borrow from 'list'
+class Item { v: i64  fn init(self, v: i64) { self.v = v } }
+class List {
+    head: Item
+    fn init(self, h: Item) { self.head = h }
+    fn first(&self) -> &Item from self { &self.head }
+}
+fn attach(list: &var List, item: &Item from list) { }
+fn bad(list: &var List, other: &List) {
+    let it = other.first()     // borrows from `other`, not `list`
+    attach(list, it)
+}
+fn main() -> i64 { 0 }

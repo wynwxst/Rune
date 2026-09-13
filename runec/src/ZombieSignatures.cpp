@@ -89,8 +89,10 @@ FnSummary declaredSummary(const FunctionDecl *fn) {
 
   for (size_t i = 0; i < n; ++i) {
     const Param &p = fn->Params[i];
-    if (p.TypeAnnotation && p.TypeAnnotation->Origin)
-      for (const OriginPlace &pl : p.TypeAnnotation->Origin->Places) {
+    std::vector<const OriginClause *> pclauses;
+    collectClauses(p.TypeAnnotation.get(), pclauses);
+    for (const OriginClause *c : pclauses)
+      for (const OriginPlace &pl : c->Places) {
         FromEntry e;
         if (pl.Root == OriginPlace::RootKind::Global)
           e.Global = true;
@@ -215,6 +217,31 @@ void applySummaries(Body &body, const SummaryTable &table,
       FnSummary scratch;
       const FnSummary &sum = summaryFor(s.Callee, table, scratch);
       const std::vector<Param> &params = s.Callee->Params;
+
+      // A caller-side `from` on a parameter (`item: &Item from list`) becomes a
+      // requirement to check once loans are known: the argument's origin must
+      // stay within the origins of the arguments it names (E0283).
+      for (size_t i = 0; i < sum.ParamFrom.size() && i < s.Args.size(); ++i) {
+        if (sum.ParamFrom[i].empty() || s.Args[i] == kNone)
+          continue;
+        Stmt::FromRequirement req;
+        req.Arg = static_cast<unsigned>(i);
+        req.Name = i < params.size() ? params[i].Name.c_str() : "argument";
+        req.Range = s.Range;
+        for (const FromEntry &e : sum.ParamFrom[i]) {
+          if (e.Global) {
+            req.Global = true;
+            if (!req.FromName)
+              req.FromName = "global";
+          } else if (e.Param < s.Args.size() && s.Args[e.Param] != kNone) {
+            req.FromArgs.push_back(e.Param);
+            if (!req.FromName && e.Param < params.size())
+              req.FromName = params[e.Param].Name.c_str();
+          }
+        }
+        if (!req.FromArgs.empty() || req.Global)
+          s.FromReqs.push_back(std::move(req));
+      }
 
       // Which argument was borrowed implicitly for the call, and how.
       auto accessOf = [&](PlaceId arg) -> PlaceAccess * {

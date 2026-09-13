@@ -250,6 +250,19 @@ struct Stmt {
   /// sibling field's object, and nothing else (E0297).
   PlaceId InternalTarget = kNone;
   const FieldDecl *InternalField = nullptr;
+  /// `Call`: a caller-side `from` on a parameter (`item: &Item from list`).
+  /// Each entry says argument `Arg`'s origin must stay within the origins of
+  /// the arguments at `FromArgs` (and `global` when `Global`) — checked once
+  /// the loans are known (E0283). Filled in by `applySummaries`.
+  struct FromRequirement {
+    unsigned Arg = 0;
+    std::vector<unsigned> FromArgs;
+    bool Global = false;
+    const char *Name = nullptr;      ///< the constrained parameter's name
+    const char *FromName = nullptr;  ///< the place it must borrow from
+    SourceRange Range;
+  };
+  std::vector<FromRequirement> FromReqs;
   SourceRange Range;
   const Node *Source = nullptr;
 };

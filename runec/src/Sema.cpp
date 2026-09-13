@@ -4885,9 +4885,21 @@ bool typeIsThreadSafe(Type *t, bool wantSync,
       }
     return true;
   }
+  case TypeKind::Pointer: {
+    // A raw or `weak` pointer carries no promise about its target.
+    if (t->isRawPointer() || t->isWeakPointer() || !t->pointee())
+      return false;
+    // A shared `&T` may be sent or shared exactly when `T` is safe to reach
+    // from several threads at once — i.e. `T: Sync` — for both `Send` and
+    // `Sync`. A `&var T` follows the referent for whichever was asked:
+    // `Send` when `T: Send`, `Sync` when `T: Sync`.
+    if (t->isMutablePointer())
+      return typeIsThreadSafe(t->pointee(), wantSync, visiting);
+    return typeIsThreadSafe(t->pointee(), /*wantSync=*/true, visiting);
+  }
   default:
-    // Pointers, closures, `Any`, `dyn Mark`, `CString`: what they reach is
-    // not something the compiler can see, so it will not vouch for it.
+    // Closures, `Any`, `dyn Mark`, `CString`: what they reach is not
+    // something the compiler can see, so it will not vouch for it.
     return false;
   }
 }

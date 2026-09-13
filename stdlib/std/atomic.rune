@@ -77,8 +77,8 @@ pub class Counter {
     }
 
     @safe("an atomic write to a number this object owns")
-    pub fn store(&var self, next: i64) {
-        unsafe { rawStore(&var self.value as *var i64, next) }
+    pub fn store(&self, next: i64) {
+        unsafe { rawStore(&self.value as *var i64, next) }
     }
 
     /// Adds `delta` and hands back the value as it was **before**.
@@ -86,25 +86,25 @@ pub class Counter {
     /// Returning the old value is what makes this a hand-out rather than a
     /// count: each caller gets a number nobody else got.
     @safe("an atomic read-modify-write of a number this object owns")
-    pub fn add(&var self, delta: i64) -> i64 {
-        unsafe { rawAdd(&var self.value as *var i64, delta) }
+    pub fn add(&self, delta: i64) -> i64 {
+        unsafe { rawAdd(&self.value as *var i64, delta) }
     }
 
     @safe("an atomic read-modify-write of a number this object owns")
-    pub fn sub(&var self, delta: i64) -> i64 {
-        unsafe { rawSub(&var self.value as *var i64, delta) }
+    pub fn sub(&self, delta: i64) -> i64 {
+        unsafe { rawSub(&self.value as *var i64, delta) }
     }
 
     /// Adds one; hands back the value before. `next()` reads better where the
     /// point is the number you were given.
-    pub fn increment(&var self) -> i64 { self.add(1) }
-    pub fn decrement(&var self) -> i64 { self.sub(1) }
-    pub fn next(&var self) -> i64 { self.add(1) }
+    pub fn increment(&self) -> i64 { self.add(1) }
+    pub fn decrement(&self) -> i64 { self.sub(1) }
+    pub fn next(&self) -> i64 { self.add(1) }
 
     /// Replaces the value, handing back what was there.
     @safe("an atomic read-modify-write of a number this object owns")
-    pub fn exchange(&var self, next: i64) -> i64 {
-        unsafe { rawExchange(&var self.value as *var i64, next) }
+    pub fn exchange(&self, next: i64) -> i64 {
+        unsafe { rawExchange(&self.value as *var i64, next) }
     }
 
     /// Stores `desired`, but only while the value is still `expected`.
@@ -114,9 +114,9 @@ pub class Counter {
     /// work out the new value, and swap it in only if nobody moved it
     /// meanwhile. If somebody did, read again and retry — see `update`.
     @safe("an atomic compare-and-swap of a number this object owns")
-    pub fn compareExchange(&var self, expected: i64, desired: i64) -> bool {
+    pub fn compareExchange(&self, expected: i64, desired: i64) -> bool {
         unsafe {
-            rawCompareExchange(&var self.value as *var i64, expected, desired)
+            rawCompareExchange(&self.value as *var i64, expected, desired)
         }
     }
 
@@ -126,7 +126,7 @@ pub class Counter {
     ///
     /// `change` may run more than once — every time another thread gets in
     /// first — so it has to be a plain calculation with nothing else to it.
-    pub fn update(&var self, change: @cfunction(i64) -> i64) -> i64 {
+    pub fn update(&self, change: @cfunction(i64) -> i64) -> i64 {
         while true {
             let seen = self.load()
             let wanted = unsafe { change(seen) }
@@ -136,7 +136,7 @@ pub class Counter {
     }
 
     /// Keeps the larger of the two, and hands back whichever won.
-    pub fn raiseTo(&var self, floor: i64) -> i64 {
+    pub fn raiseTo(&self, floor: i64) -> i64 {
         while true {
             let seen = self.load()
             if seen >= floor { return seen }
@@ -176,14 +176,14 @@ pub class Flag {
     /// Raises the flag, and says whether it was this call that raised it.
     /// Exactly one caller ever gets `true`.
     @safe("an atomic exchange of a number this object owns")
-    pub fn raise(&var self) -> bool {
-        unsafe { rawExchange(&var self.raised as *var i64, 1) } == 0
+    pub fn raise(&self) -> bool {
+        unsafe { rawExchange(&self.raised as *var i64, 1) } == 0
     }
 
     /// Lowers it, and says whether it had been raised.
     @safe("an atomic exchange of a number this object owns")
-    pub fn lower(&var self) -> bool {
-        unsafe { rawExchange(&var self.raised as *var i64, 0) } != 0
+    pub fn lower(&self) -> bool {
+        unsafe { rawExchange(&self.raised as *var i64, 0) } != 0
     }
 }
 

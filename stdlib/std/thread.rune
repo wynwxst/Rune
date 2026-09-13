@@ -387,3 +387,52 @@ pub class Channel<T: Send> {
         unsafe { rune_mutex_dispose(self.lock) }
     }
 }
+
+//===--------------------------------------------------------------------===//
+// Scoped threads
+//===--------------------------------------------------------------------===//
+
+/// The scope a `thread::scope` body is handed. It owns the shared environment
+/// and lends it out — and nothing else — to the threads the body spawns.
+///
+/// The safety it buys: a thread is only ever handed something built from the
+/// environment (`argument: A from self`, enforced at the call), and every
+/// thread is joined before the environment is gone — a `Handle` joins its
+/// thread when it is dropped, and the body's handles are dropped before
+/// `scope` drops the environment. So a `&` a thread takes out of `env()` is
+/// live for as long as the thread runs.
+pub class Scope<E> {
+    env: E
+
+    fn init(self, env: E) { self.env = env }
+
+    /// The shared environment, borrowed. Anything a thread is given has to be
+    /// built from this, so it cannot point at anything shorter-lived.
+    pub fn env(&self) -> &E from self { &self.env }
+
+    /// Runs `entry(argument)` on a thread and hands back a `Handle` to join.
+    /// `argument` must borrow from the scope (E0283), so a thread can never be
+    /// handed a local of the body — only the environment, which outlives it.
+    @zombie("every handle joins its thread by the end of the scope, before the environment is dropped, so a borrow into `env` cannot dangle")
+    pub fn spawn<A: Send, R: Send>(&self, entry: @cfunction(A) -> R,
+                                   argument: A from self) -> Handle<R> {
+        spawn(entry, argument)
+    }
+}
+
+/// Runs `body` with a scope whose threads all finish before it returns.
+///
+/// The environment is moved in and lent to every thread the body spawns. A
+/// `Handle` joins its thread when it goes out of scope, and every handle the
+/// body makes is gone by the time `body` returns — so once `scope` hands the
+/// result back, no thread is still running and no borrow one took can dangle.
+///
+///     let total = thread::scope(counters, ||(s: &thread::Scope<Stats>) -> i64 {
+///         let a = s.spawn(countHalf, (s.env(), 0))
+///         let b = s.spawn(countHalf, (s.env(), 1))
+///         a.join() + b.join()
+///     })
+pub fn scope<E, R>(env: E, body: @cfunction(&Scope<E>) -> R) -> R {
+    let s = Scope<E>(env)
+    body(&s)
+}

@@ -753,6 +753,80 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
       });
     }
   }
+  // A caller-side `from` on a parameter (`item: &Item from list`): the
+  // argument's origin must stay within what the named argument(s) lend, so a
+  // thread handed the scope's environment cannot also be handed a body local.
+  for (const Stmt::FromRequirement &req : s.FromReqs) {
+    PlaceId argP = req.Arg < s.Args.size() ? s.Args[req.Arg] : kNone;
+    if (argP == kNone)
+      continue;
+    OriginId argO = B.Locals[B.Places.get(argP).Root].Origin;
+    if (argO == kNone)
+      continue;
+    // What the named argument(s) lend: the roots they themselves borrow from
+    // (so `item` may borrow from wherever `list` does), plus their own place
+    // roots (so it may borrow from `list` directly). `origin(item)` has to
+    // stay inside that.
+    std::set<LocalId> allowedRoots;
+    std::set<unsigned> allowedParams;
+    bool allowGlobal = req.Global;
+    for (unsigned fa : req.FromArgs) {
+      if (fa >= s.Args.size() || s.Args[fa] == kNone)
+        continue;
+      LocalId far = B.Places.get(s.Args[fa]).Root;
+      allowedRoots.insert(far);
+      const Local &fl = B.Locals[far];
+      if (fl.K == Local::Param || fl.K == Local::Capture)
+        allowedParams.insert(fl.Index);
+      OriginId fo = fl.Origin;
+      if (fo != kNone)
+        st.Contains[fo].forEach([&](size_t li) {
+          const Loan &l2 = B.Loans[li];
+          if (l2.Global)
+            allowGlobal = true;
+          else if (l2.Placeholder)
+            allowedParams.insert(l2.Param);
+          else if (l2.Place != kNone)
+            allowedRoots.insert(B.Places.get(l2.Place).Root);
+        });
+    }
+    const Loan *offender = nullptr;
+    st.Contains[argO].forEach([&](size_t li) {
+      if (offender)
+        return;
+      const Loan &l = B.Loans[li];
+      if (l.Global) {
+        if (!allowGlobal)
+          offender = &l;
+        return;
+      }
+      if (l.Placeholder) {
+        if (!allowedParams.count(l.Param))
+          offender = &l;
+        return;
+      }
+      if (l.Place == kNone) {
+        offender = &l; // an untracked (raw) borrow: not vouched for here
+        return;
+      }
+      if (!allowedRoots.count(B.Places.get(l.Place).Root))
+        offender = &l;
+    });
+    if (offender) {
+      auto d = Diags.error(req.Range, "'{}' must borrow from '{}'",
+                           req.Name ? req.Name : "argument",
+                           req.FromName ? req.FromName : "it");
+      if (offender->Place != kNone && !offender->Placeholder && !offender->Global)
+        d.related(offender->Range, "it borrows from here instead",
+                  "pass something borrowed from the named place, so it cannot "
+                  "outlive it");
+      else
+        d.note("pass something borrowed from the named place, so it cannot "
+               "outlive it");
+      d.code(283);
+    }
+  }
+
   for (const PlaceAccess &a : s.Accesses) {
     if (a.Place == kNone)
       continue;
