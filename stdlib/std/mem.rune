@@ -7,6 +7,7 @@
 // `unsafe` once, inside, and offers a checked interface outside.
 
 import std::process
+import std::collections::vector
 
 extern "C" {
     fn rune_raw_alloc(size: u64) -> *var u8
@@ -418,6 +419,19 @@ pub class Buffer<T> {
         true
     }
 
+    /// Takes the value out of the slot at `index`, handing it back and leaving
+    /// the slot empty (zeroed). Nothing when there is no such slot. The caller
+    /// owns what comes out; the buffer no longer does.
+    @safe("the index is compared against the count before the move")
+    pub fn take(&var self, index: i64) -> T? {
+        if !self.holds(index) { return nil }
+        let slot = unsafe { self.block as *var T }
+        let value = unsafe { take<T>(&var slot[index] as *var T) }
+        let stride = size_of<T>()
+        zero(offset(self.block, index as usize * stride), stride)
+        Some(value)
+    }
+
     /// Empties the slot at `index`, releasing whatever was there.
     ///
     /// For a counted type the slot reads as `nil` afterwards. For a value type
@@ -455,5 +469,221 @@ bind<T> operator::"[]" to Buffer<T> {
         if !self.put(index, value) {
             process::panic("Buffer index out of range")
         }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Checked: exclusive access decided at run time
+//===--------------------------------------------------------------------===//
+
+/// A value whose borrows are checked as the program runs, for the places the
+/// compiler cannot prove exclusive access ahead of time.
+///
+/// This is what the borrow diagnostics point to when two borrows genuinely
+/// have to overlap, or a field has to change behind a shared `&`: put the
+/// value in a `Checked`, and ask for a borrow when you need one. A shared
+/// `borrow()` reads; the one `borrowVar()` reads and writes; asking for a
+/// conflicting one aborts rather than letting the two race.
+///
+///     let cell = mem::Checked<i64>(0)
+///     { var w = cell.borrowVar(); *w = 41; *w = *w + 1 }
+///     io::println((*cell.borrow()).$str())      // 42
+///
+/// It costs one machine word and no reference count, so it works the same
+/// under `--memory arc` and `--memory zombie`.
+pub class Checked<T> {
+    value: T
+    // 0 = free; n > 0 = n shared borrows out; -1 = the one mutable borrow.
+    state: i64
+
+    fn init(self, value: T) {
+        self.value = value
+        self.state = 0
+    }
+
+    @safe("the state word belongs to this Checked and is written only here")
+    fn setState(&self, next: i64) {
+        unsafe { store<i64>(&self.state as *var i64, next) }
+    }
+
+    /// A shared, read-only borrow. Aborts if the mutable borrow is out.
+    pub fn borrow(&self) -> Ref<T> from self {
+        if self.state < 0 {
+            process::panic("Checked: already borrowed for writing")
+        }
+        self.setState(self.state + 1)
+        Ref<T> { owner: self }
+    }
+
+    /// The one mutable borrow. Aborts if any borrow is already out.
+    pub fn borrowVar(&self) -> RefVar<T> from self {
+        if self.state != 0 {
+            process::panic("Checked: already borrowed")
+        }
+        self.setState(-1)
+        RefVar<T> { owner: self }
+    }
+
+    /// True when no borrow is out.
+    pub fn isFree(&self) -> bool { self.state == 0 }
+}
+
+/// A shared borrow handed out by `Checked::borrow`: read it with `*r`, and the
+/// claim is returned when `r` goes out of scope.
+pub struct Ref<T> {
+    owner: &Checked<T>
+
+    fn deinit(&self) { self.owner.setState(self.owner.state - 1) }
+}
+bind<T> operator::"*" to Ref<T> {
+    @alias("Asterisk")
+    fn deref(&self) -> T { self.owner.value.$clone() }
+}
+
+/// The mutable borrow handed out by `Checked::borrowVar`: read or write it with
+/// `*r`, and the exclusive claim is returned when `r` goes out of scope.
+pub struct RefVar<T> {
+    owner: &Checked<T>
+
+    fn deinit(&self) { self.owner.setState(0) }
+
+    @safe("the run-time check makes this the only borrow, so the write is exclusive")
+    fn write(&self, value: T) {
+        unsafe {
+            drop_at<T>(&self.owner.value as *var T)
+            store<T>(&self.owner.value as *var T, value)
+        }
+    }
+}
+bind<T> operator::"*" to RefVar<T> {
+    @alias("Asterisk")
+    fn deref(&self) -> T { self.owner.value.$clone() }
+
+    @alias("AsteriskEquals")
+    fn derefSet(&var self, value: T) { self.write(value) }
+}
+
+//===--------------------------------------------------------------------===//
+// Arena: owned storage behind generational handles
+//===--------------------------------------------------------------------===//
+
+/// A handle into an `Arena`. It is a plain value — copy it, store it, pass it
+/// around freely — and it stays valid until the slot it names is removed. A
+/// handle to a removed slot is detected and reads as nothing, rather than
+/// quietly naming whatever took the slot's place.
+pub struct Slot {
+    index: i64
+    generation: i64
+}
+
+/// Owned storage that hands out `Slot` handles instead of borrows — the answer
+/// when a `weak` back-reference or a borrow that has to outlive its owner is
+/// what a design reaches for, but single ownership has no count to lend one.
+///
+/// Everything the arena holds lives as long as the arena does; a `Slot` names
+/// one entry, and a stale handle (its slot removed and perhaps reused) is
+/// caught by a generation stamp rather than dangling.
+///
+///     var a = mem::Arena<String>()
+///     let h = a.insert("first")
+///     io::println(a.get(h).unwrap())     // first
+///     a.remove(h)
+///     io::println(a.get(h).isNil().$str())   // true — the handle is stale
+///
+/// It keeps no reference count, so it works the same under both memory models.
+pub class Arena<T> {
+    // Values live in raw storage — one buffer, not a vector of options, since
+    // `T?` would flatten when `T` is itself an option. The bookkeeping (which
+    // slots are live, and each slot's generation stamp) is kept alongside.
+    values: Buffer<T>
+    occupied: vector::Vector<i64>    // 1 = live, 0 = free
+    generations: vector::Vector<i64> // bumped on removal, so old handles go stale
+    free: vector::Vector<i64>        // freed indices, ready to reuse
+    slots: i64                       // how many slots have ever been created
+    live: i64
+
+    fn init(self) {
+        self.values = Buffer<T>(0)
+        self.occupied = vector::Vector<i64>()
+        self.generations = vector::Vector<i64>()
+        self.free = vector::Vector<i64>()
+        self.slots = 0
+        self.live = 0
+    }
+
+    /// How many live entries it holds.
+    pub fn length(&self) -> i64 { self.live }
+
+    /// True when it holds none.
+    pub fn isEmpty(&self) -> bool { self.live == 0 }
+
+    @safe("the new buffer is sized for every slot before any value moves into it")
+    fn grow(&var self, wanted: i64) {
+        if wanted <= self.values.length() { return }
+        var cap = self.values.length() * 2
+        if cap < 4 { cap = 4 }
+        if cap < wanted { cap = wanted }
+        var bigger = Buffer<T>(cap)
+        // Move the live values across. Only the slots that already exist have
+        // an `occupied` entry — the slot being added has not been pushed yet.
+        var i = 0
+        while i < self.occupied.length() {
+            if self.occupied.at(i).unwrap() == 1 {
+                match self.values.take(i) {
+                    Some(v) => { bigger.put(i, v) },
+                    None => {},
+                }
+            }
+            i += 1
+        }
+        self.values = bigger
+    }
+
+    /// Stores `value` and hands back a handle to it.
+    pub fn insert(&var self, value: T) -> Slot {
+        self.live += 1
+        match self.free.pop() {
+            Some(i) => {
+                self.occupied.set(i, 1)
+                self.values.put(i, value)
+                Slot { index: i, generation: self.generations.at(i).unwrap() }
+            },
+            None => {
+                let i = self.slots
+                self.slots += 1
+                self.grow(self.slots)
+                self.occupied.push(1)
+                self.generations.push(0)
+                self.values.put(i, value)
+                Slot { index: i, generation: 0 }
+            },
+        }
+    }
+
+    fn liveAt(&self, slot: Slot) -> bool {
+        slot.index >= 0 && slot.index < self.slots &&
+            self.occupied.at(slot.index).unwrap() == 1 &&
+            self.generations.at(slot.index).unwrap() == slot.generation
+    }
+
+    /// The value a handle names, or nothing when the handle is stale.
+    pub fn get(&self, slot: Slot) -> T? {
+        if !self.liveAt(slot) { return nil }
+        self.values.read(slot.index)
+    }
+
+    /// True when the handle still names a live entry.
+    pub fn holds(&self, slot: Slot) -> bool { self.liveAt(slot) }
+
+    /// Removes the entry a handle names, handing it back. A stale handle
+    /// removes nothing and returns nothing.
+    pub fn remove(&var self, slot: Slot) -> T? {
+        if !self.liveAt(slot) { return nil }
+        let taken = self.values.take(slot.index)
+        self.occupied.set(slot.index, 0)
+        self.generations.set(slot.index, slot.generation + 1)
+        self.free.push(slot.index)
+        self.live -= 1
+        taken
     }
 }
