@@ -1269,9 +1269,12 @@ Value *CodeGen::emitCall(CallExpr *c) {
     if (target) {
       Value *self = nullptr;
       Type *selfParam = nullptr;
+      bool selfByRef = false;
       for (const Param &p : target->Params)
-        if (p.IsSelf)
+        if (p.IsSelf) {
           selfParam = p.Ty;
+          selfByRef = p.SelfByRef;
+        }
 
       if (isa<SuperExpr>(member->Base.get())) {
         // `super.method()` reuses the current instance.
@@ -1287,10 +1290,20 @@ Value *CodeGen::emitCall(CallExpr *c) {
                                              : emitLValue(member->Base.get());
       } else {
         self = emitRValue(member->Base.get());
-        if (member->Base->Ty && member->Base->Ty->is(TypeKind::Pointer) &&
-            selfParam && !selfParam->is(TypeKind::Pointer) &&
+        bool baseIsPtr =
+            member->Base->Ty && member->Base->Ty->is(TypeKind::Pointer);
+        if (baseIsPtr && selfParam && !selfParam->is(TypeKind::Pointer) &&
             !handleBorrow(member->Base->Ty))
           self = B->CreateLoad(lower(selfParam), self);
+        else if (zombie() && !baseIsPtr && selfParam && !selfByRef)
+          // A receiver taken *by value* (`fn f(self)`, not `&self`/`&var self`)
+          // is moved into the method, exactly like a by-value argument (see
+          // `buildArguments`): empty the caller's place so the value is not
+          // dropped both by the callee, which now owns `self`, and again by the
+          // caller when its scope ends. A `&self`/`&var self` receiver on a
+          // class also lands here (its self type is the bare class handle, not
+          // a pointer) but borrows, so `SelfByRef` keeps it out.
+          takeOwnership(member->Base.get(), self, member->Base->Ty);
       }
 
       std::vector<Value *> args;

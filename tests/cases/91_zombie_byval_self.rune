@@ -1,0 +1,29 @@
+// A receiver taken *by value* (`fn f(self)`, not `&self`) is moved into the
+// method, which then owns `self` and drops it at its scope end — so the caller
+// must not drop it again. Regression: the caller's place was never emptied, so
+// a class with a `deinit` was torn down twice ("drop of an already-destroyed
+// object"). A `&self` method borrows and must stay clean too.
+// FLAGS: --memory zombie
+// EXPECT: dropped 7
+// EXPECT: used 7
+// EXPECT: peeked 5
+// EXPECT: dropped 5
+import std::io
+
+class Box {
+    var v: i64
+    fn init(self, v: i64) { self.v = v }
+    fn consume(self) -> i64 { self.v }        // by value: moves the Box in
+    fn peek(&self) -> i64 { self.v }          // by ref: borrows, owner keeps it
+    fn deinit(self) { io::println("dropped " + self.v.$str()) }
+}
+
+fn main() -> i64 {
+    let a = Box(7)
+    let n = a.consume()                       // `a` moves into consume; it drops here
+    io::println("used " + n.$str())           // main must NOT drop `a` again
+
+    let b = Box(5)
+    io::println("peeked " + b.peek().$str())  // borrow only; `b` dropped once at end
+    0
+}
