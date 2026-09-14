@@ -7193,12 +7193,90 @@ fn main() -> i64 {
     0
 }''', mode="run", memory="zombie", title="A struct that borrows from itself"),
 
+        H("The standard library runs on it"),
+        P("The whole standard library compiles and runs under single ownership — "
+          "`Vector`, `Map` and `Set`, `Option` and `Result`, `String` and the "
+          "text routines, files and streams, JSON, the command-line parser. A "
+          "container hands back a copy of what it is asked for rather than a "
+          "shared reference (`v.at(0)` clones the element), and moves values in "
+          "and out of its own storage with `std::mem`. How you call it does not "
+          "change between the two modes: the same program builds either way, "
+          "which is the whole point — anything that compiles under `zombie` "
+          "compiles under `arc` too."),
+
+        H("When a borrow has to wait for run time"),
+        P("Sometimes two parts of a program genuinely reach one value and the "
+          "compiler cannot see that only one touches it at a time. "
+          "`mem::Checked<T>` moves the check to run time: `borrow()` hands out a "
+          "read-only `Ref`, `borrowVar()` the one writable `RefVar`, and asking "
+          "for a conflicting one aborts rather than letting them race. It keeps "
+          "no count — one state word — so it reads the same in both modes, and "
+          "it is what the exclusive-borrow diagnostics point to."),
+        S('''import std::io
+import std::mem
+
+fn main() -> i64 {
+    let cell = mem::Checked<i64>(0)
+    { var w = cell.borrowVar(); *w = 41; *w = *w + 1 }   // exclusive, checked
+    io::println((*cell.borrow()).$str())                  // 42
+    0
+}''', mode="run", memory="zombie", title="A borrow decided as the program runs"),
+
+        H("Handles instead of back-references"),
+        P("A `weak` back-reference needs a count to know when its target is "
+          "gone, so single ownership does without it. `mem::Arena<T>` takes its "
+          "place: it owns its entries and hands out small `Slot` handles that "
+          "stay valid until an entry is removed. A handle to a removed slot is "
+          "caught by a generation stamp rather than dangling — so a graph or a "
+          "cache keeps arena handles where it would have kept weak pointers."),
+        S('''import std::io
+import std::mem
+
+fn main() -> i64 {
+    var a = mem::Arena<String>()
+    let h = a.insert("first")
+    a.remove(h)
+    io::println(a.get(h).isNil().$str())    // true: the handle went stale
+    0
+}''', mode="run", memory="zombie", title="A generational handle"),
+
+        H("Threads that borrow shared data"),
+        P("`thread::scope` runs threads that may borrow the data around them and "
+          "joins every one before it returns, so a borrow a thread takes never "
+          "outlives what it points at. A thread is only ever handed something "
+          "built from the scope's environment — `argument: A from self`, checked "
+          "at the call — never a local of the body it could outlive. A shared "
+          "`&T` may cross into a thread exactly when `T` is `Sync`."),
+        S('''import std::io
+import std::thread
+import std::atomic
+
+fn bump(c: &atomic::Counter) -> i64 {
+    var i = 0
+    while i < 100 { c.increment(); i += 1 }
+    0
+}
+
+fn main() -> i64 {
+    let counter = atomic::Counter(0)
+    let total = thread::scope(counter,
+        ||(s: &thread::Scope<atomic::Counter>) -> i64 {
+            let a = s.spawn(bump, s.env())
+            let b = s.spawn(bump, s.env())
+            a.join()
+            b.join()
+            s.env().load()
+        })
+    io::println(total.$str())     // 200
+    0
+}''', mode="run", memory="zombie", title="Scoped threads over shared state"),
+
         H("What single ownership does without"),
-        P("Two things that only make sense with a count are gone. A `weak` field "
-          "cannot tell when its target has been freed without one, so it is an "
-          "error; keep an index or a borrow instead. And a type that exists to "
-          "be shared — `thread::Arc`, `mem::retain`/`release` — is marked "
-          "unavailable, with the alternative named in the message."),
+        P("A `weak` field cannot tell when its target has been freed without a "
+          "count, so it is an error; keep a `mem::Arena<T>` handle or an ordinary "
+          "borrow instead. A library can also mark a type reference-counting-only "
+          "with `@zombie_unavailable(\"…\")`, and reaching for it under `--memory "
+          "zombie` fails with the alternative spelled out."),
         S('''class Parent { name: String  fn init(self, n: String) { self.name = n } }
 class Child {
     weak owner: Parent?
@@ -7212,17 +7290,50 @@ fn main() -> i64 { 0 }''', mode="diag", memory="zombie",
           "the contract callers are held to. And `unsafe { }` leaves raw "
           "pointers untracked, exactly as under reference counting.",
           label="When you know better"),
-        N("The core of the standard library is being brought over to compile "
-          "under both memory models; until it is, some modules that lean on "
-          "shared containers are checked but not yet clean under `--memory "
-          "zombie`. The language, the checker and the code generator are "
-          "complete — this is library work, tracked in the roadmap.",
-          label="Standard library", tone="warn"),
+
+        H("The guards"),
+        P("Every rule Zombie enforces has a code and a message that says what to "
+          "do about it. They are errors at every `--safety` level, because the "
+          "generated code keeps no count to fall back on — the checker's verdict "
+          "is what makes it sound."),
+        T(["Code", "The rule it enforces"],
+          [["E0270", "a `&var` borrow is exclusive — no other borrow of an overlapping place may be live at once"],
+           ["E0272", "a returned reference must outlive the call, so it may not borrow a local"],
+           ["E0273", "a value cannot be used after it is moved"],
+           ["E0274", "a value cannot be moved out of a borrow, raw memory, or a type with a `deinit`"],
+           ["E0275", "a value cannot be moved while it is borrowed"],
+           ["E0277", "a partly-moved value cannot be used whole"],
+           ["E0278", "no write to a place while it is borrowed"],
+           ["E0279", "no read of a place that is borrowed as `&var`"],
+           ["E0280", "a borrow cannot outlive the value it points at"],
+           ["E0281", "the body may borrow from no more than the result's `from` clause allows"],
+           ["E0282", "a reference result the compiler cannot trace needs an explicit `from`"],
+           ["E0283", "an argument must borrow from the place its parameter's `from` names"],
+           ["E0286", "a method may touch only the fields its view names"],
+           ["E0288", "`weak` needs a count, which single ownership does not keep"],
+           ["E0289", "a global cannot be borrowed as `&var`"],
+           ["E0290", "no write to a field through a shared `&self`"],
+           ["E0292", "a reference-counting-only declaration is unavailable"],
+           ["E0293", "a `from` place must name a parameter, `self`, or `global`"],
+           ["E0294", "`@zombie` needs a reason"],
+           ["E0296", "an internal reference must point into a heap-owned field"],
+           ["E0297", "an internal reference must borrow from a field of its own value"],
+           ["E0298", "a field that borrows another must be declared after it"],
+           ["E0299", "a written view must cover everything the body touches"]],
+          caption="The Zombie guards"),
+        N("Findings inside the standard library are reported too, so a change "
+          "that made a library body unsound is caught where it is written rather "
+          "than miscompiling in silence. `--no-zombie-stdlib` silences them if "
+          "you ever need it; the bodies are read for their summaries either way.",
+          label="Standard library"),
     ],
     keywords=["zombie", "single ownership", "borrow checker", "move", "moved",
               "from", "lifetime", "view", "internal reference", "clone",
               "no reference counting", "memory zombie",
-              "two-phase borrow", "dangling", "use after move"]))
+              "two-phase borrow", "dangling", "use after move",
+              "checked", "refcell", "arena", "generational handle", "slot",
+              "thread scope", "scoped threads", "send", "sync", "guards",
+              "no-zombie-stdlib"]))
 
 
 
@@ -10351,6 +10462,8 @@ SECTIONS.append(Sec(
            ["`--safety <level>`", "`none`, `minimal` or `full` (default)"],
            ["`--memory <mode>`", "`arc` (default) or `zombie`; see **Single "
             "ownership without a count**"],
+           ["`--no-zombie-stdlib`", "silence Zombie findings inside the standard "
+            "library (reported by default)"],
            ["`-I <dir>`", "add a module search path"],
            ["`-L <dir>` / `-l <name>`", "native library path / library"],
            ["`--module <name>`", "set the module name"],

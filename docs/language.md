@@ -1968,11 +1968,16 @@ are inferred and written only to pin them. And an **internal reference**,
 of the same value — the struct still owns everything and can be moved, because
 moving it moves the handle, not the borrowed data.
 
-Two things that need a count are gone under Zombie: a `weak` field (which
-cannot know its target is freed without one) and the types that exist to be
-shared (`thread::Arc`, `mem::retain`/`release`), each reported with the
-alternative to reach for. `@zombie("reason")` trusts a body the checker cannot
-follow, and `unsafe { }` leaves raw pointers untracked, as always.
+The whole standard library compiles and runs under Zombie: containers hand
+back copies rather than shared references, `mem::Checked<T>` moves an
+exclusive-access check to run time, `mem::Arena<T>` hands out generational
+handles where a `weak` back-reference would go, and `thread::scope` runs
+threads that borrow shared data and joins them before it returns. Only `weak`
+is gone (it cannot know its target is freed without a count); a library may
+also mark a type reference-counting-only with `@zombie_unavailable`, which then
+reports the alternative. `@zombie("reason")` trusts a body the checker cannot
+follow, and `unsafe { }` leaves raw pointers untracked, as always. Anything
+that compiles under Zombie compiles under `--memory arc` too.
 
 ---
 

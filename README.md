@@ -327,11 +327,14 @@ last use, disjoint fields never clash, `v.push(v.len())` is fine. Where a
 returned reference borrows from is inferred; write it down with a `from` place
 clause (`-> &String from (a, b)`, `from self.text`, `from global`) only to pin
 an interface. Views (`&var self { field }`) and internal references
-(`body: &String from self.text`) fall out of the same idea. `weak` and the
-shared-only types (`thread::Arc`) are unavailable under Zombie and say so.
-`--memory arc` is reference counting, unchanged, and a library records which
-mode it was built for. See the reference's *Single ownership* section for the
-full story.
+(`body: &String from self.text`) fall out of the same idea. The whole standard
+library runs on it — containers hand back copies, `mem::Checked<T>` gives a
+run-time-checked borrow where the compiler cannot prove one, `mem::Arena<T>`
+hands out generational handles in place of `weak`, and `thread::scope` runs
+threads that safely borrow shared data. Only `weak` itself is gone (it needs a
+count). `--memory arc` is reference counting, unchanged; a library records which
+mode it was built for, and anything that compiles under Zombie compiles under
+`arc` too. See the reference's *Single ownership* section for the full story.
 
 ## Safety
 
