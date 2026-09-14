@@ -1,0 +1,18 @@
+// Formatting a String argument — `println!`/`format!` go through
+// `fmt::show` and `String::display`, which must hand back an owned copy the
+// caller can print without moving, dangling, or leaking the source.
+// FLAGS: --memory zombie
+// EXPECT: [Gödel] and 42
+// EXPECT: title is Gödel
+// EXPECT: Gödel
+import std::io
+struct Book { title: String }
+fn main() -> i64 {
+    let s = "Gödel"
+    let n = 42
+    println!("[{}] and {}", s, n)         // s not moved
+    io::println("title is " + s)          // s still usable
+    let b = Book { title: s }             // now move it in
+    println!("{}", b.title)               // print a String field
+    0
+}

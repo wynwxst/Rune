@@ -14,7 +14,7 @@ extern "C" {
 ///
 /// Every type that can be printed can be formatted, because both go through
 /// `io::Display` — so a type gains `{}` by being bound to it, and nothing else.
-pub fn show<T: io::Display>(value: T) -> String { value.display() }
+pub fn show<T: io::Display>(value: &T) -> String { value.display() }
 
 /// `{:.N}` — exactly `places` digits after the point, rounded.
 ///

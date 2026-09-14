@@ -17,10 +17,10 @@ import std::process
 import std::collections::vector
 
 extern "C" {
-    fn rune_print(text: String)
-    fn rune_println(text: String)
-    fn rune_eprint(text: String)
-    fn rune_eprintln(text: String)
+    fn rune_print(text: &String)
+    fn rune_println(text: &String)
+    fn rune_eprint(text: &String)
+    fn rune_eprintln(text: &String)
     fn rune_read_line() -> String
     fn rune_read_line_checked(more: *var i8) -> String
 }
@@ -75,7 +75,11 @@ bind Display to CString {
 }
 
 bind Display to String {
-    fn display(&self) -> String { self }
+    // A copy, not the borrowed self: the caller owns what `display` returns,
+    // and under single ownership handing back `self` would be a borrow that
+    // dangles the moment its owner is dropped. `$clone` is a share under
+    // counting, so this is free there.
+    fn display(&self) -> String { self.$clone() }
     fn describe(&self) -> String { "\"" + self + "\"" }
 }
 
