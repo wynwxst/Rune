@@ -7118,6 +7118,38 @@ fn main() -> i64 {
     a.x + b.y
 }''', mode="diag", memory="zombie", title="Two borrows, one of them mutable"),
 
+        H("Reference-counted code, ported"),
+        P("Most reference-counted code compiles under `--memory zombie` "
+          "unchanged: constructing values, calling methods, passing arguments, "
+          "printing, building containers and looping over them all read exactly "
+          "the same. What changes is underneath — a value that was shared is now "
+          "moved — and the checker points at the one line where that matters "
+          "rather than making you rewrite the rest."),
+        P("Two habits answer almost everything it asks for. When you hand a "
+          "value on but still need it, **borrow** it with `&` — most functions "
+          "that only read already take `&T`, so a bare name auto-borrows and "
+          "nothing changes at the call. When you need a second value that lives "
+          "on its own, **copy** it with `$clone()` — a share under counting, an "
+          "independent value under single ownership."),
+        S('''import std::io
+import std::collections::vector
+
+class Account { var balance: i64  fn init(self) { self.balance = 0 } }
+
+fn main() -> i64 {
+    var names = vector::Vector<String>()
+    names.push("ada")
+    names.push("grace")
+    for name in names { io::println(name) }        // borrows each; `names` stays whole
+    io::println(names.length().$str())             // 2 — still ours
+
+    let a = Account()
+    let b = a.$clone()                             // a second, independent account
+    b.balance = 100
+    io::println(a.balance.$str() + " " + b.balance.$str())   // 0 100
+    0
+}''', mode="run", memory="zombie", title="The same code, either mode"),
+
         H("Where a reference is borrowed from"),
         P("A returned reference has to point somewhere that outlives the call. "
           "The checker works out where from on its own, from the body, so most "
@@ -7139,6 +7171,46 @@ fn main() -> i64 {
 }
 fn main() -> i64 { *dangling() }''', mode="diag", memory="zombie",
           title="A borrow that does not outlive the call"),
+        P("A `from` clause is not only for results. On a **parameter** it is a "
+          "requirement on the caller: the argument must borrow from the named "
+          "place and nowhere else. This is what keeps a value handed to a thread "
+          "off the caller's own locals — see `thread::scope` — and it is checked "
+          "at the call, not in the body."),
+        S('''class Item { pub v: i64  fn init(self, v: i64) { self.v = v } }
+class List {
+    head: Item
+    fn init(self, h: Item) { self.head = h }
+    fn first(&self) -> &Item from self { &self.head }
+}
+// `attach` promises the caller only ever hands it something borrowed from
+// `list`, so what goes in cannot outlive the list it goes into.
+fn attach(list: &var List, item: &Item from list) { }''', mode="decls", memory="zombie",
+          title="`from` on a parameter: a caller-side contract"),
+        P("On a **local binding** it is an assertion the checker verifies — for "
+          "documentation, or to narrow what would otherwise be inferred:"),
+        S('''class Item { pub v: i64  fn init(self, v: i64) { self.v = v } }
+class List {
+    head: Item
+    fn init(self, h: Item) { self.head = h }
+    fn first(&self) -> &Item from self { &self.head }
+}
+fn head(list: &List) -> &Item from list {
+    let first: &Item from list = list.first()   // verified against `list`
+    first
+}''', mode="decls", memory="zombie", title="`from` on a local binding"),
+        P("A **longer lifetime coerces to a shorter one**. A borrow of a `global` "
+          "outlives every place a `from` clause could name, so it satisfies any "
+          "of them: a function that promises `-> &String from a` may return a "
+          "global, and an argument required `from list` may be one. The caller "
+          "keeps the named place alive, which is more than a `'static` borrow "
+          "ever needs — the place-based reading of `&'static T` fitting where "
+          "`&'a T` was asked for."),
+        S('''global BANNER: String = "welcome"
+// Promises to borrow from `a`; returning the global is accepted, because a
+// global outlives `a`.
+fn label(a: &String) -> &String from a {
+    if a.$isEmpty() { &BANNER } else { a }
+}''', mode="decls", memory="zombie", title="A longer lifetime coerces to a shorter"),
 
         H("Views: which fields a method touches"),
         P("A `&var self` method that only touches some of the object's fields "
