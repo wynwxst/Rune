@@ -1,0 +1,28 @@
+// A longer lifetime coerces to a shorter one: a borrow of a `global` outlives
+// every place a `from` clause could name, so it satisfies any of them —
+// whether declared on a result or required of an argument.
+// FLAGS: --memory zombie
+// EXPECT: hi from global
+// EXPECT: 2
+import std::io
+global BANNER: String = "hi from global"
+
+// The result says it borrows from `a`; returning a global (which outlives `a`)
+// is accepted — the caller keeps `a` alive, which is more than `'static` needs.
+fn choose(a: &String, pickGlobal: bool) -> &String from a {
+    if pickGlobal { &BANNER } else { a }
+}
+
+// The argument must borrow from `keep`; a global borrow satisfies it.
+fn record(keep: &var i64, note: &String from keep) {
+    *keep += 1
+}
+
+fn main() -> i64 {
+    let local = "local"
+    io::println(choose(&local, true))     // hi from global
+    var n = 1
+    record(&var n, &BANNER)               // global arg where `from keep` asked
+    io::println(n.$str())                 // 2
+    0
+}

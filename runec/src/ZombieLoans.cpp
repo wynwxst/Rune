@@ -769,7 +769,6 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
     // stay inside that.
     std::set<LocalId> allowedRoots;
     std::set<unsigned> allowedParams;
-    bool allowGlobal = req.Global;
     for (unsigned fa : req.FromArgs) {
       if (fa >= s.Args.size() || s.Args[fa] == kNone)
         continue;
@@ -782,9 +781,7 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
       if (fo != kNone)
         st.Contains[fo].forEach([&](size_t li) {
           const Loan &l2 = B.Loans[li];
-          if (l2.Global)
-            allowGlobal = true;
-          else if (l2.Placeholder)
+          if (l2.Placeholder)
             allowedParams.insert(l2.Param);
           else if (l2.Place != kNone)
             allowedRoots.insert(B.Places.get(l2.Place).Root);
@@ -796,8 +793,8 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
         return;
       const Loan &l = B.Loans[li];
       if (l.Global) {
-        if (!allowGlobal)
-          offender = &l;
+        // A global borrow outlives every place a `from` clause could name, so
+        // it always satisfies one: a longer lifetime coerces to a shorter.
         return;
       }
       if (l.Placeholder) {
@@ -809,7 +806,11 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
         offender = &l; // an untracked (raw) borrow: not vouched for here
         return;
       }
-      if (!allowedRoots.count(B.Places.get(l.Place).Root))
+      LocalId lr = B.Places.get(l.Place).Root;
+      // A borrow of a global outlives every named place — it coerces down.
+      if (B.Locals[lr].K == Local::Global)
+        return;
+      if (!allowedRoots.count(lr))
         offender = &l;
     });
     if (offender) {

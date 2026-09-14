@@ -480,7 +480,11 @@ FnSummary inferSummary(Body &body, const LoanResults &loans,
     if (declared.ResultExplicit) {
       // The body must fit inside what was written.
       for (const FromEntry &inferred : loans.ResultFrom) {
-        bool covered = false;
+        // A global borrow outlives everything a `from` clause could name, so
+        // it satisfies any of them: the caller keeps the named place alive,
+        // which is more than a `'static` result needs. A longer lifetime
+        // coerces to a shorter one.
+        bool covered = inferred.Global;
         for (const FromEntry &d : declared.ResultFrom) {
           if (inferred.Global && d.Global)
             covered = true;
