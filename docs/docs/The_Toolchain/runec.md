@@ -17,8 +17,9 @@
 | `--runtime-dir <dir>` | where `libruneruntime.a` is |
 | `--link-arg <arg>` | appended to the link command verbatim |
 | `--link-cxx` | link the C++ runtime (implied by `extern "C++"`) |
+| `--cxx-stdlib <lib>` | which one: `libc++` or `libstdc++` (default: the platform's) |
 | `--safety <level>` | `none`, `minimal` or `full` (default) |
-| `--memory <mode>` | `arc` (default) or `zombie`; see **Single ownership without a count** |
+| `--memory <mode>` | `zombie` (default) or `arc`; see **Single ownership without a count** |
 | `--no-zombie-stdlib` | silence Zombie findings inside the standard library (reported by default) |
 | `-I <dir>` | add a module search path |
 | `-L <dir>` / `-l <name>` | native library path / library |

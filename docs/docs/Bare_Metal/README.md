@@ -5,6 +5,7 @@ Programs with nothing underneath them: a kernel, a boot loader, firmware. The la
 ## Pages
 
 - [A freestanding program](a_freestanding_program.md)
+- [Strings](strings.md)
 - [The hooks](the_hooks.md)
 - [Safety on bare metal](safety_on_bare_metal.md)
 - [What the freestanding runtime provides](what_the_freestanding_runtime_provides.md)

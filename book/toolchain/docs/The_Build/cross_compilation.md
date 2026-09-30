@@ -119,9 +119,26 @@ machine the code is *for*.
 definition on COFF becomes a *weak external*, which another object's reference
 does not resolve against.
 
-There is also `abiRejectsByValue`: Win64 passes an aggregate in a register only
-when it is exactly 1, 2, 4 or 8 bytes wide. Rather than pass something C will
-misread, the compiler says so.
+**Structs across the C boundary.** LLVM passes a first-class aggregate
+argument by splitting it into its fields, which is what AArch64's C
+convention does for a small struct and what x86-64's does not: SysV packs
+fields into eightbytes and puts anything over 16 bytes in memory, and Win64
+passes anything but 1, 2, 4 or 8 bytes by pointer. So `cSignatureFor` in
+`CodeGenCxx.cpp` classifies a C signature with the same `classifyCxxArgument`
+the C++ interop uses — in a C mode that accepts a Rune struct, since both
+sides of a C call see Rune's layout — whenever a struct, tuple or array
+crosses by value. It is used for a foreign `extern "C"` function's
+declaration and calls, and for every call through a `@cfunction` value, both
+through `emitAbiCall`. A Rune function taken as a `@cfunction` would then be
+called the C way while defined the Rune way, so `cAdapterFor` gives it an
+internal adapter with the C signature that unpacks its arguments and makes
+the Rune call. A signature of nothing but scalars gets none of this and is
+unchanged.
+
+What is left for `abiRejectsByValue` is a Rune function `@export`ed to C,
+whose definition still takes its arguments as LLVM lowers them: on Win64 a
+struct that is not 1, 2, 4 or 8 bytes wide is refused there rather than
+misread.
 
 **Macros run here.** A package's `@type(Macros)` files are compiled into a
 program that runs during the build, so it is always built for the host — with

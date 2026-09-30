@@ -406,6 +406,43 @@ static void overlay(const TargetSpec &spec, ResolvedTarget &out) {
   append(out.LinkArgs, spec.LinkArgs);
 }
 
+/// A package's `runner` is written from where its manifest is, so a word of
+/// it that names something in the package — `sh tools/run.sh` — is made
+/// absolute: `rune run` then works from any directory. Anything else, a
+/// program on `PATH` or a flag, is left as written.
+static std::string anchorRunner(const std::string &runner,
+                                const std::string &root) {
+  if (root.empty())
+    return runner;
+  std::string out, word;
+  auto flush = [&]() {
+    if (word.empty())
+      return;
+    std::error_code ec;
+    const fs::path p(word);
+    if (word[0] != '-' && word.find_first_of("'\"$`{}") == std::string::npos &&
+        p.is_relative() && fs::exists(fs::path(root) / p, ec)) {
+      std::string abs = fs::weakly_canonical(fs::path(root) / p, ec).string();
+      std::string quoted = "'";
+      for (char c : abs)
+        quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+      word = quoted + "'";
+    }
+    out += word;
+    word.clear();
+  };
+  for (char c : runner) {
+    if (c == ' ' || c == '\t') {
+      flush();
+      out += c;
+    } else {
+      word += c;
+    }
+  }
+  flush();
+  return out;
+}
+
 bool resolveTarget(const Manifest &m, const std::string &name,
                    ResolvedTarget &out, TargetProblem &problem) {
   out = ResolvedTarget();
@@ -437,6 +474,8 @@ bool resolveTarget(const Manifest &m, const std::string &name,
     return false;
   if (spec) {
     overlay(*spec, out);
+    if (!spec->Runner.empty())
+      out.Runner = anchorRunner(spec->Runner, m.Root);
     return true;
   }
   if (base)

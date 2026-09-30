@@ -41,6 +41,7 @@
   "Packages_And_Registries",
   "Threads_And_Sharing",
   "Tasks_And_Futures",
+  "Build_Scripts",
   "Cross_Compilation",
   "Bare_Metal",
   "Conditional_Compilation",
@@ -365,6 +366,7 @@
   "std_any.md",
   "std_math.md",
   "std_process.md",
+  "std_build.md",
   "std_env.md",
   "std_arch.md",
   "std_random.md",
@@ -465,6 +467,12 @@
   "what_it_costs.md",
   "what_is_not_here.md"
  ],
+ "Build_Scripts": [
+  "two_phases.md",
+  "what_it_is_told.md",
+  "how_it_answers.md",
+  "when_it_runs.md"
+ ],
  "Cross_Compilation": [
   "foreign_targets.md",
   "webassembly.md",
@@ -479,6 +487,7 @@
  ],
  "Bare_Metal": [
   "a_freestanding_program.md",
+  "strings.md",
   "the_hooks.md",
   "safety_on_bare_metal.md",
   "what_the_freestanding_runtime_provides.md",

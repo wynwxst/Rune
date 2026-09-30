@@ -59,6 +59,12 @@ links the library brings one). The parser reads them again in
   in a 21 KB stack frame, on a 16 KB stack that sat directly above the
   kernel's read-only data: the overflow zeroed its strings.
 
+**String literals.** `Sema::CStringLiterals` is set for a freestanding or
+`--no-stdlib` compile: a string literal in the program's own modules that is
+not expected to be a `String` is typed `CString`, so `let s = "..."` needs no
+annotation where `String` cannot exist. The standard library's modules are
+unaffected, and an expected `String` still gets one — and E0542.
+
 **Sema.** `@panicHandler`, `@allocator` and `@deallocator` give a function a
 fixed symbol (`langItemSymbol` in `AST.h`) and a fixed C signature, checked by
 `checkRuntimeHook` (E0248, and E0249 for a second one). `@weak` is linkage
@@ -90,6 +96,11 @@ choice applies to the whole build, as `memory` does. A foreign target with
 built with `ToolchainKind::Clang` — forces it. A freestanding build never
 prepares a hosted runtime. `[build] linker-script` is passed as
 `-Wl,-T,<path>` and is part of the step's fingerprint, as is the runtime file.
+
+What a linker cannot produce — a raw disk image laid out by load address —
+is a [build script](build_scripts.md)'s finish phase; TETRIS-OS's makes one
+with `objcopy` and names it with `runWith`, and its runner boots it with
+`file={}`.
 
 ## Testing
 

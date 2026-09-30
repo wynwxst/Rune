@@ -1662,6 +1662,7 @@ int compileWithOptions(const CompilerOptions &given) {
   // built for: `long` is 32 bits on Windows, `int64_t` is `long` on Linux.
   sema.setCxxTarget(
       cxxTargetFor(targetTripleOf(opts).str(), typeCtx.pointerBits()));
+  sema.CStringLiterals = opts.Freestanding || opts.NoStdlib;
   for (const auto &m : modules)
     sema.addModule(m.get());
   timer.phase("check", [&] { sema.check(); });

@@ -290,7 +290,10 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
   }
   case NodeKind::StringLit: {
     auto *l = cast<StringLitExpr>(e);
-    if (expected && expected->is(TypeKind::CString)) {
+    const bool wantsString = expected && expected->is(TypeKind::String);
+    const bool ownCode = CurModule && !CurModule->IsStdlib;
+    if ((expected && expected->is(TypeKind::CString)) ||
+        (CStringLiterals && ownCode && !wantsString)) {
       l->AsCString = true;
       result = Types.cstringType();
     } else {

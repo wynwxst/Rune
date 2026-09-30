@@ -48,6 +48,8 @@ PROGRAMS = {
     "noalloc":  ("mini", True,  101, "panic: this program allocates, and declares no @allocator"),
     "moved":    ("sys",  False, None, "'b' has been moved out of [E0273]"),
     "hosted":   (None,   False, None, "'greet' needs the hosted runtime, and this program is built without one [E0542]"),
+    "literals": ("sys",  True,  0,   "no annotation needed\na literal is a CString here\nin an array\n"),
+    "wantsstring": (None, False, None, "needs the hosted runtime, and this program is built without one [E0542]"),
 }
 
 
@@ -147,14 +149,22 @@ def tetris(tmp):
     if r.returncode != 0:
         return
 
-    kernel = os.path.join(project, "target", "bare-x86", "debug", "tetris")
+    image = os.path.join(project, "target", "bare-x86", "debug", "tetris.img")
+    check("its build script lays the kernel out as a disk image",
+          os.path.exists(image) and os.path.getsize(image) > 512 and
+          open(image, "rb").read()[510:512] == b"\x55\xaa",
+          r.stdout + r.stderr)
     serial = os.path.join(tmp, "tetris-serial.txt")
     monitor = os.path.join(tmp, "tetris-monitor.sock")
+    # `rune run` from inside the package: it finds the manifest above, and
+    # boots the image the build script made through the target's runner.
     qemu = subprocess.Popen(
-        ["sh", "tools/run.sh", kernel, "-display", "none", "-no-reboot",
+        [os.path.join(BIN, "rune"), "run", "--no-color", "--",
+         "-display", "none", "-no-reboot",
          "-serial", "file:" + serial,
          "-monitor", "unix:" + monitor + ",server,nowait"],
-        cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cwd=os.path.join(project, "src"), env=env, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         def log():
             try:
@@ -171,7 +181,7 @@ def tetris(tmp):
                 time.sleep(0.2)
             return False
 
-        for _ in range(100):
+        for _ in range(300):
             if os.path.exists(monitor):
                 break
             time.sleep(0.1)
@@ -201,10 +211,15 @@ def tetris(tmp):
               wait_for("music parts of 62 195 128 58 notes", 30), log())
         check("tetris-os reaches its menu", wait_for("tetris: menu", 30), log())
 
-        w, h, pixels = screen("menu")
-        red = sum(1 for i in range(0, len(pixels), 3)
-                  if pixels[i] > 200 and pixels[i + 1] < 40 and pixels[i + 2] < 40)
-        lit = sum(1 for i in range(0, len(pixels), 3) if pixels[i:i + 3] != b"\0\0\0")
+        # The log line comes as the menu starts; the first frame reaches the
+        # screen a moment later, so give it a few tries.
+        for _ in range(10):
+            w, h, pixels = screen("menu")
+            red = sum(1 for i in range(0, len(pixels), 3)
+                      if pixels[i] > 200 and pixels[i + 1] < 40 and pixels[i + 2] < 40)
+            lit = sum(1 for i in range(0, len(pixels), 3) if pixels[i:i + 3] != b"\0\0\0")
+            if lit > w * h // 20:
+                break
         check("the menu is drawn, and is not the panic screen",
               lit > w * h // 20 and red < w * h // 2, f"{lit} lit, {red} red")
 
@@ -228,7 +243,12 @@ def tetris(tmp):
         check("nothing panicked", "panic" not in log(), log())
         command("quit")
     finally:
-        qemu.kill()
+        # `rune run` and the QEMU it started, together.
+        try:
+            os.killpg(qemu.pid, 9)
+        except OSError:
+            pass
+        qemu.wait()
 
 
 def main():

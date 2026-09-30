@@ -18,6 +18,7 @@ Linking is the part that needs help. A linker is platform software: it knows one
 | `--runtime-dir <dir>` | where its `libruneruntime.a` is |
 | `--link-arg <arg>` | appended to the link command verbatim |
 | `--link-cxx` | link the C++ runtime (implied by `extern "C++"`) |
+| `--cxx-stdlib <lib>` | `libc++` for C++ built with `-stdlib=libc++`, `libstdc++`, or the platform's own |
 
 ```sh
 $ runec --target wasm32-wasip1 \

@@ -16,9 +16,9 @@ target = "bare-x86"
 c-sources = ["boot/start.S", "boot/stage0.S"]
 linker-script = "link.ld"
 
-# `rune build` makes the kernel as an ELF file; tools/run.sh turns it into a
-# disk image and boots it from its own boot sector, with a SoundBlaster 16
-# and no audio output (edit the script's `-audiodev` to hear it). Run from
-# this directory.
+# `rune build` makes the kernel as an ELF file, and build.rune lays it out
+# as a disk image; `rune run` boots that image from its own boot sector, with
+# a SoundBlaster 16 and no audio output (change `-audiodev none` to `pa` or
+# `coreaudio` to hear it). `{}` is where the image goes.
 [target.bare-x86]
-runner = "sh tools/run.sh"
+runner = "qemu-system-i386 -drive format=raw,file={} -audiodev none,id=snd -device sb16,audiodev=snd"

@@ -153,6 +153,11 @@ private:
     std::vector<LoopFrame> Loops;
     /// Temporaries owned by the statement being emitted.
     std::vector<std::pair<llvm::Value *, Type *>> Temps;
+    /// While an `if`, `match` or block is evaluated for its value: where a
+    /// temporary goes that its result only borrows. Made inside a branch, it
+    /// would go with the branch's temporaries; it belongs to the statement
+    /// the whole expression is part of, and is handed there afterwards.
+    std::vector<std::pair<llvm::Value *, Type *>> *BorrowedTemps = nullptr;
     /// Under Zombie: which temporary slot holds a tracked value, so a
     /// consumer that keeps the value can take it back out of the statement's
     /// cleanup (`adopt`).
@@ -330,6 +335,28 @@ private:
     ~TempScope() { G.fs().Temps = std::move(Saved); }
     TempScope(const TempScope &) = delete;
     TempScope &operator=(const TempScope &) = delete;
+  };
+  /// Collects the temporaries an `if`, `match` or block's result borrows
+  /// (`FunctionState::BorrowedTemps`) while it is emitted; `handOver` then
+  /// gives them to the statement around it, once its own branches' scopes
+  /// are gone.
+  struct BorrowedTempsScope {
+    CodeGen &G;
+    std::vector<std::pair<llvm::Value *, Type *>> Collected;
+    std::vector<std::pair<llvm::Value *, Type *>> *Saved;
+    explicit BorrowedTempsScope(CodeGen &g)
+        : G(g), Saved(g.fs().BorrowedTemps) {
+      g.fs().BorrowedTemps = &Collected;
+    }
+    void handOver() {
+      G.fs().BorrowedTemps = Saved;
+      for (auto &t : Collected)
+        G.fs().Temps.push_back(t);
+      Collected.clear();
+    }
+    ~BorrowedTempsScope() { G.fs().BorrowedTemps = Saved; }
+    BorrowedTempsScope(const BorrowedTempsScope &) = delete;
+    BorrowedTempsScope &operator=(const BorrowedTempsScope &) = delete;
   };
   void emitScopeCleanup(size_t scopeIndex, bool runDeferred = true);
   void emitAllScopeCleanups(size_t downTo);

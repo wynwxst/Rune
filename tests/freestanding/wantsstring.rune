@@ -1,0 +1,8 @@
+@runtime(none)
+@entry(none)
+// Asking for a `String` by name still means the hosted runtime's.
+@export("_start")
+fn start() -> Never {
+    let s: String = "a String"
+    loop {}
+}

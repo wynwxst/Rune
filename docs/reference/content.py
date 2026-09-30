@@ -2651,6 +2651,10 @@ fn main() -> i64 {
     io::println(copied().$str())     // still 1
     0
 }""", mode="run", title="`move` names what already happens"),
+        N("`move` is a keyword only as an operator — before `||`, or before "
+          "a value it hands on. `move(...)` is a call, so a function or a "
+          "method may be named `move`, as a game's often is.",
+          label="A function named `move`"),
         P("Which means assigning to a captured name changes only the "
           "closure's copy. That is easy to write by accident and impossible "
           "to notice at run time, so the compiler says so."),
@@ -8645,13 +8649,18 @@ fn main() -> i64 {
     io::println("same: " + same.$str() + ", differs: " + differs.$str())
     0
 }''', mode="run", title="A struct, by pointer"),
-        N("Windows x64 passes an aggregate in a register only at 1, 2, 4 or 8 "
-          "bytes wide and passes anything else indirectly. Rather than hand C "
-          "something it will misread, a `struct` parameter or result that "
-          "cannot travel by value on the target is refused with an error "
-          "saying so. Pointers behave identically everywhere, which is why "
-          "they are the advice and not the workaround.",
-          label="Why not by value", tone="warn"),
+        N("A struct, tuple or array passed to C by value, or returned from "
+          "it, travels the way the platform's C compiler passes one: in "
+          "registers, packed into them, or in memory, by the same rules the "
+          "C++ interop follows. So does a call through a `@cfunction`, and a "
+          "Rune function handed to C as one takes its arguments that way "
+          "too. A pointer is still the cheaper way to hand over anything "
+          "large.", label="Structs by value"),
+        N("A Rune function `@export`ed to C still takes its arguments as "
+          "Rune passes them. On Windows x64 that differs from C for a struct "
+          "that is not 1, 2, 4 or 8 bytes wide, and such a signature is "
+          "refused with an error saying so; pass a pointer instead.",
+          label="An export on Windows x64", tone="warn"),
 
         H("Pointers and out-parameters"),
         P("A C function has one result, so a second comes back through a "
@@ -10229,6 +10238,25 @@ fn main() -> i64 {
     io::println("still live: " + process::liveObjectCount().$str())
     0
 }""", mode="run", title="The process itself"),
+
+        H("std::build"),
+        P("For a package's `build.rune`: what it is told, and how it answers. "
+          "See [Build scripts](#buildscripts)."),
+        T(["Function", "Does"],
+          [["`preparing` / `finishing`", "which phase this is: before the "
+            "package compiles, or after an executable links"],
+           ["`packageName`, `packageVersion`, `packageDir`, `outDir`",
+            "the package, and where its outputs go"],
+           ["`profile`, `release`, `target`, `triple`, `freestanding`, `cc`",
+            "what it is being built as, and for"],
+           ["`artifact`, `artifactName`", "while finishing: the executable "
+            "just linked"],
+           ["`cfg`, `cfgValue`", "set `@Config` flags for the package"],
+           ["`linkArg`, `linkLibrary`, `linkPath`", "add to every link"],
+           ["`runWith`", "while finishing: what `rune run` starts instead"],
+           ["`warning`, `fail`", "say something; stop the build"],
+           ["`tool`, `run`", "find the first of several programs on `PATH`; "
+            "run one, failing the build unless it succeeds"]]),
 
         H("std::env"),
         P("The process's environment: its variables, and where it is. A "
@@ -12076,6 +12104,7 @@ SECTIONS.append(Sec(
            ["`--runtime-dir <dir>`", "where `libruneruntime.a` is"],
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
            ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"],
+           ["`--cxx-stdlib <lib>`", "which one: `libc++` or `libstdc++` (default: the platform's)"],
            ["`--safety <level>`", "`none`, `minimal` or `full` (default)"],
            ["`--memory <mode>`", "`zombie` (default) or `arc`; see **Single "
             "ownership without a count**"],
@@ -13741,6 +13770,103 @@ async fn main() -> i64 {
 
 
 # ===========================================================================
+# Build scripts
+# ===========================================================================
+SECTIONS.append(Sec(
+    "buildscripts", "tooling", "Build scripts",
+    "When a package needs more than compiling and linking \u2014 a flag worked "
+    "out from the machine, a library found at build time, a kernel laid out "
+    "as a disk image after the link \u2014 it says so in Rune, in a "
+    "`build.rune` beside its `Rune.toml`.",
+    [
+        H("Two phases"),
+        P("`rune` compiles `build.rune` for the machine doing the building, "
+          "whatever the package is built for, and runs it twice per build, "
+          "in the package's directory:"),
+        T(["Phase", "Runs", "Can"],
+          [["**prepare**", "before the package is compiled",
+            "set `@Config` flags; add link arguments, libraries and library "
+            "directories"],
+           ["**finish**", "after each executable is linked, once per "
+            "executable", "post-process the file \u2014 strip it, sign it, "
+            "lay it out as an image \u2014 and say what `rune run` should "
+            "start in its place"]]),
+        P("It is an ordinary program with a `main`. `std::build` tells it "
+          "which phase this is and everything else it may want to know, and "
+          "gives it a function for each answer."),
+        S("""// build.rune
+import std::build
+
+fn main() -> i64 {
+    if build::preparing() {
+        if build::release() { build::cfg("fast_paths") }
+        build::linkLibrary("z")
+    }
+    if build::finishing() {
+        let image = build::artifact() + ".img"
+        let objcopy = build::tool(["llvm-objcopy", "objcopy"])
+        build::run(objcopy, ["-O", "binary", build::artifact(), image.$clone()])
+        build::runWith(image)       // `rune run` boots this
+    }
+    0
+}""", mode="frag", title="Both phases"),
+
+        H("What it is told"),
+        T(["`std::build`", "Environment", "Is"],
+          [["`preparing()` / `finishing()`", "`RUNE_BUILD_PHASE`", "`prepare` or `finish`"],
+           ["`packageName()`, `packageVersion()`", "`RUNE_PACKAGE_NAME`, `_VERSION`", "from the manifest"],
+           ["`packageDir()`", "`RUNE_PACKAGE_DIR`", "where `Rune.toml` is, absolute"],
+           ["`outDir()`", "`RUNE_OUT_DIR`", "`target/<target>/<profile>`, where outputs go"],
+           ["`profile()`, `release()`", "`RUNE_PROFILE`", "`debug` or `release`"],
+           ["`target()`, `triple()`", "`RUNE_TARGET`, `_TRIPLE`", "the `--target` name, or `host`; its triple"],
+           ["`freestanding()`", "`RUNE_FREESTANDING`", "built with no hosted runtime"],
+           ["`cc()`", "`RUNE_CC`", "the target's C compiler"],
+           ["`artifact()`, `artifactName()`", "`RUNE_ARTIFACT`, `_NAME`", "finishing: the executable just linked"]]),
+
+        H("How it answers"),
+        P("Each answer is a line on its output, `rune:key=value`; `std::build` "
+          "writes them, and any program that prints them will do. Everything "
+          "else it prints is shown when it fails, or under `-v`."),
+        T(["`std::build`", "Line", "Does"],
+          [["`cfg(name)`", "`rune:cfg=name`", "sets `@Config(name)` for the package's sources"],
+           ["`cfgValue(key, value)`", "`rune:cfg=key=value`", "sets `@Config(key == \"value\")`"],
+           ["`linkArg(arg)`", "`rune:link-arg=arg`", "added to every link of the package's executables"],
+           ["`linkLibrary(name)`", "`rune:link-lib=name`", "`-l<name>`"],
+           ["`linkPath(dir)`", "`rune:link-path=dir`", "`-L<dir>`, relative to the package"],
+           ["`runWith(path)`", "`rune:run=path`", "finishing: what `rune run` starts instead"],
+           ["`warning(text)`", "`rune:warning=text`", "shown; the build goes on"],
+           ["`fail(text)`", "`rune:error=text`", "the build stops, saying why"]]),
+        P("A script that exits with anything but 0 fails the build, and its "
+          "output is shown with the phase it failed in."),
+        SH("""$ rune build
+\u25cb Compiling widgets v0.1.0 (build script)
+\u25cf the build script of widgets failed in its prepare phase (exit 1): libwidget is not installed"""),
+
+        H("When it runs"),
+        P("The script is compiled again only when it changes, and runs on "
+          "every build, so what it does should be quick, or look for itself "
+          "whether there is anything to do. What its prepare phase answers "
+          "is part of what decides whether the package is compiled again, "
+          "so a script that answers the same as last time costs a compile "
+          "nothing."),
+        N("A build script is compiled for this machine with its own defaults "
+          "\u2014 hosted, with the standard library \u2014 even when the package "
+          "is a freestanding kernel for another processor. It can read files, "
+          "run programs and print; the package it builds is what cannot.",
+          label="Hosted, always"),
+        P("[`examples/tetris-os`](examples/tetris-os/README.md) uses one to "
+          "turn its linked kernel into the disk image its boot sector "
+          "expects, and its runner boots that image:"),
+        S("""[target.bare-x86]
+runner = "qemu-system-i386 -drive format=raw,file={} -audiodev none,id=snd -device sb16,audiodev=snd\"""",
+          mode="frag", title="examples/tetris-os/Rune.toml"),
+    ],
+    keywords=["build.rune", "build script", "std::build", "prepare", "finish",
+              "post-link", "objcopy", "disk image", "runWith", "cfg",
+              "link-arg", "link-lib", "rune:cfg", "RUNE_BUILD_PHASE"]))
+
+
+# ===========================================================================
 # Cross compilation
 # ===========================================================================
 SECTIONS.append(Sec(
@@ -13862,7 +13988,8 @@ hello.o: Intel amd64 COFF object file"""),
            ["`--sysroot <dir>`", "where that target's headers and libraries are"],
            ["`--runtime-dir <dir>`", "where its `libruneruntime.a` is"],
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
-           ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"]]),
+           ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"],
+           ["`--cxx-stdlib <lib>`", "`libc++` for C++ built with `-stdlib=libc++`, `libstdc++`, or the platform's own"]]),
         SH("""$ runec --target wasm32-wasip1 \\
         --cc /opt/wasi-sdk/bin/wasm32-wasip1-clang \\
         --sysroot /opt/wasi-sdk/share/wasi-sysroot \\
@@ -13914,7 +14041,9 @@ runner = "qemu-aarch64 -L /opt/pi-sysroot"''', mode="frag",
            ["`ar`", "the archiver; derived from `cc` when absent"],
            ["`sysroot`", "passed as `--sysroot`"],
            ["`sdk`", "where the WASI SDK is, for a target based on `wasm`"],
-           ["`runner`", "how to start a built program here"],
+           ["`runner`", "how to start a built program here; `{}` marks where "
+            "the program goes, and a word naming a file in the package is "
+            "read from Rune.toml's directory"],
            ["`runtime-dir`", "a prebuilt `libruneruntime.a` to use instead of building one"],
            ["`c-flags`", "added to every C compile for the target, the runtime's included"],
            ["`link`, `link-paths`, `link-args`", "native libraries the *target* needs, on top of the package's"]],
@@ -13967,6 +14096,12 @@ target/pi/debug/report             # --target pi"""),
         SH("""$ rune run --target windows        # wine is not installed
 ● built for x86_64-w64-mingw32, which this machine cannot run
   ─  note: install wine to run it here, or copy it to a machine that can"""),
+        P("The program is added at the end of the runner's command, unless "
+          "the runner says where with `{}` — `qemu-system-i386 -drive "
+          "format=raw,file={}` — and `rune run`'s own arguments follow "
+          "either way. A runner that names a script of the package's, `sh "
+          "tools/boot.sh`, finds it from any directory: `rune` itself works "
+          "on the nearest `Rune.toml` above where it is started."),
 
         H("C and C++ sources"),
         P("A package with a C or C++ half lists it, and `rune` compiles it "
@@ -14077,6 +14212,19 @@ fn kernelMain(magic: u32, info: u32) -> Never {
 4 ║ fn greet() { io::println("hi") }
        ^^^^^ ERROR: 'greet' needs the hosted runtime, and this program is built without one [E0542]
     ─  note: it uses `String`, which lives in the hosted runtime; a freestanding program works in `CString` and byte arrays"""),
+        H("Strings"),
+        P("With no hosted runtime there is no `String` to make, so a string "
+          "literal nothing asks to be a `String` is a `CString`: it can be "
+          "named, stored in a table and handed to a function without an "
+          "annotation. Asking for `String` by name still means the hosted "
+          "runtime's, and is refused like any other use of it. The same holds "
+          "under `--no-stdlib`."),
+        S("""let banner = "TETRIS-OS\\n"        // a CString
+
+fn greet() {
+    serial::write(banner)
+    serial::write("ready\\n")
+}""", mode="frag", title="No annotations"),
         N("A freestanding program is built with `--memory zombie`. Every "
           "object has one owner and nothing is counted, so the heap needs "
           "nothing but an allocator; reference counting would need the "
@@ -14208,7 +14356,8 @@ $ rune run -- -append panic         # trips a bounds check on purpose; exits 3""
           "Tetris to the theme — Rune throughout but for the boot sector and "
           "the interrupt stubs. Porting it under `--safety full` turned up an "
           "out-of-bounds write and a missing table entry the C had carried "
-          "silently."),
+          "silently. Its [build script](#buildscripts) lays the linked kernel "
+          "out as a disk image, which is what `rune run` then boots."),
         H("Tables in the image"),
         P("A global whose initialiser is made only of constants — numbers, "
           "`bool`s, strings as `CString`, top-level functions as "
@@ -14224,6 +14373,7 @@ $ rune run -- -append panic         # trips a bounds check on purpose; exits 3""
               "panicHandler", "allocator", "deallocator", "weak", "rune_init",
               "multiboot", "qemu", "linker script", "linker-script",
               "bare-x86", "bare-arm64", "bare-riscv64", "E0542", "E0248",
+              "CString literal", "disk image",
               "E0249", "memcpy", "__udivdi3", "firmware", "embedded"]))
 
 
@@ -14481,7 +14631,10 @@ fn main() -> i64 {
            ["`=r`", "a result written to a general register"],
            ["`0`", "this input must land where operand 0 did"],
            ["`i`", "an immediate the assembler can fold in"],
-           ["`m`", "a memory operand"]]),
+           ["`m`", "a memory operand"],
+           ["`{eax}`", "that register, by name"],
+           ["`t`, `u`", "x86: the top two of the x87 register stack, as GCC "
+            "writes them; read as `{st}` and `{st(1)}`"]]),
         P("LLVM is asked whether the constraints fit the call before anything "
           "is emitted, so a mismatch is a diagnostic pointing at the call "
           "rather than a failure inside the back end."),
@@ -14491,6 +14644,15 @@ fn broken() -> i64 {
     // Three inputs promised, none supplied.
     unsafe { asm::value<i64>("nop", "=r,r,r,r") }
 }""", mode="diag", title="Constraints that do not fit"),
+        P("What only the assembler can find — an instruction it does not "
+          "know, a register that does not exist — is found after the "
+          "program has been checked, while machine code is made. It is still "
+          "reported at the call that wrote it (E0509), with the offending "
+          "line, and the build leaves no half-written object behind."),
+        SH("""● kernel.rune [6:13..14]
+6 ║     unsafe { asm::run("movl %eax, %notareg", "") }
+                 ^ ERROR: inline assembly: invalid register name [E0509]
+    ─  note: in the assembly line `movl %eax, %notareg`"""),
 
         H("Which one to reach for"),
         P("`asm::value` is a function of its inputs, so the compiler may drop "

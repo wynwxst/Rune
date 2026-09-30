@@ -1,0 +1,21 @@
+// TETRIS-OS's build script. `rune build` links the kernel as an ELF file,
+// with the boot sector inside it; this turns that into the disk image the
+// boot sector expects — sector 0 the boot sector, the kernel from sector 1,
+// each where link.ld's AT(...) says — and tells `rune run` to boot the
+// image rather than the ELF file.
+//
+// The image is made here rather than by the linker because ld.lld writes
+// `--oformat=binary` by virtual address, and the boot sector (at 0x7C00) and
+// the kernel (at 0x10000) are not where they sit on the disk. objcopy lays a
+// binary out by load address, which is what is wanted.
+import std::build
+
+fn main() -> i64 {
+    if build::finishing() {
+        let image = build::artifact() + ".img"
+        let objcopy = build::tool(["llvm-objcopy", "objcopy"])
+        build::run(objcopy, ["-O", "binary", build::artifact(), image.$clone()])
+        build::runWith(image)
+    }
+    0
+}

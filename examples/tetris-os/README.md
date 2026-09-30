@@ -15,13 +15,15 @@ rune run              # build it, make the disk image, boot it in QEMU
 rune run --release
 ```
 
-Run from this directory. Needs clang, ld.lld, llvm-objcopy (or objcopy) and
-`qemu-system-i386`. `rune build` makes the kernel as an ELF file, the boot
-sector inside it; `tools/run.sh` lays that out as a disk image — each section
-at its load address — and boots it. Enter starts a game; the arrow
-keys move, `a` and `d` (or `r`) rotate, space drops, `m` toggles the music.
-QEMU is started with a SoundBlaster 16 and no audio output; to hear it, change
-`-audiodev none` in `Rune.toml` to `pa` (PulseAudio) or `coreaudio`.
+Needs clang, ld.lld, llvm-objcopy (or objcopy) and `qemu-system-i386`, and
+works from anywhere in this directory. `rune build` links the kernel as an ELF
+file, the boot sector inside it; `build.rune`, the package's build script,
+then lays that out as a disk image — each section at its load address — and
+tells `rune run` to boot the image rather than the ELF file. Enter starts a
+game; the arrow keys move, `a` and `d` (or `r`) rotate, space drops, `m`
+toggles the music. QEMU is started with a SoundBlaster 16 and no audio output;
+to hear it, change `-audiodev none` in `Rune.toml` to `pa` (PulseAudio) or
+`coreaudio`.
 
 ## What is where
 
@@ -29,7 +31,7 @@ QEMU is started with a SoundBlaster 16 and no audio output; to hear it, change
 | --- | --- | --- |
 | `stage0.S` | `boot/stage0.S` | the boot sector: loads the kernel, mode 13h, A20, protected mode |
 | `start.S` | `boot/start.S` | `_start`, and the 48 interrupt entry stubs |
-| `link.ld`, `Makefile` | `link.ld`, `Rune.toml`, `tools/run.sh` | the boot sector as sector 0 of the disk, the kernel from sector 1 |
+| `link.ld`, `Makefile` | `link.ld`, `Rune.toml`, `build.rune` | the boot sector as sector 0 of the disk, the kernel from sector 1 |
 | `util.h` | `src/port.rune` | I/O ports and the interrupt flag, over `std::asm` |
 | `idt.c` | `src/idt.rune` | the IDT, and `lidt` |
 | `isr.c` | `src/isr.rune` | installing the stubs; `isr_handler` |

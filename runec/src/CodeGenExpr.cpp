@@ -321,6 +321,25 @@ void CodeGen::emitInto(Expr *e, Value *slot, Type *slotType, bool raw) {
   Value *produced = v;
   v = coerce(v, e->Ty, slotType);
 
+  // A borrow of a temporary made right here — `if c { a + b } else { ... }`
+  // where a `&String` is wanted. The temporary belongs to the statement the
+  // whole expression is part of, not to the branch that made it, or the
+  // borrow would outlive what it points at.
+  if (fs().BorrowedTemps && slotType->is(TypeKind::Pointer) &&
+      !slotType->isRawPointer() && e->Ty && e->Ty->isRefCounted()) {
+    auto parked = fs().TempOf.find(produced);
+    if (parked != fs().TempOf.end()) {
+      llvm::Type *ty = lower(e->Ty);
+      IRBuilder<> entry(&fs().Fn->getEntryBlock(),
+                        fs().Fn->getEntryBlock().begin());
+      Value *keep = entry.CreateAlloca(ty, nullptr, "borrowed.temp");
+      entry.CreateStore(Constant::getNullValue(ty), keep);
+      adopt(produced);
+      B->CreateStore(produced, keep);
+      fs().BorrowedTemps->push_back({keep, e->Ty});
+    }
+  }
+
   // A store through a raw pointer is exactly that: no counting, and no
   // assumption that the slot already held anything. `mem::retain` and
   // `mem::release` are how the caller keeps the books in that case. Under
@@ -678,8 +697,11 @@ std::vector<Value *> CodeGen::buildArguments(CallExpr *c, FunctionDecl *fn,
     }
     Value *v = emitRValue(value);
     // Under Zombie an argument passed by value is moved in: the callee owns
-    // it from here. A borrow (`&T`) is a copy of a pointer and owns nothing.
-    const bool byValue = want && !want->is(TypeKind::Pointer);
+    // it from here. A borrow (`&T`) is a copy of a pointer and owns nothing,
+    // and neither does a slice (`[T]`), which is a view of an array: the
+    // array — a temporary, often — stays this statement's to destroy.
+    const bool byValue = want && !want->is(TypeKind::Pointer) &&
+                         !want->is(TypeKind::Slice);
     if (zombie() && byValue)
       takeOwnership(value, v, value->Ty);
     if (want) {
@@ -3803,7 +3825,9 @@ Value *CodeGen::emitRValue(Expr *e) {
     Value *slot = createEntryAlloca(lower(e->Ty), "block.value");
     if (e->Ty->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(e->Ty)), slot);
+    BorrowedTempsScope borrowed(*this);
     emitBlock(cast<BlockExpr>(e), slot, e->Ty);
+    borrowed.handOver();
     return track(B->CreateLoad(lower(e->Ty), slot), e->Ty);
   }
 
@@ -3833,7 +3857,9 @@ Value *CodeGen::emitRValue(Expr *e) {
     Value *slot = createEntryAlloca(lower(e->Ty), "if.value");
     if (e->Ty->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(e->Ty)), slot);
+    BorrowedTempsScope borrowed(*this);
     emitIf(cast<IfExpr>(e), slot, e->Ty);
+    borrowed.handOver();
     return track(B->CreateLoad(lower(e->Ty), slot), e->Ty);
   }
 
@@ -3845,7 +3871,9 @@ Value *CodeGen::emitRValue(Expr *e) {
     Value *slot = createEntryAlloca(lower(e->Ty), "match.value");
     if (e->Ty->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(e->Ty)), slot);
+    BorrowedTempsScope borrowed(*this);
     emitMatch(cast<MatchExpr>(e), slot, e->Ty);
+    borrowed.handOver();
     return track(B->CreateLoad(lower(e->Ty), slot), e->Ty);
   }
 

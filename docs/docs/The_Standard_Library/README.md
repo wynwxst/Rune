@@ -21,6 +21,7 @@ Small on purpose, and written in Rune over a C runtime you can read in an aftern
 - [std::any](std_any.md)
 - [std::math](std_math.md)
 - [std::process](std_process.md)
+- [std::build](std_build.md)
 - [std::env](std_env.md)
 - [std::arch](std_arch.md)
 - [std::random](std_random.md)

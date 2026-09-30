@@ -211,9 +211,17 @@ const char *emitFlagFor(OutputKind k) {
 std::string launchCommand(const Options &o, const std::string &exe,
                           const std::string &args = "") {
   std::string cmd;
-  if (o.Target.Active && !o.Target.Runner.empty())
-    cmd = o.Target.Runner + " ";
-  cmd += quote(exe);
+  // `{}` in a runner is where the executable goes — `qemu -kernel {} -s` —
+  // and the arguments still come last. Without one, the executable does.
+  std::string runner = o.Target.Active ? o.Target.Runner : std::string();
+  size_t slot = runner.find("{}");
+  if (slot != std::string::npos) {
+    cmd = runner.substr(0, slot) + quote(exe) + runner.substr(slot + 2);
+  } else {
+    if (!runner.empty())
+      cmd = runner + " ";
+    cmd += quote(exe);
+  }
   if (!args.empty())
     cmd += " " + args;
   return cmd;
@@ -382,6 +390,9 @@ struct BuildResult {
   std::string ExecutablePath;  ///< the one `rune run` means by default
   /// Every executable the package produced, in build order, as name -> path.
   std::vector<std::pair<std::string, std::string>> Executables;
+  /// What the build script said `rune run` should start in an executable's
+  /// place — a disk image made from a kernel, say — by executable path.
+  std::map<std::string, std::string> RunWith;
 };
 
 /// What a package's dependencies contribute to the build that consumes them:
@@ -514,6 +525,41 @@ bool buildNativeSources(const Manifest &m, const Options &opts,
 /// needs it, and can do nothing but wait for it, whereas a graph known in
 /// advance says which packages have nothing to do with each other and can
 /// therefore be compiled at the same time.
+//===----------------------------------------------------------------------===//
+// Build scripts
+//
+// A package's `build.rune` is an ordinary Rune program, compiled for the
+// machine doing the building and run twice: `prepare`, before the package is
+// compiled, and `finish`, after each of its executables is linked. It is told
+// where it is through `RUNE_*` variables and answers with `rune:key=value`
+// lines on its output; `std::build` wraps both sides.
+//===----------------------------------------------------------------------===//
+
+/// What a build script answered.
+struct ScriptAnswers {
+  std::vector<std::string> Cfgs;       ///< `name`, or `key=value`
+  std::vector<std::string> LinkArgs;
+  std::vector<std::string> LinkLibs;
+  std::vector<std::string> LinkPaths;  ///< made absolute
+  std::string RunWith;                 ///< finish only; absolute
+};
+
+/// Adds a script's `@Config` answers to a `runec` command line.
+void appendScriptConfig(std::string &cmd, const ScriptAnswers &a) {
+  for (const std::string &c : a.Cfgs)
+    cmd += " --cfg " + quote(c);
+}
+
+/// Adds its link answers.
+void appendScriptLink(std::string &cmd, const ScriptAnswers &a) {
+  for (const std::string &dir : a.LinkPaths)
+    cmd += " -L" + quote(dir);
+  for (const std::string &lib : a.LinkLibs)
+    cmd += " -l" + quote(lib);
+  for (const std::string &arg : a.LinkArgs)
+    cmd += " --link-arg " + quote(arg);
+}
+
 struct PackageNode {
   std::string Dir;              ///< canonical path
   Manifest M;
@@ -531,6 +577,10 @@ struct PackageNode {
   // run afterwards.
   BuildResult Result;
   DependencyInputs Inputs;
+  /// The package's `build.rune`, compiled for this machine, and what its
+  /// prepare phase answered. Empty when it has none.
+  std::string ScriptExe;
+  ScriptAnswers Script;
 };
 
 /// Loads every manifest reachable from `rootDir`, depth first, so that a
@@ -728,6 +778,123 @@ bool prepareInputs(PackageNode &node, std::vector<PackageNode> &nodes,
 /// A dependent imports this package's `.rul` and nothing else, so its own
 /// compiles can start as soon as this step is done — its binaries need not
 /// wait, and neither need anything else in the graph.
+/// Compiles the package's `build.rune`, if it has one, for this machine.
+/// Whatever the package is built for, the script runs here, so it gets none
+/// of the target's settings — only the host's defaults.
+bool compileBuildScript(PackageNode &node, const Options &opts) {
+  const Manifest &m = node.M;
+  const fs::path script = fs::path(m.Root) / "build.rune";
+  std::error_code ec;
+  if (!fs::exists(script, ec))
+    return true;
+  const fs::path dir = fs::path(m.Root) / "target" / "build-script";
+  fs::create_directories(dir, ec);
+  const fs::path exe = dir / "build";
+  pm::FingerprintStore stamps(dir);
+  std::string cmd = quote(findCompiler()) + " --module build_script -o " +
+                    quote(exe.string()) + " " + quote(script.string());
+  pm::Fingerprint fp = stepFingerprint(cmd, {script.string()});
+  if (!stamps.isFresh(exe, fp)) {
+    if (!runStep("Compiling", m.Name + " v" + m.Version + " (build script)",
+                 cmd, opts))
+      return false;
+    stamps.record(exe, fp);
+  }
+  node.ScriptExe = exe.string();
+  return true;
+}
+
+/// Runs the build script in one of its phases, and reads its answers.
+bool runBuildScript(const PackageNode &node, const Options &opts,
+                    const std::string &phase, const std::string &artifact,
+                    const std::string &artifactName, ScriptAnswers &out) {
+  const Manifest &m = node.M;
+  const fs::path root = fs::absolute(m.Root).lexically_normal();
+  std::string env;
+  auto set = [&](const char *name, const std::string &value) {
+    env += std::string(name) + "=" + quote(value) + " ";
+  };
+  set("RUNE_BUILD_PHASE", phase);
+  set("RUNE_PACKAGE_NAME", m.Name);
+  set("RUNE_PACKAGE_VERSION", m.Version);
+  set("RUNE_PACKAGE_DIR", root.string());
+  set("RUNE_OUT_DIR", fs::absolute(buildDir(m, opts)).lexically_normal().string());
+  set("RUNE_PROFILE", profileName(opts));
+  set("RUNE_TARGET", opts.Target.Active ? opts.Target.Name : "host");
+  set("RUNE_TARGET_TRIPLE", opts.Target.Active ? opts.Target.Triple : "");
+  set("RUNE_FREESTANDING", opts.Freestanding ? "1" : "0");
+  set("RUNE_CC", opts.Target.Active && !opts.Target.Cc.empty()
+                     ? opts.Target.Cc
+                     : std::string("cc"));
+  if (!artifact.empty()) {
+    set("RUNE_ARTIFACT", artifact);
+    set("RUNE_ARTIFACT_NAME", artifactName);
+  }
+  std::string cmd = "cd " + quote(root.string()) + " && " + env +
+                    quote(node.ScriptExe);
+  const std::string what = m.Name + " v" + m.Version + " (build script, " +
+                           phase + (artifactName.empty() ? "" : " " + artifactName) + ")";
+  if (opts.Verbose)
+    pm::writeSerialized(std::string("  ") + cmd + "\n");
+
+  std::string output;
+  int rc = pm::runCaptured(cmd, output);
+
+  // Its answers, and whatever else it had to say.
+  std::string said, error;
+  std::vector<std::string> warnings;
+  std::istringstream lines(output);
+  for (std::string line; std::getline(lines, line);) {
+    // `rune:key=value`, the key in lower case: anything else is the
+    // script's own output — including the runtime's `rune: warning: ...`.
+    const size_t eq = line.find('=');
+    bool answer = line.rfind("rune:", 0) == 0 && eq != std::string::npos &&
+                  eq > 5;
+    for (size_t i = 5; answer && i < eq; ++i)
+      answer = (line[i] >= 'a' && line[i] <= 'z') || line[i] == '-';
+    if (!answer) {
+      said += line + "\n";
+      continue;
+    }
+    const std::string key = line.substr(5, eq - 5);
+    const std::string value = line.substr(eq + 1);
+    auto anchored = [&](const std::string &p) {
+      fs::path path(p);
+      return (path.is_relative() ? root / path : path).lexically_normal().string();
+    };
+    if (key == "cfg")
+      out.Cfgs.push_back(value);
+    else if (key == "link-arg")
+      out.LinkArgs.push_back(value);
+    else if (key == "link-lib")
+      out.LinkLibs.push_back(value);
+    else if (key == "link-path")
+      out.LinkPaths.push_back(anchored(value));
+    else if (key == "run")
+      out.RunWith = anchored(value);
+    else if (key == "warning")
+      warnings.push_back(value);
+    else if (key == "error")
+      error = value;
+    else
+      warnings.push_back("unknown build script answer `" + line + "`");
+  }
+  for (const std::string &w : warnings)
+    pm::writeSerialized(std::string(c("\x1b[33m")) + "warning" + c("\x1b[0m") +
+                        ": " + m.Name + ": " + w + "\n");
+  if (rc != 0) {
+    std::string text = std::string(c("\x1b[31m")) + "●" + c("\x1b[0m") +
+                       " the build script of " + m.Name + " failed in its " +
+                       phase + " phase (exit " + std::to_string(rc) + ")" +
+                       (error.empty() ? "" : ": " + error) + "\n" + said;
+    pm::writeSerialized(text);
+    return false;
+  }
+  if (opts.Verbose && !said.empty())
+    pm::writeSerialized(what + ":\n" + said);
+  return true;
+}
+
 bool buildPackageLibrary(PackageNode &node, std::vector<PackageNode> &nodes,
                          const Options &opts) {
   const Manifest &m = node.M;
@@ -738,6 +905,14 @@ bool buildPackageLibrary(PackageNode &node, std::vector<PackageNode> &nodes,
   pm::FingerprintStore stamps(target);
 
   if (!prepareInputs(node, nodes, depsDir, opts))
+    return false;
+
+  // The build script first: what it answers is part of how everything in
+  // the package is compiled.
+  if (!compileBuildScript(node, opts))
+    return false;
+  if (!node.ScriptExe.empty() &&
+      !runBuildScript(node, opts, "prepare", "", "", node.Script))
     return false;
 
   if (m.producesLibrary()) {
@@ -753,6 +928,7 @@ bool buildPackageLibrary(PackageNode &node, std::vector<PackageNode> &nodes,
                       emitFlagFor(OutputKind::Library) + " --module " +
                       quote(m.Name);
     appendBuildFlags(cmd, m, opts, node.Config);
+    appendScriptConfig(cmd, node.Script);
     cmd += " -I " + quote(depsDir.string());
     cmd += " -o " + quote(libOut.string());
     for (const std::string &s : sources)
@@ -849,8 +1025,16 @@ std::vector<TargetStep> targetsOf(const Manifest &m, const Options &opts) {
 /// Builds one of them. `producedExe` receives the executable's path when the
 /// step made one — a slot of the step's own, because a package's targets are
 /// built at the same time and must not write to one list between them.
+/// What one target step produced: the executable, and what its build
+/// script said to run in its place.
+struct Produced {
+  std::string Exe;
+  std::string RunWith;
+};
+
 bool buildTarget(const TargetStep &step, const PackageNode &node,
-                 const Options &opts, std::string &producedExe) {
+                 const Options &opts, Produced &produced) {
+  std::string &producedExe = produced.Exe;
   const Manifest &m = node.M;
   const fs::path target = buildDir(m, opts);
   const fs::path depsDir = target / "deps";
@@ -911,6 +1095,7 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
     cmd += emitFlagFor(step.Kind);
   }
   appendBuildFlags(cmd, m, opts, node.Config);
+  appendScriptConfig(cmd, node.Script);
   cmd += " -I " + quote(depsDir.string());
   // Staged dependency libraries are already in depsDir; a library built by
   // this package sits one level up, so make that visible too. The library
@@ -930,6 +1115,7 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
       cmd += " --link-arg " + quote(a);
     if (inputs.NeedsCxx)
       cmd += " --link-cxx";
+    appendScriptLink(cmd, node.Script);
   }
   if (!opts.CheckOnly)
     cmd += " -o " + quote(out.string());
@@ -950,11 +1136,23 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
       deps.push_back((fs::path(RUNE_TOOLCHAIN_ROOT) / "runetime" /
                       "freestanding.rune").string());
     pm::Fingerprint fp = stepFingerprint(cmd, deps);
-    if (stamps.isFresh(out, fp)) {
-      if (step.Kind == OutputKind::Executable && !emitting)
-        producedExe = out.string();
+    const bool linked = step.Kind == OutputKind::Executable && !emitting;
+    // After the link, the build script's finish phase — every build, since
+    // what it makes is its own business and it may have been edited.
+    auto finish = [&]() {
+      if (!linked)
+        return true;
+      producedExe = out.string();
+      if (node.ScriptExe.empty())
+        return true;
+      ScriptAnswers after;
+      if (!runBuildScript(node, opts, "finish", out.string(), step.Name, after))
+        return false;
+      produced.RunWith = after.RunWith;
       return true;
-    }
+    };
+    if (stamps.isFresh(out, fp))
+      return finish();
     std::string verb = "Compiling";
     std::string what = step.Name + " v" + m.Version;
     if (step.Kind != OutputKind::Executable)
@@ -962,9 +1160,7 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
     if (!runStep(verb, what, cmd, opts))
       return false;
     stamps.record(out, fp);
-    if (step.Kind == OutputKind::Executable && !emitting)
-      producedExe = out.string();
-    return true;
+    return finish();
   }
 
   std::string what = step.Name + " v" + m.Version;
@@ -1035,7 +1231,7 @@ WorkspaceResult buildWorkspace(const Options &opts) {
   // A dependency's binaries are of no use to the package that depends on it,
   // but `rune build` on a workspace is expected to build everything in it,
   // and the recursive builder did.
-  std::vector<std::vector<std::string>> producedExes(nodes.size());
+  std::vector<std::vector<Produced>> producedExes(nodes.size());
   for (size_t i = 0; i < nodes.size(); ++i) {
     const Options *use = nodes[i].IsRoot ? &opts : &depOpts;
     targets[i] = targetsOf(nodes[i].M, *use);
@@ -1064,10 +1260,14 @@ WorkspaceResult buildWorkspace(const Options &opts) {
   // argument means the first executable the manifest names, so the list is
   // rebuilt here in the order the targets were worked out.
   BuildResult &rootResult = nodes[root].Result;
-  for (size_t t = 0; t < targets[root].size(); ++t)
-    if (!producedExes[root][t].empty())
-      rootResult.Executables.push_back(
-          {targets[root][t].Name, producedExes[root][t]});
+  for (size_t t = 0; t < targets[root].size(); ++t) {
+    const Produced &p = producedExes[root][t];
+    if (p.Exe.empty())
+      continue;
+    rootResult.Executables.push_back({targets[root][t].Name, p.Exe});
+    if (!p.RunWith.empty())
+      rootResult.RunWith[p.Exe] = p.RunWith;
+  }
   if (!rootResult.Executables.empty())
     rootResult.ExecutablePath = rootResult.Executables.front().second;
   rootResult.Ok = true;
@@ -1202,7 +1402,10 @@ int commandRun(const Options &opts) {
     return 1;
   }
 
-  auto runOne = [&](const std::string &path) {
+  auto runOne = [&](const std::string &exe) {
+    // A build script may have made what is really run: a disk image, say.
+    auto made = r.RunWith.find(exe);
+    const std::string path = made != r.RunWith.end() ? made->second : exe;
     status("Running", path);
     std::string args;
     for (const std::string &a : opts.ProgramArgs)
@@ -2418,6 +2621,20 @@ int main(int argc, char **argv) {
                            ? fs::absolute(opts.PackageDir).filename().string()
                            : newName;
     return scaffold(opts.PackageDir, name, wantLib);
+  }
+  // Run from inside a package — its `src/`, say — `rune` works on the package
+  // around it: the nearest directory above with a Rune.toml, as Cargo does.
+  if (opts.PackageDir == "." && !fs::exists("Rune.toml")) {
+    std::error_code ec;
+    for (fs::path dir = fs::current_path(ec).parent_path();
+         !ec && !dir.empty(); dir = dir.parent_path()) {
+      if (fs::exists(dir / "Rune.toml", ec)) {
+        opts.PackageDir = dir.string();
+        break;
+      }
+      if (dir == dir.root_path())
+        break;
+    }
   }
   // Resolve the target once, from the root package's manifest. A dependency
   // does not get to pick the toolchain: everything in one build is built for

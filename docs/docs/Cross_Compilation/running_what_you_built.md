@@ -7,3 +7,5 @@ $ rune run --target windows        # wine is not installed
 ● built for x86_64-w64-mingw32, which this machine cannot run
   ─  note: install wine to run it here, or copy it to a machine that can
 ```
+
+The program is added at the end of the runner's command, unless the runner says where with `{}` — `qemu-system-i386 -drive format=raw,file={}` — and `rune run`'s own arguments follow either way. A runner that names a script of the package's, `sh tools/boot.sh`, finds it from any directory: `rune` itself works on the nearest `Rune.toml` above where it is started.

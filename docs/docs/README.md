@@ -418,6 +418,7 @@ Small on purpose, and written in Rune over a C runtime you can read in an aftern
 - [std::any](The_Standard_Library/std_any.md)
 - [std::math](The_Standard_Library/std_math.md)
 - [std::process](The_Standard_Library/std_process.md)
+- [std::build](The_Standard_Library/std_build.md)
 - [std::env](The_Standard_Library/std_env.md)
 - [std::arch](The_Standard_Library/std_arch.md)
 - [std::random](The_Standard_Library/std_random.md)
@@ -545,6 +546,15 @@ How a package is made, how one is used, and how a registry is run. A package is 
 - [What it costs](Tasks_And_Futures/what_it_costs.md)
 - [What is not here](Tasks_And_Futures/what_is_not_here.md)
 
+## Build scripts
+
+When a package needs more than compiling and linking — a flag worked out from the machine, a library found at build time, a kernel laid out as a disk image after the link — it says so in Rune, in a `build.rune` beside its `Rune.toml`.
+
+- [Two phases](Build_Scripts/two_phases.md)
+- [What it is told](Build_Scripts/what_it_is_told.md)
+- [How it answers](Build_Scripts/how_it_answers.md)
+- [When it runs](Build_Scripts/when_it_runs.md)
+
 ## Cross compilation
 
 Building for a machine that is not the one you are on. The compiler already emits code for any target LLVM knows; what a cross build needs beyond that is a toolchain to link with. For the common targets `rune` finds that toolchain itself; for the rest, the manifest names it.
@@ -565,6 +575,7 @@ Building for a machine that is not the one you are on. The compiler already emit
 Programs with nothing underneath them: a kernel, a boot loader, firmware. The language is the same one — the checks, the borrow checker, classes and optionals included — and what the generated code needs of a runtime is Rune compiled into the program, asking the program for the three things only it can know.
 
 - [A freestanding program](Bare_Metal/a_freestanding_program.md)
+- [Strings](Bare_Metal/strings.md)
 - [The hooks](Bare_Metal/the_hooks.md)
 - [Safety on bare metal](Bare_Metal/safety_on_bare_metal.md)
 - [What the freestanding runtime provides](Bare_Metal/what_the_freestanding_runtime_provides.md)

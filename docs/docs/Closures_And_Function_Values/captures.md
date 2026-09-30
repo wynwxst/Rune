@@ -48,6 +48,11 @@ fn main() -> i64 {
 }
 ```
 
+> [!NOTE]
+> **A function named `move`**
+>
+> `move` is a keyword only as an operator — before `||`, or before a value it hands on. `move(...)` is a call, so a function or a method may be named `move`, as a game's often is.
+
 Which means assigning to a captured name changes only the closure's copy. That is easy to write by accident and impossible to notice at run time, so the compiler says so.
 
 **Assigning to a capture is a copy**

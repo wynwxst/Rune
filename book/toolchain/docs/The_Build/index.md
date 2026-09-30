@@ -15,3 +15,5 @@ processes.
 - [Incremental builds](incremental_builds.md)
 - [Concurrency](concurrency.md)
 - [Cross compilation](cross_compilation.md)
+- [Bare metal](bare_metal.md)
+- [Build scripts](build_scripts.md)

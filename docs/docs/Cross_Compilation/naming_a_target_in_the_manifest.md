@@ -39,7 +39,7 @@ runner = "qemu-aarch64 -L /opt/pi-sysroot"
 | `ar` | the archiver; derived from `cc` when absent |
 | `sysroot` | passed as `--sysroot` |
 | `sdk` | where the WASI SDK is, for a target based on `wasm` |
-| `runner` | how to start a built program here |
+| `runner` | how to start a built program here; `{}` marks where the program goes, and a word naming a file in the package is read from Rune.toml's directory |
 | `runtime-dir` | a prebuilt `libruneruntime.a` to use instead of building one |
 | `c-flags` | added to every C compile for the target, the runtime's included |
 | `link`, `link-paths`, `link-args` | native libraries the *target* needs, on top of the package's |

@@ -1,0 +1,14 @@
+import fs::sys
+// No hosted runtime means no `String`: a literal nothing asks to be one is a
+// `CString`, so it can be named, stored and handed on without an annotation.
+let greeting = "a literal is a CString here\n"
+struct Line { text: CString }
+@export("_start")
+fn start() -> Never {
+    let s = "no annotation needed\n"
+    sys::say(s)
+    sys::say(greeting)
+    let lines = [Line { text: "in a struct\n" }, Line { text: "in an array\n" }]
+    sys::say(lines[1].text)
+    sys::exit(0)
+}

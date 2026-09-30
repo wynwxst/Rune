@@ -1,0 +1,158 @@
+// std::build — what a package's `build.rune` is told, and how it answers.
+//
+// A package may keep a `build.rune` beside its `Rune.toml`. `rune` compiles
+// it for the machine doing the building — whatever the package itself is
+// built for — and runs it twice per build:
+//
+//   prepare   before the package is compiled. It can set `@Config` flags,
+//             and add link arguments, libraries and library directories.
+//   finish    after each executable is linked, once per executable. It can
+//             post-process the file (strip it, lay it out as a disk image,
+//             sign it), and say what `rune run` should hand the runner in
+//             its place.
+//
+//     import std::build
+//
+//     fn main() -> i64 {
+//         if build::finishing() {
+//             let image = build::outDir() + "/" + build::artifactName() + ".img"
+//             build::run(build::tool(["llvm-objcopy", "objcopy"]),
+//                        ["-O", "binary", build::artifact(), image])
+//             build::runWith(image)
+//         }
+//         0
+//     }
+//
+// The script runs in the package's directory. It is told everything through
+// the environment, which the functions below read; it answers by printing
+// `rune:key=value` lines, which the functions below write. Anything else it
+// prints is shown only when it fails, or under `rune build -v`. A script that
+// exits with anything but 0 fails the build.
+//
+// It runs on every build, so what it does should be quick, or check for
+// itself whether there is anything to do.
+
+import std::env
+import std::io
+import std::process
+import std::text
+import std::collections::vector
+
+//=== Where and what ======================================================//
+
+/// True in the phase that runs before the package is compiled.
+pub fn preparing() -> bool { env::getOr("RUNE_BUILD_PHASE", "") == "prepare" }
+
+/// True in the phase that runs after an executable is linked.
+pub fn finishing() -> bool { env::getOr("RUNE_BUILD_PHASE", "") == "finish" }
+
+/// The package's name, from its manifest.
+pub fn packageName() -> String { env::getOr("RUNE_PACKAGE_NAME", "") }
+
+/// The package's version, from its manifest.
+pub fn packageVersion() -> String { env::getOr("RUNE_PACKAGE_VERSION", "") }
+
+/// The directory holding `Rune.toml` and `build.rune`, as an absolute path.
+pub fn packageDir() -> String { env::getOr("RUNE_PACKAGE_DIR", ".") }
+
+/// Where this build's outputs go: `target/<target>/<profile>` under the
+/// package. Whatever the script makes belongs here too.
+pub fn outDir() -> String { env::getOr("RUNE_OUT_DIR", ".") }
+
+/// `debug` or `release`.
+pub fn profile() -> String { env::getOr("RUNE_PROFILE", "debug") }
+
+/// True for `rune build --release`.
+pub fn release() -> bool { profile() == "release" }
+
+/// The target being built for, by the name `--target` was given — `wasm`,
+/// `bare-x86`, a `[target.x]` table's `x` — or `host`.
+pub fn target() -> String { env::getOr("RUNE_TARGET", "host") }
+
+/// The target's LLVM triple; empty for the host.
+pub fn triple() -> String { env::getOr("RUNE_TARGET_TRIPLE", "") }
+
+/// True when the package is built with no hosted runtime.
+pub fn freestanding() -> bool { env::getOr("RUNE_FREESTANDING", "0") == "1" }
+
+/// The C compiler the target builds with, as `rune` would call it.
+pub fn cc() -> String { env::getOr("RUNE_CC", "cc") }
+
+/// While finishing: the executable that was just linked.
+pub fn artifact() -> String { env::getOr("RUNE_ARTIFACT", "") }
+
+/// While finishing: its name, without directory or suffix.
+pub fn artifactName() -> String { env::getOr("RUNE_ARTIFACT_NAME", "") }
+
+//=== Answers =============================================================//
+
+/// Sets `@Config(name)` for this package's own sources.
+pub fn cfg(name: String) { io::println("rune:cfg=" + name) }
+
+/// Sets `@Config(key == "value")` for this package's own sources.
+pub fn cfgValue(key: String, value: String) {
+    io::println("rune:cfg=" + key + "=" + value)
+}
+
+/// Adds an argument to the link of every executable in the package.
+pub fn linkArg(argument: String) { io::println("rune:link-arg=" + argument) }
+
+/// Links a native library, `-l<name>`.
+pub fn linkLibrary(name: String) { io::println("rune:link-lib=" + name) }
+
+/// Adds a directory to search for native libraries; relative to the package.
+pub fn linkPath(directory: String) { io::println("rune:link-path=" + directory) }
+
+/// While finishing: what `rune run` hands the target's runner instead of the
+/// executable — a disk image made from it, say. A relative path is read from
+/// the package's directory.
+pub fn runWith(path: String) { io::println("rune:run=" + path) }
+
+/// Shows a warning among the build's own output. The build carries on.
+pub fn warning(message: String) { io::println("rune:warning=" + message) }
+
+/// Stops the build, saying why.
+pub fn fail(message: String) -> Never {
+    io::println("rune:error=" + message)
+    process::exit(1)
+}
+
+//=== Helpers =============================================================//
+
+/// The first of `candidates` found on `PATH` — `["llvm-objcopy", "objcopy"]`
+/// — as the name to run it by. Fails the build, naming them all, when none is.
+pub fn tool(candidates: [String]) -> String {
+    let path = env::getOr("PATH", "")
+    let dirs = text::split(&path, &":")
+    for name in candidates {
+        for dir in dirs {
+            let file = io::joinPath(dir, name)
+            if !dir.$isEmpty() && io::exists(&file) {
+                return name.$clone()
+            }
+        }
+    }
+    var names = ""
+    for name in candidates {
+        names = if names.$isEmpty() { name.$clone() } else { names + ", " + name }
+    }
+    fail("none of " + names + " is on PATH")
+}
+
+/// Runs `program` with `args` in the package's directory, and fails the build
+/// — with its output — unless it succeeds.
+pub fn run(program: String, args: [String]) {
+    var c = process::Command(program.$clone())
+    for a in args { c.arg(a.$clone()) }
+    c.inDirectory(packageDir())
+    match c.run() {
+        Some(out) => {
+            if !out.succeeded() {
+                io::print(out.stdout)
+                io::print(out.stderr)
+                fail(program + " exited with status " + out.status.$str())
+            }
+        }
+        None => fail("cannot start " + program),
+    }
+}

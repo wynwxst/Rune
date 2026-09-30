@@ -91,6 +91,14 @@ if(RUNE_PYTHON3)
             ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# Build scripts: a package's build.rune, compiled for this machine and run
+# before the package compiles and after each executable links.
+if(RUNE_PYTHON3)
+  add_test(NAME rune_build_script
+    COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/build_script_test.py
+            ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # Bare metal: freestanding programs with no C library, every safety check
 # reaching their own panic handler, and examples/toyos booted under QEMU.
 # Each half is skipped where this machine cannot run it.

@@ -219,6 +219,11 @@ void bindGenerics(const std::vector<GenericParam> &generics, TypeContext &types,
 
 class Sema {
 public:
+  /// A program with no hosted runtime, or no standard library, has no
+  /// `String` to make: there a string literal nothing asks to be a `String`
+  /// is a `CString`. The standard library's own sources are unaffected.
+  bool CStringLiterals = false;
+
   Sema(const SourceManager &sm, DiagnosticEngine &diags, TypeContext &types,
        SafetyLevel safety, MemoryMode memory = MemoryMode::Arc,
        DumpKind dump = DumpKind::Nothing, bool zombieStdlib = true);

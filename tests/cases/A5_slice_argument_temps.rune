@@ -1,0 +1,23 @@
+// EXPECT: 3 strings, 9 bytes
+// EXPECT: still live: 0
+//
+// An array literal handed to a `[T]` parameter is a temporary the slice only
+// looks at. What it holds is the calling statement's to destroy — including
+// strings made on the spot — and nothing is left behind.
+import std::io
+import std::process
+
+fn total(xs: [String]) -> i64 {
+    var n = 0
+    for x in xs { n += x.$length() }
+    n
+}
+fn make(s: String) -> String { s + "!" }
+
+fn main() -> i64 {
+    let before = process::liveObjectCount()
+    let n = total([make("ab"), make("cd"), "e" + "f" + "g"])
+    io::println("3 strings, " + n.$str() + " bytes")
+    io::println("still live: " + (process::liveObjectCount() - before).$str())
+    0
+}

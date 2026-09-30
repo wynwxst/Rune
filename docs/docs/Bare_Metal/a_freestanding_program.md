@@ -35,8 +35,3 @@ The standard library is still there, and still only compiled where it is used, s
        ^^^^^ ERROR: 'greet' needs the hosted runtime, and this program is built without one [E0542]
     ─  note: it uses `String`, which lives in the hosted runtime; a freestanding program works in `CString` and byte arrays
 ```
-
-> [!NOTE]
-> **Single ownership**
->
-> A freestanding program is built with `--memory zombie`. Every object has one owner and nothing is counted, so the heap needs nothing but an allocator; reference counting would need the hosted runtime's atomics and weak table, and is refused like any other use of it.
