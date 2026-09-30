@@ -28,6 +28,7 @@
 #include <llvm/TargetParser/Host.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <iomanip>
 #include <map>
@@ -357,13 +358,22 @@ bool linkExecutable(const std::string &objPath,
     argv.push_back(extra);
   argv.push_back("-o");
   argv.push_back(outPath);
-  std::filesystem::path runtimeLib =
-      std::filesystem::path(opts.RuntimeLibDir) / "libruneruntime.a";
-  if (std::filesystem::exists(runtimeLib))
-    argv.push_back(runtimeLib.string());
-  else
-    diags.fatal("cannot find the Rune runtime at '{}'", runtimeLib.string())
-        .note("build the `runeruntime` target, or pass --runtime-dir");
+  // A freestanding program carries its runtime compiled in, and links with
+  // nothing the platform would otherwise supply: no C library, no start
+  // files. What it needs beyond its own object — a linker script, a boot
+  // stub — comes through `--link-arg`.
+  if (opts.Freestanding) {
+    argv.push_back("-nostdlib");
+    argv.push_back("-static");
+  } else {
+    std::filesystem::path runtimeLib =
+        std::filesystem::path(opts.RuntimeLibDir) / "libruneruntime.a";
+    if (std::filesystem::exists(runtimeLib))
+      argv.push_back(runtimeLib.string());
+    else
+      diags.fatal("cannot find the Rune runtime at '{}'", runtimeLib.string())
+          .note("build the `runeruntime` target, or pass --runtime-dir");
+  }
 
   const llvm::Triple triple = targetTripleOf(opts);
   const bool isWindows = triple.isOSWindows();
@@ -393,7 +403,7 @@ bool linkExecutable(const std::string &objPath,
   // A PE image exports through a different mechanism and has no such flag.
   // WebAssembly has no dynamic linker to ask, and its traps carry their own
   // backtrace.
-  if (opts.DebugInfo && !isWindows && !isWasm)
+  if (opts.DebugInfo && !isWindows && !isWasm && !opts.Freestanding)
     argv.push_back("-rdynamic");
 
   // What WASI leaves out, the SDK emulates, and the runtime asks for those
@@ -401,7 +411,7 @@ bool linkExecutable(const std::string &objPath,
   // `-threads` flavour the threads are real: every thread is an instance of
   // its own, so the memory has to come from outside — imported, shared, and
   // with a ceiling it can grow to (the whole of wasm32's 4 GB).
-  if (isWasm) {
+  if (isWasm && !opts.Freestanding) {
     if (triple.str().find("threads") != std::string::npos) {
       argv.push_back("-pthread");
       argv.push_back("-Wl,--import-memory,--export-memory,"
@@ -455,7 +465,7 @@ bool linkExecutable(const std::string &objPath,
   // only where there is one. Windows keeps the math functions in the C
   // runtime and Apple's platforms keep them in libSystem, so on both, asking
   // for `-lm` means the driver goes looking for a library that is not there.
-  if (!wantsMath && !isWindows && !triple.isOSDarwin())
+  if (!wantsMath && !isWindows && !triple.isOSDarwin() && !opts.Freestanding)
     argv.push_back("-lm");
 
   if (opts.Verbose)
@@ -1143,7 +1153,57 @@ int answerHintQuery(const SourceManager &sm, const SemaResult &result,
 
 } // namespace
 
-int compileWithOptions(const CompilerOptions &opts) {
+/// The value of the program directive `@<name>(<value>)` at the top of
+/// `text`, or empty. Only the directives before the first declaration count,
+/// as the parser has it; this reads them before anything is parsed, because
+/// `@runtime(none)` decides which files the compilation is made of.
+static std::string programDirective(const std::string &text,
+                                    const std::string &name) {
+  size_t i = 0;
+  const size_t n = text.size();
+  for (;;) {
+    while (i < n && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' ||
+                     text[i] == '\n' || text[i] == ';'))
+      ++i;
+    if (i + 1 < n && text[i] == '/' && text[i + 1] == '/') {
+      while (i < n && text[i] != '\n')
+        ++i;
+      continue;
+    }
+    if (i >= n || text[i] != '@')
+      return "";
+    size_t start = ++i;
+    while (i < n && (std::isalnum(static_cast<unsigned char>(text[i])) ||
+                     text[i] == '_'))
+      ++i;
+    const std::string word = text.substr(start, i - start);
+    std::string value;
+    if (i < n && text[i] == '(') {
+      size_t close = text.find(')', i);
+      if (close == std::string::npos)
+        return "";
+      value = text.substr(i + 1, close - i - 1);
+      i = close + 1;
+    }
+    auto trim = [](std::string v) {
+      const char *ws = " \t\r\n";
+      size_t a = v.find_first_not_of(ws);
+      if (a == std::string::npos)
+        return std::string();
+      return v.substr(a, v.find_last_not_of(ws) - a + 1);
+    };
+    // Only the directives the parser reads at the top of a file; anything
+    // else is a declaration's decorator, and the directives are over.
+    if (word != "type" && word != "link" && word != "linkpath" &&
+        word != "runtime" && word != "entry" && word != "lint")
+      return "";
+    if (word == name)
+      return trim(value);
+  }
+}
+
+int compileWithOptions(const CompilerOptions &given) {
+  CompilerOptions opts = given;
   PhaseTimer timer(opts.TimeReport);
   SourceManager sm;
   DiagnosticEngine diags(sm);
@@ -1187,6 +1247,33 @@ int compileWithOptions(const CompilerOptions &opts) {
     if (!id) {
       diags.fatal("cannot open input file '{}'", path)
           .note("check the path and that the file is readable");
+      return 1;
+    }
+    fileIDs.push_back(*id);
+  }
+
+  // `@runtime(none)` and `@entry(none)` in any of the program's own files say
+  // the same as the flags. They are read now because a freestanding program
+  // is compiled together with the runtime it brings along.
+  for (unsigned id : fileIDs) {
+    const std::string &text = sm.file(id).Buffer;
+    if (programDirective(text, "runtime") == "none")
+      opts.Freestanding = true;
+    if (programDirective(text, "entry") == "none")
+      opts.NoEntry = true;
+  }
+  // The generated code's runtime needs — panics, the heap, `memcpy` — are
+  // answered by a Rune file compiled into the program, for its target, the
+  // way Rust builds `core` for the target it is compiling for. A library is
+  // compiled without it: the program that links the library brings one.
+  if (opts.Freestanding && opts.Output != OutputKind::Library &&
+      opts.Output != OutputKind::Docs && opts.Output != OutputKind::None) {
+    const std::filesystem::path rt =
+        std::filesystem::path(opts.RunetimeDir) / "freestanding.rune";
+    std::optional<unsigned> id = sm.loadFile(rt.string());
+    if (!id) {
+      diags.fatal("cannot find the freestanding runtime at '{}'", rt.string())
+          .note("it ships in the toolchain's `runetime/` directory");
       return 1;
     }
     fileIDs.push_back(*id);

@@ -1,0 +1,95 @@
+# Bare metal
+
+## The idea
+
+A hosted Rune program links two things it did not write: the C library and
+`libruneruntime.a`. A freestanding one — `@runtime(none)` — links neither.
+What the generated code still needs of a runtime is Rune source,
+`runetime/freestanding.rune`, compiled into the program for the program's own
+target, the way Rust builds `core` for whatever it is compiling for. That file
+depends on nothing; what only the program can know, it asks the program for.
+
+So the split is:
+
+| Layer | Where it lives | Needs |
+| --- | --- | --- |
+| The language: checks, the borrow checker, classes, optionals | the compiler, and `std` where it is plain Rune | nothing |
+| The freestanding runtime: panics, the heap, `memcpy`, 32-bit division | `runetime/freestanding.rune` | three hooks |
+| The hooks: `@panicHandler`, `@allocator`, `@deallocator` | the program | whatever the machine offers |
+| The hosted runtime: `String`, files, threads, tasks, counting | `runtime/` and `runetime/core.rune` | an operating system |
+
+## In the compiler
+
+**Options.** `CompilerOptions::Freestanding` and `NoEntry`, from
+`--runtime none` / `--entry none`, or from `@runtime(none)` / `@entry(none)`
+atop any of the program's files. The directives are read by
+`programDirective` in `Compilation.cpp` *before* anything is parsed, because
+freestanding decides which files make up the compilation: the runtime file is
+added to the inputs then, for every output but a library (the program that
+links the library brings one). The parser reads them again in
+`parseFileDirectives`, which is where a misspelling is reported.
+
+**Code generation** (`CodeGen.cpp`):
+
+- `emitEntryPoint` generates no `main` under `NoEntry`; it generates
+  `rune_init` instead, which runs the global initialisers. Freestanding,
+  a `main` it does generate calls no `rune_runtime_init` and no leak report.
+- Every defined function gets `no-builtins`, as `-ffreestanding` does for C,
+  so LLVM never rewrites the runtime's byte loops into calls to themselves.
+- `resolveWeakDefinitions` handles two definitions of one symbol in one
+  module where one is `@weak`: the program's `@panicHandler` and the
+  runtime's default are both `rune_panic_handler`. The strong one is kept,
+  the weak one is never emitted. Across objects the linker does the same.
+- The standard library's globals are initialised only when the program reads
+  them (`emitBorrowedGlobalInitialisers`, after the bodies it reaches are
+  emitted), and never torn down; `std::io`'s would otherwise need the hosted
+  runtime just to exist.
+- `reportHostedRuntimeUses` runs last: any `rune_*` function still only
+  declared is the hosted runtime, and each is reported (E0542) against the
+  program's own function that reached it — walking up through standard
+  library functions, so `io::println` is blamed on the caller.
+- `createTargetMachine` uses static relocation for an OS-less triple.
+- A global whose initialiser is all zeros is left to the zeroed storage it
+  starts in, hosted or not: nothing to run, and a `[0; 65536]` arena no
+  longer becomes a 64 KB aggregate store.
+
+**Sema.** `@panicHandler`, `@allocator` and `@deallocator` give a function a
+fixed symbol (`langItemSymbol` in `AST.h`) and a fixed C signature, checked by
+`checkRuntimeHook` (E0248, and E0249 for a second one). `@weak` is linkage
+only.
+
+**Linking.** `linkExecutable` passes `-nostdlib -static` and leaves out the
+runtime archive, `-lm` and `-rdynamic`. A linker script and anything else
+arrive through `--link-arg`.
+
+## In `runetime/freestanding.rune`
+
+Everything the code generator calls, as `@export`ed Rune: the panic entry
+points (formatting into a static buffer, since a panic may be the heap
+running out), `rune_alloc` / `rune_drop` over the hooks, `$clone`, `is`,
+`Any`, hashing, `memcpy` and friends, and `__divdi3` and its three siblings
+under `@Config(pointer_width == "32")` — written with shifts and subtraction,
+since a `/` there would call itself. Everything a program might want to
+replace is `@weak`.
+
+Adding something the code generator calls means adding it here too, or
+freestanding programs that reach it fail with E0542.
+
+## In `rune`
+
+`[build] runtime = "none"` and `entry = "none"`, or the directives in any
+source file, set `Manifest::Freestanding` / `NoEntry`; the root package's
+choice applies to the whole build, as `memory` does. A foreign target with
+`Freestanding` — `bare-x86`, `bare-x86_64`, `bare-arm64`, `bare-riscv64`,
+built with `ToolchainKind::Clang` — forces it. A freestanding build never
+prepares a hosted runtime. `[build] linker-script` is passed as
+`-Wl,-T,<path>` and is part of the step's fingerprint, as is the runtime file.
+
+## Testing
+
+`rune_bare_metal` (`tests/bare_metal_test.py`) builds every case in
+`tests/freestanding/` as a Linux x86_64 program with no C library — two system
+calls by inline assembly — and checks each failed check's message and exit
+status, the heap's behaviour, the borrow checker, and E0542. Then it boots
+`examples/toyos` under `qemu-system-i386`, normally and with `-append panic`,
+debug and release. Each half is skipped where the machine cannot run it.

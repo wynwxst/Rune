@@ -1,0 +1,115 @@
+// The kernel's heap: a first-fit allocator over a region of its own, handed to
+// Rune as the program's `@allocator` and `@deallocator`. Every class the
+// kernel makes comes from here, and — under single ownership — goes back
+// here the moment its one owner is done with it.
+//
+// Each block is a 16-byte header and a payload whose size is a multiple of
+// 16, laid end to end. A freed block is marked free and merged with the free
+// blocks after it; an allocation takes the first free block big enough,
+// splitting off what it does not need.
+
+/// What precedes every payload. 16 bytes, so payloads stay 16-byte aligned.
+struct Header {
+    size: u32       // the payload's bytes
+    used: u32       // 1 while allocated
+    magic: u32      // `headerMagic`, to catch a free of something else
+    spare: u32
+}
+
+fn headerMagic() -> u32 { 1380275789 }          // "RUNE", as little-endian bytes
+let capacity: usize = 262144                    // 256 KB
+global var region: [262160:u8] = [0; 262160]    // capacity, and room to align
+
+/// How much of the region has been carved into blocks so far.
+global var carved: usize = 0
+
+pub global var allocations: i64 = 0
+pub global var frees: i64 = 0
+pub global var bytesInUse: i64 = 0
+
+/// The region's first 16-byte boundary: a byte array is aligned to one.
+@safe("computes an address inside the region; nothing is read")
+fn regionStart() -> usize {
+    let raw = unsafe { &var region[0] as *var u8 as usize }
+    (raw + 15) / 16 * 16
+}
+
+@safe("every offset handed in is one this file carved")
+fn headerAt(offset: usize) -> *var Header {
+    unsafe { (regionStart() + offset) as *var Header }
+}
+
+fn roundUp(size: usize) -> usize { (size + 15) / 16 * 16 }
+
+@allocator
+@safe("hands out payloads inside the region, each behind its own header")
+fn allocate(size: usize, align: usize) -> *var u8 {
+    let want = roundUp(if size == 0 { 1 as usize } else { size })
+    // First fit among the blocks already carved.
+    var at: usize = 0
+    while at < carved {
+        let h = headerAt(at)
+        let blockSize = unsafe { h[0].size } as usize
+        if unsafe { h[0].used } == 0 && blockSize >= want {
+            // Split when what is left could hold a block of its own.
+            if blockSize >= want + 32 {
+                let rest = headerAt(at + 16 + want)
+                unsafe {
+                    rest[0].size = (blockSize - want - 16) as u32
+                    rest[0].used = 0
+                    rest[0].magic = headerMagic()
+                    h[0].size = want as u32
+                }
+            }
+            return handOut(at)
+        }
+        at += 16 + blockSize
+    }
+    // Nothing free fits: carve a new block off the end.
+    if carved + 16 + want > capacity { return unsafe { 0 as *var u8 } }
+    let h = headerAt(carved)
+    unsafe {
+        h[0].size = want as u32
+        h[0].magic = headerMagic()
+    }
+    let fresh = carved
+    carved += 16 + want
+    handOut(fresh)
+}
+
+@safe("the block at `at` was carved by this file")
+fn handOut(at: usize) -> *var u8 {
+    let h = headerAt(at)
+    unsafe { h[0].used = 1 }
+    allocations += 1
+    bytesInUse += unsafe { h[0].size } as i64
+    unsafe { (regionStart() + at + 16) as *var u8 }
+}
+
+@deallocator
+@safe("checks that the block is one of ours before touching it")
+fn release(block: *var u8) {
+    let address = unsafe { block as usize }
+    let start = regionStart()
+    if address < start + 16 || address >= start + carved { return }
+    let at = address - start - 16
+    let h = headerAt(at)
+    if unsafe { h[0].magic } != headerMagic() || unsafe { h[0].used } == 0 {
+        return
+    }
+    unsafe { h[0].used = 0 }
+    frees += 1
+    bytesInUse -= unsafe { h[0].size } as i64
+    // Merge with every free block that follows, so space comes back whole.
+    while true {
+        let next = at + 16 + (unsafe { h[0].size } as usize)
+        if next >= carved { break }
+        let n = headerAt(next)
+        if unsafe { n[0].used } != 0 { break }
+        unsafe { h[0].size = h[0].size + 16 + n[0].size }
+    }
+}
+
+/// How much of the region has been carved into blocks: what a test looks at
+/// to see that freed space is reused rather than lost.
+pub fn carvedBytes() -> i64 { carved as i64 }

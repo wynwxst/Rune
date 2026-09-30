@@ -21,6 +21,7 @@
 #include <llvm/Transforms/Utils/Cloning.h>
 
 #include <cctype>
+#include <cmath>
 #include <set>
 
 namespace rune {
@@ -3190,7 +3191,7 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     return existing;
   }
 
-  if ((fn->IsExtern && !isCxxExtern(fn)) || fn->hasAttr("export"))
+  if ((fn->IsExtern && !isCxxExtern(fn)) || isExportedFunction(fn))
     checkForeignABI(fn);
 
   auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, name, *M);
@@ -3230,7 +3231,7 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     // pull its object out of an archive on COFF, which is how the runtime is
     // linked, and merging two different `@export("rune_alloc")`s was never
     // wanted anyway. Give it strong external linkage.
-    if (fn->hasAttr("export"))
+    if (isExportedFunction(fn))
       f->setLinkage(GlobalValue::ExternalLinkage);
     else if (isAncillary(fn))
       // Not this artefact's API: a copy of somebody else's code, kept only
@@ -3241,6 +3242,15 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     else
       f->setLinkage(GlobalValue::InternalLinkage);
   }
+  // `@weak`: a definition another object may replace — a default handler a
+  // program overrides by defining its own under the same name.
+  if (hasDefinition && fn->hasAttr("weak"))
+    f->setLinkage(GlobalValue::WeakAnyLinkage);
+  // A freestanding program is its own C library: LLVM must not turn a loop
+  // that copies bytes into a call to `memcpy`, least of all inside `memcpy`.
+  // This is what `-ffreestanding` does for C.
+  if (hasDefinition && Opts.Freestanding)
+    f->addFnAttr("no-builtins");
   if (fn->hasAttr("inline"))
     f->addFnAttr(llvm::Attribute::AlwaysInline);
   if (fn->hasAttr("noinline"))
@@ -3286,6 +3296,30 @@ Constant *CodeGen::constantInitialiserFor(GlobalVarDecl *g) {
     return ConstantInt::get(lower(g->Ty), lit->Value ? 1 : 0);
   }
   return nullptr;
+}
+
+/// True when `e` is worth all zero bytes as a `t`: `0`, `0.0`, `false`, or an
+/// array of them, written out or as `[v; n]`.
+bool CodeGen::isZeroInitialiser(Expr *e, Type *t) {
+  if (!e || !t)
+    return false;
+  t = t->canonical();
+  if (auto *lit = dyn_cast<IntLitExpr>(e))
+    return t->isInt() && lit->Value == 0;
+  if (auto *lit = dyn_cast<FloatLitExpr>(e))
+    // Negative zero has its sign bit set, so only a plain `0.0` counts.
+    return t->isFloat() && lit->Value == 0.0 && !std::signbit(lit->Value);
+  if (auto *lit = dyn_cast<BoolLitExpr>(e))
+    return t->isBool() && !lit->Value;
+  if (auto *arr = dyn_cast<ArrayLitExpr>(e)) {
+    if (!t->is(TypeKind::Array) || !t->element())
+      return false;
+    for (const ExprPtr &el : arr->Elements)
+      if (!isZeroInitialiser(el.get(), t->element()))
+        return false;
+    return true;
+  }
+  return false;
 }
 
 GlobalVariable *CodeGen::declareGlobal(GlobalVarDecl *g) {
@@ -3499,6 +3533,8 @@ Function *CodeGen::thunkFor(Function *target, Type *fnType) {
 
 void CodeGen::emitFunctionBody(FunctionDecl *fn) {
   if (fn->IsExtern || fn->IsImported)
+    return;
+  if (ReplacedDefinitions.count(fn))
     return;
   if (fn->Flavour == FunctionFlavour::Closure) {
     emitClosureBody(fn);
@@ -3800,14 +3836,32 @@ void CodeGen::emitGlobalInitialisers() {
   B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", f));
   fs().Scopes.push_back(LexicalScope{});
 
+  // A freestanding program has the standard library's code only where it
+  // reaches it, and its globals the same way: `std::io`'s would need the
+  // hosted runtime just to exist. Those are initialised first, once the
+  // program's code is emitted and it is known which of them it reads.
+  if (Opts.Freestanding) {
+    BorrowedGlobalsInit = Function::Create(
+        ft, GlobalValue::InternalLinkage, "rune.init_borrowed_globals", *M);
+    B->CreateCall(BorrowedGlobalsInit);
+  }
+
   for (GlobalVarDecl *g : Sema.Globals) {
     if (g->Parent && isa<ExternDecl>(g->Parent))
       continue;
     GlobalVariable *gv = declareGlobal(g);
     if (!g->Init)
       continue;
-    // Already in the object file; there is nothing to run for it.
-    if (constantInitialiserFor(g))
+    if (Opts.Freestanding && isAncillary(g)) {
+      DeferredGlobals.push_back(g);
+      continue;
+    }
+    // Already in the object file; there is nothing to run for it. That
+    // includes every global whose value is all zeros — a buffer, a counter,
+    // `[0; 65536]` — which is where the zeroed storage already starts: storing
+    // it again would cost start-up time, and a program with no `main` would
+    // have to call `rune_init` for nothing.
+    if (constantInitialiserFor(g) || isZeroInitialiser(g->Init.get(), g->Ty))
       continue;
     emitInto(g->Init.get(), gv, g->Ty);
     emitStatementCleanup();
@@ -3881,6 +3935,11 @@ void CodeGen::emitGlobalTeardown() {
       continue;
     if (!g->Ty || !g->Ty->isRefCounted())
       continue;
+    // A freestanding program's borrowed globals exist only where it reads
+    // them, and a program that stops by switching the machine off never
+    // gets here; releasing one would be what brought it in.
+    if (Opts.Freestanding && isAncillary(g))
+      continue;
     GlobalVariable *gv = declareGlobal(g);
     emitRelease(B->CreateLoad(lower(g->Ty), gv), g->Ty);
     B->CreateStore(Constant::getNullValue(lower(g->Ty)), gv);
@@ -3896,6 +3955,37 @@ void CodeGen::emitEntryPoint() {
   // lack one; only a finished executable must have `main`.
   if (Opts.Output == OutputKind::Library)
     return;
+
+  // `@entry(none)`: the program starts wherever it says — a boot stub's
+  // `call`, a reset vector. What `main` would have done first is handed to
+  // it as one function, `rune_init`, to call before touching a global whose
+  // value is worked out at run time. A global whose value is a constant is
+  // in the image already and needs nothing.
+  if (Opts.NoEntry) {
+    // The program names it in an `extern "C"` block to call it, so a
+    // declaration may be here already; this is its body.
+    auto *ft = FunctionType::get(B->getVoidTy(), {}, false);
+    Function *init = M->getFunction("rune_init");
+    if (init && (!init->isDeclaration() || init->getFunctionType() != ft)) {
+      Diags.error(SourceRange(), "`rune_init` is the compiler's under "
+                                 "`@entry(none)`")
+          .note("declare it as `fn rune_init()` in an `extern \"C\"` block, "
+                "and define nothing by that name")
+          .code(501);
+      return;
+    }
+    if (!init)
+      init = Function::Create(ft, GlobalValue::ExternalLinkage, "rune_init",
+                              *M);
+    if (Opts.Freestanding)
+      init->addFnAttr("no-builtins");
+    B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", init));
+    B->CreateCall(M->getFunction("rune.init_globals"));
+    if (llvm::Function *decorators = M->getFunction("rune.run_decorators"))
+      B->CreateCall(decorators);
+    B->CreateRetVoid();
+    return;
+  }
 
   FunctionDecl *userMain = Sema.EntryPoint;
   if (!userMain) {
@@ -3917,9 +4007,12 @@ void CodeGen::emitEntryPoint() {
   auto *entry = BasicBlock::Create(*Ctx, "entry", f);
   B->SetInsertPoint(entry);
 
-  B->CreateCall(runtimeFn("rune_runtime_init", B->getVoidTy(),
-                          {B->getInt32Ty(), PtrTy}),
-                {f->getArg(0), f->getArg(1)});
+  // A hosted runtime keeps the arguments and sets up what it needs; a
+  // freestanding one has nothing to set up.
+  if (!Opts.Freestanding)
+    B->CreateCall(runtimeFn("rune_runtime_init", B->getVoidTy(),
+                            {B->getInt32Ty(), PtrTy}),
+                  {f->getArg(0), f->getArg(1)});
   B->CreateCall(M->getFunction("rune.init_globals"));
   // Decorators run after globals exist and before `main` is entered, so a
   // registry a decorator fills is ready by the time anything reads it.
@@ -3941,9 +4034,208 @@ void CodeGen::emitEntryPoint() {
   // `full` refuses the shapes that leak, so the report is mostly for the
   // levels that allow them: a program working below `full` still wants to
   // hear about what it left behind. Only `none` opts out entirely.
-  if (Opts.Safety != SafetyLevel::None)
+  // A freestanding program has nowhere to report to; its heap is its own.
+  if (Opts.Safety != SafetyLevel::None && !Opts.Freestanding)
     B->CreateCall(runtimeFn("rune_report_leaks", B->getVoidTy(), {}));
   B->CreateRet(code);
+}
+
+/// What a hosted-runtime entry point is part of, said the way a program's
+/// author would look for it.
+static const char *hostedFeatureOf(llvm::StringRef name) {
+  if (name.starts_with("rune_string_") || name.starts_with("rune_cstring_"))
+    return "`String`, which lives in the hosted runtime; a freestanding "
+           "program works in `CString` and byte arrays";
+  if (name.starts_with("rune_task_") || name.starts_with("rune_pool_"))
+    return "`std::task`, which needs threads and an event loop";
+  if (name.starts_with("rune_thread_") || name.starts_with("rune_mutex_") ||
+      name.starts_with("rune_cond_"))
+    return "`std::thread`, which needs an operating system's threads";
+  if (name.starts_with("rune_retain") || name.starts_with("rune_release") ||
+      name.starts_with("rune_weak_"))
+    return "reference counting; a freestanding program is built with "
+           "`--memory zombie`, where nothing is counted";
+  if (name.starts_with("rune_net_") || name.starts_with("rune_command_") ||
+      name.starts_with("rune_env_") || name.starts_with("rune_file_"))
+    return "the operating system's services, through the hosted runtime";
+  return "the hosted runtime";
+}
+
+/// A freestanding program links nothing but itself and the Rune-written
+/// runtime compiled in with it, so a call into the hosted runtime would be an
+/// undefined symbol at link time — reported by the linker, in the linker's
+/// terms, far from its cause. Here it is reported against the function that
+/// makes it.
+void CodeGen::reportHostedRuntimeUses() {
+  std::map<const llvm::Function *, FunctionDecl *> declOf;
+  for (auto &[decl, f] : Functions)
+    declOf[f] = decl;
+  // Each function is reported once, for the first thing it needs; fixing
+  // that usually fixes the rest.
+  std::vector<std::pair<FunctionDecl *, std::string>> needs;
+  std::set<FunctionDecl *> seen;
+  for (llvm::Function &callee : *M) {
+    if (!callee.isDeclaration() || callee.isIntrinsic() || callee.use_empty() ||
+        !callee.getName().starts_with("rune_"))
+      continue;
+    std::string generated; // what the compiler wrote itself, by name
+    bool attributed = false;
+    for (llvm::User *u : callee.users())
+      if (auto *inst = dyn_cast<llvm::Instruction>(u)) {
+        auto it = declOf.find(inst->getFunction());
+        if (it == declOf.end()) {
+          generated = inst->getFunction()->getName().str();
+          continue;
+        }
+        attributed = true;
+        // Inside the standard library, the function to point at is the
+        // program's own that called into it: `io::println` needs the hosted
+        // runtime, but `greet` is what to change.
+        std::vector<FunctionDecl *> blamed;
+        std::set<const llvm::Function *> visited;
+        std::vector<const llvm::Function *> work = {inst->getFunction()};
+        while (!work.empty()) {
+          const llvm::Function *f = work.back();
+          work.pop_back();
+          if (!visited.insert(f).second)
+            continue;
+          auto d = declOf.find(f);
+          if (d != declOf.end() && !isAncillary(d->second)) {
+            blamed.push_back(d->second);
+            continue;
+          }
+          for (const llvm::User *fu : f->users())
+            if (auto *ci = dyn_cast<llvm::Instruction>(fu))
+              work.push_back(ci->getFunction());
+        }
+        if (blamed.empty())
+          blamed.push_back(it->second);
+        for (FunctionDecl *fn : blamed)
+          if (seen.insert(fn).second)
+            needs.push_back({fn, callee.getName().str()});
+      }
+    if (attributed)
+      continue;
+    auto d = Diags.error(SourceRange(), "this program needs '{}' from the "
+                                        "hosted runtime, and is built "
+                                        "without one",
+                         callee.getName().str());
+    d.note("{}", hostedFeatureOf(callee.getName()));
+    if (!generated.empty())
+      d.note("it is called from '{}', which the compiler generated",
+             generated);
+    d.code(542);
+  }
+  for (const auto &[fn, symbol] : needs)
+    Diags.error(fn->NameRange, "'{}' needs the hosted runtime, and this "
+                               "program is built without one",
+                fn->Name)
+        .note("it uses {}", hostedFeatureOf(symbol))
+        .note("`@runtime(none)` links only the program and the freestanding "
+              "runtime compiled with it")
+        .code(542);
+}
+
+/// Two definitions of one symbol in this module: a `@weak` default and the
+/// definition that replaces it — the freestanding runtime's panic handler and
+/// the program's own, compiled together. Across objects the linker would pick
+/// the strong one; within a module that choice is made here, and the default
+/// is never emitted.
+void CodeGen::resolveWeakDefinitions() {
+  std::map<llvm::Function *, std::vector<FunctionDecl *>> bySymbol;
+  for (FunctionDecl *fn : Sema.Functions) {
+    if (fn->IsExtern || fn->IsImported || !fn->Body || isAncillary(fn))
+      continue;
+    auto it = Functions.find(fn);
+    if (it != Functions.end())
+      bySymbol[it->second].push_back(fn);
+  }
+  for (auto &[f, decls] : bySymbol) {
+    // One symbol, several declarations, and no `@weak` among them is the
+    // ordinary case of a generic instantiated twice: one function.
+    if (decls.size() < 2 ||
+        std::none_of(decls.begin(), decls.end(), [](FunctionDecl *fn) {
+          return fn->hasAttr("weak");
+        }))
+      continue;
+    FunctionDecl *winner = nullptr;
+    for (FunctionDecl *fn : decls)
+      if (!fn->hasAttr("weak")) {
+        if (winner) {
+          auto d = Diags.error(fn->NameRange, "'{}' is defined twice",
+                               f->getName().str());
+          d.note("mark the default `@weak` so another definition can replace "
+                 "it")
+              .code(501);
+          continue;
+        }
+        winner = fn;
+      }
+    if (!winner)
+      winner = decls.front();
+    else
+      f->setLinkage(GlobalValue::ExternalLinkage);
+    for (FunctionDecl *fn : decls)
+      if (fn != winner)
+        ReplacedDefinitions.insert(fn);
+  }
+}
+
+/// Borrowed code — the standard library, an imported library's generics —
+/// gets a body only where this module turns out to refer to it. See `run`.
+void CodeGen::emitReachedBodies() {
+  std::set<FunctionDecl *> &offered = OfferedBodies;
+  for (bool more = true; more;) {
+    more = false;
+    for (FunctionDecl *fn : Sema.Functions) {
+      if (!isAncillary(fn) || fn->hasAttr("intrinsic"))
+        continue;
+      auto it = Functions.find(fn);
+      if (it == Functions.end() || !it->second->isDeclaration() ||
+          it->second->use_empty())
+        continue;
+      if (!offered.insert(fn).second)
+        continue;
+      emitFunctionBody(fn);
+      more = true;
+    }
+  }
+}
+
+/// The standard library's globals that a freestanding program reads, and only
+/// those, initialised before its own. An initialiser can reach code and
+/// globals of its own, so this runs until nothing new turns up.
+void CodeGen::emitBorrowedGlobalInitialisers() {
+  FunctionState st;
+  st.Fn = BorrowedGlobalsInit;
+  st.ReturnType = Types.voidType();
+  FnStack.push_back(st);
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", BorrowedGlobalsInit));
+  fs().Scopes.push_back(LexicalScope{});
+  std::set<GlobalVarDecl *> done;
+  for (bool more = true; more;) {
+    more = false;
+    for (GlobalVarDecl *g : DeferredGlobals) {
+      GlobalVariable *gv = declareGlobal(g);
+      if (done.count(g) || gv->use_empty())
+        continue;
+      done.insert(g);
+      more = true;
+      if (constantInitialiserFor(g) || isZeroInitialiser(g->Init.get(), g->Ty))
+        continue;
+      emitInto(g->Init.get(), gv, g->Ty);
+      emitStatementCleanup();
+    }
+    if (more) {
+      // Emitting bodies moves the builder; come back to this function after.
+      BasicBlock *here = B->GetInsertBlock();
+      emitReachedBodies();
+      B->SetInsertPoint(here);
+    }
+  }
+  fs().Scopes.pop_back();
+  B->CreateRetVoid();
+  FnStack.pop_back();
 }
 
 bool CodeGen::run() {
@@ -3968,6 +4260,7 @@ bool CodeGen::run() {
   for (FunctionDecl *fn : Sema.Functions)
     if (!isAncillary(fn))
       declareFunction(fn);
+  resolveWeakDefinitions();
 
   // The runtime prints a traceback only for a build that carries debug
   // information; this is how it finds out.
@@ -4014,24 +4307,12 @@ bool CodeGen::run() {
   // a body to give — a generic template has none until it is instantiated, a
   // mark's requirement may have none at all — and a loop that judged by the
   // result would offer those again forever.
-  {
-    std::set<FunctionDecl *> offered;
-    for (bool more = true; more;) {
-      more = false;
-      for (FunctionDecl *fn : Sema.Functions) {
-        if (!isAncillary(fn) || fn->hasAttr("intrinsic"))
-          continue;
-        auto it = Functions.find(fn);
-        if (it == Functions.end() || !it->second->isDeclaration() ||
-            it->second->use_empty())
-          continue;
-        if (!offered.insert(fn).second)
-          continue;
-        emitFunctionBody(fn);
-        more = true;
-      }
-    }
-  }
+  emitReachedBodies();
+  if (Opts.Freestanding)
+    emitBorrowedGlobalInitialisers();
+
+  if (Opts.Freestanding && Opts.Output != OutputKind::Library)
+    reportHostedRuntimeUses();
 
   finishDebugInfo();
 
@@ -4105,6 +4386,15 @@ createTargetMachine(const llvm::Triple &triple, std::string &err,
     return nullptr;
   llvm::Reloc::Model reloc = llvm::Reloc::PIC_;
   std::string features;
+  // Bare metal — `x86_64-unknown-none`, `i686-unknown-none-elf`: an image
+  // loaded where its linker script says, with no dynamic loader to relocate
+  // it and no GOT anyone will fill in.
+  if (triple.getOS() == llvm::Triple::UnknownOS && !triple.isWasm())
+    reloc = llvm::Reloc::Static;
+  // LLVM's generic RISC-V has no multiply or divide; every board Rune would
+  // run on has them, and clang's bare-metal default is the same `imac`.
+  if (triple.isRISCV())
+    features = "+m,+a,+c";
   if (triple.isWasm()) {
     reloc = llvm::Reloc::Static;
     if (triple.str().find("threads") != std::string::npos)

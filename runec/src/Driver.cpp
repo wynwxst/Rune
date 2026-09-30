@@ -59,6 +59,16 @@ CROSS COMPILATION
     --link-cxx           Link the C++ runtime (implied by `extern "C++"`)
     --runtime-dir <dir>  Where this target's libruneruntime.a lives
 
+BARE METAL
+    --runtime <kind>     hosted | none   (default hosted): `none` builds a
+                         freestanding program — no C library, no hosted
+                         runtime; panics go to its @panicHandler and the heap
+                         to its @allocator (the same as `@runtime(none)`)
+    --entry <kind>       main | none     (default main): `none` generates no
+                         `main`; an @export-ed function is the entry (the
+                         same as `@entry(none)`)
+    --no-main            The same as --entry none
+
 DIAGNOSTICS
     --color / --no-color Force colour on or off
     --source <path>=<file>
@@ -126,6 +136,7 @@ int runCompilerMain(int argc, char **argv) {
   CompilerOptions opts;
   opts.StdlibDir = RUNE_DEFAULT_STDLIB_DIR;
   opts.RuntimeLibDir = RUNE_RUNTIME_LIB_DIR;
+  opts.RunetimeDir = RUNE_RUNETIME_DIR;
 
   auto needsValue = [&](int &i, const char *flag) -> const char * {
     if (i + 1 >= argc) {
@@ -211,6 +222,27 @@ int runCompilerMain(int argc, char **argv) {
     }
     if (a == "--no-stdlib") { opts.NoStdlib = true; continue; }
     if (a == "--stdlib") { opts.StdlibDir = needsValue(i, "--stdlib"); continue; }
+    if (a == "--runtime") {
+      std::string v = needsValue(i, "--runtime");
+      if (v != "none" && v != "hosted") {
+        std::cerr << "runec: unknown runtime '" << v
+                  << "' (expected hosted or none)\n";
+        return 2;
+      }
+      opts.Freestanding = v == "none";
+      continue;
+    }
+    if (a == "--entry") {
+      std::string v = needsValue(i, "--entry");
+      if (v != "none" && v != "main") {
+        std::cerr << "runec: unknown entry '" << v
+                  << "' (expected main or none)\n";
+        return 2;
+      }
+      opts.NoEntry = v == "none";
+      continue;
+    }
+    if (a == "--no-main") { opts.NoEntry = true; continue; }
     if (a == "--runtime-dir") {
       opts.RuntimeLibDir = needsValue(i, "--runtime-dir");
       continue;

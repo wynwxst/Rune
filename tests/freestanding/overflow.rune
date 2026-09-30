@@ -1,0 +1,9 @@
+import fs::sys
+fn grow(x: i64) -> i64 { x + 1 }
+@export("_start")
+fn start() -> Never {
+    sys::sayNumber(grow(41))
+    sys::say("\n")
+    let v = grow(9223372036854775807)
+    sys::exit(0)
+}

@@ -1,0 +1,163 @@
+// Output, twice over: the VGA text screen a person would look at, and the
+// first serial port, which QEMU hands to whoever started it — the test reads
+// the kernel's output from there.
+import toyos::cpu
+
+/// Where the VGA text buffer lives: 80 by 25 cells of character and colour.
+fn screen() -> *var u16 { unsafe { 753664 as *var u16 } }   // 0xB8000
+
+let columns: i64 = 80
+let rows: i64 = 25
+/// The first serial port, COM1.
+let com1: u16 = 1016                                          // 0x3F8
+
+global var row: i64 = 0
+global var column: i64 = 0
+/// White on black. Not zero, so it is set by `rune_init` — which is why
+/// `kernel_main` calls that first.
+global var colour: u16 = 15
+
+pub enum Colour { Normal, Good, Bad, Quiet }
+
+/// Sets the colour of what is written next to the screen.
+pub fn setColour(c: Colour) {
+    colour = match c {
+        Colour::Normal => 15,   // white
+        Colour::Good => 10,     // light green
+        Colour::Bad => 79,      // white on red
+        Colour::Quiet => 8,     // dark grey
+    }
+}
+
+/// Makes both outputs ready: the screen cleared, the serial port at 38400
+/// baud, eight bits, no parity.
+pub fn init() {
+    var i: i64 = 0
+    while i < columns * rows {
+        writeCell(i, 32)
+        i += 1
+    }
+    row = 0
+    column = 0
+    cpu::outb(com1 + 1, 0)      // no interrupts
+    cpu::outb(com1 + 3, 128)    // divisor follows
+    cpu::outb(com1, 3)          // 115200 / 3
+    cpu::outb(com1 + 1, 0)
+    cpu::outb(com1 + 3, 3)      // 8 bits, no parity, one stop bit
+    cpu::outb(com1 + 2, 199)    // FIFO on, cleared
+    cpu::outb(com1 + 4, 11)     // ready
+}
+
+@safe("the index is inside the 80x25 buffer; every caller keeps it there")
+fn writeCell(index: i64, ch: u8) {
+    unsafe { screen()[index] = (colour << 8) | (ch as u16) }
+}
+
+fn scroll() {
+    var i: i64 = 0
+    while i < columns * (rows - 1) {
+        let below = unsafe { screen()[i + columns] }
+        unsafe { screen()[i] = below }
+        i += 1
+    }
+    var c: i64 = 0
+    while c < columns {
+        writeCell(columns * (rows - 1) + c, 32)
+        c += 1
+    }
+    row = rows - 1
+}
+
+fn serialByte(ch: u8) {
+    // Wait until the transmitter can take another byte.
+    while (cpu::inb(com1 + 5) & 32) == 0 {}
+    cpu::outb(com1, ch)
+}
+
+/// One character, to both.
+pub fn putByte(ch: u8) {
+    serialByte(ch)
+    if ch == 10 {
+        column = 0
+        row += 1
+    } else {
+        writeCell(row * columns + column, ch)
+        column += 1
+        if column == columns {
+            column = 0
+            row += 1
+        }
+    }
+    if row == rows { scroll() }
+}
+
+/// A NUL-terminated string, to both.
+@safe("a CString ends at its NUL, and nothing past it is read")
+pub fn print(text: CString) {
+    let bytes = unsafe { text as *u8 }
+    var i: i64 = 0
+    while unsafe { bytes[i] } != 0 {
+        putByte(unsafe { bytes[i] })
+        i += 1
+    }
+}
+
+pub fn line(text: CString) {
+    print(text)
+    putByte(10)
+}
+
+/// A signed number in decimal. On this 32-bit machine every `/` and `%` of
+/// an i64 here is a call to the freestanding runtime's `__divdi3` family.
+pub fn printNumber(value: i64) {
+    if value < 0 {
+        putByte(45)
+        // -(i64 min) does not fit; its last digit is printed on its own.
+        if value == -9223372036854775807 - 1 {
+            print("9223372036854775808")
+            return
+        }
+        printNumber(0 - value)
+        return
+    }
+    var digits: [20:u8] = [0; 20]
+    var count: i64 = 0
+    var rest = value
+    while true {
+        digits[count] = (48 + rest % 10) as u8
+        rest = rest / 10
+        count += 1
+        if rest == 0 { break }
+    }
+    while count > 0 {
+        count -= 1
+        putByte(digits[count])
+    }
+}
+
+/// An unsigned number in hexadecimal, with a `0x`.
+pub fn printHex(value: u64) {
+    print("0x")
+    var shift: i64 = 60
+    var started = false
+    while shift >= 0 {
+        let nibble = ((value >> (shift as u64)) & 15) as u8
+        if nibble != 0 || started || shift == 0 {
+            started = true
+            putByte(if nibble < 10 { 48 + nibble } else { 87 + nibble })
+        }
+        shift -= 4
+    }
+}
+
+/// How many checks have failed.
+pub global var failures: i64 = 0
+
+/// A check's result, as `[ ok ] what` or `[FAIL] what`.
+pub fn check(passed: bool, what: CString) {
+    if !passed { failures += 1 }
+    setColour(if passed { Colour::Good } else { Colour::Bad })
+    print(if passed { "[ ok ] " } else { "[FAIL] " })
+    setColour(Colour::Normal)
+    line(what)
+}

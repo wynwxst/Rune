@@ -1,0 +1,31 @@
+import fs::sys
+
+class Leaf {
+    pub var value: i64 = 0
+    fn init(self, value: i64) { self.value = value }
+    fn deinit(self) { sys::say("freed a leaf\n") }
+}
+
+class Pair {
+    pub var left: Leaf = Leaf(value: 1)
+    pub var right: Leaf = Leaf(value: 2)
+    fn deinit(self) { sys::say("freed the pair\n") }
+}
+
+fn total(p: &Pair) -> i64 { p.left.value + p.right.value }
+
+@export("_start")
+fn start() -> Never {
+    {
+        let p = Pair()
+        sys::say("total ")
+        sys::sayNumber(total(&p))
+        sys::say(", live objects ")
+        sys::sayNumber(sys::live)
+        sys::say("\n")
+    }
+    sys::say("live after scope ")
+    sys::sayNumber(sys::live)
+    sys::say("\n")
+    sys::exit(0)
+}

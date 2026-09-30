@@ -201,6 +201,39 @@ runner = "qemu-aarch64 -L /opt/pi-sysroot"
 The reference's *Cross compilation* section has the rest, including driving
 `runec` by hand.
 
+### Bare metal
+
+`@runtime(none)` builds a freestanding program — a kernel, firmware — with no
+C library and no hosted runtime; `@entry(none)` generates no `main`. What the
+generated code needs of a runtime is Rune (`runetime/freestanding.rune`),
+compiled in for the target, and it asks the program for three things:
+
+```rune
+@runtime(none)
+@entry(none)
+
+@panicHandler
+fn panicked(message: CString, location: CString) -> Never { ... }
+
+@allocator
+fn allocate(size: usize, align: usize) -> *var u8 { ... }
+
+@deallocator
+fn release(block: *var u8) { ... }
+
+@export("kernel_main")
+fn kernelMain(magic: u32, info: u32) -> Never { ... }
+```
+
+`--safety full` means the same there as anywhere: every bounds, overflow,
+division and nil check is inserted, the Zombie borrow checker proves every
+borrow, and a failed check goes to the `@panicHandler`. Classes, `Unique<T>`
+and optionals work, on the program's own heap; `String`, `std::io` and
+threads are refused at compile time. `bare-x86`, `bare-x86_64`, `bare-arm64`
+and `bare-riscv64` build with clang and ld.lld, and
+[`examples/toyos`](examples/toyos/README.md) is a multiboot kernel that QEMU
+boots with `rune run`.
+
 ### Incremental and concurrent builds
 
 A build resolves the whole package graph before compiling any of it, then runs

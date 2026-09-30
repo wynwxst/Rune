@@ -439,6 +439,8 @@ std::string Sema::mangleFunction(const FunctionDecl *fn,
     return mangleCxx(fn);
   if (fn->IsExtern)
     return fn->LinkName.empty() ? fn->Name : fn->LinkName;
+  if (const char *lang = langItemSymbol(fn))
+    return lang;
   if (fn->hasAttr("export")) {
     const Attribute *a = fn->findAttr("export");
     if (!a->Args.empty())
@@ -5673,6 +5675,9 @@ bool Sema::isBuiltinDecorator(const std::string &name) {
       // nothing in it — the arguments are rule names, not expressions to
       // check — and only has to know the name.
       "lint",
+      // Bare metal: the hooks a freestanding program gives the runtime it is
+      // compiled with, and a definition another may replace.
+      "panicHandler", "allocator", "deallocator", "weak",
   };
   return kBuiltin.count(name) != 0;
 }
@@ -5714,6 +5719,57 @@ void Sema::collectDoc(Decl *d) {
   }
 }
 
+/// `@panicHandler`, `@allocator` and `@deallocator` are called by the
+/// generated code and by the freestanding runtime, through a C signature
+/// fixed in advance; a function that does not match it would be called with
+/// the wrong arguments rather than refused, so it is refused here.
+void Sema::checkRuntimeHook(FunctionDecl *fn, const Attribute &a) {
+  if (!fn->Ty)
+    return;
+  Type *bytes = Types.pointerTo(Types.u8(), /*isMutable=*/true, /*isRaw=*/true);
+  std::vector<Type *> want;
+  Type *wantResult = nullptr;
+  const char *spelled = "";
+  if (a.Name == "panicHandler") {
+    want = {Types.cstringType(), Types.cstringType()};
+    wantResult = Types.neverType();
+    spelled = "fn(message: CString, location: CString) -> Never";
+  } else if (a.Name == "allocator") {
+    want = {Types.usize(), Types.usize()};
+    wantResult = bytes;
+    spelled = "fn(size: usize, align: usize) -> *var u8";
+  } else {
+    want = {bytes};
+    wantResult = Types.voidType();
+    spelled = "fn(block: *var u8)";
+  }
+  bool ok = fn->Params.size() == want.size() && !fn->Parent &&
+            fn->Generics.empty();
+  for (size_t i = 0; ok && i < want.size(); ++i)
+    ok = fn->Params[i].Ty &&
+         fn->Params[i].Ty->canonical() == want[i]->canonical();
+  Type *result = fn->Ty->result();
+  if (ok)
+    ok = result && result->canonical() == wantResult->canonical();
+  if (!ok) {
+    Diags.error(fn->NameRange, "`@{}` needs the signature `{}`", a.Name,
+                spelled)
+        .note("the generated code calls it through that C signature, and "
+              "nothing else would be passed what it expects")
+        .code(248);
+    return;
+  }
+  // One of each per program: the linker would take whichever it met first.
+  auto [it, inserted] = RuntimeHooks.insert({a.Name, fn});
+  if (!inserted && it->second != fn) {
+    auto d = Diags.error(fn->NameRange, "a second `@{}`", a.Name);
+    d.note("a program has one; the freestanding runtime would call only one "
+           "of them")
+        .code(249);
+    noteDeclaredAt(d, it->second, "the first is here", "");
+  }
+}
+
 void Sema::checkDecorators(FunctionDecl *fn) {
   if (!fn)
     return;
@@ -5730,6 +5786,9 @@ void Sema::checkDecorators(FunctionDecl *fn) {
           .code(234);
       continue;
     }
+    if (a.Name == "panicHandler" || a.Name == "allocator" ||
+        a.Name == "deallocator")
+      checkRuntimeHook(fn, a);
     if (isBuiltinDecorator(a.Name))
       continue;
 

@@ -1,0 +1,24 @@
+[package]
+name = "toyos"
+version = "0.1.0"
+edition = "2026"
+description = "A toy operating system in Rune: a multiboot kernel for 32-bit x86, booted by QEMU."
+
+[build]
+# `@runtime(none)` in src/main.rune says this too; the manifest says it for
+# anyone reading it first. The whole checking dial stays up: bounds,
+# overflow, division by zero, nil and the Zombie borrow checker all apply
+# to kernel code as to any other.
+safety = "full"
+memory = "zombie"
+runtime = "none"
+entry = "none"
+target = "bare-x86"
+# Everything before `kernel_main`: the multiboot header, a stack, the call.
+c-sources = ["boot/boot.s"]
+linker-script = "kernel.ld"
+
+# The foreign target `bare-x86`, run with QEMU's debug-exit device so a
+# panic ends the run with a status of its own.
+[target.bare-x86]
+runner = "qemu-system-i386 -display none -serial stdio -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -kernel"

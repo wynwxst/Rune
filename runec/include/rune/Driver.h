@@ -134,6 +134,17 @@ struct CompilerOptions {
   bool WarningsAsErrors = false;
   bool NoWarnings = false;
   bool NoStdlib = false;
+  /// `--runtime none` (or `@runtime(none)` at the top of a file): build a
+  /// freestanding program. Nothing hosted is linked — no C library, no
+  /// `libruneruntime.a` — and what the generated code needs of a runtime
+  /// comes from `runetime/freestanding.rune`, compiled in, and from the
+  /// program's own `@panicHandler`, `@allocator` and `@deallocator`.
+  bool Freestanding = false;
+  /// `--entry none` (or `@entry(none)`): generate no `main`. The program's
+  /// own `@export`ed function is where execution starts.
+  bool NoEntry = false;
+  /// Where `runetime/` is: the freestanding runtime's source.
+  std::string RunetimeDir;
   /// `--emit-docs --docs-stdlib`: write the standard library's own modules
   /// into the sidecar, rather than only the modules being compiled. This is
   /// how `rune doc std::io` gets a reference for a library that is never

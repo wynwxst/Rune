@@ -1,0 +1,461 @@
+// The freestanding runtime: everything the code generator relies on, for a
+// program built with `@runtime(none)` — a kernel, a boot loader, firmware.
+//
+// It is Rune, compiled into the program for the program's own target, and it
+// depends on nothing: no C library, no operating system. What only the
+// program can know it asks the program for, through three hooks:
+//
+//     @panicHandler  fn(message: CString, location: CString) -> Never
+//     @allocator     fn(size: usize, align: usize) -> *var u8
+//     @deallocator   fn(block: *var u8)
+//
+// Each has a `@weak` default here that a program's own replaces. The default
+// panic handler stops the processor where it is; the default allocator
+// panics, so a program that never allocates never needs one.
+//
+// Every safety check the compiler inserts — bounds, overflow, division by
+// zero, nil, an unmatched `match`, a checked drop — still happens; this file
+// only decides where a failed one goes, which is the panic handler.
+
+//===--------------------------------------------------------------------===//
+// The hooks, and their defaults
+//===--------------------------------------------------------------------===//
+
+/// Stops here, for ever. With no handler of the program's own there is
+/// nowhere to say anything, and carrying on after a failed check is the one
+/// thing a panic exists to prevent.
+@export("rune_panic_handler")
+@weak
+fn defaultPanicHandler(message: CString, location: CString) -> Never {
+    loop {}
+}
+
+@export("rune_heap_allocate")
+@weak
+fn defaultAllocate(size: usize, align: usize) -> *var u8 {
+    defaultPanicHandler("this program allocates, and declares no @allocator",
+                        "runetime/freestanding.rune")
+}
+
+/// Without an allocator nothing was allocated, so there is nothing to free.
+@export("rune_heap_free")
+@weak
+fn defaultFree(block: *var u8) {}
+
+//===--------------------------------------------------------------------===//
+// Memory, byte by byte
+//
+// LLVM lowers a large copy to a call to `memcpy`, freestanding or not, so
+// these have to exist. The compiler builds a freestanding program with
+// `no-builtins`, which keeps these loops from being turned back into calls to
+// themselves. `@weak`, so a program with faster ones keeps its own.
+//===--------------------------------------------------------------------===//
+
+@export("memcpy")
+@weak
+@safe("the caller sizes both blocks, as C's memcpy requires")
+pub fn memcpy(dst: *var u8, src: *u8, size: usize) -> *var u8 {
+    var i: usize = 0
+    while i < size {
+        unsafe { dst[i as i64] = src[i as i64] }
+        i += 1
+    }
+    dst
+}
+
+@export("memmove")
+@weak
+@safe("the caller sizes both blocks, as C's memmove requires")
+pub fn memmove(dst: *var u8, src: *u8, size: usize) -> *var u8 {
+    if unsafe { dst as usize } <= unsafe { src as usize } {
+        return memcpy(dst, src, size)
+    }
+    // Overlapping with the destination above: copy from the end down.
+    var i = size
+    while i > 0 {
+        i -= 1
+        unsafe { dst[i as i64] = src[i as i64] }
+    }
+    dst
+}
+
+@export("memset")
+@weak
+@safe("the caller sizes the block, as C's memset requires")
+pub fn memset(block: *var u8, value: i32, size: usize) -> *var u8 {
+    let byte = (value & 255) as u8
+    var i: usize = 0
+    while i < size {
+        unsafe { block[i as i64] = byte }
+        i += 1
+    }
+    block
+}
+
+@export("memcmp")
+@weak
+@safe("the caller sizes both blocks, as C's memcmp requires")
+pub fn memcmp(a: *u8, b: *u8, size: usize) -> i32 {
+    var i: usize = 0
+    while i < size {
+        let x = unsafe { a[i as i64] }
+        let y = unsafe { b[i as i64] }
+        if x != y { return if x < y { -1 } else { 1 } }
+        i += 1
+    }
+    0
+}
+
+//===--------------------------------------------------------------------===//
+// Panics
+//
+// What the generated code calls when a check fails, turned into a message and
+// handed on. The message is built in a buffer of its own rather than on the
+// heap, because a panic may be what the heap running out looks like.
+//===--------------------------------------------------------------------===//
+
+global var panicText: [128:u8] = [0; 128]
+global var panicLength: i64 = 0
+
+@safe("writes inside the buffer and nowhere else")
+fn panicAppend(text: CString) {
+    let bytes = unsafe { text as *u8 }
+    var i: i64 = 0
+    while unsafe { bytes[i] } != 0 && panicLength < 127 {
+        panicText[panicLength] = unsafe { bytes[i] }
+        panicLength += 1
+        i += 1
+    }
+}
+
+@safe("writes inside the buffer and nowhere else")
+fn panicAppendNumber(n: i64) {
+    if n < 0 {
+        panicAppend("-")
+        // The most negative i64 has no positive; its digits are those of the
+        // number one above it, with the last one adjusted.
+        if n == -9223372036854775807 - 1 {
+            panicAppend("9223372036854775808")
+            return
+        }
+        panicAppendNumber(0 - n)
+        return
+    }
+    var digits: [20:u8] = [0; 20]
+    var count: i64 = 0
+    var rest = n as u64
+    while true {
+        digits[count] = (48 + unsigned10Remainder(rest)) as u8
+        rest = unsigned10Quotient(rest)
+        count += 1
+        if rest == 0 { break }
+    }
+    while count > 0 && panicLength < 127 {
+        count -= 1
+        panicText[panicLength] = digits[count]
+        panicLength += 1
+    }
+}
+
+/// `n / 10` and `n % 10`, without the division instruction a 32-bit target
+/// only has as a library call — which, in here, would be a call to this.
+fn unsigned10Quotient(n: u64) -> u64 { unsignedDivide(n, 10, false) }
+fn unsigned10Remainder(n: u64) -> u64 { unsignedDivide(n, 10, true) }
+
+@safe("the buffer is NUL-terminated before it is handed on")
+fn panicWith(location: CString) -> Never {
+    panicText[panicLength] = 0
+    panicLength = 0
+    let text = unsafe { &var panicText[0] as *var u8 }
+    defaultPanicHandler(unsafe { text as CString }, location)
+}
+
+fn panicStart(text: CString) {
+    panicLength = 0
+    panicAppend(text)
+}
+
+@export("rune_panic_bounds")
+pub fn panicBounds(index: i64, length: i64, location: CString) {
+    panicStart("index ")
+    panicAppendNumber(index)
+    panicAppend(" is out of bounds for a collection of length ")
+    panicAppendNumber(length)
+    panicWith(location)
+}
+
+@export("rune_panic_overflow")
+pub fn panicOverflow(operation: CString, location: CString) {
+    panicStart("integer overflow in `")
+    panicAppend(operation)
+    panicAppend("`")
+    panicWith(location)
+}
+
+@export("rune_panic_div_zero")
+pub fn panicDivZero(location: CString) {
+    defaultPanicHandler("division by zero", location)
+}
+
+@export("rune_panic_nil")
+pub fn panicNil(location: CString) {
+    defaultPanicHandler("dereferenced a nil reference", location)
+}
+
+@export("rune_panic_no_match")
+pub fn panicNoMatch(location: CString) {
+    defaultPanicHandler("no arm of the `match` matched", location)
+}
+
+/// `process::panic`, and anything else that stops the program on purpose.
+@export("rune_panic")
+pub fn panicExplicit(message: CString, location: CString) {
+    defaultPanicHandler(message, location)
+}
+
+/// `Option::unwrap` and `expect` on an empty one.
+@export("rune_panic_unwrap")
+pub fn panicUnwrap(what: CString, location: CString) {
+    panicStart("unwrapped an empty ")
+    panicAppend(what)
+    panicWith(location)
+}
+
+@export("rune_panic_any")
+pub fn panicAny(expected: CString, value: *var u8, location: CString) {
+    panicStart("this `Any` does not hold ")
+    panicAppend(expected)
+    panicWith(location)
+}
+
+//===--------------------------------------------------------------------===//
+// The heap
+//
+// Under `--memory zombie` every object has one owner, so there is no count to
+// keep: an object is made, handed on, and dropped once. The layouts are the
+// code generator's, as in core.rune.
+//===--------------------------------------------------------------------===//
+
+struct Object {
+    refcount: i64
+    typeinfo: *var u8
+}
+
+struct TypeInfo {
+    name: *var u8
+    size: u64
+    deinit: *var u8         // @cfunction(*var u8), or null
+    base: *var u8           // *TypeInfo of the superclass, or null
+    vtable: *var u8
+    vtableCount: u32
+    clone: *var u8          // @cfunction(*var u8) -> *var u8, or null
+}
+
+@safe("a null pointer compares equal to zero without being read")
+fn isNull(p: *var u8) -> bool { unsafe { p as usize == 0 } }
+
+/// A string literal's object, and anything else made to outlive every owner,
+/// carries this bit in its count and is never destroyed.
+fn immortalMark() -> i64 { 4611686018427387904 }   // 1 << 62
+
+@export("rune_alloc")
+@safe("the allocator hands back at least `size` bytes, or null")
+pub fn alloc(size: u64, info: *var u8) -> *var u8 {
+    var want = size as usize
+    let header = 16 as usize
+    if want < header { want = header }
+    let block = defaultAllocate(want, 16 as usize)
+    if isNull(block) {
+        defaultPanicHandler("out of memory", "runetime/freestanding.rune")
+    }
+    // Objects start zeroed, as the hosted runtime's `calloc` leaves them.
+    memset(block, 0, want)
+    let o = unsafe { block as *var Object }
+    unsafe {
+        o[0].refcount = 1
+        o[0].typeinfo = info
+    }
+    block
+}
+
+/// An object's one owner is done with it: its `deinit`, then its memory.
+/// `checked` is `--safety full` asking that the object really had one owner,
+/// which a count that moved behind the borrow checker's back would betray.
+@export("rune_drop")
+@safe("the borrow checker proved the caller is the object's one owner")
+pub fn drop(obj: *var u8, checked: bool) {
+    if isNull(obj) { return }
+    let o = unsafe { obj as *var Object }
+    let count = unsafe { o[0].refcount }
+    if (count & immortalMark()) != 0 { return }
+    if checked && count != 1 {
+        defaultPanicHandler("an object was dropped while still shared",
+                            "runetime/freestanding.rune")
+    }
+    unsafe { o[0].refcount = 0 }
+    let info = unsafe { o[0].typeinfo }
+    if !isNull(info) {
+        let ti = unsafe { info as *var TypeInfo }
+        let d = unsafe { ti[0].deinit }
+        if !isNull(d) {
+            let run = unsafe { d as @cfunction(*var u8) -> () }
+            unsafe { run(obj) }
+        }
+    }
+    defaultFree(obj)
+}
+
+@export("rune_make_immortal")
+@safe("only sets a bit in the header")
+pub fn makeImmortal(obj: *var u8) {
+    if isNull(obj) { return }
+    let o = unsafe { obj as *var Object }
+    unsafe { o[0].refcount = o[0].refcount | immortalMark() }
+}
+
+/// A copy of an object of exactly its own type, made by the class's `clone`
+/// — which is what `$clone()` means under single ownership.
+@export("rune_clone_object")
+@safe("calls the clone the compiler generated for the object's own type")
+pub fn cloneObject(obj: *var u8) -> *var u8 {
+    if isNull(obj) { return obj }
+    let o = unsafe { obj as *var Object }
+    let info = unsafe { o[0].typeinfo }
+    if !isNull(info) {
+        let ti = unsafe { info as *var TypeInfo }
+        let c = unsafe { ti[0].clone }
+        if !isNull(c) {
+            let run = unsafe { c as @cfunction(*var u8) -> *var u8 }
+            return unsafe { run(obj) }
+        }
+    }
+    defaultPanicHandler("this value cannot be copied: it has no clone",
+                        "runetime/freestanding.rune")
+}
+
+/// Whether `obj` is an instance of the class `info` describes, or of one
+/// derived from it: the walk up the chain of base classes.
+@export("rune_is_kind_of")
+@safe("follows the type descriptors the compiler emitted")
+pub fn isKindOf(obj: *var u8, info: *var u8) -> i32 {
+    if isNull(obj) || isNull(info) { return 0 }
+    let o = unsafe { obj as *var Object }
+    var t = unsafe { o[0].typeinfo }
+    while !isNull(t) {
+        if unsafe { t as usize } == unsafe { info as usize } { return 1 }
+        let ti = unsafe { t as *var TypeInfo }
+        t = unsafe { ti[0].base }
+    }
+    0
+}
+
+/// `Any`'s question. A descriptor is one symbol for the whole program, so
+/// comparing addresses is the answer.
+@export("rune_any_is")
+pub fn anyIs(obj: *var u8, info: *var u8) -> i32 { isKindOf(obj, info) }
+
+/// Raw memory, for code that manages its own: `mem::allocator` and the like.
+@export("rune_raw_alloc")
+pub fn rawAlloc(size: u64) -> *var u8 { defaultAllocate(size as usize, 16 as usize) }
+
+@export("rune_raw_free")
+pub fn rawFree(block: *var u8) {
+    if !isNull(block) { defaultFree(block) }
+}
+
+@export("rune_raw_copy")
+pub fn rawCopy(dst: *var u8, src: *u8, size: u64) {
+    if size != 0 { memcpy(dst, src, size as usize) }
+}
+
+@export("rune_raw_zero")
+pub fn rawZero(block: *var u8, size: u64) {
+    if size != 0 && !isNull(block) { memset(block, 0, size as usize) }
+}
+
+//===--------------------------------------------------------------------===//
+// Hashing
+//===--------------------------------------------------------------------===//
+
+/// Mixes one value into a running hash, as the hosted runtime does
+/// (splitmix64's finaliser), so a hash is the same number on either.
+@export("rune_hash_mix")
+pub fn hashMix(accIn: u64, v: u64) -> u64 {
+    var acc = accIn
+    acc = acc ^ v.$wrappingAdd(11400714819323198485)
+                 .$wrappingAdd(acc << 6).$wrappingAdd(acc >> 2)
+    acc = acc ^ (acc >> 30)
+    acc = acc.$wrappingMul(13787848793156543929)
+    acc = acc ^ (acc >> 27)
+    acc = acc.$wrappingMul(10723151780598845931)
+    acc ^ (acc >> 31)
+}
+
+//===--------------------------------------------------------------------===//
+// 64-bit division on 32-bit targets
+//
+// A 32-bit processor divides 64-bit numbers by calling these, which a C
+// toolchain takes from libgcc or compiler-rt. A freestanding program has
+// neither, so here they are — built from shifts and subtraction, since a
+// division here would be a call to itself.
+//===--------------------------------------------------------------------===//
+
+/// Long division, one bit at a time: the quotient, or with `wantRemainder`
+/// what is left over.
+fn unsignedDivide(n: u64, d: u64, wantRemainder: bool) -> u64 {
+    if d == 0 {
+        defaultPanicHandler("division by zero", "runetime/freestanding.rune")
+    }
+    var quotient: u64 = 0
+    var remainder: u64 = 0
+    var bit: i64 = 63
+    while bit >= 0 {
+        remainder = (remainder << 1) | ((n >> (bit as u64)) & 1)
+        if remainder >= d {
+            remainder = remainder - d
+            quotient = quotient | ((1 as u64) << (bit as u64))
+        }
+        bit -= 1
+    }
+    if wantRemainder { remainder } else { quotient }
+}
+
+/// The magnitude of a signed number, as the unsigned number it fits in —
+/// the most negative included.
+fn magnitude(n: i64) -> u64 {
+    if n >= 0 { return n as u64 }
+    ((0 - (n + 1)) as u64) + 1
+}
+
+/// `-m`, as the two's complement bits of an i64.
+fn negated(m: u64) -> i64 {
+    if m == 0 { return 0 }
+    (0 - ((m - 1) as i64)) - 1
+}
+
+@Config(pointer_width == "32")
+@export("__udivdi3")
+@weak
+pub fn udivdi3(n: u64, d: u64) -> u64 { unsignedDivide(n, d, false) }
+
+@Config(pointer_width == "32")
+@export("__umoddi3")
+@weak
+pub fn umoddi3(n: u64, d: u64) -> u64 { unsignedDivide(n, d, true) }
+
+@Config(pointer_width == "32")
+@export("__divdi3")
+@weak
+pub fn divdi3(n: i64, d: i64) -> i64 {
+    let q = unsignedDivide(magnitude(n), magnitude(d), false)
+    if (n < 0) != (d < 0) { negated(q) } else { q as i64 }
+}
+
+@Config(pointer_width == "32")
+@export("__moddi3")
+@weak
+pub fn moddi3(n: i64, d: i64) -> i64 {
+    // The remainder takes the sign of the dividend, as C's `%` does.
+    let r = unsignedDivide(magnitude(n), magnitude(d), true)
+    if n < 0 { negated(r) } else { r as i64 }
+}

@@ -1,0 +1,7 @@
+import fs::mini
+class Leaf { pub var v: i64 = 0 }
+@export("_start")
+fn start() -> Never {
+    let l = Leaf()
+    mini::exit(l.v)
+}

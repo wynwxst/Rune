@@ -47,6 +47,15 @@ if(RUNE_PYTHON3)
             ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# Bare metal: freestanding programs with no C library, every safety check
+# reaching their own panic handler, and examples/toyos booted under QEMU.
+# Each half is skipped where this machine cannot run it.
+if(RUNE_PYTHON3)
+  add_test(NAME rune_bare_metal
+    COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/bare_metal_test.py
+            ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # The editor tooling: `rune-lint` over files with known problems, and a whole
 # language server session driven the way an editor drives it.
 if(RUNE_PYTHON3)

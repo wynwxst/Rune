@@ -1,0 +1,99 @@
+// Processes and a round-robin scheduler — simulated, since this kernel has no
+// timer interrupt: each process has an amount of work, and every turn of the
+// scheduler gives each unfinished one a slice of it.
+//
+// They are classes, so they live on the kernel heap, and under
+// `--memory zombie` each has exactly one owner: the scheduler owns the first,
+// each process owns the next. Nothing is counted. Dropping the scheduler
+// drops the chain, and every `deinit` runs, in order, before its memory goes
+// back to the allocator.
+import toyos::console
+
+pub class Process {
+    pub var pid: i64 = 0
+    pub var name: CString = ""
+    pub var work: i64 = 0
+    pub var done: i64 = 0
+    /// `Unique`: owned by this process alone, so the chain cannot loop.
+    pub var next: Unique<Process>? = nil
+
+    fn init(self, pid: i64, name: CString, work: i64) {
+        self.pid = pid
+        self.name = name
+        self.work = work
+    }
+
+    fn deinit(self) {
+        console::setColour(console::Colour::Quiet)
+        console::print("       reaped pid ")
+        console::printNumber(self.pid)
+        console::print(" (")
+        console::print(self.name)
+        console::line(")")
+        console::setColour(console::Colour::Normal)
+    }
+}
+
+pub class Scheduler {
+    var head: Unique<Process>? = nil
+    pub var spawned: i64 = 0
+    pub var turns: i64 = 0
+
+    /// A new process, at the front of the queue. The queue's old head moves
+    /// into the new process's `next`: one owner before, one owner after.
+    pub fn spawn(&var self, name: CString, work: i64) {
+        self.spawned += 1
+        let p: Unique<Process> = Process(self.spawned, name, work)
+        p.next = self.head.take()
+        self.head = p
+    }
+
+    /// Runs every process for up to `slice` units until none has work left.
+    /// Returns how many turns that took.
+    pub fn runAll(&var self, slice: i64) -> i64 {
+        while true {
+            let left = match &var self.head {
+                Some(var p) => runSlice(&var p, slice),
+                None => 0,
+            }
+            self.turns += 1
+            if left == 0 { break }
+        }
+        self.turns
+    }
+
+    /// How much work every process has done, together.
+    pub fn totalDone(&self) -> i64 {
+        match &self.head {
+            Some(p) => doneFrom(&p),
+            None => 0,
+        }
+    }
+}
+
+/// One slice for `p` and everything after it; what is still left to do.
+fn runSlice(p: &var Process, slice: i64) -> i64 {
+    if p.done < p.work {
+        let step = if p.work - p.done < slice { p.work - p.done } else { slice }
+        p.done += step
+        if p.done == p.work {
+            console::print("       pid ")
+            console::printNumber(p.pid)
+            console::print(" ")
+            console::print(p.name)
+            console::line(" finished")
+        }
+    }
+    let left = p.work - p.done
+    match &var p.next {
+        Some(var n) => left + runSlice(&var n, slice),
+        None => left,
+    }
+}
+
+fn doneFrom(p: &Process) -> i64 {
+    match &p.next {
+        Some(n) => p.done + doneFrom(&n),
+        None => p.done,
+    }
+}

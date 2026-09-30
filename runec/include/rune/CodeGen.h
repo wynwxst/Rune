@@ -348,6 +348,18 @@ private:
   /// True when `d` was declared by the standard library or by an imported
   /// `.rul` — code this artefact carries a copy of rather than owns.
   bool isAncillary(const Decl *d) const;
+  void reportHostedRuntimeUses();
+  void emitReachedBodies();
+  void emitBorrowedGlobalInitialisers();
+  /// Freestanding: the standard library's globals, initialised only when the
+  /// program reads them, by this function, before its own.
+  llvm::Function *BorrowedGlobalsInit = nullptr;
+  std::vector<GlobalVarDecl *> DeferredGlobals;
+  std::set<FunctionDecl *> OfferedBodies;
+  bool isZeroInitialiser(Expr *e, Type *t);
+  void resolveWeakDefinitions();
+  /// `@weak` definitions another in this module replaces; never emitted.
+  std::set<FunctionDecl *> ReplacedDefinitions;
   /// Drops every definition nothing in the module reaches. What "reaches"
   /// means is decided by linkage: see `setDiscardableLinkage`.
   void pruneUnreachable();

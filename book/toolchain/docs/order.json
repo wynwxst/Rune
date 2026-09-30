@@ -45,7 +45,8 @@
     "the_package_registry.md",
     "incremental_builds.md",
     "concurrency.md",
-    "cross_compilation.md"
+    "cross_compilation.md",
+    "bare_metal.md"
   ],
   "Performance": [
     "index.md",

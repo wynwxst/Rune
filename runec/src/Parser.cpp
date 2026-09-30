@@ -392,8 +392,44 @@ void Parser::parseFileDirectives(Module &mod) {
       skipSeparators();
       continue;
     }
-    if (name != "link" && name != "linkpath" && name != "type")
+    if (name != "link" && name != "linkpath" && name != "type" &&
+        name != "runtime" && name != "entry")
       return;
+    if (name == "runtime" || name == "entry") {
+      // `@runtime(none)` and `@entry(none)` belong to the program: what it is
+      // linked with, and where it starts. `rune` and `runec` read them before
+      // parsing; this is where a misspelling is caught.
+      std::string &value =
+          name == "runtime" ? mod.RuntimeDirective : mod.EntryDirective;
+      SourceRange &range = name == "runtime" ? mod.RuntimeDirectiveRange
+                                             : mod.EntryDirectiveRange;
+      advance();
+      advance();
+      if (expect(Tok::LParen, "a program directive")) {
+        const char *choices =
+            name == "runtime" ? "hosted or none" : "main or none";
+        if (check(Tok::Identifier) &&
+            (cur().Text == "none" ||
+             cur().Text == (name == "runtime" ? "hosted" : "main"))) {
+          value = cur().Text;
+          range = cur().Range;
+          advance();
+        } else {
+          Diags.error(cur().Range, "`@{}` takes one of {}", name, choices)
+              .note(name == "runtime"
+                        ? "`@runtime(none)` builds a freestanding program: "
+                          "no C library and no hosted runtime"
+                        : "`@entry(none)` generates no `main`; an `@export`ed "
+                          "function is where the program starts")
+              .code(109);
+          if (!check(Tok::RParen))
+            advance();
+        }
+        expect(Tok::RParen, "a program directive");
+      }
+      skipSeparators();
+      continue;
+    }
     if (name == "type") {
       // `@type` decides what the file produces, which is what everything else
       // about linking depends on, so it comes before them.
@@ -540,7 +576,8 @@ DeclPtr Parser::parseTopLevelDecl() {
   // These belong to the file, not to a declaration, so they are only read at
   // the very top. Reaching one here means it came too late.
   for (const Attribute &a : attrs)
-    if (a.Name == "link" || a.Name == "linkpath" || a.Name == "type")
+    if (a.Name == "link" || a.Name == "linkpath" || a.Name == "type" ||
+        a.Name == "runtime" || a.Name == "entry")
       Diags.error(a.Range, "`@{}` must be at the top of the file", a.Name)
           .note("it applies to the whole file, so it goes before every "
                 "declaration — imports included")

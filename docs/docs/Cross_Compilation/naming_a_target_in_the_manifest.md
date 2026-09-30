@@ -51,7 +51,7 @@ $ rune targets
 In Rune.toml
   wasm            wasm32-wasip1
       the foreign target wasm, adjusted
-      ✓ builds with ../toolchains/wasi-sdk/bin/wasm32-wasip1-clang
+      ✓ builds with /work/toolchains/wasi-sdk/bin/wasm32-wasip1-clang
       ✓ runs with wasmtime run -S inherit-env=y --dir=.
   web             wasm32-wasip1
       the foreign target wasm, adjusted

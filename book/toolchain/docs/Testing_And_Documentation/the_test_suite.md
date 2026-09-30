@@ -86,6 +86,17 @@ tests run as WebAssembly, and a handful of `tests/cases` compiled with
 `runec --target` for each flavour and compared against their `// EXPECT:`
 lines. Run it alone with `python3 tests/cross_test.py build/bin`.
 
+## The bare-metal test
+
+`rune_bare_metal` is `tests/bare_metal_test.py`. It compiles each program in
+`tests/freestanding/` as a freestanding Linux x86_64 binary — no C library,
+two system calls by inline assembly — under `--safety full`, and checks that
+each failed check reaches the program's panic handler with the right message,
+that the heap goes through the program's allocator, that the borrow checker
+and E0542 still refuse what they refuse. Then it boots `examples/toyos` under
+`qemu-system-i386`, normally, with `-append panic`, and optimised. Run it
+alone with `python3 tests/bare_metal_test.py build/bin`.
+
 ## The other checks
 
 The suite is not the only thing that exercises the compiler:

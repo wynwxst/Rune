@@ -560,6 +560,18 @@ Building for a machine that is not the one you are on. The compiler already emit
 - [What does not cross](Cross_Compilation/what_does_not_cross.md)
 - [32-bit targets](Cross_Compilation/32_bit_targets.md)
 
+## Bare metal
+
+Programs with nothing underneath them: a kernel, a boot loader, firmware. The language is the same one — the checks, the borrow checker, classes and optionals included — and what the generated code needs of a runtime is Rune compiled into the program, asking the program for the three things only it can know.
+
+- [A freestanding program](Bare_Metal/a_freestanding_program.md)
+- [The hooks](Bare_Metal/the_hooks.md)
+- [Safety on bare metal](Bare_Metal/safety_on_bare_metal.md)
+- [What the freestanding runtime provides](Bare_Metal/what_the_freestanding_runtime_provides.md)
+- [Starting without main](Bare_Metal/starting_without_main.md)
+- [@weak](Bare_Metal/weak.md)
+- [Bare-metal targets](Bare_Metal/bare_metal_targets.md)
+
 ## Conditional compilation
 
 `@Config(...)` decides whether a declaration exists at all. It is answered before anything is checked, so what it rules out is not merely unused — it is gone, and may name types and foreign symbols that exist on no other target.

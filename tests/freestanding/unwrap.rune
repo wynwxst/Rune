@@ -1,0 +1,9 @@
+import fs::sys
+fn find(i: i64) -> i64? { if i > 2 { i } else { nil } }
+@export("_start")
+fn start() -> Never {
+    sys::sayNumber(find(5).unwrap())
+    sys::say("\n")
+    sys::sayNumber(find(1).unwrap())
+    sys::exit(0)
+}

@@ -1,0 +1,6 @@
+@runtime(none)
+@entry(none)
+import std::io
+fn greet() { io::println("hi") }
+@export("_start")
+fn start() -> i64 { greet(); 0 }

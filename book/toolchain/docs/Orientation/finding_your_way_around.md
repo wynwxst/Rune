@@ -34,6 +34,7 @@ targets and how their toolchains are found.
 | Add something the compiler must answer itself | An `@intrinsic` in `stdlib/`, handled in `CodeGenExpr.cpp` |
 | Change what a build does | `rune/src/main.cpp` |
 | Add a cross target, or change how one is found | `rune/src/Targets.cpp` |
+| Change what a freestanding program is given | `runetime/freestanding.rune` |
 | Add a test | `tests/cases/` |
 | Document something | `docs/reference/content.py` |
 

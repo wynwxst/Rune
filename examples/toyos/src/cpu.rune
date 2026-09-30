@@ -1,0 +1,45 @@
+// The processor and the machine around it: I/O ports, stopping, and the two
+// ways out of QEMU.
+import std::asm
+
+/// Writes a byte to an I/O port.
+@safe("a port write reaches a device, never Rune memory")
+pub fn outb(port: u16, value: u8) {
+    unsafe { asm::run("outb %al, %dx", "{al},{dx}", value, port) }
+}
+
+/// Writes a 16-bit word to an I/O port.
+@safe("a port write reaches a device, never Rune memory")
+pub fn outw(port: u16, value: u16) {
+    unsafe { asm::run("outw %ax, %dx", "{ax},{dx}", value, port) }
+}
+
+/// Reads a byte from an I/O port.
+@safe("a port read reaches a device, never Rune memory")
+pub fn inb(port: u16) -> u8 {
+    unsafe { asm::value<u8>("inb %dx, %al", "={al},{dx}", port) }
+}
+
+/// Stops the processor for good: interrupts off, then halt.
+@safe("stops the processor; touches no memory")
+pub fn halt() -> Never {
+    loop {
+        unsafe { asm::run("cli; hlt", "") }
+    }
+}
+
+/// Switches the machine off through the ACPI port QEMU's PC provides, which
+/// makes QEMU exit with status 0.
+pub fn powerOff() -> Never {
+    outw(1540, 8192)        // 0x604 <- 0x2000: sleep state S5
+    halt()
+}
+
+/// Ends the run with a status of the kernel's choosing, through QEMU's
+/// `isa-debug-exit` device at port 0xf4: QEMU exits with `code * 2 + 1`.
+/// Where there is no such device the write goes nowhere, and the machine is
+/// switched off instead.
+pub fn exitWith(code: u8) -> Never {
+    outb(244, code)
+    powerOff()
+}

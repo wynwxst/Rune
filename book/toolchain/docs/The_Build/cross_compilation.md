@@ -71,6 +71,11 @@ flags and libraries the runtime needs there:
 | --- | --- |
 | `GnuPrefix` | `<prefix>-gcc` on `PATH`; `-g++` and `-ar` beside it |
 | `WasiSdk` | `sdk`, `$WASI_SDK_PATH`, `/opt/wasi-sdk`, `/opt/wasi-sdk-*`, `~/.rune/toolchains/wasi-sdk`, `~/wasi-sdk`; then `bin/<triple>-clang`, `bin/llvm-ar`, `share/wasi-sysroot` |
+| `Clang` | `clang` and `ld.lld` on `PATH`; the triple goes in `c-flags` and `link-args` |
+
+`Clang` (host clang and ld.lld, told the target) is for the bare-metal
+targets, which are also `Freestanding`: built `@runtime(none)` whatever the
+sources say. See *Bare metal*.
 
 A missing toolchain is an error at resolution, before anything compiles, with
 the entry's `InstallHint` as the note. A missing runner is not: the target

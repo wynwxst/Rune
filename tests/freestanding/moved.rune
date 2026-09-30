@@ -1,0 +1,10 @@
+import fs::sys
+class Box { pub var v: i64 = 1 }
+fn take(b: Box) -> i64 { b.v }
+@export("_start")
+fn start() -> Never {
+    let b = Box()
+    let x = take(b)
+    let y = take(b)
+    sys::exit(x + y)
+}

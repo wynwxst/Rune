@@ -1,0 +1,9 @@
+import fs::sys
+fn share(total: i64, people: i64) -> i64 { total / people }
+@export("_start")
+fn start() -> Never {
+    sys::sayNumber(share(10, 2))
+    sys::say("\n")
+    let v = share(10, 0)
+    sys::exit(0)
+}

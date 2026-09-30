@@ -42,6 +42,7 @@
   "Threads_And_Sharing",
   "Tasks_And_Futures",
   "Cross_Compilation",
+  "Bare_Metal",
   "Conditional_Compilation",
   "Inline_Assembly",
   "Grammar_And_Limits"
@@ -475,6 +476,15 @@
   "c_and_c_plus_plus_sources.md",
   "what_does_not_cross.md",
   "32_bit_targets.md"
+ ],
+ "Bare_Metal": [
+  "a_freestanding_program.md",
+  "the_hooks.md",
+  "safety_on_bare_metal.md",
+  "what_the_freestanding_runtime_provides.md",
+  "starting_without_main.md",
+  "weak.md",
+  "bare_metal_targets.md"
  ],
  "Conditional_Compilation": [
   "config.md",

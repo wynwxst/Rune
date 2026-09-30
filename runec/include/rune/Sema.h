@@ -1048,6 +1048,8 @@ private:
   /// Resolves `@name(...)` on a function to a user-defined decorator: a
   /// function whose last parameter is a function type. Reports when a
   /// decorator is unknown, mis-shaped, or given the wrong arguments.
+  void checkRuntimeHook(FunctionDecl *fn, const Attribute &a);
+  std::map<std::string, FunctionDecl *> RuntimeHooks;
   void checkDecorators(FunctionDecl *fn);
   /// Records `@Doc("...")` on any declaration into its `Doc` field.
   void collectDoc(Decl *d);

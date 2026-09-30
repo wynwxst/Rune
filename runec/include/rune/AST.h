@@ -1306,6 +1306,12 @@ struct Module {
   /// in which case a `main` makes it an executable.
   std::string DeclaredOutput;
   SourceRange DeclaredOutputRange;
+  /// `@runtime(none)` and `@entry(none)` — what the program has around it.
+  /// Empty when the file did not say.
+  std::string RuntimeDirective;
+  SourceRange RuntimeDirectiveRange;
+  std::string EntryDirective;
+  SourceRange EntryDirectiveRange;
 };
 
 //===----------------------------------------------------------------------===//
@@ -1431,6 +1437,28 @@ template <> inline bool isa<ValueDecl>(const Node *n) {
   return n && (n->Kind == NodeKind::Function || n->Kind == NodeKind::GlobalVar ||
                n->Kind == NodeKind::LocalVar || n->Kind == NodeKind::Field);
 }
+/// The symbol a function answers to when it provides something the generated
+/// code relies on — the freestanding runtime's hooks, which a bare-metal
+/// program supplies itself: `@panicHandler`, `@allocator`, `@deallocator`.
+/// Null for any other function.
+inline const char *langItemSymbol(const FunctionDecl *fn) {
+  if (!fn)
+    return nullptr;
+  if (fn->hasAttr("panicHandler"))
+    return "rune_panic_handler";
+  if (fn->hasAttr("allocator"))
+    return "rune_heap_allocate";
+  if (fn->hasAttr("deallocator"))
+    return "rune_heap_free";
+  return nullptr;
+}
+
+/// True when a function is reached from outside by a symbol name of its own:
+/// `@export`, or one of the hooks above.
+inline bool isExportedFunction(const FunctionDecl *fn) {
+  return fn && (fn->hasAttr("export") || langItemSymbol(fn));
+}
+
 } // namespace rune
 
 #endif

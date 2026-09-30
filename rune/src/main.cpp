@@ -137,6 +137,10 @@ struct Options {
   /// `--memory <mode>`, or the root manifest's `[build] memory`. Applies to
   /// every package in the build: a program is one memory model throughout.
   std::string Memory = "zombie";
+  /// A freestanding build: the root manifest says `runtime = "none"` (or a
+  /// source says `@runtime(none)`), or the target is bare metal. Everything
+  /// in the build is compiled without the hosted runtime.
+  bool Freestanding = false;
   bool CheckOnly = false;
   bool RunAll = false;         ///< `rune run --all`
   /// `--emit <kind>`, or `[build] emit`. When set, this package's own roots
@@ -235,6 +239,10 @@ void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o,
                       const std::map<std::string, std::string> &config) {
   cmd += " --safety " + m.Safety;
   cmd += " --memory " + o.Memory;
+  if (o.Freestanding)
+    cmd += " --runtime none";
+  if (m.NoEntry)
+    cmd += " --entry none";
   unsigned opt = o.Release ? std::max(2u, m.OptLevel) : m.OptLevel;
   cmd += " -O" + std::to_string(opt);
   if (m.Debug && !o.Release)
@@ -705,6 +713,8 @@ bool prepareInputs(PackageNode &node, std::vector<PackageNode> &nodes,
   own.NeedsCxx = !node.M.CxxSources.empty();
   for (const std::string &a : node.M.LinkArgs)
     own.LinkArgs.push_back(a);
+  if (!node.M.LinkerScript.empty())
+    own.LinkArgs.push_back("-Wl,-T," + node.M.LinkerScript);
   for (const std::string &l : opts.Target.LinkLibraries)
     own.LinkLibs.push_back(l);
   for (const std::string &p : opts.Target.LinkPaths)
@@ -933,6 +943,12 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
       deps.push_back(lib);
     if (!node.Result.LibraryPath.empty())
       deps.push_back(node.Result.LibraryPath);
+    // Read by the link or compiled in, though no source names them.
+    if (!m.LinkerScript.empty())
+      deps.push_back(m.LinkerScript);
+    if (opts.Freestanding)
+      deps.push_back((fs::path(RUNE_TOOLCHAIN_ROOT) / "runetime" /
+                      "freestanding.rune").string());
     pm::Fingerprint fp = stepFingerprint(cmd, deps);
     if (stamps.isFresh(out, fp)) {
       if (step.Kind == OutputKind::Executable && !emitting)
@@ -2432,6 +2448,7 @@ int main(int argc, char **argv) {
         }
         opts.EmitSet = true;
       }
+      opts.Freestanding = root.Freestanding;
       if (!opts.TargetName.empty()) {
         TargetProblem problem;
         if (!resolveTarget(root, opts.TargetName, opts.Target, problem)) {
@@ -2440,9 +2457,13 @@ int main(int argc, char **argv) {
             note(n);
           return 1;
         }
+        // Bare metal has no hosted runtime to build, whatever the package
+        // said; a freestanding program has no use for one either.
+        if (opts.Target.Freestanding)
+          opts.Freestanding = true;
         // A cross build needs a runtime built for its target. One named in
         // the manifest is taken as given; otherwise it is built and cached.
-        if (opts.Target.RuntimeDir.empty()) {
+        if (opts.Target.RuntimeDir.empty() && !opts.Freestanding) {
           opts.Target.RuntimeDir = ensureRuntimeFor(opts.Target, opts);
           if (opts.Target.RuntimeDir.empty())
             return 1;

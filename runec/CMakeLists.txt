@@ -10,7 +10,8 @@ target_link_libraries(runec_core PUBLIC rune_llvm)
 target_compile_definitions(runec_core PUBLIC
   RUNE_VERSION_STRING="${PROJECT_VERSION}"
   RUNE_DEFAULT_STDLIB_DIR="${RUNE_STDLIB_DIR}"
-  RUNE_RUNTIME_LIB_DIR="${CMAKE_BINARY_DIR}/lib")
+  RUNE_RUNTIME_LIB_DIR="${CMAKE_BINARY_DIR}/lib"
+  RUNE_RUNETIME_DIR="${CMAKE_SOURCE_DIR}/runetime")
 
 target_compile_options(runec_core PRIVATE
   -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations)

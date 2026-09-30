@@ -32,6 +32,9 @@ enum class ToolchainKind {
   /// wasi-libc in it. Found through `sdk`, `$WASI_SDK_PATH`, or the places
   /// its installers put it.
   WasiSdk,
+  /// This machine's clang and ld.lld, told the target: one compiler for
+  /// every bare-metal target, since there is no libc to match.
+  Clang,
 };
 
 /// A platform Rune can build for by name alone.
@@ -50,6 +53,12 @@ struct ForeignTarget {
   std::vector<std::string> CFlags;
   /// Native libraries the runtime needs on this target.
   std::vector<std::string> LinkLibraries;
+  /// Added to the link command: `-fuse-ld=lld`, the target for a driver that
+  /// was not named after it.
+  std::vector<std::string> LinkArgs;
+  /// Bare metal: no operating system, so no hosted runtime — the program is
+  /// built as `@runtime(none)` whatever its sources say.
+  bool Freestanding = false;
   /// How to get the toolchain, for when it is missing.
   std::string InstallHint;
 };
@@ -79,6 +88,8 @@ struct ResolvedTarget {
   std::vector<std::string> LinkLibraries;
   std::vector<std::string> LinkPaths;
   std::vector<std::string> LinkArgs;
+  /// Bare metal: see `ForeignTarget::Freestanding`.
+  bool Freestanding = false;
 
   /// Enough to name what a build produces. Parsing the whole triple here
   /// would mean linking LLVM into the package driver for two questions.

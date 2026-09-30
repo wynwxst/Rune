@@ -1,0 +1,49 @@
+// What the boot loader tells the kernel: the multiboot information structure,
+// whose address arrives in EBX, and the magic number in EAX that says the
+// structure is really there.
+
+/// The magic a multiboot-compliant loader leaves in EAX.
+pub let bootMagic: u32 = 732803074           // 0x2BADB002
+
+/// The start of the structure; the fields past `cmdline` are not used here.
+pub struct Info {
+    pub flags: u32
+    pub memLower: u32       // KB of memory below 1 MB, if flags bit 0
+    pub memUpper: u32       // KB of memory above 1 MB, if flags bit 0
+    pub bootDevice: u32
+    pub cmdline: u32        // address of a C string, if flags bit 2
+}
+
+/// The structure at `address`, copied out.
+@safe("the loader put the structure at this address before the kernel ran")
+pub fn read(address: u32) -> Info {
+    let p = unsafe { address as usize as *var Info }
+    unsafe { p[0] }
+}
+
+pub fn hasMemory(info: &Info) -> bool { (info.flags & 1) != 0 }
+pub fn hasCommandLine(info: &Info) -> bool { (info.flags & 4) != 0 }
+
+/// The kernel's command line — QEMU's `-append` — or an empty string.
+@safe("the loader's command line is NUL-terminated")
+pub fn commandLine(info: &Info) -> CString {
+    if !hasCommandLine(info) || info.cmdline == 0 { return "" }
+    unsafe { info.cmdline as usize as *var u8 as CString }
+}
+
+/// Whether `word` appears in `text`.
+@safe("both strings are read up to their NUL and no further")
+pub fn contains(text: CString, word: CString) -> bool {
+    let t = unsafe { text as *u8 }
+    let w = unsafe { word as *u8 }
+    var i: i64 = 0
+    while unsafe { t[i] } != 0 {
+        var j: i64 = 0
+        while unsafe { w[j] } != 0 && unsafe { t[i + j] } == unsafe { w[j] } {
+            j += 1
+        }
+        if unsafe { w[j] } == 0 { return true }
+        i += 1
+    }
+    false
+}

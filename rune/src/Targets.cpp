@@ -94,6 +94,47 @@ const std::vector<ForeignTarget> &foreignTargets() {
     all.push_back(linuxTarget("linux-riscv64", "linux-riscv", "riscv64",
                               "64-bit RISC-V Linux, built with GCC",
                               "gcc-riscv64-linux-gnu"));
+
+    // Bare metal: no operating system underneath, so no C library and no
+    // hosted runtime — a kernel, a boot loader, firmware. One clang builds
+    // for all of them, and ld.lld links; the program brings its own linker
+    // script and entry. QEMU runs what it can boot straight from an ELF.
+    auto bareTarget = [](const std::string &name, const std::string &arch,
+                         const std::string &triple, const std::string &summary,
+                         const std::string &runner) {
+      ForeignTarget t;
+      t.Name = name;
+      t.Aliases = {arch + "-none", arch + "-bare", triple};
+      t.Summary = summary;
+      t.Triple = triple;
+      t.Toolchain = ToolchainKind::Clang;
+      t.Freestanding = true;
+      if (!runner.empty())
+        t.Runners = {runner};
+      // `-ffreestanding` means nothing to an assembly file; saying so is noise.
+      t.CFlags = {"--target=" + triple, "-ffreestanding", "-fno-pic",
+                  "-Wno-unused-command-line-argument"};
+      t.LinkArgs = {"--target=" + triple, "-fuse-ld=lld"};
+      t.InstallHint = "install clang and lld: `apt install clang lld` or "
+                      "`brew install llvm`";
+      return t;
+    };
+    all.push_back(bareTarget(
+        "bare-x86", "i686", "i686-unknown-none-elf",
+        "32-bit x86, no operating system: a multiboot kernel",
+        "qemu-system-i386 -display none -serial stdio -no-reboot -kernel"));
+    all.push_back(bareTarget("bare-x86_64", "x86_64", "x86_64-unknown-none-elf",
+                             "64-bit x86, no operating system", ""));
+    all.push_back(bareTarget(
+        "bare-arm64", "aarch64", "aarch64-unknown-none-elf",
+        "64-bit ARM, no operating system",
+        "qemu-system-aarch64 -M virt -cpu cortex-a57 -display none "
+        "-serial stdio -kernel"));
+    all.push_back(bareTarget(
+        "bare-riscv64", "riscv64", "riscv64-unknown-none-elf",
+        "64-bit RISC-V, no operating system",
+        "qemu-system-riscv64 -M virt -bios none -display none -serial stdio "
+        "-kernel"));
     return all;
   }();
   return targets;
@@ -224,7 +265,9 @@ std::string cxxDriverFor(const ResolvedTarget &t) {
   return t.Cc;
 }
 
-bool wantsPic(const ResolvedTarget &t) { return !t.isWasm(); }
+bool wantsPic(const ResolvedTarget &t) {
+  return !t.isWasm() && !t.Freestanding;
+}
 
 //===----------------------------------------------------------------------===//
 // Resolving a name
@@ -267,6 +310,8 @@ static bool fillFromForeign(const ForeignTarget &f, const TargetSpec *spec,
   out.Triple = f.Triple;
   out.CFlags = f.CFlags;
   out.LinkLibraries = f.LinkLibraries;
+  out.LinkArgs = f.LinkArgs;
+  out.Freestanding = f.Freestanding;
   const bool ccGiven = spec && !spec->Cc.empty();
 
   switch (f.Toolchain) {
@@ -296,6 +341,20 @@ static bool fillFromForeign(const ForeignTarget &f, const TargetSpec *spec,
       out.Ar = (fs::path(sdk) / "bin" / "llvm-ar").string();
       out.Sysroot = (fs::path(sdk) / "share" / "wasi-sysroot").string();
     }
+    break;
+  }
+  case ToolchainKind::Clang: {
+    if (!ccGiven && (findOnPath("clang").empty() || findOnPath("ld.lld").empty())) {
+      problem.Message = std::string("cannot find ") +
+                        (findOnPath("clang").empty() ? "clang" : "ld.lld") +
+                        ", which " + f.Name + " builds with";
+      problem.Notes.push_back(f.InstallHint);
+      problem.Notes.push_back("or name another compiler: `cc = \"...\"` in "
+                              "[target." + f.Name + "]");
+      return false;
+    }
+    out.Cc = "clang";
+    out.Ar = findOnPath("llvm-ar").empty() ? "ar" : "llvm-ar";
     break;
   }
   case ToolchainKind::GnuPrefix: {

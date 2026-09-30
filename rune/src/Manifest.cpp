@@ -112,6 +112,32 @@ static OutputKind kindOfSource(const fs::path &path) {
 }
 
 
+/// The value of `@<name>(...)` among the directives at the top of a file —
+/// `@runtime(none)` gives "none" — or empty when the file does not say.
+static std::string programDirectiveOf(const fs::path &path,
+                                      const std::string &name) {
+  std::ifstream in(path);
+  std::string line;
+  while (std::getline(in, line)) {
+    size_t i = line.find_first_not_of(" \t\r");
+    if (i == std::string::npos || line.compare(i, 2, "//") == 0)
+      continue;
+    if (line[i] != '@')
+      return ""; // the first declaration: the directives are over
+    const std::string open = "@" + name + "(";
+    if (line.compare(i, open.size(), open) == 0) {
+      size_t close = line.find(')', i);
+      if (close == std::string::npos)
+        return "";
+      std::string arg = line.substr(i + open.size(), close - i - open.size());
+      arg.erase(0, arg.find_first_not_of(" \t"));
+      arg.erase(arg.find_last_not_of(" \t") + 1);
+      return arg;
+    }
+  }
+  return "";
+}
+
 void collectRuneFiles(const fs::path &dir, std::vector<std::string> &out) {
   std::error_code ec;
   if (!fs::is_directory(dir, ec))
@@ -172,6 +198,24 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
     if (const TomlValue *v = build->find("warnings-as-errors"))
       out.WarningsAsErrors = v->boolOr(false);
     if (const TomlValue *v = build->find("no-stdlib")) out.NoStdlib = v->boolOr(false);
+    if (const TomlValue *v = build->find("runtime")) {
+      const std::string r = v->stringOr("hosted");
+      if (r != "hosted" && r != "none") {
+        error = manifestPath.string() + ": [build] runtime is 'hosted' or "
+                "'none', not '" + r + "'";
+        return false;
+      }
+      out.Freestanding = r == "none";
+    }
+    if (const TomlValue *v = build->find("entry")) {
+      const std::string e = v->stringOr("main");
+      if (e != "main" && e != "none") {
+        error = manifestPath.string() + ": [build] entry is 'main' or "
+                "'none', not '" + e + "'";
+        return false;
+      }
+      out.NoEntry = e == "none";
+    }
     out.LinkLibraries = stringList(build->find("link"));
     out.LinkPaths = stringList(build->find("link-paths"));
     out.CSources = stringList(build->find("c-sources"));
@@ -182,6 +226,11 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
       out.CxxStandard = v->stringOr("");
     out.ConfigFlags = stringList(build->find("cfg"));
     out.LinkArgs = stringList(build->find("link-args"));
+    if (const TomlValue *v = build->find("linker-script")) {
+      out.LinkerScript = v->stringOr("");
+      if (!out.LinkerScript.empty() && !fs::path(out.LinkerScript).is_absolute())
+        out.LinkerScript = (root / out.LinkerScript).lexically_normal().string();
+    }
     // A source path is relative to the manifest, like everything else in it.
     for (std::string &p : out.CSources)
       if (!fs::path(p).is_absolute())
@@ -278,6 +327,12 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
   for (const std::string &f : out.Sources) {
     fs::path p(f);
     std::string stem = p.stem().string();
+    // A source that says `@runtime(none)` or `@entry(none)` says it for the
+    // program, as the manifest would.
+    if (programDirectiveOf(p, "runtime") == "none")
+      out.Freestanding = true;
+    if (programDirectiveOf(p, "entry") == "none")
+      out.NoEntry = true;
     OutputKind k = kindOfSource(p);
     if (k == OutputKind::Component) {
       if (stem == "lib")  k = OutputKind::Library;

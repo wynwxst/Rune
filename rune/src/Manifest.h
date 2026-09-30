@@ -117,6 +117,12 @@ struct Manifest {
   int OverflowChecks = -1;
   bool WarningsAsErrors = false;
   bool NoStdlib = false;
+  /// `[build] runtime = "none"`, or `@runtime(none)` atop a source file: a
+  /// freestanding program — no C library, no hosted runtime. Like `memory`,
+  /// the root package decides for the whole build.
+  bool Freestanding = false;
+  /// `[build] entry = "none"`, or `@entry(none)`: no generated `main`.
+  bool NoEntry = false;
   std::vector<std::string> LinkLibraries; ///< [build] link = ["m", "z"]
   std::vector<std::string> LinkPaths;
   /// [build] c-sources = ["c/shim.c"] — compiled with the same toolchain the
@@ -138,6 +144,9 @@ struct Manifest {
   /// choose them instead; see `Dependency::Config`.
   std::map<std::string, std::string> Config;
   std::vector<std::string> LinkArgs;     ///< [build] link-args
+  /// [build] linker-script = "kernel.ld" — where each section goes, for a
+  /// program with no operating system to load it. Relative to the manifest.
+  std::string LinkerScript;
 
   // [dependencies]
   std::vector<Dependency> Dependencies;

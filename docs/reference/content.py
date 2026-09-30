@@ -14032,6 +14032,185 @@ $ rune test --target wasm           # wasm32: a 32-bit target too"""),
 
 
 # ===========================================================================
+# Bare metal
+# ===========================================================================
+SECTIONS.append(Sec(
+    "baremetal", "tooling", "Bare metal",
+    "Programs with nothing underneath them: a kernel, a boot loader, "
+    "firmware. The language is the same one — the checks, the borrow "
+    "checker, classes and optionals included — and what the generated code "
+    "needs of a runtime is Rune compiled into the program, asking the "
+    "program for the three things only it can know.",
+    [
+        H("A freestanding program"),
+        P("Two directives at the top of a file — or `runtime` and `entry` "
+          "under `[build]`, or `--runtime none` and `--entry none` to "
+          "`runec` — say what the program has around it."),
+        T(["Directive", "Means", "Like Rust's"],
+          [["`@runtime(none)`", "no C library and no hosted runtime are "
+            "linked; `runetime/freestanding.rune` is compiled into the "
+            "program instead", "`#![no_std]`"],
+           ["`@entry(none)`", "no `main` is generated; an `@export`ed "
+            "function is where execution starts", "`#![no_main]`"]]),
+        S("""@runtime(none)
+@entry(none)
+import std::asm
+
+@panicHandler
+fn panicked(message: CString, location: CString) -> Never {
+    // say it somewhere (a serial port, the screen), then stop
+    loop { unsafe { asm::run("cli; hlt", "") } }
+}
+
+@export("kernel_main")
+fn kernelMain(magic: u32, info: u32) -> Never {
+    // ...
+    loop {}
+}""", mode="frag", title="The shape of a kernel"),
+        P("The standard library is still there, and still only compiled "
+          "where it is used, so `T?`, `Result`, `std::asm` and the rest of "
+          "what is plain Rune work as ever. What reaches the hosted runtime "
+          "— `String`, `std::io`, threads, tasks, reference counting — is "
+          "refused at compile time, against the function of yours that "
+          "reached it:"),
+        SH("""● kernel.rune [4:3..8]
+4 ║ fn greet() { io::println("hi") }
+       ^^^^^ ERROR: 'greet' needs the hosted runtime, and this program is built without one [E0542]
+    ─  note: it uses `String`, which lives in the hosted runtime; a freestanding program works in `CString` and byte arrays"""),
+        N("A freestanding program is built with `--memory zombie`. Every "
+          "object has one owner and nothing is counted, so the heap needs "
+          "nothing but an allocator; reference counting would need the "
+          "hosted runtime's atomics and weak table, and is refused like any "
+          "other use of it.", label="Single ownership"),
+
+        H("The hooks"),
+        P("Three functions the generated code relies on, supplied by the "
+          "program. Each has a default in the freestanding runtime, marked "
+          "`@weak`, that the program's own replaces."),
+        T(["Attribute", "Signature", "Called for", "Default"],
+          [["`@panicHandler`", "`fn(message: CString, location: CString) -> Never`",
+            "every failed check, `unwrap` of an empty `Option`, "
+            "`process::panic`", "stops where it is, for ever"],
+           ["`@allocator`", "`fn(size: usize, align: usize) -> *var u8`",
+            "every object a class, a closure or a `Unique` makes",
+            "panics: *this program allocates, and declares no @allocator*"],
+           ["`@deallocator`", "`fn(block: *var u8)`",
+            "every object whose one owner is done with it",
+            "nothing — without an allocator nothing was allocated"]],
+          caption="A hook with the wrong signature is E0248; two of one kind "
+                  "is E0249."),
+        S("""global var region: [65536:u8] = [0; 65536]
+global var used: usize = 0
+
+@allocator
+fn allocate(size: usize, align: usize) -> *var u8 {
+    let at = (used + align - 1) / align * align
+    used = at + size
+    unsafe { &var region[at as i64] as *var u8 }
+}
+
+@deallocator
+fn release(block: *var u8) {}""", mode="frag",
+          title="The smallest allocator: a bump pointer that never frees"),
+
+        H("Safety on bare metal"),
+        P("Nothing about checking changes. `--safety full` inserts every "
+          "check it inserts anywhere — array bounds, integer overflow, "
+          "division by zero, a nil dereference, a `match` no arm matched, "
+          "a drop of an object that turns out to be shared — and the Zombie "
+          "borrow checker proves the same things at compile time. The only "
+          "difference is where a failed check goes: the freestanding "
+          "runtime formats it into a buffer of its own, not the heap, and "
+          "hands it to the `@panicHandler`."),
+        SH("""KERNEL PANIC: index 4 is out of bounds for a collection of length 4
+  at main.rune:53:34"""),
+
+        H("What the freestanding runtime provides"),
+        P("`runetime/freestanding.rune` is compiled into the program for "
+          "the program's own target, the way Rust builds `core` for the "
+          "target it compiles for. It depends on nothing."),
+        T(["", "Provides"],
+          [["Panics", "`rune_panic_bounds`, `_overflow`, `_div_zero`, `_nil`, "
+            "`_no_match`, `_any`, `_unwrap` and `rune_panic`, each turned "
+            "into a message for the `@panicHandler`"],
+           ["The heap", "`rune_alloc` and `rune_drop` over the `@allocator` "
+            "and `@deallocator`: an object's header, its `deinit`, and "
+            "`--safety full`'s check that a dropped object had one owner"],
+           ["Memory", "`memcpy`, `memmove`, `memset`, `memcmp` — LLVM emits "
+            "calls to them for large copies whatever the target"],
+           ["32-bit targets", "`__divdi3`, `__udivdi3`, `__moddi3` and "
+            "`__umoddi3`: 64-bit division, which a 32-bit processor does "
+            "with a library call"],
+           ["Classes", "`$clone()`, `is` and `Any` checks, hashing"]]),
+        N("A freestanding program is compiled with `no-builtins`, as C's "
+          "`-ffreestanding` does, so LLVM never turns a loop that copies "
+          "bytes into a call to `memcpy` — least of all inside `memcpy`. "
+          "Every one of these is `@weak`: a program with faster ones keeps "
+          "its own.", label="Why the loops stay loops"),
+
+        H("Starting without main"),
+        P("Under `@entry(none)` nothing runs before the program's own entry "
+          "— which is usually a few lines of assembly that make a stack and "
+          "call it. A global whose value is a constant or all zeros is in "
+          "the image already. Anything else is set by `rune_init`, which the "
+          "compiler generates and the entry calls first:"),
+        S("""extern "C" { fn rune_init() }
+
+@export("kernel_main")
+fn kernelMain(magic: u32, info: u32) -> Never {
+    unsafe { rune_init() }
+    // ...
+}""", mode="frag"),
+
+        H("@weak"),
+        P("A definition another may replace: the linker keeps a strong "
+          "definition of the same symbol over it, and so does the compiler "
+          "when both are in one program. It is how the freestanding "
+          "runtime's defaults give way to a program's hooks, and it works "
+          "the same for any `@export`ed function of your own."),
+
+        H("Bare-metal targets"),
+        P("Four foreign targets build with this machine's clang and ld.lld "
+          "and are freestanding whatever the sources say."),
+        T(["Name", "Triple", "Runs here with"],
+          [["`bare-x86`", "`i686-unknown-none-elf`", "`qemu-system-i386 -kernel`: a multiboot kernel"],
+           ["`bare-x86_64`", "`x86_64-unknown-none-elf`", "—"],
+           ["`bare-arm64`", "`aarch64-unknown-none-elf`", "`qemu-system-aarch64 -M virt -kernel`"],
+           ["`bare-riscv64`", "`riscv64-unknown-none-elf`", "`qemu-system-riscv64 -M virt -bios none -kernel`"]]),
+        P("A kernel says where its sections go with a linker script, and "
+          "brings what has to run before any Rune can — the multiboot "
+          "header, a stack — as an assembly file among its `c-sources`, "
+          "which clang assembles like any other."),
+        S("""[build]
+safety = "full"
+runtime = "none"
+entry = "none"
+target = "bare-x86"
+c-sources = ["boot/boot.s"]
+linker-script = "kernel.ld"
+
+[target.bare-x86]
+runner = "qemu-system-i386 -display none -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04 -kernel\"""",
+          mode="frag", title="examples/toyos/Rune.toml"),
+        SH("""$ cd examples/toyos
+$ rune run                          # boots under QEMU, runs its checks, powers off
+$ rune run -- -append panic         # trips a bounds check on purpose; exits 3"""),
+        P("[`examples/toyos`](examples/toyos/README.md) is the whole of it "
+          "worked through: a multiboot kernel with a VGA console and a "
+          "serial one, a first-fit heap behind its `@allocator`, processes "
+          "on a round-robin scheduler, each owned by the one before it, and "
+          "64-bit arithmetic on a 32-bit processor — all of it under "
+          "`--safety full`."),
+    ],
+    keywords=["bare metal", "freestanding", "kernel", "os", "no_std",
+              "no_main", "runtime", "entry", "@runtime", "@entry",
+              "panicHandler", "allocator", "deallocator", "weak", "rune_init",
+              "multiboot", "qemu", "linker script", "linker-script",
+              "bare-x86", "bare-arm64", "bare-riscv64", "E0542", "E0248",
+              "E0249", "memcpy", "__udivdi3", "firmware", "embedded"]))
+
+
+# ===========================================================================
 # Conditional compilation
 # ===========================================================================
 SECTIONS.append(Sec(
