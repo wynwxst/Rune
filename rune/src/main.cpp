@@ -161,7 +161,7 @@ struct Options {
   bool Verbose = false;
   /// `--memory <mode>`, or the root manifest's `[build] memory`. Applies to
   /// every package in the build: a program is one memory model throughout.
-  std::string Memory = "arc";
+  std::string Memory = "zombie";
   bool CheckOnly = false;
   bool RunAll = false;         ///< `rune run --all`
   /// `--emit <kind>`, or `[build] emit`. When set, this package's own roots
@@ -2312,9 +2312,9 @@ PACKAGES
 
 OPTIONS
     --release            Optimise (-O2) and omit debug information
-    --memory <mode>      arc | zombie: reference counting, or single ownership
-                         proven by the Zombie borrow checker (default: the
-                         manifest's [build] memory, else arc)
+    --memory <mode>      zombie | arc: single ownership proven by the Zombie
+                         borrow checker, or reference counting (default: the
+                         manifest's [build] memory, else zombie)
     -j, --jobs <n>       Compile at most <n> things at once (default: cores)
     --cfg <name>         Set <name> for `@Config(...)`, on top of [build] cfg
     --cfg <key>=<value>  Give <key> a value, over what [config] says

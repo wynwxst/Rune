@@ -7528,11 +7528,13 @@ fn main() -> i64 {
     io::println(b.x)
     0
 }""", mode="run", title="A borrow that has been finished with"),
-        N("A borrow is followed back to the binding it starts from, so two "
-          "*fields* of the same value count as the same place. Following an "
-          "index the compiler cannot evaluate would report the same conflicts "
-          "with less certainty, so it does not try; the diagnostic says as "
-          "much rather than leaving the reader to guess.",
+        N("A borrow is followed back to the binding it starts from and the "
+          "fields named on the way, so `&var p.x` and `&var p.y` are "
+          "different places — the same rule the Zombie checker keeps, so a "
+          "program it accepts is accepted here too. An index ends the path: "
+          "`v[i]` stands for all of `v`, since following an index the compiler "
+          "cannot evaluate would report conflicts with less certainty, not "
+          "more.",
           label="How precise it is"),
 
         H("What it buys at run time"),
@@ -10344,8 +10346,8 @@ fn main() -> i64 {
            ["`Random::chance` / `coin`", "`(&var self, p: f64) -> bool`",
             "true with probability `p`; or evenly"],
            ["`Random::choose` / `pick`", "`<T>(&var self, [T]) -> T?`",
-            "one element of a slice, or of a `Vector`"],
-           ["`Random::shuffle`", "`<T>(&var self, Vector<T>)`",
+            "one element of a slice, or a copy of one from a borrowed `Vector`"],
+           ["`Random::shuffle`", "`<T>(&var self, &var Vector<T>)`",
             "a uniformly random order, in place"],
            ["`bytes`", "`(count: i64) -> Vector<u8>`",
             "straight from the OS — for anything secret"],
@@ -10363,7 +10365,7 @@ fn main() -> i64 {
 
     var rng = random::new()                   // different every run
     var deck = vec!("A", "K", "Q", "J")
-    rng.shuffle(deck)
+    rng.shuffle(&var deck)
     io::println(deck.length())
     io::println(rng.float() < 1.0)
     io::println(random::bytes(16).length())
@@ -12075,7 +12077,7 @@ SECTIONS.append(Sec(
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
            ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"],
            ["`--safety <level>`", "`none`, `minimal` or `full` (default)"],
-           ["`--memory <mode>`", "`arc` (default) or `zombie`; see **Single "
+           ["`--memory <mode>`", "`zombie` (default) or `arc`; see **Single "
             "ownership without a count**"],
            ["`--no-zombie-stdlib`", "silence Zombie findings inside the standard "
             "library (reported by default)"],
@@ -12298,7 +12300,7 @@ license = "MIT"
 
 [build]
 safety = "full"                 # none | minimal | full
-memory = "arc"                  # arc | zombie (single ownership, no count)
+memory = "zombie"               # zombie | arc (reference counting)
 emit = "exe"                    # exe | lib | obj | asm | llvm-ir
 optimize = 0                    # 0..3, or use --release
 debug = true

@@ -219,6 +219,42 @@ private:
   void adopt(llvm::Value *v);
   /// Empties the place `e` names once its value has been moved out.
   void emptyPlace(Expr *e, Type *t);
+  /// Places moved out of while the operands of one construction — a call's
+  /// arguments, a literal's fields — are still being read. The borrow
+  /// checker moves them when the whole is built, after every operand, so
+  /// `S { name: name, dir: isDir(join(path, name)) }` reads `name` before
+  /// it is gone; emptying each place as its operand is emitted would not.
+  struct DeferEmpties;
+  DeferEmpties *PendingEmpties = nullptr;
+  struct DeferEmpties {
+    CodeGen &G;
+    std::vector<std::pair<Expr *, Type *>> List;
+    DeferEmpties *Saved;
+    /// Where the construction is: an operand emitted in a scope of its own —
+    /// a block's tail, a nested builder — empties at once, since that scope
+    /// may drop the place before this construction is done.
+    size_t Functions, Scopes;
+    bool Done = false;
+    explicit DeferEmpties(CodeGen &g)
+        : G(g), Saved(g.PendingEmpties), Functions(g.FnStack.size()),
+          Scopes(g.FnStack.empty() ? 0 : g.fs().Scopes.size()) {
+      G.PendingEmpties = this;
+    }
+    bool here() const {
+      return G.FnStack.size() == Functions && !G.FnStack.empty() &&
+             G.fs().Scopes.size() == Scopes;
+    }
+    /// Every operand has been read: the places they moved from give up now.
+    void flush() {
+      if (Done)
+        return;
+      Done = true;
+      G.PendingEmpties = Saved;
+      for (auto &[e, t] : List)
+        G.emptyPlace(e, t);
+    }
+    ~DeferEmpties() { flush(); }
+  };
   /// The place expression a consuming read of `e` actually moves from —
   /// through casts and blocks — or null when `e` produces a fresh value.
   Expr *movedPlaceOf(Expr *e);
@@ -371,6 +407,9 @@ private:
   /// A copy of `v` that owns its own everything: `$clone()`.
   llvm::Value *emitClone(llvm::Value *v, Type *t);
   llvm::Function *cloneFnFor(Type *t);
+  llvm::Function *objectCloneFor(Type *t);
+  /// Sema's functions, as a set, for asking whether one was instantiated.
+  std::set<FunctionDecl *> KnownFunctions;
   FunctionDecl *userCloneOf(Type *t);
   llvm::Value *emitUserClone(FunctionDecl *user, llvm::Value *v, Type *t);
   bool containsUserClone(Type *t, std::set<Type *> &seen);

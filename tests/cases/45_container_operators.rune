@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Subscripting and iterating the containers.
 //
 // `[]` is the direct form everywhere and aborts on a key or index that is not

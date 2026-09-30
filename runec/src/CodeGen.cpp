@@ -264,9 +264,11 @@ void CodeGen::initRuntimeTypes() {
   // struct RuneObject { int64_t refcount; const RuneTypeInfo *type; }
   ObjectHeaderTy = StructType::create(*Ctx, {B->getInt64Ty(), PtrTy},
                                       "rune.object");
-  // struct RuneTypeInfo { name, size, deinit, super, vtable, vtableCount }
+  // struct RuneTypeInfo { name, size, deinit, super, vtable, vtableCount,
+  //                       clone }
   TypeInfoTy = StructType::create(
-      *Ctx, {PtrTy, B->getInt64Ty(), PtrTy, PtrTy, PtrTy, B->getInt32Ty()},
+      *Ctx,
+      {PtrTy, B->getInt64Ty(), PtrTy, PtrTy, PtrTy, B->getInt32Ty(), PtrTy},
       "rune.typeinfo");
 }
 
@@ -1490,14 +1492,23 @@ Value *CodeGen::emitClone(Value *v, Type *t) {
   switch (t->kind()) {
   case TypeKind::Void:
     return v;
-  case TypeKind::Function:
-  case TypeKind::DynMark:
   case TypeKind::Any:
-    // No deep copy exists for these; a "clone" shares them. Under counting
-    // that is a retain; under single ownership `emitRetain` is a no-op, so a
-    // program that reaches this holds two owners of one closure — which
-    // the drop check catches at run time. Cloning one is rare and the borrow
-    // checker steers away from it.
+    // The object says what it is, and its descriptor how to copy it.
+    return B->CreateCall(runtimeFn("rune_clone_object", PtrTy, {PtrTy}), {v},
+                         "clone");
+  case TypeKind::DynMark: {
+    // The same object copy; the mark table is the concrete type's still.
+    Value *obj = B->CreateExtractValue(v, 0);
+    Value *copy = B->CreateCall(
+        runtimeFn("rune_clone_object", PtrTy, {PtrTy}), {obj}, "clone");
+    return B->CreateInsertValue(v, copy, 0);
+  }
+  case TypeKind::Function:
+    // No deep copy exists for a closure's captures; a "clone" shares them.
+    // Under counting that is a retain; under single ownership `emitRetain` is
+    // a no-op, so a program that reaches this holds two owners of one
+    // closure — which the drop check catches at run time. Cloning one is
+    // rare and the borrow checker steers away from it.
     emitRetain(v, t);
     return v;
   case TypeKind::String:
@@ -1537,7 +1548,10 @@ Value *CodeGen::emitClone(Value *v, Type *t) {
       emitRetain(v, t);
       return v;
     }
-    return B->CreateCall(cloneFnFor(t), {v}, "clone");
+    // Through the object's own descriptor: a `Dog` named as an `Animal` is
+    // copied as a `Dog`.
+    return B->CreateCall(runtimeFn("rune_clone_object", PtrTy, {PtrTy}), {v},
+                         "clone");
   case TypeKind::Enum:
     return B->CreateCall(cloneFnFor(t), {v}, "clone");
   default:
@@ -1565,6 +1579,42 @@ FunctionDecl *CodeGen::userCloneOf(Type *t) {
     return nullptr;
   FunctionDecl *m = Sema::userClone(t);
   return m;
+}
+
+/// `void *(const void *)`: a copy of an object of exactly class `t`, for its
+/// descriptor's `clone` slot. A class that writes its own `clone` is copied
+/// by it; otherwise field by field.
+Function *CodeGen::objectCloneFor(Type *t) {
+  FunctionDecl *user = userCloneOf(t);
+  if (!user)
+    return cloneFnFor(t);
+  // A generic's own `clone` exists for this instantiation only if something
+  // asked Sema for it. When nothing did there is no body to point at, and a
+  // field-by-field copy would be wrong for exactly the types that write
+  // their own — so the slot stays empty and a copy made at run time says so.
+  if (KnownFunctions.empty())
+    KnownFunctions.insert(Sema.Functions.begin(), Sema.Functions.end());
+  if (!user->Body || !KnownFunctions.count(user))
+    return nullptr;
+  std::string name = "rune.oclone." + typeSymbolFor(t->nominal());
+  if (Function *f = M->getFunction(name))
+    return f;
+  auto *f = Function::Create(FunctionType::get(PtrTy, {PtrTy}, false),
+                             GlobalValue::LinkOnceODRLinkage, name, *M);
+  auto *saveBB = B->GetInsertBlock();
+  auto saveIt = saveBB ? B->GetInsertPoint() : BasicBlock::iterator();
+  FunctionState st;
+  st.Fn = f;
+  st.ReturnType = t;
+  FnStack.push_back(st);
+  fs().Scopes.push_back(LexicalScope{});
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", f));
+  B->CreateRet(emitUserClone(user, f->getArg(0), t));
+  fs().Scopes.pop_back();
+  FnStack.pop_back();
+  if (saveBB)
+    B->SetInsertPoint(saveBB, saveIt);
+  return f;
 }
 
 Function *CodeGen::cloneFnFor(Type *t) {
@@ -1930,7 +1980,13 @@ void CodeGen::takeOwnership(Expr *e, Value *v, Type *t) {
   if (readsUntrackedMemory(e))
     return;
   if (Expr *place = movedPlaceOf(e)) {
-    emptyPlace(place, t);
+    // Only a place the operand names directly outlives the operand: one
+    // reached through a block may be that block's own local, which its
+    // scope drops before the construction is done.
+    if (PendingEmpties && place == e && PendingEmpties->here())
+      PendingEmpties->List.push_back({place, t});
+    else
+      emptyPlace(place, t);
     return;
   }
   adopt(v);
@@ -2419,13 +2475,26 @@ Value *CodeGen::coerce(Value *v, Type *from, Type *to) {
     }
   }
 
+  // Under Zombie the box takes the value over — a class is its own box, and
+  // anything else is copied into one — so the temporary it came from must
+  // not also give it back at the end of the statement.
   // T -> dyn Mark
-  if (to->is(TypeKind::DynMark) && !from->is(TypeKind::DynMark))
-    return track(emitDynCoerce(v, from, to), to);
+  if (to->is(TypeKind::DynMark) && !from->is(TypeKind::DynMark)) {
+    Value *r = emitDynCoerce(v, from, to);
+    if (zombie())
+      adopt(v);
+    return track(r, to);
+  }
 
   // T -> Any. The box is the value; its header names the type.
-  if (to->isAny() && !from->isAny())
-    return track(emitAnyBox(v, from), to);
+  if (to->isAny() && !from->isAny()) {
+    Value *r = emitAnyBox(v, from);
+    if (zombie() && r == v)
+      return r;                        // the same object, owned where it was
+    if (zombie())
+      adopt(v);
+    return track(r, to);
+  }
 
   // Tuples are coerced element by element, which is where a `String` in one
   // becomes the `Any` the destination asked for.
@@ -2434,10 +2503,15 @@ Value *CodeGen::coerce(Value *v, Type *from, Type *to) {
     const auto &te = to->tupleElements();
     if (fe.size() == te.size()) {
       Value *out = UndefValue::get(lower(to));
-      for (unsigned i = 0; i < fe.size(); ++i)
-        out = B->CreateInsertValue(
-            out, coerce(B->CreateExtractValue(v, i), fe[i], te[i]), i);
-      return out;
+      for (unsigned i = 0; i < fe.size(); ++i) {
+        Value *e = coerce(B->CreateExtractValue(v, i), fe[i], te[i]);
+        // Under Zombie the new tuple owns what the conversion made — a box,
+        // say — so that is handed on with the tuple, not given back here.
+        if (zombie())
+          adopt(e);
+        out = B->CreateInsertValue(out, e, i);
+      }
+      return zombie() ? track(out, to) : out;
     }
   }
 
@@ -2696,6 +2770,15 @@ GlobalVariable *CodeGen::boxInfoFor(Type *concrete) {
       B->SetInsertPoint(saveBB, saveIt);
   }
 
+  // Under single ownership a box can be copied — out of an `Any`, or a
+  // `dyn` — into a new box of its own, the value inside cloned.
+  Function *clone = nullptr;
+  if (zombie()) {
+    auto *ft = FunctionType::get(PtrTy, {PtrTy}, false);
+    clone = Function::Create(ft, GlobalValue::LinkOnceODRLinkage,
+                             "rune.box.clone." + symbol, *M);
+  }
+
   Constant *nameConst = ConstantDataArray::getString(*Ctx, name, true);
   auto *nameGV = new GlobalVariable(*M, nameConst->getType(), true,
                                     GlobalValue::PrivateLinkage, nameConst,
@@ -2709,9 +2792,34 @@ GlobalVariable *CodeGen::boxInfoFor(Type *concrete) {
            deinit ? static_cast<Constant *>(deinit)
                   : ConstantPointerNull::get(PtrTy),
            ConstantPointerNull::get(PtrTy), ConstantPointerNull::get(PtrTy),
-           B->getInt32(0)}),
+           B->getInt32(0),
+           clone ? static_cast<Constant *>(clone)
+                 : ConstantPointerNull::get(PtrTy)}),
       "rune.typeinfo.box." + symbol);
   BoxInfos[concrete] = gv;
+
+  if (clone) {
+    auto *saveBB = B->GetInsertBlock();
+    auto saveIt = saveBB ? B->GetInsertPoint() : BasicBlock::iterator();
+    FunctionState st;
+    st.Fn = clone;
+    st.ReturnType = Types.voidType();
+    FnStack.push_back(st);
+    fs().Scopes.push_back(LexicalScope{});
+    B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", clone));
+    Value *box = B->CreateCall(
+        runtimeFn("rune_alloc", PtrTy, {B->getInt64Ty(), PtrTy}),
+        {ConstantInt::get(B->getInt64Ty(), size), gv});
+    Value *from = B->CreateLoad(
+        payload, B->CreateStructGEP(boxTy, clone->getArg(0), 1));
+    B->CreateStore(emitClone(from, concrete),
+                   B->CreateStructGEP(boxTy, box, 1));
+    B->CreateRet(box);
+    fs().Scopes.pop_back();
+    FnStack.pop_back();
+    if (saveBB)
+      B->SetInsertPoint(saveBB, saveIt);
+  }
   return gv;
 }
 
@@ -2884,8 +2992,12 @@ Value *CodeGen::emitAnyIs(Value *any, Type *target) {
 
 Value *CodeGen::emitAnyUnbox(Value *any, Type *target) {
   target = TypeContext::stripUniq(target);
+  // The `Any` keeps what it holds, so what comes out is a second owner: a
+  // share under counting, a copy under Zombie, which has no count to share.
   // A class was never boxed: the `Any` *is* the object.
   if (target->is(TypeKind::Class)) {
+    if (zombie())
+      return emitClone(any, target);
     emitRetain(any, target);
     return any;
   }
@@ -2893,6 +3005,8 @@ Value *CodeGen::emitAnyUnbox(Value *any, Type *target) {
   auto *boxTy = StructType::get(*Ctx, {ObjectHeaderTy, payload});
   Value *v = B->CreateLoad(payload, B->CreateStructGEP(boxTy, any, 1),
                            "any.value");
+  if (zombie())
+    return emitClone(v, target);
   emitRetain(v, target);
   return v;
 }
@@ -3316,12 +3430,18 @@ GlobalVariable *CodeGen::emitTypeInfo(NominalDecl *nd) {
                       : 0;
 
   Constant *deinitFn = ConstantPointerNull::get(PtrTy);
+  Constant *cloneFn = ConstantPointerNull::get(PtrTy);
   Constant *superInfo = ConstantPointerNull::get(PtrTy);
   Constant *vtable = ConstantPointerNull::get(PtrTy);
   unsigned vtableCount = 0;
 
   if (cls) {
     deinitFn = emitClassDeinit(cls);
+    // Single ownership copies an object through whatever names it — a base
+    // class, a `dyn`, an `Any` — so the copy is found from the object.
+    if (zombie() && !cls->Generics.size())
+      if (Function *f = objectCloneFor(nd->DeclaredType))
+        cloneFn = f;
     if (cls->Super)
       superInfo = emitTypeInfo(static_cast<NominalDecl *>(cls->Super));
     if (!cls->VTable.empty()) {
@@ -3344,7 +3464,7 @@ GlobalVariable *CodeGen::emitTypeInfo(NominalDecl *nd) {
   gv->setInitializer(ConstantStruct::get(
       TypeInfoTy, {nameGV, ConstantInt::get(B->getInt64Ty(), size), deinitFn,
                    superInfo, vtable,
-                   ConstantInt::get(B->getInt32Ty(), vtableCount)}));
+                   ConstantInt::get(B->getInt32Ty(), vtableCount), cloneFn}));
   return gv;
 }
 

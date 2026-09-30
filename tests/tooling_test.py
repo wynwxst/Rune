@@ -19,6 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STDLIB = os.path.join(ROOT, "stdlib")
 LINT = os.path.join(BIN, "rune-lint")
 LSP = os.path.join(BIN, "rune-lsp")
+FMT = os.path.join(BIN, "rune-fmt")
 
 failures = []
 
@@ -137,6 +138,116 @@ def lint_tests(tmp):
     write(clean, "import std::io\n\nfn main() -> i64 {\n    io::println(\"hi\")\n    0\n}\n")
     r = subprocess.run([LINT, "--stdlib", STDLIB, clean], capture_output=True, text=True)
     check("a clean file exits 0", r.returncode == 0 and "No problems" in r.stderr, r.stdout + r.stderr)
+
+#===------------------------------------------------------------------===#
+# rune-fmt
+#===------------------------------------------------------------------===#
+
+FMTME = """fn area(width: i64, height: i64) -> i64 { width * height }
+import std::io
+import std::collections::vector as vec
+
+fn first<T>(items: &vec::Vector<T>) -> T? {
+    let n = items.length()
+    items.get(0)
+}
+
+fn main() -> i64 {
+  let a = area(3, 4);
+    var list = vec::Vector<i64>()
+        list.push((a + 1) * 2)
+    let total = area(1,
+                2)
+    while true {
+        break
+    }
+    let f = ||(n: i64) -> bool { n > 0 }
+    io::println(format!("{} {}", total, f(a)))
+    0
+}
+"""
+
+FMTED = """import std::collections::vector as vec
+import std::io
+
+fn area(width: i64, height: i64) -> i64 { width * height }
+
+fn first<T>(items: &vec::Vector<T>) -> T? {
+    let n = items.length()
+    items.get(0)
+}
+
+fn main() -> i64 {
+    let a: i64 = area(width: 3, height: 4)
+    var list: vec::Vector<i64> = vec::Vector<i64>()
+    list.push(value: (a + 1) * 2)
+    let total: i64 = area(width: 1,
+        height: 2)
+    loop {
+        break
+    }
+    let f: @function(i64) -> bool = ||(n: i64) -> bool { n > 0 }
+    io::println(value: format!("{} {}", total, f(a)))
+    0
+}
+"""
+
+def fmt_tests(tmp):
+    d = os.path.join(tmp, "fmt")
+    src = os.path.join(d, "fmtme.rune")
+    write(src, FMTME)
+    runec = os.path.join(BIN, "runec")
+    base = [FMT, "--stdlib", STDLIB, "--runec", runec]
+
+    r = subprocess.run(base + ["--check", src], capture_output=True, text=True)
+    check("fmt --check lists an unformatted file and exits 1", r.returncode == 1 and "fmtme.rune" in r.stdout, r)
+    check("fmt --check changes nothing", open(src).read() == FMTME)
+
+    r = subprocess.run(base + [src], capture_output=True, text=True)
+    out = open(src).read()
+    check("fmt formats the file", r.returncode == 0 and out == FMTED, out)
+    check("imports first and sorted, indentation, a stray `;` and `while true`",
+          out.startswith("import std::collections::vector as vec\nimport std::io\n") and "loop {" in out, out)
+    check("a type is written through the file's own import alias", "var list: vec::Vector<i64>" in out, out)
+    check("labels go on positional arguments, a bracketed one included", "list.push(value: (a + 1) * 2)" in out, out)
+    check("a generic function's bindings are left alone", "    let n = items.length()" in out, out)
+    check("a macro's arguments are left alone", 'format!("{} {}", total, f(a))' in out, out)
+    rc = subprocess.run([runec, "--stdlib", STDLIB, "--check", src], capture_output=True, text=True)
+    check("the formatted file compiles", rc.returncode == 0, rc.stderr)
+
+    r = subprocess.run(base + ["--check", src], capture_output=True, text=True)
+    check("formatting a formatted file changes nothing", r.returncode == 0 and r.stdout == "", r)
+
+    r = subprocess.run(base + ["--stdout", "--no-types", "--no-labels", "--no-reorder", src + ""], capture_output=True, text=True)
+    check("--stdout prints, and writes nothing", r.stdout == FMTED and open(src).read() == FMTED, r.stdout)
+
+    write(src, FMTME)
+    r = subprocess.run(base + ["--stdout", "--no-types", "--no-labels", "--no-reorder", "--no-lint-fixes", src],
+                       capture_output=True, text=True)
+    check("--no-* leave out what they name", "let a = area(3, 4);" in r.stdout and "while true" in r.stdout
+          and r.stdout.startswith("fn area") and "    var list = vec" in r.stdout, r.stdout)
+
+    # A file that does not compile is laid out, and told so.
+    broken = os.path.join(d, "broken.rune")
+    write(broken, "fn main() -> i64 {\n  let x = nowhere(1)\n    0\n}\n")
+    r = subprocess.run(base + [broken], capture_output=True, text=True)
+    check("a file that does not compile is laid out only, and says so",
+          open(broken).read() == "fn main() -> i64 {\n    let x = nowhere(1)\n    0\n}\n" and "laid out only" in r.stderr, r.stderr)
+
+    # A header comment and the directives stay first; a signature that wraps
+    # opens its body one level in.
+    header = os.path.join(d, "header.rune")
+    write(header, "@type(Executable)\n// What this is.\n\nimport std::io\n\n"
+                  "fn add(a: i64,\n        b: i64) -> i64 {\n            a + b\n}\n\n"
+                  "fn main() -> i64 {\n    io::println(value: add(a: 1, b: 2))\n    0\n}\n")
+    r = subprocess.run(base + ["--stdout", header], capture_output=True, text=True)
+    check("directives, then the preamble, then imports", r.stdout.startswith("@type(Executable)\n\n// What this is.\n\nimport std::io\n"), r.stdout)
+    check("a wrapped signature's body is one level in", "    b: i64) -> i64 {\n    a + b\n}" in r.stdout, r.stdout)
+
+    # `rune fmt` runs it with the toolchain's own paths.
+    write(src, FMTME)
+    r = subprocess.run([os.path.join(BIN, "rune"), "fmt", src], capture_output=True, text=True)
+    check("`rune fmt` formats", open(src).read() == FMTED, r.stderr)
 
 #===------------------------------------------------------------------===#
 # rune-lsp
@@ -474,6 +585,48 @@ def lsp_tests(tmp):
           and hints[0].get("relatedInformation"), ds)
     check("and attached to the error as related information", moved and moved[0].get("relatedInformation"), moved)
 
+    # Inlay hints: the types and labels `rune fmt` would write, each with
+    # the edit that writes it.
+    hsrc = FMTME
+    hpath = os.path.join(tmp, "hints", "hints.rune")
+    write(hpath, hsrc)
+    huri = uri_of(hpath)
+    c.notify("textDocument/didOpen", {"textDocument": {"uri": huri, "languageId": "rune", "version": 1, "text": hsrc}})
+    r = c.request("textDocument/inlayHint", {"textDocument": {"uri": huri},
+                                             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 99, "character": 0}}})
+    hints = r.get("result") or []
+    byLabel = {}
+    for h in hints:
+        byLabel.setdefault(h["label"], h)
+    check("initialize announces inlay hints and formatting", caps.get("inlayHintProvider") and caps.get("documentFormattingProvider"), caps)
+    t = byLabel.get(": vec::Vector<i64>")
+    check("a binding's inferred type is a type hint after its name", t and t["kind"] == 1
+          and t["position"] == pos(hsrc, "var list", 8), hints)
+    check("double-clicking it writes it in", t and t.get("textEdits", [{}])[0].get("newText") == ": vec::Vector<i64>", t)
+    w = byLabel.get("width:")
+    check("a positional argument's parameter is a parameter hint before it", w and w["kind"] == 2
+          and w["position"] == pos(hsrc, "area(3", 5) and w.get("textEdits", [{}])[0].get("newText") == "width: ", hints)
+    check("nothing inside a generic function", not any(h["position"]["line"] == 5 for h in hints), hints)
+
+    # Mid-edit, when the file does not check, the last hints move with the
+    # text: none is left where a line went, or on the wrong line.
+    lines = hsrc.split("\n")
+    at = lines.index("    var list = vec::Vector<i64>()")
+    broken = "\n".join(lines[:at] + ["    let half = "] + lines[at + 1:])
+    c.notify("textDocument/didChange", {"textDocument": {"uri": huri, "version": 2}, "contentChanges": [{"text": broken}]})
+    r = c.request("textDocument/inlayHint", {"textDocument": {"uri": huri},
+                                             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 99, "character": 0}}})
+    after = r.get("result") or []
+    labels = [h["label"] for h in after]
+    total = [h for h in after if h["label"] == ": i64" and h["position"]["line"] == at + 2]
+    check("hints on a line that changed go with it", ": vec::Vector<i64>" not in labels, after)
+    check("the rest stay on their own lines while the file does not check", total, after)
+    c.notify("textDocument/didChange", {"textDocument": {"uri": huri, "version": 3}, "contentChanges": [{"text": hsrc}]})
+
+    r = c.request("textDocument/formatting", {"textDocument": {"uri": huri}, "options": {"tabSize": 4, "insertSpaces": True}})
+    edits = r.get("result") or []
+    check("Format Document formats as `rune fmt` does", len(edits) == 1 and edits[0]["newText"] == FMTED, edits)
+
     r = c.request("rune/unknownRequest", {})
     check("an unknown request is an error, not a crash", r.get("error", {}).get("code") == -32601, r)
 
@@ -536,6 +689,7 @@ def book_tests(tmp):
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         lint_tests(tmp)
+        fmt_tests(tmp)
         lsp_tests(tmp)
         book_tests(tmp)
     if failures:

@@ -2124,8 +2124,10 @@ TypeReprPtr Parser::parseTypeNoSuffix() {
         named->Path.push_back(cur().Text);
         advance();
       }
+      named->NameRange = rangeFrom(start);
+      // `Self::Iter from self`, as for any other named type.
+      named->Origin = parseOriginClause();
       named->Range = rangeFrom(start);
-      named->NameRange = named->Range;
       return named;
     }
     return makeNode<SelfTypeRepr>(rangeFrom(start));

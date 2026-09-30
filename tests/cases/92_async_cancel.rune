@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Cancellation. `cancel` marks a task; at its next suspension point — an
 // `.await`, a `sleep`, a `checkpoint` — the task leaves its body the way `?`
 // leaves a function: its `defer`s run, what it holds is released, and it

@@ -36,6 +36,7 @@ import runetools::syntax
 import runetools::index
 import runetools::project
 import runetools::lint
+import runetools::format
 
 //===--------------------------------------------------------------------===//
 // The wire
@@ -296,7 +297,9 @@ class Server {
     /// The hints for one version of one file, and the last good answer for
     /// each file.
     hintCache: dictionary::Map<String, String>
-    hintLast: dictionary::Map<String, String>
+    hintLast: dictionary::Map<String, KnownHints>
+    /// What Format Document writes in.
+    pub formatOptions: format::Options
     lintAllow: vector::Vector<String>
     lintWarn: vector::Vector<String>
     maxLineLength: i64
@@ -317,11 +320,12 @@ class Server {
         self.checkOnChange = true
         self.checkDelay = 400
         self.pendingCompile = ""
-        self.memory = "arc"
+        self.memory = "zombie"
         self.hintTypes = true
         self.hintParameters = true
         self.hintCache = dictionary::Map<String, String>()
-        self.hintLast = dictionary::Map<String, String>()
+        self.hintLast = dictionary::Map<String, KnownHints>()
+        self.formatOptions = format::Options()
         self.lintAllow = vector::Vector<String>()
         self.lintWarn = vector::Vector<String>()
         self.maxLineLength = 0
@@ -357,6 +361,22 @@ class Server {
         }
         match dig(settings, ["inlayHints", "parameters"]) {
             Some(v) => self.hintParameters = v.asBool() ?? true,
+            None => {},
+        }
+        match dig(settings, ["format", "types"]) {
+            Some(v) => self.formatOptions.types = v.asBool() ?? true,
+            None => {},
+        }
+        match dig(settings, ["format", "labels"]) {
+            Some(v) => self.formatOptions.labels = v.asBool() ?? true,
+            None => {},
+        }
+        match dig(settings, ["format", "reorder"]) {
+            Some(v) => self.formatOptions.reorder = v.asBool() ?? true,
+            None => {},
+        }
+        match dig(settings, ["format", "lintFixes"]) {
+            Some(v) => self.formatOptions.lintFixes = v.asBool() ?? true,
             None => {},
         }
         self.lintAllow = stringsAt(settings, ["lint", "allow"])
@@ -1339,11 +1359,66 @@ fn decoratorNames() -> vector::Vector<String> {
 // Inlay hints
 //===--------------------------------------------------------------------===//
 
+/// One hint, as the compiler gave it: a byte offset into the text it
+/// was asked about.
+class Hint {
+    pub at: i64
+    pub kind: String
+    pub label: String
+    pub insert: String
+
+    fn init(self, at: i64, kind: String, label: String, insert: String) {
+        self.at = at
+        self.kind = kind
+        self.label = label
+        self.insert = insert
+    }
+}
+
+/// The last hints the compiler gave for a file, and the text they were for.
+class KnownHints {
+    pub text: String
+    pub hints: vector::Vector<Hint>
+
+    fn init(self, text: String, hints: vector::Vector<Hint>) {
+        self.text = text
+        self.hints = hints
+    }
+}
+
+/// `known`'s hints carried over to `now`, the text after an edit: those
+/// before what changed stay, those after it move with it, and those in it
+/// go. What the editor shows then matches the text even while the compiler
+/// cannot answer for it.
+fn carried(known: &KnownHints, now: &String) -> vector::Vector<Hint> {
+    let old = known.text
+    var prefix = 0
+    while prefix < old.$length() && prefix < now.$length() && old.$byteAt(prefix) == now.$byteAt(prefix) {
+        prefix += 1
+    }
+    var suffix = 0
+    while suffix < old.$length() - prefix && suffix < now.$length() - prefix &&
+            old.$byteAt(old.$length() - 1 - suffix) == now.$byteAt(now.$length() - 1 - suffix) {
+        suffix += 1
+    }
+    let delta = now.$length() - old.$length()
+    var out = vector::Vector<Hint>()
+    for h in known.hints {
+        if h.at <= prefix {
+            out.push(Hint(h.at, h.kind.$clone(), h.label.$clone(), h.insert.$clone()))
+        } elif h.at >= old.$length() - suffix {
+            out.push(Hint(h.at + delta, h.kind.$clone(), h.label.$clone(), h.insert.$clone()))
+        }
+    }
+    out
+}
+
 /// What could be written out but is not: the type of each binding without
 /// an annotation, and the parameter each positional argument goes to. The
 /// editor shows them greyed out, and inserts one when it is double-clicked.
 /// The compiler works them out, over the buffer as it stands; while the
-/// buffer does not check, the last answer for it stands.
+/// buffer does not check, the last answer is carried through the edits
+/// since.
 fn inlayHints(srv: &var Server, params: &json::Value) -> String {
     let uri = textAt(params, ["textDocument", "uri"])
     let path = uriToPath(uri)
@@ -1369,53 +1444,74 @@ fn inlayHints(srv: &var Server, params: &json::Value) -> String {
         Err(_e) => {},
     }
     let parsed = match json::parse(answer) { Ok(v) => v, Err(_e) => json::object() }
-    let list = match dig(parsed, ["hints"]) {
-        Some(l) => l,
+    var hints = vector::Vector<Hint>()
+    match dig(parsed, ["hints"]) {
+        Some(list) => {
+            var i = 0
+            while i < list.length() {
+                if list.index(i) is Some(h) {
+                    hints.push(Hint(intAt(h, ["offset"], -1), textAt(h, ["kind"]), textAt(h, ["label"]),
+                                    textAt(h, ["insert"])))
+                }
+                i += 1
+            }
+            srv.hintLast.put(path.$clone(), KnownHints(source.$clone(), hints.$clone()))
+        },
         None => {
-            // Mid-edit, most likely: keep showing what was last known.
-            if srv.hintLast.peek(path) is Some(last) { return last.$clone() }
-            return "[]"
+            // Mid-edit, most likely: what was last known, moved with the text.
+            if srv.hintLast.peek(path) is Some(known) { hints = carried(known, source) }
         },
     }
+
     let lx = srv.project.module(m).lexed
     var items = vector::Vector<String>()
-    var i = 0
-    while i < list.length() {
-        if list.index(i) is Some(h) {
-            let kind = textAt(h, ["kind"])
-            let at = intAt(h, ["offset"], -1)
-            let label = textAt(h, ["label"])
-            let insert = textAt(h, ["insert"])
-            var wanted = if kind == "type" { srv.hintTypes } else { srv.hintParameters }
-            // `f(width)` for a parameter called `width` says it already.
-            if kind == "parameter" && wanted {
-                let name = label.$substring(0, label.$length() - 1)
-                let end = at + name.$length()
-                if end <= source.$length() && source.$substring(at, end) == name &&
-                        (end == source.$length() || !isWordByte(source.$byteAt(end))) {
-                    wanted = false
-                }
-            }
-            if wanted && at >= 0 {
-                let pos = positionOf(lx, at)
-                var s = "{\"position\":" + pos + ",\"label\":" + json::quote(label) + ",\"kind\":" +
-                        (if kind == "type" { "1" } else { "2" })
-                if kind == "parameter" { s += ",\"paddingRight\":true" }
-                if !insert.$isEmpty() {
-                    s += ",\"textEdits\":[{\"range\":{\"start\":" + pos + ",\"end\":" + pos + "},\"newText\":" +
-                         json::quote(insert) + "}]"
-                    s += ",\"tooltip\":" + json::quote("Double-click to write `" + text::trim(insert) + "` in")
-                }
-                items.push(s + "}")
+    for h in hints {
+        let at = h.at
+        var wanted = if h.kind == "type" { srv.hintTypes } else { srv.hintParameters }
+        // `f(width)` for a parameter called `width` says it already.
+        if h.kind == "parameter" && wanted && at >= 0 {
+            let name = h.label.$substring(0, h.label.$length() - 1)
+            let end = at + name.$length()
+            if end <= source.$length() && source.$substring(at, end) == name &&
+                    (end == source.$length() || !isWordByte(source.$byteAt(end))) {
+                wanted = false
             }
         }
-        i += 1
+        if wanted && at >= 0 && at <= source.$length() {
+            let pos = positionOf(lx, at)
+            var s = "{\"position\":" + pos + ",\"label\":" + json::quote(h.label) + ",\"kind\":" +
+                    (if h.kind == "type" { "1" } else { "2" })
+            if h.kind == "parameter" { s += ",\"paddingRight\":true" }
+            if !h.insert.$isEmpty() {
+                s += ",\"textEdits\":[{\"range\":{\"start\":" + pos + ",\"end\":" + pos + "},\"newText\":" +
+                     json::quote(h.insert) + "}]"
+                s += ",\"tooltip\":" + json::quote("Double-click to write `" + text::trim(h.insert) + "` in")
+            }
+            items.push(s + "}")
+        }
     }
     let result = "[" + joinItems(items) + "]"
     srv.hintCache.clear()
     srv.hintCache.put(key, result.$clone())
-    srv.hintLast.put(path.$clone(), result.$clone())
     result
+}
+
+//===--------------------------------------------------------------------===//
+// Formatting
+//===--------------------------------------------------------------------===//
+
+/// The whole document, formatted as `rune fmt` would, as one edit.
+fn formatting(srv: &var Server, params: &json::Value) -> String {
+    let uri = textAt(params, ["textDocument", "uri"])
+    let path = uriToPath(uri)
+    let m = srv.moduleFor(path)
+    if m < 0 { return "[]" }
+    let source = srv.project.readSource(path)
+    let done = format::format(&var srv.project, srv.runec, path, source.$clone(), srv.queryFile, srv.formatOptions)
+    if !done.note.$isEmpty() { log(project::fileOf(path) + ": " + done.note) }
+    if done.text == source { return "[]" }
+    let lx = srv.project.module(m).lexed
+    "[{\"range\":" + rangeOf(lx, 0, source.$length()) + ",\"newText\":" + json::quote(done.text) + "}]"
 }
 
 fn completion(srv: &var Server, params: &json::Value) -> String {
@@ -1748,6 +1844,7 @@ fn capabilities() -> String {
     "\"documentSymbolProvider\":true," +
     "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"],\"retriggerCharacters\":[\",\"]}," +
     "\"inlayHintProvider\":true," +
+    "\"documentFormattingProvider\":true," +
     "\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"source.fixAll.rune\"]}" +
     "},\"serverInfo\":{\"name\":\"rune-lsp\",\"version\":\"0.1.0\"}}"
 }
@@ -1915,6 +2012,8 @@ fn main() -> i64 {
             respond(id, documentSymbols(&var srv, params))
         } elif method == "textDocument/signatureHelp" {
             respond(id, signatureHelp(&var srv, params))
+        } elif method == "textDocument/formatting" {
+            respond(id, formatting(&var srv, params))
         } elif method == "textDocument/inlayHint" {
             respond(id, inlayHints(&var srv, params))
         } elif method == "textDocument/codeAction" {

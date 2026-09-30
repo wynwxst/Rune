@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Two borrows of the same value, one of them able to write.
 // EXPECT-ERROR: cannot borrow 'p' while it is borrowed
 struct Point { var x: i64, var y: i64 }

@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // The rest of `std::task`: `spawn`, `async { }` blocks, `async ||` closures,
 // `pending`, `blocking`, `all`, and async methods — on a class, in a mark,
 // and in a `bind`.

@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A type alias declared in a library, used by a package that imported the
 // library and nothing else.
 //

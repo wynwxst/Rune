@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Taking a value that owns a resource out of a field by value would make a
 // second owner of it.
 // EXPECT-ERROR: owns a resource

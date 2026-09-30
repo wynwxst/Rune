@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Unicode normalisation, collation, and `move` closures.
 // EXPECT: raw== false  text::equal true
 // EXPECT: nfd 2  nfc 1  round-trip true

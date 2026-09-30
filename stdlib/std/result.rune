@@ -22,6 +22,7 @@
 // would be ambiguous.
 
 import std::option
+import std::mem
 
 extern "C" {
     fn rune_panic_unwrap(what: CString, location: CString) -> Never
@@ -47,9 +48,9 @@ pub enum Result<T, E> {
     }
 
     /// True when this succeeded and `keep` says yes to the value.
-    pub fn isSuchThat(&self, keep: @function(T) -> bool) -> bool {
+    pub fn isSuchThat(&self, keep: @function(T) -> bool) -> bool where T: mem::Clone {
         match self {
-            Result::Ok(v) => keep(v),
+            Result::Ok(v) => keep(v.$clone()),
             Result::Err(e) => false,
         }
     }
@@ -131,7 +132,7 @@ pub enum Result<T, E> {
     pub fn map<U>(&self, f: @function(T) -> U) -> Result<U, E> {
         match self {
             Result::Ok(v) => Result::<U, E>::Ok(f(v.$clone())),
-            Result::Err(e) => Result::<U, E>::Err(e),
+            Result::Err(e) => Result::<U, E>::Err(e.$clone()),
         }
     }
 
@@ -161,7 +162,7 @@ pub enum Result<T, E> {
     pub fn andThen<U>(&self, f: @function(T) -> Result<U, E>) -> Result<U, E> {
         match self {
             Result::Ok(v) => f(v.$clone()),
-            Result::Err(e) => Result::<U, E>::Err(e),
+            Result::Err(e) => Result::<U, E>::Err(e.$clone()),
         }
     }
 

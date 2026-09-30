@@ -5,15 +5,23 @@ fn main() -> i64 {
     let number = random::between(0, 100)
     var guess: int? = nil
 
-    while io::readLineOrEnd() is Some(line) {
-        guess = line.$toInt().expect("Please enter a number!")
-        break
-    }
+    for _ in 0..=3 {
+        while io::readLineOrEnd() is Some(line) {
+            guess = line.$toInt()
+            match guess {
+                None => continue,
+                Some(_) => {}
+            }
+            break
+        }
+        let guess: i64 = guess.unwrap()
 
-    if guess.unwrap() == number {
-        println!("Wow! You guessed it right!")
-    } else {
-        println!("Better luck next time.")
+
+        match guess {
+            _ if guess > number => println!("Too big"),
+            _ if guess < number => println!("Too small"),
+            _ => {println!("You won!"); break}
+        }
     }
 
 

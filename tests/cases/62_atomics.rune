@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Atomics: one indivisible step each, so several threads can change the same
 // number without a lock and without losing an update.
 // EXPECT: load 10, add gives 10, now 15

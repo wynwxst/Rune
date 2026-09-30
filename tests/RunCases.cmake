@@ -243,6 +243,27 @@ foreach(CASE ${CASES})
     continue()
   endif()
 
+  # Whatever compiles under Zombie — the default — must compile under ARC
+  # too: counting can share where single ownership has to move or borrow,
+  # so it accepts more, never less. A case with libraries is left out, since
+  # those were built for the case's own memory model.
+  string(JOIN " " FLAGS_TEXT ${CASE_FLAGS})
+  if(NOT FLAGS_TEXT MATCHES "--memory arc"
+     AND CASE_LIBS STREQUAL "" AND CASE_SHARED STREQUAL "")
+    execute_process(
+      COMMAND ${BUILD_ENV} "${RUNEC}" --no-color --stdlib "${STDLIB_DIR}" ${SAFETY_ARGS}
+              --memory arc --check "${CASE}" ${CASE_WITH}
+      RESULT_VARIABLE ARC_RC
+      OUTPUT_VARIABLE ARC_OUT
+      ERROR_VARIABLE ARC_ERR)
+    if(NOT ARC_RC EQUAL 0)
+      math(EXPR FAILED "${FAILED}+1")
+      list(APPEND FAILURES
+        "${NAME}: compiles under Zombie but not under ARC\n${ARC_ERR}")
+      continue()
+    endif()
+  endif()
+
   set(RUN_COMMAND "${EXE}")
   if(NOT SHARED_ENV STREQUAL "")
     set(RUN_COMMAND ${CMAKE_COMMAND} -E env ${SHARED_ENV} "${EXE}")

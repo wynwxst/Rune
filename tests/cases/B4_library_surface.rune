@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // LIB: libeverything lib/libeverything.rune
 // EXPECT: version 3
 // EXPECT: tally 2

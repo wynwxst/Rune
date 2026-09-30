@@ -1,0 +1,60 @@
+import std::{io,cli,text}
+import std::collections::vector::*
+import rugrep::commands
+import rugrep::models
+
+pub global config = [
+    "case_insensitive": false
+]
+
+fn isValid(idx: int, len: int) -> bool {
+    idx >= 0 && idx < len
+}
+
+fn search(var query: String, var contents: String, surrounding: int) -> Vector<String from contents> {
+    vec = Vector<String>()
+    if config["case_insensitive"] {
+        contents = text::lower(contents)
+        query = text::lower(query)
+    }
+    var index: int = 0
+    lines = text::split(contents, "\n")
+    lines_sz = lines.length()
+    for line in lines {
+
+        if line.$find(query) != -1 {
+            for i in 0..surrounding {
+                off = surrounding - i
+                idx = index - off
+                if isValid(idx, lines_sz) {println!("\x1B\x5B\x33\x34\x6D{}\x1B\x5B\x30\x6D",lines[idx])}
+            }
+            println!("{}",text::replace(line, query, "\x1B\x5B\x33\x31\x6D" + query + "\x1B\x5B\x30\x6D"))
+            for i in 0..surrounding {
+                off = i+1
+                idx = index + off
+                if isValid(idx, lines_sz) {println!("\x1B\x5B\x33\x34\x6D{}\x1B\x5B\x30\x6D",lines[idx])}
+            }
+        }
+
+        index += 1
+    }
+    vec
+}
+fn main() -> i64 {
+    io::println("Hello from rugrep!")
+    var parser = cli::Parser("rugrep", "Rudimentry grepping using rune")
+    commands::registerCommands(&var parser)
+    args = parser.parseOrExit()
+
+    query = args.value("query").unwrap()
+    path = args.positional(0).unwrap()
+    surrounding = args.intValue("surrounding").unwrap()
+    println!("[{}] in {}",query,path)
+    let path = commands::handlePath(path).unwrap()
+
+    out = search(query,path.file.readAll(),surrounding)
+    for line in out {
+        println!("{line}")
+    }
+    0
+}

@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Channels, Arc, durations and sleeping.
 // EXPECT: arc sum: 17, original intact: 4
 // EXPECT: channel sum: 5050

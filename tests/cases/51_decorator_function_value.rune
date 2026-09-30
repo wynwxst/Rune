@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A decorator receives the function it is written on as a *value*, and a
 // callable value carries a leading environment parameter that a plain function
 // does not. The decorator has to hand over the thunk, not the function's own

@@ -1,8 +1,10 @@
 :RuneCheck	rune.txt	/*:RuneCheck*
 :RuneClear	rune.txt	/*:RuneClear*
+:RuneFmt	rune.txt	/*:RuneFmt*
 g:rune_check	rune.txt	/*g:rune_check*
 g:rune_check_delay	rune.txt	/*g:rune_check_delay*
 g:rune_check_on_change	rune.txt	/*g:rune_check_on_change*
+g:rune_format_on_save	rune.txt	/*g:rune_format_on_save*
 g:rune_lint	rune.txt	/*g:rune_lint*
 g:rune_lsp	rune.txt	/*g:rune_lsp*
 g:rune_memory	rune.txt	/*g:rune_memory*

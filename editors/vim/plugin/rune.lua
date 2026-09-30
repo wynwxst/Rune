@@ -11,7 +11,7 @@ if vim.g.rune_lsp == 0 or vim.g.rune_lsp == false then return end
 if vim.fn.executable(vim.g.rune_rune or "rune") == 0 then return end
 vim.g.rune_lsp_active = true
 
-if vim.fn.has("nvim-0.11") == 1 then
+if vim.fn.has("nvim-0.12.5") == 1 then
   vim.lsp.enable("rune")
 else
   vim.api.nvim_create_autocmd("FileType", {
@@ -33,6 +33,9 @@ vim.api.nvim_create_autocmd("LspAttach", {
   callback = function(ev)
     local client = vim.lsp.get_client_by_id(ev.data.client_id)
     if client and client.name == "rune" then
+      vim.lsp.completion.enable(true, client.id, ev.buf, {
+        autotrigger = false,
+      })
       vim.fn["rune#clear"](ev.buf)
     end
   end,

@@ -39,7 +39,17 @@ shape:
   "check": {
     "onChange": true,
     "delay": 400,
-    "memory": "arc"
+    "memory": "zombie"
+  },
+  "inlayHints": {
+    "types": true,
+    "parameters": true
+  },
+  "format": {
+    "types": true,
+    "labels": true,
+    "reorder": true,
+    "lintFixes": true
   },
   "lint": {
     "enable": true,
@@ -56,7 +66,12 @@ shape:
 | `checkOnSave` | run the compiler on open and save |
 | `check.onChange` | also run it once typing pauses, over the unsaved text; with `checkOnSave` also `false`, only lint diagnostics are left |
 | `check.delay` | how long the pause is, in milliseconds (400) |
-| `check.memory` | `"arc"` or `"zombie"`: the memory model a file outside any package is checked in; `zombie` brings the borrow checker's errors. A package's `Rune.toml` decides for its own files |
+| `check.memory` | `"zombie"` (the default) or `"arc"`: the memory model a file outside any package is checked in; `arc` checks it with reference counting instead of the borrow checker. A package's `Rune.toml` decides for its own files |
+| `inlayHints.types` | show each unannotated binding's inferred type |
+| `inlayHints.parameters` | show the parameter each positional argument goes to |
+| `format.types`, `format.labels` | what Format Document writes in: types, argument labels |
+| `format.reorder` | whether it puts directives, imports, aliases and globals first |
+| `format.lintFixes` | whether it applies the linter's style fixes |
 | `lint.enable` | show lint findings at all |
 | `lint.allow`, `lint.warn` | rules to turn off and on, after the package's `[lint]` table |
 | `lint.maxLineLength` | the `line-too-long` limit; `0` keeps the package's, or 120 |

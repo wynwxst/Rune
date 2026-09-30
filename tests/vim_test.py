@@ -189,6 +189,21 @@ qa!
     check("vim: the linter's findings join on save",
           any(l.startswith("saved W 11:9 variable `unused` is never read") for l in lines), lines)
 
+def vim_format_tests(tmp):
+    vim = shutil.which("vim")
+    if not vim:
+        return
+    write(os.path.join(tmp, "fmt.rune"), "fn main() -> i64 {\n  let x = 1;\n    x\n}\n")
+    write(os.path.join(tmp, "fmt.vim"), """
+RuneFmt
+call writefile(getline(1, '$') + ['modified=' . &modified], 'fmt.out')
+qa!
+""")
+    lines = run([vim, "-u", "vimrc", "-i", "NONE", "-n", "--not-a-term", "-c", "source fmt.vim", "fmt.rune"],
+                os.path.join(tmp, "fmt.out"), tmp) or []
+    check("vim: :RuneFmt formats the buffer, types written in",
+          lines[:4] == ["fn main() -> i64 {", "    let x: i64 = 1", "    x", "}"] and "modified=1" in lines, lines)
+
 def nvim_tests(tmp):
     nvim = shutil.which("nvim")
     if not nvim:
@@ -228,6 +243,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = os.path.realpath(tmp)
         vim_tests(tmp)
+        vim_format_tests(tmp)
         nvim_tests(tmp)
     if failures:
         print(f"\n{len(failures)} failure(s):")

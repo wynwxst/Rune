@@ -284,11 +284,6 @@ fn lineStart(lx: &syntax::Lexed, line: i64) -> i64 {
     lx.lineStarts.get(line)
 }
 
-/// Whether line `line` is blank.
-fn blankLine(lx: &syntax::Lexed, line: i64) -> bool {
-    syntax::collapse(lx.lineText(line)).$isEmpty()
-}
-
 /// The first line of the comments directly above line `line`: running up
 /// through comment-only lines, stopping at a blank one or at `floor`.
 fn attachedFrom(lx: &syntax::Lexed, line: i64, floor: i64, commentLines: &vector::Vector<bool>) -> i64 {
@@ -343,6 +338,7 @@ pub fn arrange(text: &String) -> String {
     var i = 0
     var floorLine = 0          // the first line not yet in a chunk
     var sawItem = false
+    var sawDecl = false        // anything but a directive yet
     // A comment block at the very top, apart from what follows by a blank
     // line, is the file's header and stays first.
     while lx.isNewline(i) { i += 1 }
@@ -388,9 +384,18 @@ pub fn arrange(text: &String) -> String {
         let firstLine = lx.at(startTok).line
         let from = attachedFrom(lx, firstLine, floorLine, commentLines)
         // Comments between the last piece and this one, apart from it by a
-        // blank line, travel with it all the same.
+        // blank line, travel with it all the same — except before the first
+        // declaration, where they are the file's preamble and stay there.
         var start = lineStart(lx, from)
-        if from > floorLine { start = lineStart(lx, floorLine) }
+        if from > floorLine {
+            let between = trimEnd(text.$substring(lineStart(lx, floorLine), lineStart(lx, from)))
+            if !sawDecl && !syntax::collapse(between).$isEmpty() {
+                chunks.push(Chunk("preamble", trimStart(between), ""))
+            } else {
+                start = lineStart(lx, floorLine)
+            }
+        }
+        if kind != "directive" { sawDecl = true }
         let endOffset = if lx.isEnd(endTok) { text.$length() }
                         elif kind == "directive" { lx.at(endTok - 1).end } else { lx.at(endTok).start }
         // A comment after the item on its last line is part of it.
@@ -430,7 +435,7 @@ pub fn arrange(text: &String) -> String {
     var out = io::Bytes()
     var any = false
     var group = ""
-    for kind in ["header", "directive", "import", "alias", "global", "item", "trailer"] {
+    for kind in ["header", "directive", "preamble", "import", "alias", "global", "item", "trailer"] {
         var list = vector::Vector<Chunk>()
         if kind == "import" { list = imports } else {
             for c in chunks { if c.kind == kind { list.push(c.$clone()) } }
@@ -442,7 +447,8 @@ pub fn arrange(text: &String) -> String {
                 // Within a group of one-liners, one line each; around
                 // anything longer, and between groups, a blank line.
                 let oneLine = c.text.$find("\n") < 0 && last.$find("\n") < 0
-                let tight = group == kind && oneLine && kind != "item" && kind != "header" && kind != "trailer"
+                let tight = group == kind && oneLine && (kind == "directive" || kind == "import" || kind == "alias" ||
+                                                         kind == "global")
                 out.appendText(if tight { "\n" } else { "\n\n" })
             }
             out.appendText(c.text)
@@ -470,14 +476,6 @@ fn spaces(n: i64) -> String {
 fn continuesAfter(t: &String) -> bool {
     for op in ["+", "-", "*", "/", "%", "&&", "||", "??", "=", "==", "!=", "<=", ">=", "->", "=>", "+=", "-=",
                "*=", "/=", "%=", "&", "|", "^", "<<", ">>", ".", "as", "is", "in"] {
-        if t == op { return true }
-    }
-    false
-}
-
-/// Whether a line starting with `t` carries on the statement before it.
-fn continuesBefore(t: &String) -> bool {
-    for op in [".", "?.", "+", "*", "/", "%", "&&", "||", "??", "==", "!=", "<=", ">=", "->", "|", "^"] {
         if t == op { return true }
     }
     false
@@ -512,9 +510,12 @@ pub fn reindent(text: &String) -> String {
         while ml <= last && ml < lines { verbatim.replace(ml, true); ml += 1 }
     }
 
-    // The indentation of the line each open bracket was opened on, and the
-    // bracket.
+    // For each open bracket: the indentation of the line it was opened on,
+    // that line's statement level — its indentation without any carried-on
+    // statement's extra — and the bracket. A `(` or `[` indents what is in it
+    // from the first; a `{` opens a body one level in from the second.
     var openIndent = vector::Vector<i64>()
+    var openBase = vector::Vector<i64>()
     var openChar = vector::Vector<String>()
     var out = io::Bytes()
     var prevCodeLast = -1     // the last token of the last line with code
@@ -539,10 +540,16 @@ pub fn reindent(text: &String) -> String {
         let ft = firstTok.get(l)
         var indent = 0
         let startsWithCloser = ft >= 0 && bracket(lx, ft) < 0
+        let top = openIndent.length() - 1
+        let topIsBrace = top >= 0 && openChar.get(top) == "{"
+        let outer = if top < 0 { 0 } elif topIsBrace { openBase.get(top) } else { openIndent.get(top) }
+        var lineBase = 0
         if startsWithCloser {
-            indent = if openIndent.isEmpty() { 0 } else { openIndent.get(openIndent.length() - 1) }
+            indent = outer
+            lineBase = indent
         } else {
-            indent = if openIndent.isEmpty() { 0 } else { openIndent.get(openIndent.length() - 1) + 4 }
+            indent = if top < 0 { 0 } else { outer + 4 }
+            lineBase = indent
             // A statement carried on from the line before: no Newline token
             // ended that line, inside a block rather than a bracket list.
             let inBlock = openChar.isEmpty() || openChar.get(openChar.length() - 1) == "{"
@@ -553,10 +560,13 @@ pub fn reindent(text: &String) -> String {
                     if lx.isNewline(k) { ended = true }
                     k += 1
                 }
-                // The lexer ends no statement after a generic's `>`, so the
-                // missing Newline alone does not make a continuation: an
-                // operator on either side of the break does.
-                if !ended && (continuesAfter(lx.text(prevCodeLast)) || continuesBefore(lx.text(ft))) {
+                // No Newline token: the lexer read on. After an operator, or
+                // after something that could have ended the statement — the
+                // next line starts with `.` or an operator — that is a
+                // continuation. After `{` it is not, and after a generic's
+                // `>` the lexer ends nothing even where a statement ends.
+                let prev = lx.at(prevCodeLast)
+                if !ended && (continuesAfter(prev.text) || syntax::canEnd(prev.kind, prev.text)) {
                     indent += 4
                 }
             }
@@ -572,13 +582,26 @@ pub fn reindent(text: &String) -> String {
         wroteAny = true
         lastWritten = trimmed
         // The brackets this line opens and closes.
+        // A bracket opened after this line has closed one from an earlier
+        // line belongs to that line's level: the `{` of
+        //     fn f(a: i64,
+        //         b: i64) {
+        // opens a body one level in from `fn`, not from `b`.
         if ft >= 0 {
+            var curIndent = indent
+            var curBase = lineBase
             var k = ft
             while !lx.isEnd(k) && lx.at(k).line == l {
                 let b = bracket(lx, k)
-                if b > 0 { openIndent.push(indent); openChar.push(lx.text(k)) }
-                elif b < 0 && !openIndent.isEmpty() {
+                if b > 0 {
+                    openIndent.push(curIndent)
+                    openBase.push(curBase)
+                    openChar.push(lx.text(k))
+                } elif b < 0 && !openIndent.isEmpty() {
+                    curIndent = openIndent.get(openIndent.length() - 1)
+                    curBase = openBase.get(openBase.length() - 1)
                     openIndent.pop()
+                    openBase.pop()
                     openChar.pop()
                 }
                 if !lx.isNewline(k) { prevCodeLast = k }

@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // `fn make() -> some Shape`: the body decides the concrete type, every call
 // yields that same type, and callers see only the mark. It costs nothing at
 // run time — there is no box and no vtable, the value is the concrete one —

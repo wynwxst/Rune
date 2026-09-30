@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Classes, inheritance, virtual dispatch and deterministic destruction.
 // EXPECT: Rex says woof
 // EXPECT: Momo says meow

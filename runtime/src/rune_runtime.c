@@ -212,6 +212,20 @@ const char *rune_any_type_cstr(const void *obj) {
   return t && t->name ? t->name : "()";
 }
 
+void *rune_clone_object(const void *obj) {
+  if (!obj)
+    return NULL;
+  const RuneTypeInfo *t = ((const RuneObject *)obj)->type;
+  if (!t || !t->clone) {
+    char msg[256];
+    snprintf(msg, sizeof msg,
+             "a %s cannot be copied: it has no clone under single ownership",
+             t && t->name ? t->name : "value");
+    rune_panic(msg, NULL);
+  }
+  return t->clone(obj);
+}
+
 int rune_any_is(const void *obj, const RuneTypeInfo *ti) {
   if (!obj || !ti)
     return 0;
@@ -441,8 +455,11 @@ static void string_deinit(void *self) {
   s->data = NULL;
 }
 
+static void *string_clone(const void *s);
+
 static const RuneTypeInfo kStringTypeInfo = {
-    "std::String", sizeof(RuneString), string_deinit, NULL, NULL, 0};
+    "std::String", sizeof(RuneString), string_deinit, NULL, NULL, 0,
+    string_clone};
 
 static RuneString *string_alloc(int64_t capacity) {
   RuneString *s = (RuneString *)rune_alloc(sizeof(RuneString), &kStringTypeInfo);
@@ -489,6 +506,10 @@ RuneString *rune_string_from_cstr(const char *p) {
 
 RuneString *rune_string_copy(const RuneString *s) {
   return s ? rune_string_from_bytes(s->data, s->length) : rune_string_new();
+}
+
+static void *string_clone(const void *s) {
+  return rune_string_copy((const RuneString *)s);
 }
 
 RuneString *rune_string_concat(const RuneString *a, const RuneString *b) {

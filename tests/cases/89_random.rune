@@ -32,7 +32,7 @@ fn main() -> i64 {
     io::println(if ok { "in range" } else { "out of range" })
 
     var v = vec!(1, 2, 3, 4, 5)
-    rng.shuffle(v)
+    rng.shuffle(&var v)
     var sum = 0
     for x in v { sum += x }
     io::println(v.length())

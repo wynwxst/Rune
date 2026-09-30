@@ -31,6 +31,12 @@ checked with `runec --check --memory` |g:rune_memory|.
 :RuneClear					*:RuneClear*
 	Forget what the checker found in the current buffer.
 
+:RuneFmt					*:RuneFmt*
+	Format the buffer as `rune fmt` would: layout, the file's directives
+	and imports first, and the types and argument labels the compiler
+	knows written in. Unsaved changes are formatted as they stand. In
+	Neovim with the language server, |vim.lsp.buf.format()| does the same.
+
 :make						*rune-make*
 	The `rune` |:compiler| is set for Rune buffers. `:make` checks the file
 	or its package and fills the |quickfix| list, notes included.
@@ -45,8 +51,9 @@ Each may also be set per buffer, as `b:rune_...`.
 *g:rune_check_on_change*	1 (default) also checks when typing pauses.
 *g:rune_check_delay*	The pause, in milliseconds. Default 400.
 *g:rune_lint*		1 (default) includes `rune lint`'s findings.
-*g:rune_memory*		"arc" (default) or "zombie": the memory model files
+*g:rune_memory*		"zombie" (default) or "arc": the memory model files
 			outside a package are checked in.
+*g:rune_format_on_save*	1 runs |:RuneFmt| before each write. Default 0.
 *g:rune_rune*		The `rune` program. Default: on 'path'.
 *g:rune_runec*		The `runec` program. Default: on 'path'.
 *g:rune_lsp*		Neovim: 0 stops `rune lsp` starting by itself.

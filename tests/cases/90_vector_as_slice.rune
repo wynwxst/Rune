@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A vector viewed as a slice: no copy, every slice API and pattern applies.
 import std::io
 import std::collections::vector

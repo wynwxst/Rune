@@ -32,7 +32,7 @@ function M.settings(opts)
     check = {
       onChange = g.rune_check_on_change ~= 0 and g.rune_check_on_change ~= false,
       delay = g.rune_check_delay or 400,
-      memory = g.rune_memory or "arc",
+      memory = g.rune_memory or "zombie",
     },
     lint = { enable = g.rune_lint ~= 0 and g.rune_lint ~= false },
   }, opts or {})
@@ -48,6 +48,15 @@ function M.config(opts)
     root_markers = { "Rune.toml", ".git" },
     init_options = settings,
     settings = { rune = settings },
+    capabilities = {
+      textDocument = {
+        completion = {
+          completionItem = {
+            snippetSupport = true,
+          },
+        },
+      },
+    },
   }
 end
 

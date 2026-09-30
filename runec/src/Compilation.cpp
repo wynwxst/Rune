@@ -35,6 +35,7 @@
 #include <set>
 #include <sstream>
 #include <cstdlib>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <spawn.h>
@@ -899,10 +900,34 @@ void collectHints(const Node *root, const SourceFile &file, const Module &mod,
         return true;
     return false;
   };
-  auto typeHint = [&](SourceLoc at, const Type *ty, bool insertable) {
+  // Some code reaches the checker rewritten — a `bind`'s methods, a
+  // closure given its parameter types — and its ranges are not always the
+  // file's own. A hint is only kept where the text says it belongs.
+  const std::string &text = file.Buffer;
+  auto isWord = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' ||
+           static_cast<unsigned char>(c) >= 0x80;
+  };
+  auto nameEndsAt = [&](int64_t off, const std::string &name) {
+    if (off < static_cast<int64_t>(name.size()) || off > static_cast<int64_t>(text.size()))
+      return false;
+    size_t from = static_cast<size_t>(off) - name.size();
+    if (text.compare(from, name.size(), name) != 0)
+      return false;
+    if (from > 0 && isWord(text[from - 1]))
+      return false;
+    return static_cast<size_t>(off) >= text.size() || !isWord(text[static_cast<size_t>(off)]);
+  };
+  auto afterOpenOrComma = [&](int64_t off) {
+    int64_t k = off - 1;
+    while (k >= 0 && (text[k] == ' ' || text[k] == '\t' || text[k] == '\n' || text[k] == '\r'))
+      --k;
+    return k >= 0 && (text[k] == '(' || text[k] == ',');
+  };
+  auto typeHint = [&](SourceLoc at, const Type *ty, bool insertable, const std::string &name) {
     int64_t off = offsetOf(at);
     if (off < 0 || !ty || ty->isError() || ty->isVoid() || ty->isNever() ||
-        inGeneric(at))
+        inGeneric(at) || !nameEndsAt(off, name))
       return;
     bool ok = true;
     std::string spelled = spellType(ty, mod, ok);
@@ -921,7 +946,7 @@ void collectHints(const Node *root, const SourceFile &file, const Module &mod,
           v->Binding && v->Binding->Kind == NodeKind::BindingPat) {
         auto *b = static_cast<const BindingPattern *>(v->Binding.get());
         if (!b->Sub && b->Binding)
-          typeHint(b->Range.end(), b->Binding->Ty, true);
+          typeHint(b->Range.end(), b->Binding->Ty, true, b->Name);
       }
       break;
     }
@@ -930,7 +955,7 @@ void collectHints(const Node *root, const SourceFile &file, const Module &mod,
       if (f->Binding && f->Binding->Kind == NodeKind::BindingPat) {
         auto *b = static_cast<const BindingPattern *>(f->Binding.get());
         if (!b->Sub && b->Binding)
-          typeHint(b->Range.end(), b->Binding->Ty, false);   // no syntax for it
+          typeHint(b->Range.end(), b->Binding->Ty, false, b->Name);   // no syntax for it
       }
       break;
     }
@@ -942,7 +967,7 @@ void collectHints(const Node *root, const SourceFile &file, const Module &mod,
           const Param &p = c->Params[i];
           if (p.TypeAnnotation || p.IsSelf || !p.Range.isValid())
             continue;
-          typeHint(p.Range.begin().offsetBy(static_cast<int32_t>(p.Name.size())), ps[i], true);
+          typeHint(p.Range.begin().offsetBy(static_cast<int32_t>(p.Name.size())), ps[i], true, p.Name);
         }
       }
       break;
@@ -957,8 +982,33 @@ void collectHints(const Node *root, const SourceFile &file, const Module &mod,
         const Expr *v = a.Value.get();
         // An argument that already says it — `f(width)` for `width` — needs
         // no label to be read, though a formatter may still write one.
-        int64_t off = offsetOf(v->Range.begin());
-        if (off < 0)
+        // The argument's slot: just inside the call's `(`, or just after the
+        // `,` that ends the one before. Only more `(`s — the argument is in
+        // brackets of its own — may stand between it and the expression,
+        // whose range starts inside them. A receiver passed as the first
+        // argument is outside the brackets altogether.
+        int64_t begin = offsetOf(v->Range.begin());
+        int64_t paren = offsetOf(c->ParenRange.begin());
+        if (begin < 0 || paren < 0 || begin <= paren || text[static_cast<size_t>(paren)] != '(')
+          continue;
+        int64_t off = paren + 1;
+        if (i > 0) {
+          const Expr *before = c->Args[i - 1].Value.get();
+          int64_t k = before ? offsetOf(before->Range.end()) : -1;
+          while (k >= 0 && k < begin && text[static_cast<size_t>(k)] != ',')
+            ++k;
+          if (k < 0 || k >= begin)
+            continue;
+          off = k + 1;
+        }
+        auto blank = [&](char ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'; };
+        while (off < begin && blank(text[static_cast<size_t>(off)]))
+          ++off;
+        bool clean = true;
+        for (int64_t k = off; k < begin; ++k)
+          if (!blank(text[static_cast<size_t>(k)]) && text[static_cast<size_t>(k)] != '(')
+            clean = false;
+        if (!clean || !afterOpenOrComma(off))
           continue;
         Hint h{static_cast<uint32_t>(off), "parameter", name + ":", name + ": "};
         out.emplace(h.Offset, h);
@@ -1051,7 +1101,7 @@ int answerHintQuery(const SourceManager &sm, const SemaResult &result,
     SourceLoc at = sm.locForFileOffset(file->ID, off);
     bool inMacro = false;
     for (const SourceRange &r : expanded)
-      if (r.isValid() && r.begin() <= at && at < r.end())
+      if (r.isValid() && r.begin() < at && at < r.end())   // an argument may be one
         inMacro = true;
     if (inMacro)
       continue;

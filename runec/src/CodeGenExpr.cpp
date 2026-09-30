@@ -413,7 +413,8 @@ GlobalVariable *CodeGen::envTypeInfoFor(ClosureExpr *c) {
       ConstantStruct::get(TypeInfoTy,
                           {nameGV, ConstantInt::get(B->getInt64Ty(), size),
                            deinit, ConstantPointerNull::get(PtrTy),
-                           ConstantPointerNull::get(PtrTy), B->getInt32(0)}),
+                           ConstantPointerNull::get(PtrTy), B->getInt32(0),
+                           ConstantPointerNull::get(PtrTy)}),
       "rune.typeinfo.env");
   ClosureEnvInfos[c] = gv;
   return gv;
@@ -469,6 +470,7 @@ Value *CodeGen::emitClosureValue(ClosureExpr *c) {
 
 Value *CodeGen::emitStructLit(StructLitExpr *s) {
   Type *t = s->Ty;
+  DeferEmpties operands(*this);
   Value *slot = createEntryAlloca(lower(t), "literal");
   if (t->isRefCounted())
     B->CreateStore(Constant::getNullValue(lower(t)), slot);
@@ -491,6 +493,7 @@ Value *CodeGen::emitStructLit(StructLitExpr *s) {
         emitInto(lf.Value.get(), fieldPtr, ft);
       }
     }
+    operands.flush();
     return B->CreateLoad(lower(t), slot);
   }
 
@@ -528,6 +531,7 @@ Value *CodeGen::emitStructLit(StructLitExpr *s) {
     if (!zombie() && ft && ft->isSharedHeapBorrow())
       emitRetain(B->CreateLoad(lower(ft->pointee()), fieldPtr), ft->pointee());
   }
+  operands.flush();
   Value *v = B->CreateLoad(lower(t), slot);
   // The slot owns +1 on every reference-counted field; hand that to the
   // statement so the temporary is released once the value is consumed.
@@ -571,6 +575,7 @@ static Constant *scalarConstantOf(Expr *e, Type *t, llvm::Type *lowered,
 
 Value *CodeGen::emitArrayLit(ArrayLitExpr *a) {
   Type *t = a->Ty;
+  DeferEmpties operands(*this);
   llvm::Type *arrTy = lower(t);
   Type *elem = t->element();
 
@@ -645,6 +650,7 @@ std::vector<Value *> CodeGen::buildArguments(CallExpr *c, FunctionDecl *fn,
                                              bool variadic) {
   std::vector<Value *> args;
   std::vector<bool> used(c->Args.size(), false);
+  DeferEmpties operands(*this);
 
   // Formal parameters excluding `self`.
   std::vector<const Param *> formals;
@@ -1842,13 +1848,23 @@ Value *CodeGen::emitBinary(BinaryExpr *b) {
       someVal = B->CreateLoad(lower(b->Ty), someVal);
     } else {
       someVal = emitVariantPayload(opt, optTy, someIndex, 0, b->Ty);
+      // Under Zombie the payload moves out, and the option it came from —
+      // a temporary, or the place `x ?? d` names — has nothing left to give
+      // back. (Under counting this is a no-op: the result is shared below.)
+      if (zombie())
+        takeOwnership(b->LHS.get(), opt, optTy);
     }
     someBB = B->GetInsertBlock();
     B->CreateBr(doneBB);
 
     B->SetInsertPoint(noneBB);
     Value *noneVal = emitRValue(b->RHS.get());
-    noneVal = coerce(noneVal, b->RHS->Ty, b->Ty);
+    if (zombie())
+      takeOwnership(b->RHS.get(), noneVal, b->RHS->Ty);
+    Value *coerced = coerce(noneVal, b->RHS->Ty, b->Ty);
+    if (zombie() && coerced != noneVal)
+      adopt(coerced);
+    noneVal = coerced;
     noneBB = B->GetInsertBlock();
     B->CreateBr(doneBB);
 
@@ -1856,7 +1872,8 @@ Value *CodeGen::emitBinary(BinaryExpr *b) {
     PHINode *phi = B->CreatePHI(lower(b->Ty), 2);
     phi->addIncoming(someVal, someBB);
     phi->addIncoming(noneVal, noneBB);
-    return phi;
+    // Whichever side it came from, the result is this expression's own.
+    return zombie() ? track(phi, b->Ty) : phi;
   }
 
   // A user-provided overload wins over the builtin behaviour.
@@ -2077,7 +2094,10 @@ Value *CodeGen::emitAssign(AssignExpr *a) {
     emitAssignInto(a, scratch, valueTy);
     Value *result = B->CreateLoad(lower(valueTy), scratch);
     B->CreateCall(declareFunction(setter), {self, result});
-    emitRelease(result, valueTy);
+    // The setter takes the value by value: under counting it retains what it
+    // keeps and this reference is given back; under Zombie it owns it now.
+    if (!zombie())
+      emitRelease(result, valueTy);
     return nullptr;
   }
 
@@ -2099,16 +2119,23 @@ Value *CodeGen::emitAssign(AssignExpr *a) {
     }
     Value *self = receiverFor(idx->Base.get(), selfParam);
     Value *where = emitRValue(idx->Index.get());
+    Value *rawWhere = where;
     if (where && indexParam)
       where = coerce(where, idx->Index->Ty, indexParam);
     if (!self || !where || !valueTy)
       return nullptr;
+    // A key taken by value goes to the setter, which owns it after the call.
+    // Under Zombie the getter of a compound `m[k] += v` gets a copy of its
+    // own, so the two calls do not both think they hold the one key.
+    const bool keyByValue =
+        zombie() && indexParam && !indexParam->is(TypeKind::Pointer);
 
     Value *scratch = createEntryAlloca(lower(valueTy), "index.value");
     if (valueTy->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(valueTy)), scratch);
     if (a->Op != AssignOp::Assign && getter) {
-      Value *got = B->CreateCall(declareFunction(getter), {self, where});
+      Value *getterKey = keyByValue ? emitClone(where, indexParam) : where;
+      Value *got = B->CreateCall(declareFunction(getter), {self, getterKey});
       Type *gotTy = getter->Ty ? getter->Ty->result() : valueTy;
       if (gotTy && gotTy->is(TypeKind::Pointer) && gotTy != valueTy) {
         // A getter that lends the element: read it out, and give the scratch
@@ -2123,8 +2150,16 @@ Value *CodeGen::emitAssign(AssignExpr *a) {
     }
     emitAssignInto(a, scratch, valueTy);
     Value *result = B->CreateLoad(lower(valueTy), scratch);
+    if (keyByValue) {
+      takeOwnership(idx->Index.get(), rawWhere, idx->Index->Ty);
+      if (where != rawWhere)
+        adopt(where);
+    }
     B->CreateCall(declareFunction(setter), {self, where, result});
-    emitRelease(result, valueTy);
+    // The setter takes the value by value: under counting it retains what it
+    // keeps and this reference is given back; under Zombie it owns it now.
+    if (!zombie())
+      emitRelease(result, valueTy);
     return nullptr;
   }
 
@@ -3517,8 +3552,16 @@ Value *CodeGen::emitRValue(Expr *e) {
       }
       Value *self = receiverFor(i->Base.get(), selfParam);
       Value *idx = emitRValue(i->Index.get());
-      if (idxParam)
-        idx = coerce(idx, i->Index->Ty, idxParam);
+      // A key taken by value is moved in, as any argument is.
+      const bool byValue = idxParam && !idxParam->is(TypeKind::Pointer);
+      if (zombie() && byValue)
+        takeOwnership(i->Index.get(), idx, i->Index->Ty);
+      if (idxParam) {
+        Value *coerced = coerce(idx, i->Index->Ty, idxParam);
+        if (zombie() && byValue && coerced != idx)
+          adopt(coerced);
+        idx = coerced;
+      }
       Value *r = B->CreateCall(f, {self, idx});
       // A lent element of plain data is read out where it lies.
       if (i->ReadsThrough)
@@ -3644,10 +3687,12 @@ Value *CodeGen::emitRValue(Expr *e) {
     Value *slot = createEntryAlloca(lower(e->Ty), "tuple");
     if (e->Ty->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(e->Ty)), slot);
+    DeferEmpties operands(*this);
     for (size_t i = 0; i < t->Elements.size(); ++i)
       emitInto(t->Elements[i].get(),
                B->CreateStructGEP(lower(e->Ty), slot, static_cast<unsigned>(i)),
                e->Ty->tupleElements()[i]);
+    operands.flush();
     return track(B->CreateLoad(lower(e->Ty), slot), e->Ty);
   }
 

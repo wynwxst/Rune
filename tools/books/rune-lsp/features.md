@@ -65,6 +65,41 @@ method's declared result with the standard library's generics filled in —
 `vector::Vector<Token>`'s `pop()` gives a `Token?`. Where neither can tell, it
 offers nothing rather than guess; see [How it works](how-it-works.md).
 
+## Inlay hints
+
+What the compiler knows but the code does not say is shown in the text, greyed
+out:
+
+```rune
+let total: i64 = area(width: 3, height: 4)
+//       ^^^^^        ^^^^^^    ^^^^^^^  hints
+```
+
+- after a `let` or `var` without a type, and a closure parameter without one,
+  the type the compiler inferred, spelled the way the file would write it —
+  through its own imports, `vec::Vector<i64>` for `import std::collections::vector
+  as vec`;
+- before an argument given by position, the parameter it goes to — except where
+  the argument already is a variable of that name, `area(width, height)`;
+- after a `for` loop's variable, its element type, which has no place to be
+  written and so is only shown.
+
+Double-click a hint to write it into the code — the label, or `: Type` — exactly
+as `rune fmt` would. They come from the compiler, over the text as it stands,
+and are worked out again for each new version of the file; while the file is too
+broken to check, the last ones stay. Nothing is hinted inside a generic function,
+whose types differ with each use, nor inside a macro invocation.
+`inlayHints.types` and `inlayHints.parameters` turn each kind off.
+
+## Formatting
+
+**Format Document** (`textDocument/formatting`) formats the file with the same
+rules as `rune fmt`: the linter's style fixes, types and argument labels written
+in, directives and imports first, indentation from the brackets, and tidy blank
+lines. Unsaved changes are formatted as they stand. Whatever it holds back —
+because the file does not compile yet, say — it says in the server's log.
+`rune doc fmt` describes each step; the `format.*` settings choose which run.
+
 ## Hover
 
 - On a declaration or a use of one: its signature, the kind of thing it is and

@@ -131,7 +131,7 @@ edition = "2025"
 
 [build]
 safety = "full"        # none | minimal | full
-memory = "arc"         # arc | zombie: reference counting, or single ownership
+memory = "zombie"      # zombie | arc: single ownership, or reference counting
 emit = "exe"           # exe | lib | obj | asm | llvm-ir
 optimize = 0
 debug = true

@@ -298,6 +298,16 @@ void MoveAnalysis::checkMoveOutOf(const Stmt &s, const PlaceAccess &a) {
     }
   }
   bool whole = pl.Proj.empty();
+  if (root.K == Local::Global && !throughRef && !throughHandle) {
+    auto d = Diags.error(a.Range, "cannot move '{}' out of a global",
+                         B.spell(a.Place));
+    d.note("a global is reached from every function, so taking its value "
+           "would leave all of them holding nothing");
+    d.note("borrow it with `&`, copy it with `$clone()`, or swap something "
+           "in with `mem::replace`");
+    d.code(274);
+    return;
+  }
   if (whole && root.RefLike) {
     auto d = Diags.error(a.Range, "cannot move '{}' out of a borrow",
                          B.spell(a.Place));
@@ -365,7 +375,12 @@ void MoveAnalysis::planDrops() {
   // One plan per owned local: over every drop of it, what state it is in.
   for (BlockId bi = 0; bi < B.Blocks.size(); ++bi) {
     BitSet init = InitIn[bi], uninit = UninitIn[bi];
-    for (const Stmt &s : B.Blocks[bi].Stmts) {
+    for (Stmt &s : B.Blocks[bi].Stmts) {
+      if (s.K == Stmt::Drop && s.Dst != kNone) {
+        PathId whole = pathFor(s.Dst);
+        if (whole != kNone && uninit.test(whole) && !init.test(whole))
+          s.DropElided = true;
+      }
       if (s.K == Stmt::Drop && s.Dst != kNone) {
         const Place &pl = B.Places.get(s.Dst);
         const Local &l = B.Locals[pl.Root];
@@ -467,9 +482,21 @@ void MoveAnalysis::run() {
     BitSet init = InitIn[bi], uninit = UninitIn[bi];
     for (uint32_t si = 0; si < B.Blocks[bi].Stmts.size(); ++si) {
       const Stmt &s = B.Blocks[bi].Stmts[si];
-      for (const PlaceAccess &a : s.Accesses)
-        if (a.A == Access::Move && a.Place != kNone && pathFor(a.Place) == kNone)
+      for (const PlaceAccess &a : s.Accesses) {
+        if (a.A != Access::Move || a.Place == kNone)
+          continue;
+        // A binding that only borrows — `c` in `match e { E::A(c) => … }`
+        // over a borrowed `e` — has a path of its own, but taking all of it
+        // is still taking what somebody else owns.
+        const Place &pl = B.Places.get(a.Place);
+        const Local &root = B.Locals[pl.Root];
+        // Nor can anything be taken out of a global: every function reaches
+        // it, and no one function's paths could say it is still there.
+        if (pathFor(a.Place) == kNone ||
+            (pl.Proj.empty() && root.RefLike && !root.Owned) ||
+            root.K == Local::Global)
           checkMoveOutOf(s, a);
+      }
       check(s, Location{bi, si}, init, uninit);
       transfer(s, init, uninit);
     }

@@ -31,6 +31,7 @@ fn usage() -> String {
     OPTIONS
         --check            Change nothing; list the files that are not formatted, exit 1 if any
         --stdout           Print the formatted text instead of writing it (one file)
+        --stdin-path <p>   Format standard input as though it were the file <p>, and print it
         --no-types         Do not write in the types of bindings
         --no-labels        Do not label arguments given by position
         --no-reorder       Leave the order of the file's top-level pieces alone
@@ -55,6 +56,7 @@ fn main() -> i64 {
     var toStdout = false
     var runec = ""
     var stdlibFlag = ""
+    var stdinPath = ""
     var paths = vector::Vector<String>()
     let args = process::arguments()
     var i = 0
@@ -70,6 +72,7 @@ fn main() -> i64 {
         elif a == "--no-lint-fixes" { opts.lintFixes = false }
         elif a == "--runec" { runec = value; i += 1 }
         elif a == "--stdlib" { stdlibFlag = value; i += 1 }
+        elif a == "--stdin-path" { stdinPath = value; i += 1 }
         elif a.$length() > 0 && a.$byteAt(0) == 45 {
             io::eprintln("rune-fmt: unknown option '" + a + "'")
             io::eprint(usage())
@@ -81,6 +84,31 @@ fn main() -> i64 {
     }
     if runec.$isEmpty() { runec = sibling("runec") }
     var p = project::Project(project::findStdlib(stdlibFlag, process::programName()))
+
+    var r = random::new()
+    let scratch = project::join(env::temporaryDirectory(), "rune-fmt-" + r.between(100000, 999999).$str() + ".rune")
+
+    // An editor's buffer, on standard input: formatted as the file it will
+    // be saved as, with that file's package around it.
+    if !stdinPath.$isEmpty() {
+        var input = io::Bytes()
+        loop {
+            match io::readLineOrEnd() {
+                Some(line) => {
+                    input.appendText(line)
+                    input.appendText("\n")
+                },
+                None => break,
+            }
+        }
+        let path = project::absolute(stdinPath)
+        let done = format::format(&var p, runec, path, input.toString(), scratch, opts)
+        io::delete(scratch)
+        if !done.note.$isEmpty() { io::eprintln("rune-fmt: " + stdinPath + ": " + done.note) }
+        io::print(done.text)
+        io::flush()
+        return 0
+    }
 
     var files = vector::Vector<String>()
     if paths.isEmpty() {
@@ -111,8 +139,6 @@ fn main() -> i64 {
         return 2
     }
 
-    var r = random::new()
-    let scratch = project::join(env::temporaryDirectory(), "rune-fmt-" + r.between(100000, 999999).$str() + ".rune")
     let cwd = project::absolute(".")
     var changed = 0
     for file in files {

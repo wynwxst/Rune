@@ -374,65 +374,65 @@ pub mark Sequence {
     type Iter: Iterator
 
     /// A new cursor, positioned at the start.
-    fn iterate(&self) -> Self::Iter
+    fn iterate(&self) -> Self::Iter from self
 
     //=== The same adaptors, one step earlier ============================//
 
     /// Every value with `f` applied to it.
-    fn map<B>(self, f: @function(Self::Iter::Item) -> B) -> Map<Self::Iter, B> {
+    fn map<B>(&self, f: @function(Self::Iter::Item) -> B) -> Map<Self::Iter, B> from (self, f) {
         Map<Self::Iter, B> { source: self.iterate(), f: f }
     }
 
     /// Only the values `keep` says yes to.
-    fn filter(self,
-              keep: @function(&Self::Iter::Item) -> bool) -> Filter<Self::Iter> {
+    fn filter(&self,
+              keep: @function(&Self::Iter::Item) -> bool) -> Filter<Self::Iter> from (self, keep) {
         Filter<Self::Iter> { source: self.iterate(), keep: keep }
     }
 
     /// Pairs from both, stopping as soon as either does.
-    fn zip<J: Iterator>(self, other: J) -> Zip<Self::Iter, J> {
+    fn zip<J: Iterator>(&self, other: J) -> Zip<Self::Iter, J> from (self, other) {
         Zip<Self::Iter, J> { left: self.iterate(), right: other }
     }
 
     /// The values up to the first one `keep` says no to, and no further.
-    fn take_while(self,
-                  keep: @function(&Self::Iter::Item) -> bool) -> TakeWhile<Self::Iter> {
+    fn take_while(&self,
+                  keep: @function(&Self::Iter::Item) -> bool) -> TakeWhile<Self::Iter> from (self, keep) {
         TakeWhile<Self::Iter> { source: self.iterate(), keep: keep }
     }
 
     /// Everything from the first value `drop` says no to onwards.
-    fn skip_while(self,
-                  drop: @function(&Self::Iter::Item) -> bool) -> SkipWhile<Self::Iter> {
+    fn skip_while(&self,
+                  drop: @function(&Self::Iter::Item) -> bool) -> SkipWhile<Self::Iter> from (self, drop) {
         SkipWhile<Self::Iter> { source: self.iterate(), drop: drop }
     }
 
     /// At most `count` values.
-    fn take(self, count: i64) -> Take<Self::Iter> {
+    fn take(&self, count: i64) -> Take<Self::Iter> from self {
         Take<Self::Iter> { source: self.iterate(), remaining: count }
     }
 
     /// Everything after the first `count` values.
-    fn skip(self, count: i64) -> Skip<Self::Iter> {
+    fn skip(&self, count: i64) -> Skip<Self::Iter> from self {
         Skip<Self::Iter> { source: self.iterate(), remaining: count }
     }
 
     /// Each value paired with its position, counting from zero.
-    fn enumerate(self) -> Enumerate<Self::Iter> {
+    fn enumerate(&self) -> Enumerate<Self::Iter> from self {
         Enumerate<Self::Iter> { source: self.iterate() }
     }
 
     /// This sequence's values, then `other`'s.
-    fn chain<J: Iterator>(self, other: J) -> Chain<Self::Iter, J> {
+    fn chain<J: Iterator>(&self, other: J) -> Chain<Self::Iter, J> from (self, other) {
         Chain<Self::Iter, J> { left: self.iterate(), right: other }
     }
 
     /// Every value of every inner iterator, laid out flat.
-    fn flatten(self) -> Flatten<Self::Iter> where Self::Iter::Item: Iterator {
+    fn flatten(&self) -> Flatten<Self::Iter> from self where Self::Iter::Item: Iterator {
         Flatten<Self::Iter> { source: self.iterate() }
     }
 
     /// `map` and `flatten` in one.
-    fn flatMap<J: Iterator>(self, f: @function(Self::Iter::Item) -> J) -> Flatten<Map<Self::Iter, J>> {
+    fn flatMap<J: Iterator>(&self, f: @function(Self::Iter::Item) -> J) -> Flatten<Map<Self::Iter, J>> from (self, f) {
         Flatten<Map<Self::Iter, J>> { source: Map<Self::Iter, J> { source: self.iterate(), f: f } }
     }
 
@@ -440,7 +440,7 @@ pub mark Sequence {
     /// better with.
     ///
     ///     let firstThree = names.as_iter().take(3).collect()
-    fn as_iter(&self) -> Self::Iter { self.iterate() }
+    fn as_iter(&self) -> Self::Iter from self { self.iterate() }
 
     /// Everything in this sequence, in a vector.
     fn collect(&self) -> vector::Vector<Self::Iter::Item> {

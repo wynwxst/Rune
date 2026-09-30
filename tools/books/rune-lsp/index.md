@@ -19,6 +19,8 @@ What it gives an editor:
 | **Outline** | the file's declarations, with each type's members beneath it |
 | **Signature help** | the parameters of the call being typed, with the current one marked |
 | **Quick fixes** | the linter's fixes, one at a time or all at once |
+| **Inlay hints** | each binding's inferred type and each argument's parameter name, greyed out; double-click one to write it in |
+| **Formatting** | Format Document does what `rune fmt` does — see `rune doc fmt` |
 
 ## Starting it
 

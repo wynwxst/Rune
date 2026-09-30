@@ -28,7 +28,10 @@ is. Its settings:
 | `rune.checkOnSave` | `true` | run the compiler on open and save |
 | `rune.check.onChange` | `true` | also run it once typing pauses, over unsaved text |
 | `rune.check.delay` | `400` | that pause, in milliseconds |
-| `rune.check.memory` | `"arc"` | `"zombie"` checks files outside a package with the borrow checker |
+| `rune.check.memory` | `"zombie"` | `"arc"` checks files outside a package with reference counting instead of the borrow checker |
+| `rune.inlayHints.types` | `true` | show inferred types, greyed out; double-click to write one in |
+| `rune.inlayHints.parameters` | `true` | show argument labels, greyed out; double-click to write one in |
+| `rune.format.types`, `.labels`, `.reorder`, `.lintFixes` | `true` | what Format Document does |
 | `rune.lint.enable` | `true` | show lint findings |
 | `rune.lint.allow` | `[]` | lint rules to turn off |
 | `rune.lint.warn` | `[]` | lint rules to turn on |
@@ -99,10 +102,14 @@ everything in the location list (`:lopen`). Unsaved text is checked through
 | `g:rune_check_on_change` | `1` | `0` checks only on open and save |
 | `g:rune_check_delay` | `400` | the pause in typing, in milliseconds |
 | `g:rune_lint` | `1` | `0` leaves the linter out |
-| `g:rune_memory` | `"arc"` | `"zombie"` checks files outside a package with the borrow checker |
+| `g:rune_memory` | `"zombie"` | `"arc"` checks files outside a package with reference counting instead of the borrow checker |
 | `g:rune_rune`, `g:rune_runec` | on `PATH` | the toolchain's programs |
 
 `:RuneCheck` checks now and `:RuneClear` clears the buffer's findings.
+`:RuneFmt` formats the buffer as `rune fmt` would, unsaved changes and all, and
+`g:rune_format_on_save = 1` does it before every write. In Neovim with the
+server, `vim.lsp.buf.format()` does the same, and inlay hints show with
+`vim.lsp.inlay_hint.enable()`.
 
 With [ALE](https://github.com/dense-analysis/ale) installed, the checker stands
 aside and ALE runs `rune lsp` through the `rune_lsp` linter the directory

@@ -67,6 +67,12 @@ unbuffered and asks the operating system, before reading the next message,
 whether one arrives within `check.delay` milliseconds. Only when none does is
 the check run.
 
+Inlay hints ask it `runec --query-hints <file>`, which prints, for each binding
+without a type and each argument given by position, the byte offset and the text
+that could be written there; `rune doc fmt` describes it, since the formatter
+writes exactly those. The answer is kept for the version of the file it was
+asked about.
+
 Member completion asks the compiler too, with `runec --query-members
 <file>:<start>:<end>`, which checks the buffer and prints the type of the
 expression ending there, with its fields and methods, as JSON.
@@ -85,6 +91,8 @@ Requests are answered one at a time, in order. The server announces:
 | --- | --- |
 | text document sync | open, change (the whole text), save, close |
 | `completionProvider` | triggered by `.`, `:`, `$` and `@` |
+| `inlayHintProvider` | types and parameter names, each with the edit that writes it |
+| `documentFormattingProvider` | the whole document, as one edit |
 | `hoverProvider`, `definitionProvider`, `referencesProvider`, `documentHighlightProvider`, `documentSymbolProvider` | |
 | `signatureHelpProvider` | triggered by `(` and `,` |
 | `codeActionProvider` | `quickfix` and `source.fixAll.rune` |

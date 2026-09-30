@@ -253,9 +253,9 @@ pub fn release<T>(value: T)
 ///    twice. Such a type says what copying it means by writing
 ///    `fn clone(&self) -> Self`, which `$clone()` then calls, and claims the
 ///    mark with `bind mem::Clone to ...`.
-///  * anything the compiler cannot look into: a closure and its captures, an
-///    `Any`, a `dyn Mark`, a raw pointer. `String` is bound below, because a
-///    string's contents never change and a copy of one is a copy.
+///  * anything the compiler cannot look into: a closure and its captures, a
+///    `dyn Mark`, a raw pointer. `String` and `Any` are bound below: a
+///    string's contents never change, and an `Any` knows its own type.
 ///
 /// Write it as a bound when a function has to copy what it is given:
 ///
@@ -270,6 +270,10 @@ pub mark Clone {}
 
 /// A `String` is immutable and counted: a copy of one is a copy of a value.
 bind Clone to String {}
+/// An `Any` is copied through what it holds: a share under counting, and
+/// under single ownership a copy of the value's own type, found from the
+/// object itself. Holding a closure, that copy panics — it has no clone.
+bind Clone to Any {}
 
 //===--------------------------------------------------------------------===//
 // Handle: one owned value on the heap

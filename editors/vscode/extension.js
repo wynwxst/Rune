@@ -36,7 +36,13 @@ function serverSettings() {
     check: {
       onChange: config.get("check.onChange", true),
       delay: config.get("check.delay", 400),
-      memory: config.get("check.memory", "arc"),
+      memory: config.get("check.memory", "zombie"),
+    },
+    format: {
+      types: config.get("format.types", true),
+      labels: config.get("format.labels", true),
+      reorder: config.get("format.reorder", true),
+      lintFixes: config.get("format.lintFixes", true),
     },
     inlayHints: {
       types: config.get("inlayHints.types", true),

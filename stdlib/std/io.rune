@@ -1177,21 +1177,21 @@ bind<R> Writer to BufferedReader<R> where R: Writer {
 ///     var s = logFile.asStream()
 ///     s.writeText("started\n")
 ///
-/// The underlying file is shared, not copied: writing through the stream and
-/// writing through the file both go to the same handle, and closing either
-/// closes it.
-pub class FileStream {
-    var file: File
+/// The stream borrows the file rather than copying it: writing through the
+/// stream and writing through the file both go to the same handle, and the
+/// stream cannot outlive the file it was made from.
+pub struct FileStream {
+    file: &File
+}
 
-    fn init(self, file: File) { self.file = file }
-
+extend FileStream {
     /// The file underneath.
-    pub fn inner(&self) -> &File from self { &self.file }
+    pub fn inner(&self) -> &File from self { self.file }
 }
 
 /// The same file, in the shape `Reader`, `Writer` and `Stream` take.
 extend File {
-    pub fn asStream(&self) -> FileStream { FileStream(self) }
+    pub fn asStream(&self) -> FileStream from self { FileStream { file: self } }
 }
 
 bind Reader to FileStream {

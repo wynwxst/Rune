@@ -24,6 +24,8 @@ Or `set runtimepath^=~/path/to/Rune/editors/vim` followed by
   and when typing pauses, and shows the results as signs, underlines, a message
   under the cursor and the location list. With ALE installed, ALE runs
   `rune lsp` instead.
+- **`:RuneFmt`** formats the buffer as `rune fmt` does; `g:rune_format_on_save = 1`
+  does it on every write. Neovim's `vim.lsp.buf.format()` does the same through the server.
 - **`:make`** checks the file, or its package, anywhere.
 
 `rune` (and `runec`, for files outside a package) must be on `PATH`, or named

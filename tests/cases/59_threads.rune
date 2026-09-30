@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Threads, and the rule that keeps them safe: nothing crosses a thread
 // boundary unless the compiler can see that letting it cross is safe.
 // EXPECT: double: 42

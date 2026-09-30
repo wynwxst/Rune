@@ -135,6 +135,9 @@ void LoanAnalysis::computeLiveness() {
 
   // Backward transfer of one statement over a live set.
   auto stmtTransfer = [&](const Stmt &s, BitSet &live) {
+    // Dropping what was already moved away touches nothing it borrowed.
+    if (s.K == Stmt::Drop && s.DropElided)
+      return;
     // Definitions first (they come after the uses in execution order, so
     // are undone first walking backwards): a whole-local write, storage
     // coming or going.
@@ -948,11 +951,19 @@ void LoanAnalysis::collectResult() {
         FromEntry e;
         e.Param = root.Index;
         bool afterDeref = root.RefLike;
+        Place prefix{p.Root, {}};
         for (const Projection &pr : p.Proj) {
           if (pr.K == Projection::Deref) {
-            afterDeref = true;
+            // Through a borrow the parameter holds, the target is the
+            // caller's. Through a handle it owns — a `String`, an object
+            // passed by value — it is this call's, and goes when it does.
+            Type *pt = placeType(B, B.Places.intern(prefix));
+            if (!pt || pt->is(TypeKind::Pointer) || pt->is(TypeKind::Slice))
+              afterDeref = true;
+            prefix.Proj.push_back(pr);
             continue;
           }
+          prefix.Proj.push_back(pr);
           if (!afterDeref)
             continue;
           if (pr.K == Projection::Field)
@@ -960,7 +971,7 @@ void LoanAnalysis::collectResult() {
           else
             break;
         }
-        if (!afterDeref && !p.Proj.empty() && !root.RefLike) {
+        if (!afterDeref && !root.RefLike) {
           // A borrow of the parameter's own storage: a local of this call.
           auto d = Diags.error(l.Range,
                                "this returns a borrow of '{}', which does "

@@ -7,10 +7,12 @@
 //     last place its binding is mentioned, which is where it stops mattering
 //   * the set of locals something has taken away from this scope
 //
-// Everything is keyed on a *root local*: `&var v.field[i]` borrows `v`, and
-// that is the granularity conflicts are reported at. Finer would need to
-// follow indices the compiler cannot evaluate, and would report the same
-// conflicts with less certainty.
+// Everything is keyed on a *root local* and the field path below it:
+// `&var v.a` and `&var v.b` are different places, as they are to the Zombie
+// checker, so whatever it accepts this accepts too. The path stops at the
+// first index or deref — `v.a[i]` is just `v.a` here — because following
+// indices the compiler cannot evaluate would report conflicts with less
+// certainty, not more.
 //
 //===----------------------------------------------------------------------===//
 #include "rune/Ownership.h"
@@ -62,6 +64,36 @@ VarDecl *rootLocal(const Expr *e) {
   return nullptr;
 }
 
+/// The fields named between a place's root local and its first index or
+/// deref: `v.a.b` is `{a, b}`, `v.a[i].c` is `{a}`, `v` and `*p` are `{}`.
+std::vector<std::string> fieldPath(const Expr *e) {
+  std::vector<std::string> path;
+  while (e) {
+    if (e->Kind == NodeKind::Member) {
+      path.push_back(cast<MemberExpr>(e)->Name);
+      e = cast<MemberExpr>(e)->Base.get();
+    } else if (e->Kind == NodeKind::Borrow) {
+      e = cast<BorrowExpr>(e)->Operand.get();
+    } else if (e->Kind == NodeKind::Index || e->Kind == NodeKind::Deref) {
+      path.clear();                    // everything below here is one place
+      e = e->Kind == NodeKind::Index ? cast<IndexExpr>(e)->Base.get()
+                                     : cast<DerefExpr>(e)->Operand.get();
+    } else {
+      break;
+    }
+  }
+  return {path.rbegin(), path.rend()};
+}
+
+/// Two paths from one root overlap unless they part at some field.
+bool overlaps(const std::vector<std::string> &a,
+              const std::vector<std::string> &b) {
+  for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+    if (a[i] != b[i])
+      return false;
+  return true;
+}
+
 /// How a place is spelled, for a diagnostic: `v`, `v.field`, `v[…]`.
 std::string spell(const Expr *e) {
   if (!e)
@@ -91,6 +123,7 @@ bool isTrackedBorrow(Type *t) {
 struct LiveBorrow {
   VarDecl *Binding = nullptr;   ///< the local holding the borrow
   VarDecl *Root = nullptr;      ///< the local it points into
+  std::vector<std::string> Path; ///< the fields below `Root` it covers
   bool Mutable = false;
   SourceRange TakenAt;
   std::string Place;            ///< how the borrowed place was written
@@ -212,8 +245,9 @@ private:
       return;
     if (!reports())
       return;
+    const std::vector<std::string> path = fieldPath(place);
     for (const LiveBorrow &b : Borrows) {
-      if (b.Root != root)
+      if (b.Root != root || !overlaps(b.Path, path))
         continue;
       if (!b.Mutable && !wantMutable)
         continue;                       // two readers never disagree
@@ -228,8 +262,8 @@ private:
       d.related(b.TakenAt, "the borrow is taken here",
                 fmt("finish with '{}' before this line, or take this one as "
                     "`&` instead", b.Place));
-      d.note("a borrow is followed to the binding it starts from, so two "
-             "fields of the same value count as the same place");
+      d.note("two borrows clash when one place contains the other; an "
+             "index counts as the whole collection");
       d.code(270);
       return;
     }
@@ -384,6 +418,7 @@ private:
     LiveBorrow b;
     b.Binding = binding;
     b.Root = root;
+    b.Path = fieldPath(init);
     b.Mutable = binding->Ty->isMutablePointer();
     b.TakenAt = init->Range;
     b.Place = spell(init);

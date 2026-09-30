@@ -22,6 +22,8 @@ extern "C" {
 #endif
 
 typedef void (*RuneDeinitFn)(void *self);
+/* A deep copy of an object, as a new object with a count of 1. */
+typedef void *(*RuneCloneFn)(const void *self);
 
 /* Static per-type metadata emitted once per class/struct that needs it. */
 typedef struct RuneTypeInfo {
@@ -31,6 +33,10 @@ typedef struct RuneTypeInfo {
   const struct RuneTypeInfo *super; /* base class, or NULL                 */
   const void *const *vtable;        /* virtual method table, or NULL       */
   uint32_t vtableCount;
+  /* Copies an object of exactly this type. Filled in under single ownership,
+     where a copy made through a base class, a `dyn` or an `Any` has to be of
+     the object's own type; NULL under counting, which shares instead. */
+  RuneCloneFn clone;
 } RuneTypeInfo;
 
 /* Header shared by every reference-counted allocation. */
@@ -57,6 +63,9 @@ int64_t rune_refcount(void *obj);
 int rune_teardown_enter(void *obj);
 void *rune_teardown_next(void);
 void rune_teardown_leave(void);
+/* A deep copy of `obj` made by its own type's `clone`; NULL-safe. Panics
+ * when the type has none — a closure's captures, say. */
+void *rune_clone_object(const void *obj);
 /* True if `obj` is an instance of `ti` or one of its subclasses. */
 int rune_is_kind_of(const void *obj, const RuneTypeInfo *ti);
 

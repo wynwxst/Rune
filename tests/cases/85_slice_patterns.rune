@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // `[a, b, c]` takes an array or a slice apart element by element; `..`
 // stands for a run in the middle, and `..rest` binds that run as a slice.
 // A fixed array with the right count is irrefutable, so it works in `let`

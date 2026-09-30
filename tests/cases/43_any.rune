@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // An `Any` answers for the type it was built from, whatever that was.
 // EXPECT: i64 true false 42
 // EXPECT: f64 false true 2.5

@@ -241,6 +241,10 @@ struct Stmt {
   /// True when the value moved into `Dst` came out of a heap handle's
   /// pointee — loans under `Src`'s `Deref` follow it (§4.4 re-rooting).
   bool MoveOfHandle = false;
+  /// A `Drop` of a place moved out of on every path that reaches it: it
+  /// destroys nothing, so it is not a use of what the place borrowed. Set by
+  /// the move analysis.
+  bool DropElided = false;
   /// Loans this statement issues into `Dst`'s origin besides `Loan`: the
   /// derived loans of a call's implicit borrows (see `applySummaries`).
   std::vector<LoanId> Issues;

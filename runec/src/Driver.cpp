@@ -36,8 +36,9 @@ CODE GENERATION
     --safety <level>     none | minimal | full   (default full)
     --overflow-checks    Trap when integer arithmetic overflows (default at -O0)
     --no-overflow-checks Wrap instead (default at -O1 and above)
-    --memory <mode>      arc | zombie   (default arc): reference counting, or
-                         single ownership proven by the Zombie borrow checker
+    --memory <mode>      zombie | arc   (default zombie): single ownership
+                         proven by the Zombie borrow checker, or reference
+                         counting
     --no-zombie-stdlib   Silence Zombie findings inside the standard library
                          (they are reported by default)
 

@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A user-defined decorator is a function whose last parameter is a function.
 // `@route("GET", "/health")` on `fn health()` means `route("GET", "/health",
 // health)`, called once before `main`.

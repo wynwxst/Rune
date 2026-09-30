@@ -25,6 +25,7 @@
 
 import std::io
 import std::collections::vector
+import std::mem
 
 extern "C" {
     fn rune_os_entropy(out: *var u8, count: i64) -> bool
@@ -162,21 +163,17 @@ extend Random {
     }
 
     /// One of the vector's elements, or `nil` when it is empty.
-    pub fn pick<T>(&var self, items: vector::Vector<T>) -> T? {
+    pub fn pick<T>(&var self, items: &vector::Vector<T>) -> T? where T: mem::Clone {
         if items.isEmpty() { return nil }
         items.get(self.below(items.length()))
     }
 
     /// Puts the vector's elements in a random order, in place. Every order
     /// is equally likely (Fisher–Yates).
-    pub fn shuffle<T>(&var self, items: vector::Vector<T>) {
+    pub fn shuffle<T>(&var self, items: &var vector::Vector<T>) {
         var i = items.length() - 1
         while i > 0 {
-            let j = self.below(i + 1)
-            let a = items.get(i)
-            let b = items.get(j)
-            items.set(i, b)
-            items.set(j, a)
+            items.swap(i, self.below(i + 1))
             i -= 1
         }
     }
@@ -228,4 +225,4 @@ pub fn coin() -> bool { ready(); unsafe { shared.coin() } }
 /// One of `items`, or `nil` when there are none.
 pub fn choose<T>(items: [T]) -> T? { ready(); unsafe { shared.choose(items) } }
 /// Puts the vector in a random order, in place.
-pub fn shuffle<T>(items: vector::Vector<T>) { ready(); unsafe { shared.shuffle(items) } }
+pub fn shuffle<T>(items: &var vector::Vector<T>) { ready(); unsafe { shared.shuffle(items) } }

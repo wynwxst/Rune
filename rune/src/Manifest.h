@@ -91,11 +91,11 @@ struct Manifest {
 
   // [build]
   std::string Safety = "full";  ///< none | minimal | full
-  /// `memory`: "arc" (reference counting, the default) or "zombie" (single
-  /// ownership proven by the borrow checker, no counting at all). Read from
+  /// `memory`: "zombie" (single ownership proven by the borrow checker, no
+  /// counting at all — the default) or "arc" (reference counting). Read from
   /// the root package only: one program is one memory model, and every
   /// dependency is built for the root's.
-  std::string Memory = "arc";
+  std::string Memory = "zombie";
   /// [build] emit = "llvm-ir" — what `rune build` produces for this package
   /// when the command line does not say. Empty means an executable.
   std::string Emit;

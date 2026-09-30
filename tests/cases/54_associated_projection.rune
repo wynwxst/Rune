@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // `I::Item` names what a cursor yields, and `S::Iter::Item` what a sequence
 // does. Both work wherever a type can be written, including in a signature
 // whose owner is still a parameter.

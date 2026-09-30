@@ -5,6 +5,8 @@ edition = "2026"
 description = "One thread doing several things at once: async fn, .await, and std::task."
 
 [build]
+# Written for reference counting (it shares where Zombie would move).
+memory = "arc"
 safety = "full"
 optimize = 0
 debug = true

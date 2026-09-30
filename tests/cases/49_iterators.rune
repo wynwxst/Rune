@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A `for` loop drives anything bound to `Iterator`, and asks a `Sequence` for
 // one first. Both marks are in the prelude, because `for` is syntax.
 // EXPECT: 3

@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // An enum variant used as a value is an rvalue with no storage of its own.
 // Borrowing one — passing it to a `&Self` parameter, which is what an operator
 // overload takes — has to materialise it first.

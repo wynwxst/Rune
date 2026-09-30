@@ -90,8 +90,9 @@ add_subdirectory(tests)
 # was just built. `rune doc` looks for it beside `runec`.
 add_custom_command(
   OUTPUT ${CMAKE_BINARY_DIR}/bin/rune-doc
+  # Written for reference counting; not yet ported to Zombie, the default.
   COMMAND $<TARGET_FILE:runec> --stdlib ${CMAKE_SOURCE_DIR}/stdlib
-          -o ${CMAKE_BINARY_DIR}/bin/rune-doc
+          --memory arc -o ${CMAKE_BINARY_DIR}/bin/rune-doc
           ${CMAKE_SOURCE_DIR}/tools/rune-doc.rune
   DEPENDS runec runeruntime ${CMAKE_SOURCE_DIR}/tools/rune-doc.rune
   COMMENT "Building rune-doc")
@@ -106,8 +107,9 @@ file(GLOB_RECURSE RUNE_STDLIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/stdl
 foreach(tool rune-lint rune-fmt rune-lsp)
   add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/bin/${tool}
+    # Written for reference counting; not yet ported to Zombie, the default.
     COMMAND $<TARGET_FILE:runec> --stdlib ${CMAKE_SOURCE_DIR}/stdlib
-            --module runetools -O2 -o ${CMAKE_BINARY_DIR}/bin/${tool}
+            --memory arc --module runetools -O2 -o ${CMAKE_BINARY_DIR}/bin/${tool}
             ${CMAKE_SOURCE_DIR}/tools/${tool}.rune ${RUNE_TOOLS_SHARED}
     DEPENDS runec runeruntime ${CMAKE_SOURCE_DIR}/tools/${tool}.rune
             ${RUNE_TOOLS_SHARED} ${RUNE_STDLIB_SOURCES}

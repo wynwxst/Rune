@@ -28,7 +28,9 @@ enum class OverflowChecks {
   Off,
 };
 
-/// How the program keeps its heap alive.
+/// How the program keeps its heap alive. `Zombie` is the default; whatever
+/// compiles under it also compiles under `Arc`, which accepts more (it can
+/// share where Zombie must move or borrow).
 ///
 /// `Arc` is automatic reference counting: every class, `String`, closure and
 /// mark object carries a count, copies retain and scope exits release, and
@@ -96,7 +98,7 @@ struct CompilerOptions {
   DumpKind Dump = DumpKind::Nothing;
   SafetyLevel Safety = SafetyLevel::Full;
   OverflowChecks Overflow = OverflowChecks::Default;
-  MemoryMode Memory = MemoryMode::Arc;
+  MemoryMode Memory = MemoryMode::Zombie;
   /// Report the Zombie borrow checker's findings inside the standard library
   /// as well as in the program. On by default now that the library is clean,
   /// so a regression there is caught; `--no-zombie-stdlib` silences it (the

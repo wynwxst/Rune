@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // `Self` in a mark: a constructor requirement, a parameter, and a return.
 // The implementation is chosen by the type the result flows into.
 // EXPECT: dolly says baaaa?

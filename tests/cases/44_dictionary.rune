@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Map and Set: open-addressed tables keyed structurally.
 //
 // A key needs nothing of its own — no `Hashable` mark, no `Display` — because

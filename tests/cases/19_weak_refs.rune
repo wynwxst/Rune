@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A weak field does not keep its target alive and reads as empty afterwards,
 // so a cycle built through one is fully destroyed. The harness fails the case
 // if anything is still live at exit.

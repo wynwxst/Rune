@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // Two instantiations of one generic are two types, and their per-type globals
 // have to say so. A destructor, a descriptor and a vtable are all named after
 // the type, and a name that left the arguments out gave `Vector<i64>` and

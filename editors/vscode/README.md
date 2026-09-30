@@ -12,6 +12,10 @@ Rune language server — diagnostics, completion, hover, navigation and quick fi
   Inside a package (a directory with a `Rune.toml`) the server runs `rune check`, which
   knows the package's other files, dependencies and memory model; a file on its own is
   checked with `runec --check` (set `rune.check.memory` to `zombie` for the borrow checker).
+- **Inlay hints**: each binding's inferred type and each argument's parameter name,
+  greyed out. Double-click one to write it into the code.
+- **Format Document** formats like `rune fmt`: directives and imports first, four-space
+  indentation, and the types and argument labels the compiler knows written in.
 - **Lint diagnostics as you type**, from the same rules as `rune lint`, with quick fixes
   for the ones that have a certain answer (`var` that could be `let`, an unused import,
   `while true`, trailing whitespace…) and a *Fix All* source action.
@@ -57,7 +61,10 @@ code --install-extension rune-lang-0.1.0.vsix
 | `rune.checkOnSave` | `true` | run the compiler on open and save |
 | `rune.check.onChange` | `true` | also run it once typing pauses, over unsaved text |
 | `rune.check.delay` | `400` | that pause, in milliseconds |
-| `rune.check.memory` | `"arc"` | `"zombie"` checks files outside a package with the borrow checker |
+| `rune.check.memory` | `"zombie"` | `"arc"` checks files outside a package with reference counting instead of the borrow checker |
+| `rune.inlayHints.types` | `true` | show inferred types; double-click to write one in |
+| `rune.inlayHints.parameters` | `true` | show argument labels; double-click to write one in |
+| `rune.format.types`, `.labels`, `.reorder`, `.lintFixes` | `true` | what Format Document does |
 | `rune.lint.enable` | `true` | show lint findings as you type |
 | `rune.lint.allow` | `[]` | rules to turn off, e.g. `["naming"]` |
 | `rune.lint.warn` | `[]` | rules to turn on, e.g. `["missing-docs"]` |

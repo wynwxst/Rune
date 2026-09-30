@@ -76,6 +76,26 @@
           "minimum": 0,
           "markdownDescription": "How long typing must pause, in milliseconds, before `#rune.check.onChange#` runs the compiler."
         },
+        "rune.format.types": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Format Document writes in the type of each binding that has none, as `rune fmt` does."
+        },
+        "rune.format.labels": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Format Document labels each argument given by position with its parameter's name."
+        },
+        "rune.format.reorder": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Format Document puts the file's directives, imports, type aliases and globals first."
+        },
+        "rune.format.lintFixes": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Format Document applies the linter's style fixes: stray `;`, `while true`, `== true`, repeated imports."
+        },
         "rune.inlayHints.types": {
           "type": "boolean",
           "default": true,
@@ -88,8 +108,8 @@
         },
         "rune.check.memory": {
           "type": "string",
-          "enum": ["arc", "zombie"],
-          "default": "arc",
+          "enum": ["zombie", "arc"],
+          "default": "zombie",
           "markdownDescription": "The memory model a file outside any package is checked in. `zombie` shows the borrow checker's errors. Inside a package, `[build] memory` in its `Rune.toml` decides."
         },
         "rune.lint.enable": {

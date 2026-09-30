@@ -178,6 +178,10 @@ bool carriesReference(Type *t) {
   std::function<bool(Type *)> go = [&](Type *x) -> bool {
     if (!x || !seen.insert(x).second)
       return false;
+    // `some Iterator` hides the type from callers, not from this question:
+    // an iterator over a borrowed vector borrows whatever it is spelled as.
+    if (x->isOpaque() && x->canonical() != x)
+      return go(x->canonical());
     switch (x->kind()) {
     case TypeKind::Pointer:
       return !x->isRawPointer();
@@ -2335,8 +2339,15 @@ PlaceId Lowerer::lowerClosure(ClosureExpr *c) {
   for (const Capture &cap : c->Captures) {
     if (!cap.Var)
       continue;
-    PlaceId p = place(localFor(cap.Var, c->Range));
-    consume(s, p, c, c->Range);
+    LocalId l = localFor(cap.Var, c->Range);
+    PlaceId p = place(l);
+    // A binding that only borrows its value — a `&self` object receiver, a
+    // payload of a borrowed scrutinee — is carried as the borrow it is, not
+    // moved; its origin flows into the closure below.
+    if (l != kNone && B.Locals[l].RefLike && !B.Locals[l].Owned)
+      read(s, p, c, c->Range);
+    else
+      consume(s, p, c, c->Range);
     flowThrough(s, p, dst);
   }
   if (dst != kNone) {

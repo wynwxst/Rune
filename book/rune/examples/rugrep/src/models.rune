@@ -1,0 +1,4 @@
+import std::io
+pub struct Path {
+    file: io::File
+}

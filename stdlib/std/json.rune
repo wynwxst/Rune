@@ -283,17 +283,19 @@ extend Value {
 
     /// The string inside, or nothing.
     pub fn asText(&self) -> String? {
-        match self { Value::Text(s) => s, _ => nil }
+        match self { Value::Text(s) => s.$clone(), _ => nil }
     }
 
-    /// The array inside, or nothing.
+    /// The array inside, or nothing. A copy under single ownership; under
+    /// counting, the same array shared.
     pub fn asArray(&self) -> Array? {
-        match self { Value::Array(a) => a, _ => nil }
+        match self { Value::Array(a) => a.$clone(), _ => nil }
     }
 
-    /// The object inside, or nothing.
+    /// The object inside, or nothing. A copy under single ownership; under
+    /// counting, the same object shared.
     pub fn asObject(&self) -> Object? {
-        match self { Value::Object(o) => o, _ => nil }
+        match self { Value::Object(o) => o.$clone(), _ => nil }
     }
 
     //=== Reaching into it ===============================================//
@@ -336,24 +338,30 @@ extend Value {
     ///
     ///     json::object().withMember("name", "ada" into Value)
     ///
-    /// The value handed back is the one that went in: an `Object` is a class,
-    /// so a `Value` holding one holds a reference to it. That is what makes
-    /// these two chainable, and it is what `json!` expands to.
-    pub fn withMember(&self, name: String, item: Value) -> Value {
-        match self.asObject() {
-            Some(o) => { var target = o; target.put(name, item) },
-            None => {},
+    /// It takes the value and hands it back with the member added, which is
+    /// what makes these two chainable, and it is what `json!` expands to.
+    /// Anything that is not an object comes back unchanged.
+    pub fn withMember(self, name: String, item: Value) -> Value {
+        match self {
+            Value::Object(o) => {
+                var target = o
+                target.put(name, item)
+                Value::Object(target)
+            },
+            other => other,
         }
-        self.$clone()
     }
 
     /// The same array, with `item` on the end.
-    pub fn withItem(&self, item: Value) -> Value {
-        match self.asArray() {
-            Some(a) => { var onto = a; onto.push(item) },
-            None => {},
+    pub fn withItem(self, item: Value) -> Value {
+        match self {
+            Value::Array(a) => {
+                var onto = a
+                onto.push(item)
+                Value::Array(onto)
+            },
+            other => other,
         }
-        self.$clone()
     }
 }
 
@@ -400,7 +408,7 @@ bind As<Value> to i64    { fn convert(&self) -> Value { Value::Int(self) } }
 bind As<Value> to i32    { fn convert(&self) -> Value { Value::Int(self as i64) } }
 bind As<Value> to f64    { fn convert(&self) -> Value { Value::Number(self) } }
 bind As<Value> to bool   { fn convert(&self) -> Value { Value::Bool(self) } }
-bind As<Value> to String { fn convert(&self) -> Value { Value::Text(self) } }
+bind As<Value> to String { fn convert(&self) -> Value { Value::Text(self.$clone()) } }
 
 //===--------------------------------------------------------------------===//
 // Text, into a value

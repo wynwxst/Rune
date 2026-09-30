@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // std::mem, and the vector built on it. The counts at the end are the point:
 // a container holding reference-counted values must balance them itself.
 // EXPECT: size 8 align 8

@@ -29,7 +29,7 @@ fn main() -> i64 {
     io::println(rng.chance(0.0))
 
     var deck = vec!("A", "K", "Q", "J")
-    rng.shuffle(deck)
+    rng.shuffle(&var deck)
     io::println(deck.length())
     io::println(rng.pick(deck).hasValue())
     let items: [3:i64] = [1, 2, 3]

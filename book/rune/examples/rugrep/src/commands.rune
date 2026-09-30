@@ -1,0 +1,24 @@
+import std::{cli,io}
+import rugrep::models
+pub fn registerCommands(parser: &var cli::Parser) {
+    parser.positional("path","Path to the relevant directory/file")
+    parser.option("query","q","Regex to query for within a file","")
+    parser.option("surrounding","s","lines surrounding target","1")
+    parser.setVersion("0.1.0")
+}
+
+pub fn handlePath(p: String) -> models::Path? {
+    if io::exists(p) {
+        out = io::open(p)
+        return match out {
+            .Ok(file) => {
+                models::Path {file: file}
+            },
+            .Err(err) => {
+                println!("Error while accessing file: {}",io::describe(err))
+                nil
+            }
+        }
+    }
+    nil
+}

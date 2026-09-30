@@ -286,8 +286,50 @@ void Sema::resolveSignatureAnnotations(FunctionDecl *fn) {
   // that holds no borrow — a `String`, an `i64`, a struct of them — it says
   // nothing, and a reader who wrote it meant something else: usually that
   // the value should move, which it does on its own.
+  // Written in terms of a type parameter or `Self`, the type may hold a
+  // borrow in one instantiation and not in another (`Take<Self::Iter>` over a
+  // vector's cursor, or over an iterator that owns its values). The clause is
+  // then a bound — at most these origins — and is never refused.
+  std::vector<const std::vector<GenericParam> *> scopes;
+  auto addScope = [&](const std::vector<GenericParam> &g) {
+    if (!g.empty())
+      scopes.push_back(&g);
+  };
+  addScope(fn->Generics);
+  if (fn->GenericTemplate)
+    addScope(fn->GenericTemplate->Generics);
+  if (auto *nd = fn->Parent ? dyn_cast<NominalDecl>(fn->Parent) : nullptr) {
+    addScope(nd->Generics);
+    if (nd->GenericTemplate)
+      addScope(nd->GenericTemplate->Generics);
+  }
+  auto dependent = [&](TypeRepr *repr) {
+    bool found = false;
+    forEachRepr(repr, [&](TypeRepr *t) {
+      if (isa<SelfTypeRepr>(t)) {
+        found = true;
+        return;
+      }
+      auto *n = dyn_cast<NamedTypeRepr>(t);
+      if (!n || n->Path.empty())
+        return;
+      const std::string &head = n->Path.front();
+      if (head == "Self")
+        found = true;
+      for (auto *g : scopes)
+        for (const GenericParam &gp : *g)
+          if (gp.Name == head ||
+              std::find(gp.Aliases.begin(), gp.Aliases.end(), head) !=
+                  gp.Aliases.end())
+            found = true;
+    });
+    return found;
+  };
+
   auto rejectOwnedFrom = [&](TypeRepr *repr, Type *t, const char *what) {
     if (!repr || !repr->Origin || !t || t->isError() || zombie::carriesReference(t))
+      return;
+    if (fn->FromMark || dependent(repr))
       return;
     auto d = Diags.error(repr->Origin->Range,
                          "`from` names where a borrow comes from, and {} is "

@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // The same shape with one edge made `weak` is accepted, and frees cleanly.
 // EXPECT: child sees parent: configuration
 // EXPECT: drop parent

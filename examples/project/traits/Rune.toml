@@ -6,6 +6,8 @@ description = ""
 authors = []
 
 [build]
+# Written for reference counting (it shares where Zombie would move).
+memory = "arc"
 # none | minimal | full — how much checking the compiler inserts.
 safety = "full"
 optimize = 0

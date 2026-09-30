@@ -42,6 +42,36 @@ function! rune#makeprg() abort
   return rune#runec() . ' --check --diagnostic-format short --memory ' . s:Get('memory', 'arc') . ' %'
 endfunction
 
+"=== Formatting =============================================================
+
+" Formats the buffer with `rune fmt`, as though it were saved: layout, and
+" the types and argument labels the compiler knows. The view stays where it
+" was; if the formatter fails, the buffer is left alone.
+function! rune#format() abort
+  let path = expand('%:p')
+  if empty(path)
+    let path = getcwd() . '/untitled.rune'
+  endif
+  let cmd = [rune#rune(), 'fmt', '--stdin-path', path]
+  let lines = getline(1, '$')
+  let out = systemlist(join(map(copy(cmd), 'shellescape(v:val)')) . ' 2>' . (has('win32') ? 'NUL' : '/dev/null'),
+        \ lines)
+  if v:shell_error != 0 || empty(out)
+    echohl WarningMsg | echomsg 'rune fmt failed' | echohl None
+    return
+  endif
+  if out ==# lines
+    return
+  endif
+  let view = winsaveview()
+  silent! undojoin
+  call setline(1, out)
+  if line('$') > len(out)
+    silent execute (len(out) + 1) . ',$delete _'
+  endif
+  call winrestview(view)
+endfunction
+
 "=== The checker ============================================================
 
 " The last findings for each buffer, as location-list items; kept apart so

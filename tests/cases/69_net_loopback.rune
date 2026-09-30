@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A connection over the loopback: one thread listens, the main thread
 // connects, and each reads a line the other wrote. Port 0 asks the system for
 // a free one, so nothing here can collide with whatever else is running.

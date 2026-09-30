@@ -1,3 +1,4 @@
+// FLAGS: --memory arc
 // A guarded match arm must release the bindings its pattern made when the
 // guard says no; `while ... is` destructures each turn; bounds may name an
 // operator; marks may declare associated types.
