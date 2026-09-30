@@ -3519,7 +3519,16 @@ ExprPtr Parser::parsePrimaryExpr() {
   }
 
   // `move ||(...)` is a closure that copies its captures; `move value` hands
-  // on a `uniq` reference. The token after it tells the two apart.
+  // on a `uniq` reference. The token after it tells the two apart — and
+  // `move(...)` is a call to a function of that name, which a program may
+  // well have (a game's `move(dx, dy)`), not the operator applied to a
+  // parenthesised value, which nobody writes.
+  if (check(Tok::KwMove) && peek(1).is(Tok::LParen)) {
+    auto ref = makeNode<DeclRefExpr>(here());
+    ref->Path.push_back("move");
+    advance();
+    return ref;
+  }
   if (check(Tok::KwMove)) {
     if (peek(1).is(Tok::PipePipe))
       return parseClosure();

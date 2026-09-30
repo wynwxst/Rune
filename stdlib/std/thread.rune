@@ -83,10 +83,11 @@ struct Task<A, R> {
 fn trampoline<A, R>(raw: *var u8) -> *var u8 {
     let task = unsafe { raw as *var Task<A, R> }
     let entry = unsafe { task[0].entry }
-    let argument = unsafe { task[0].argument }
-    unsafe { task[0].result = entry(argument) }
-    // The argument was retained for this thread when the task was built.
-    unsafe { mem::release(argument) }
+    // Taken out of the task, the argument belongs to this thread, and goes
+    // when the call is done with it.
+    let argument = unsafe { mem::take<A>(&var task[0].argument as *var A) }
+    let result = entry(argument)
+    unsafe { mem::store<R>(&var task[0].result as *var R, result) }
     raw
 }
 
@@ -149,17 +150,18 @@ pub fn spawn<A: Send, R: Send>(entry: @cfunction(A) -> R,
                                argument: A) -> Handle<R> {
     let raw = mem::allocator.allocate(mem::size_of::<Task<A, R>>())
     if mem::isNull(raw) { process::panic("cannot allocate a thread's task") }
+    // Zeroed first: an assignment into the block would give back whatever
+    // it held before, and fresh memory holds nothing but noise.
+    mem::zero(raw, mem::size_of::<Task<A, R>>())
     let task = unsafe { raw as *var Task<A, R> }
-    // Storing into the task claims a reference of its own, which is what
-    // keeps the argument alive for as long as the thread runs; the caller
-    // keeps theirs. `trampoline` gives this one back when it is done.
+    // The task owns the argument from here until `trampoline` takes it out.
     unsafe {
         task[0].entry = entry
-        task[0].argument = argument
+        mem::store<A>(&var task[0].argument as *var A, argument)
     }
     let started = unsafe { rune_thread_start(trampoline::<A, R>, raw) }
     if mem::isNull(started) {
-        unsafe { mem::release(argument) }
+        unsafe { mem::drop_at<A>(&var task[0].argument as *var A) }
         mem::allocator.deallocate(raw)
         process::panic("cannot start a thread")
     }

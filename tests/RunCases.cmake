@@ -15,7 +15,9 @@
 #
 # `@LLVM_LIBDIR@` and `@LLVM_INCLUDE_DIR@` in a `// FLAGS:` or `// CXX:` line
 # stand for the LLVM this compiler was built against, so a case can call
-# into LLVM's own C++ API. A case that needs a C++ compiler is skipped, with a
+# into LLVM's own C++ API; `@LLVM_LINK@` in a `// FLAGS:` line, for the
+# `runec` flags that link against it, however it was built, and
+# `@LLVM_MAJOR@` for its major version, for an API that changed. A case that needs a C++ compiler is skipped, with a
 # note, when CMake found none.
 #
 # A `// LIB:` line names a Rune library the case imports. Its source is a path
@@ -26,7 +28,7 @@
 # one library may import another.
 #
 # Invoked by CTest with RUNEC, RUNTIME_LIB, STDLIB_DIR, CASE_DIR and WORK_DIR,
-# and optionally CXX_COMPILER, LLVM_LIBDIR and LLVM_INCLUDE_DIR.
+# and optionally CXX_COMPILER, LLVM_LIBDIR, LLVM_INCLUDE_DIR, LLVM_LINK and LLVM_MAJOR.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -70,6 +72,8 @@ foreach(CASE ${CASES})
       string(STRIP "${CMAKE_MATCH_1}" ONE_FLAGS)
       string(REPLACE "@LLVM_LIBDIR@" "${LLVM_LIBDIR}" ONE_FLAGS "${ONE_FLAGS}")
       string(REPLACE "@LLVM_INCLUDE_DIR@" "${LLVM_INCLUDE_DIR}" ONE_FLAGS "${ONE_FLAGS}")
+      string(REPLACE "@LLVM_LINK@" "${LLVM_LINK}" ONE_FLAGS "${ONE_FLAGS}")
+      string(REPLACE "@LLVM_MAJOR@" "${LLVM_MAJOR}" ONE_FLAGS "${ONE_FLAGS}")
       separate_arguments(ONE_FLAGS)
       list(APPEND CASE_FLAGS ${ONE_FLAGS})
     elseif(LINE MATCHES "^// WITH: ?(.*)$")

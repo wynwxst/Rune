@@ -1,0 +1,25 @@
+// std::builder — a type that can be written as a block of values.
+//
+// A type bound to `Builder` can be written the way it looks:
+//
+//     let page = Body {
+//         Text("hello")
+//         Button {}.style("wide")
+//     }
+//
+// which stands for `Body::empty()` and one `add` per item, in the order they
+// were written. The compiler knows the mark by name, and that is all it
+// knows: what an empty one is and how one more is taken are the type's own.
+//
+// This module imports nothing.
+
+pub mark Builder {
+    /// What goes in.
+    type Child
+
+    /// The empty one, which a block starts from.
+    fn empty() -> Self
+
+    /// Takes one more. Called once per item, in the order they were written.
+    fn add(&var self, child: Self::Child)
+}

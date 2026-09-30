@@ -1,0 +1,27 @@
+// EXPECT: moved to 30
+// EXPECT: shape moved 4
+// EXPECT: closure sees 5
+//
+// `move` is a keyword only where it is an operator: `move value`, or
+// `move ||` before a closure. `move(...)` is a call, so a function or a
+// method may be called `move` — a game's `move(dx, dy)`.
+import std::io
+
+fn move(dx: i64) -> i64 { dx * 10 }
+
+struct Shape { x: i64 }
+extend Shape {
+    fn move(&var self, by: i64) { self.x += by }
+}
+
+fn main() -> i64 {
+    io::println("moved to " + move(3).$str())
+    var s = Shape { x: 1 }
+    s.move(3)
+    io::println("shape moved " + s.x.$str())
+    var n = 5
+    let seen = move ||() -> i64 { n }
+    n = 6
+    io::println("closure sees " + seen().$str())
+    0
+}

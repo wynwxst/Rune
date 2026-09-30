@@ -5,6 +5,48 @@
 list(GET LLVM_INCLUDE_DIRS 0 RUNE_LLVM_ONE_INCLUDE)
 list(GET LLVM_LIBRARY_DIRS 0 RUNE_LLVM_ONE_LIBDIR)
 
+# How a case links against that LLVM: `libLLVM` where it was built as one
+# shared library, its static archives where it was not — and, when it was
+# built with libc++ (as this compiler then is too), that C++ library rather
+# than the platform's. `@LLVM_LINK@` in a case's `// FLAGS:` stands for it.
+if(EXISTS "${RUNE_LLVM_ONE_LIBDIR}/libLLVM${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(RUNE_LLVM_CASE_LINK "-L ${RUNE_LLVM_ONE_LIBDIR} -l LLVM")
+else()
+  set(RUNE_LLVM_CASE_LINK "-L ${RUNE_LLVM_ONE_LIBDIR}")
+  execute_process(
+    COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-config" --link-static --libs core
+    OUTPUT_VARIABLE RUNE_LLVM_STATIC OUTPUT_STRIP_TRAILING_WHITESPACE)
+  execute_process(
+    COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-config" --link-static --system-libs
+    OUTPUT_VARIABLE RUNE_LLVM_SYSTEM OUTPUT_STRIP_TRAILING_WHITESPACE)
+  separate_arguments(RUNE_LLVM_STATIC UNIX_COMMAND "${RUNE_LLVM_STATIC} ${RUNE_LLVM_SYSTEM}")
+  foreach(ARG ${RUNE_LLVM_STATIC})
+    if(ARG MATCHES "^-l(.+)$")
+      string(APPEND RUNE_LLVM_CASE_LINK " -l ${CMAKE_MATCH_1}")
+    else()
+      string(APPEND RUNE_LLVM_CASE_LINK " --link-arg ${ARG}")
+    endif()
+  endforeach()
+  # Release builds of LLVM ship their archives as LTO bitcode, which only
+  # LLVM's own linker reads; lld reads ordinary objects as well.
+  find_program(RUNE_LLD NAMES ld.lld HINTS "${LLVM_TOOLS_BINARY_DIR}")
+  if(RUNE_LLD AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+    string(APPEND RUNE_LLVM_CASE_LINK
+      " --cc ${CMAKE_C_COMPILER} --link-arg -fuse-ld=lld")
+  endif()
+endif()
+if("${CMAKE_CXX_FLAGS}" MATCHES "-stdlib=libc\\+\\+")
+  execute_process(
+    COMMAND ${CMAKE_CXX_COMPILER} -stdlib=libc++ -print-file-name=libc++.so
+    OUTPUT_VARIABLE RUNE_LIBCXX OUTPUT_STRIP_TRAILING_WHITESPACE)
+  get_filename_component(RUNE_LIBCXX_DIR "${RUNE_LIBCXX}" DIRECTORY)
+  string(APPEND RUNE_LLVM_CASE_LINK " --cxx-stdlib libc++")
+  if(IS_ABSOLUTE "${RUNE_LIBCXX_DIR}")
+    string(APPEND RUNE_LLVM_CASE_LINK
+      " -L ${RUNE_LIBCXX_DIR} --link-arg -Wl,-rpath,${RUNE_LIBCXX_DIR}")
+  endif()
+endif()
+
 # A case may bring a C++ half (`// CXX: <path>`), compiled with the compiler
 # this build uses; the LLVM the compiler was built against is what the C++
 # interop cases call into, so its directories are passed along too.
@@ -18,6 +60,8 @@ add_test(NAME rune_end_to_end
     "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
     "-DLLVM_LIBDIR=${RUNE_LLVM_ONE_LIBDIR}"
     "-DLLVM_INCLUDE_DIR=${RUNE_LLVM_ONE_INCLUDE}"
+    "-DLLVM_LINK=${RUNE_LLVM_CASE_LINK}"
+    "-DLLVM_MAJOR=${LLVM_VERSION_MAJOR}"
     -P ${CMAKE_CURRENT_SOURCE_DIR}/RunCases.cmake)
 
 # The package registry, end to end: a registry made and served from files, a

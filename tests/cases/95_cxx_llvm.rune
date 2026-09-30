@@ -1,4 +1,4 @@
-// FLAGS: -L @LLVM_LIBDIR@ -l LLVM
+// FLAGS: @LLVM_LINK@ --cfg llvm=@LLVM_MAJOR@
 // EXPECT: verifier: ok
 // EXPECT: function: answer
 // EXPECT: found again: true
@@ -77,6 +77,12 @@ extern "C++" {
         }
         class Constant : User {}
         class ConstantInt : Constant {
+            // LLVM 22 added `ImplicitTrunc`; before it, `get` took three.
+            @Config(llvm == "21")
+            @as("constantInt")
+            fn get(ty: *var IntegerType, value: c_uint64_t,
+                   isSigned: bool) -> *var ConstantInt
+            @Config(!(llvm == "21"))
             @as("constantInt")
             fn get(ty: *var IntegerType, value: c_uint64_t, isSigned: bool,
                    implicitTrunc: bool) -> *var ConstantInt
@@ -127,6 +133,15 @@ fn stringRef(text: &String) -> StringRef {
 }
 
 @safe("every pointer below is one LLVM handed out, or storage allocated here for it")
+@Config(llvm == "21")
+fn i32Constant(ty: *var IntegerType, value: c_uint64_t) -> *var ConstantInt {
+    ConstantInt::constantInt(ty, value, false)
+}
+@Config(!(llvm == "21"))
+fn i32Constant(ty: *var IntegerType, value: c_uint64_t) -> *var ConstantInt {
+    ConstantInt::constantInt(ty, value, false, false)
+}
+
 fn main() -> i64 {
     let ctx = cxx::alloc<LLVMContext>()
     ctx.init()
@@ -149,8 +164,8 @@ fn main() -> i64 {
     let entry = cxx::alloc<BasicBlock>()
     entry.init(ctx, &entryName, answer, cxx::null<BasicBlock>())
 
-    let forty = ConstantInt::constantInt(i32Ty, 40, false, false)
-    let two = ConstantInt::constantInt(i32Ty, 2, false, false)
+    let forty = i32Constant(i32Ty, 40)
+    let two = i32Constant(i32Ty, 2)
     var at = InsertPosition { node: cxx::null<c_void>(), parent: cxx::null<c_void>() }
     at.init(entry)
     let sumName = twine("sum")

@@ -57,6 +57,7 @@ CROSS COMPILATION
     --sysroot <dir>      Pass --sysroot=<dir> to the link driver
     --link-arg <arg>     Append <arg> to the link command verbatim
     --link-cxx           Link the C++ runtime (implied by `extern "C++"`)
+    --cxx-stdlib <lib>   Which one: libc++ or libstdc++ (default: the platform's)
     --runtime-dir <dir>  Where this target's libruneruntime.a lives
 
 BARE METAL
@@ -181,6 +182,16 @@ int runCompilerMain(int argc, char **argv) {
       continue;
     }
     if (a == "--link-cxx") { opts.LinkCxx = true; continue; }
+    if (a == "--cxx-stdlib") {
+      std::string v = needsValue(i, "--cxx-stdlib");
+      if (v != "libc++" && v != "libstdc++") {
+        std::cerr << "runec: unknown C++ standard library '" << v
+                  << "' (expected libc++ or libstdc++)\n";
+        return 2;
+      }
+      opts.CxxStdlib = v;
+      continue;
+    }
     if (a == "--safety") {
       std::string v = needsValue(i, "--safety");
       if (!parseSafety(v, opts.Safety)) {

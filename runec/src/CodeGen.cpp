@@ -493,6 +493,8 @@ llvm::FunctionType *CodeGen::functionTypeFor(FunctionDecl *fn) {
   // signature: see CodeGenCxx.cpp.
   if (isCxxExtern(fn))
     return cxxSignatureFor(fn).FT;
+  if (const CxxSignature *sig = cSignatureFor(fn))
+    return sig->FT;
   std::vector<llvm::Type *> params;
   // Closures take their environment first.
   if (fn->Flavour == FunctionFlavour::Closure)
@@ -3127,8 +3129,9 @@ bool CodeGen::isAncillary(const Decl *d) const {
 /// Win64 passes an aggregate in a register only when it is exactly 1, 2, 4 or
 /// 8 bytes wide; anything else goes as a pointer to a copy the caller makes,
 /// and a result comes back through a hidden pointer. We emit the value
-/// directly, which every other target we support accepts. Rather than pass
-/// something C will misread, say so.
+/// directly. A call into C is lowered the way C passes it (`cSignatureFor`),
+/// but a Rune function exported to C takes its arguments as LLVM lowers
+/// them. Rather than accept something C will misread, say so.
 bool CodeGen::abiRejectsByValue(Type *t) {
   if (!t)
     return false;
@@ -3191,7 +3194,10 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     return existing;
   }
 
-  if ((fn->IsExtern && !isCxxExtern(fn)) || isExportedFunction(fn))
+  // A foreign `extern "C"` function is called the way C passes a struct
+  // (`cSignatureFor`); a Rune function exported to C still takes its
+  // arguments Rune's way, which C would misread on Windows x64.
+  if (isExportedFunction(fn) && !fn->IsExtern)
     checkForeignABI(fn);
 
   auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, name, *M);
@@ -3199,6 +3205,8 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     const CxxSignature &sig = cxxSignatureFor(fn);
     f->setCallingConv(sig.CC);
     applyCxxAttributes(nullptr, f, sig);
+  } else if (const CxxSignature *sig = cSignatureFor(fn)) {
+    applyCxxAttributes(nullptr, f, *sig);
   }
   // A traceback walks the frame-pointer chain, so a debug build has to keep
   // one in every function or the walk stops at the first omission.
@@ -3328,7 +3336,7 @@ Constant *CodeGen::constantValueOf(Expr *e, Type *t) {
     if (!fn || !t->is(TypeKind::CFunction) || !fn->Generics.empty() ||
         fn->Parent || fn->Flavour == FunctionFlavour::Closure)
       return nullptr;
-    return declareFunction(fn);
+    return cAdapterFor(fn, declareFunction(fn));
   }
   if (auto *arr = dyn_cast<ArrayLitExpr>(e)) {
     if (!t->is(TypeKind::Array) || !t->element())

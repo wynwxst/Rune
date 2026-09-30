@@ -72,8 +72,17 @@ pub fn squareRoot(value: f64) -> f64 { sqrt(value) }
 
 /// The real cube root, defined for negative values too — unlike
 /// `power(value, 1.0 / 3.0)`, which is NaN below zero.
+///
+/// C libraries differ in the last bit: glibc's `cbrt(27.0)` is
+/// 3.0000000000000004, Apple's is 3. A perfect cube's root is a whole
+/// number, so when the nearest whole number cubes back to exactly `value`,
+/// that is the answer — the same on every platform.
 @safe("libm handles its own domain errors by returning NaN")
-pub fn cubeRoot(value: f64) -> f64 { cbrt(value) }
+pub fn cubeRoot(value: f64) -> f64 {
+    let r = cbrt(value)
+    let whole = round(r)
+    if whole * whole * whole == value { whole } else { r }
+}
 
 @safe("libm handles its own domain errors by returning NaN")
 pub fn power(base: f64, exponent: f64) -> f64 { pow(base, exponent) }

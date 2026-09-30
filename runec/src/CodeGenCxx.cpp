@@ -181,7 +181,7 @@ CodeGen::CxxArg CodeGen::classifyCxxArgument(Type *t, unsigned &intRegs,
 
   // An aggregate. A C++ `class` is one Rune must not copy; a `struct`, a
   // tuple or an array has a layout both sides agree on.
-  if (t->is(TypeKind::Struct)) {
+  if (t->is(TypeKind::Struct) && !ClassifyingForC) {
     NominalDecl *nd = t->nominal();
     if (nd && nd->Cxx && nd->Cxx->IsClass)
       return reject("a C++ class is never passed by value",
@@ -484,12 +484,18 @@ void CodeGen::applyCxxAttributes(llvm::CallBase *call, llvm::Function *fn,
 Value *CodeGen::emitCxxCall(CallExpr *c, FunctionDecl *fn, Value *self) {
   const CxxSignature &sig = cxxSignatureFor(fn);
   Function *callee = declareFunction(fn);
+  return emitAbiCall(c, fn, fn->Ty->params(), fn->IsVariadic, sig, callee,
+                     self, fn->Flavour == FunctionFlavour::Initialiser);
+}
+
+Value *CodeGen::emitAbiCall(CallExpr *c, FunctionDecl *fn,
+                            const std::vector<Type *> &paramTypes,
+                            bool variadic, const CxxSignature &sig,
+                            Value *callee, Value *self, bool isInitialiser) {
   const DataLayout &dl = M->getDataLayout();
 
   // The arguments as Rune values, already converted to the parameter types.
-  std::vector<Value *> ruleArgs =
-      buildArguments(c, fn, fn->Ty->params(), fn->IsVariadic);
-  const std::vector<Type *> &paramTypes = fn->Ty->params();
+  std::vector<Value *> ruleArgs = buildArguments(c, fn, paramTypes, variadic);
 
   // A slot big enough for both spellings of a value, so it can be stored as
   // one type and read back as the other.
@@ -554,8 +560,11 @@ Value *CodeGen::emitCxxCall(CallExpr *c, FunctionDecl *fn, Value *self) {
   applyCxxAttributes(call, nullptr, sig);
 
   Type *retTy = c->Ty;
-  if (fn->Flavour == FunctionFlavour::Initialiser || !retTy || retTy->isVoid() ||
-      retTy->isNever())
+  if (retTy && retTy->isNever()) {
+    B->CreateUnreachable();
+    return nullptr;
+  }
+  if (isInitialiser || !retTy || retTy->isVoid())
     return nullptr;
   llvm::Type *runeRet = lower(retTy);
   Value *result = nullptr;
@@ -609,6 +618,186 @@ void CodeGen::emitCxxFree(CallExpr *c) {
   FunctionCallee opDelete =
       M->getOrInsertFunction(cxx.OperatorDelete, B->getVoidTy(), PtrTy);
   B->CreateCall(opDelete, {p});
+}
+
+//===----------------------------------------------------------------------===//
+// The C calling convention
+//===----------------------------------------------------------------------===//
+//
+// C passes an aggregate the same way C++ passes a plain struct, so a foreign
+// `extern "C"` function, and any call through a `@cfunction`, is lowered with
+// the classification above whenever a struct, tuple or array crosses by
+// value. A signature of nothing but scalars is left as LLVM lowers it, which
+// is already what C does; that is also what keeps every declaration of the
+// runtime's own functions the shape it always was.
+
+namespace {
+bool crossesAsAggregate(Type *t) {
+  if (!t)
+    return false;
+  t = t->canonical();
+  return t->is(TypeKind::Struct) || t->is(TypeKind::Tuple) ||
+         t->is(TypeKind::Array);
+}
+} // namespace
+
+const CodeGen::CxxSignature *
+CodeGen::cSignatureFor(const std::vector<Type *> &params, Type *ret,
+                       bool variadic) {
+  bool any = crossesAsAggregate(ret);
+  for (Type *p : params)
+    any = any || crossesAsAggregate(p);
+  if (!any)
+    return nullptr;
+  std::string key = variadic ? "..." : "";
+  for (Type *p : params)
+    key += p->toString() + ",";
+  key += "->" + (ret ? ret->toString() : std::string("()"));
+  auto it = CSignatures.find(key);
+  if (it != CSignatures.end())
+    return &it->second;
+
+  bool saved = ClassifyingForC;
+  ClassifyingForC = true;
+  CxxSignature sig;
+  unsigned intRegs = 0, sseRegs = 0;
+  // Anything but an aggregate goes as LLVM lowers it, and uses the register
+  // it would.
+  auto plain = [&](Type *t) {
+    CxxArg a;
+    a.K = CxxArg::Direct;
+    a.Ty = lower(t);
+    if (a.Ty->isFloatingPointTy()) ++sseRegs; else ++intRegs;
+    return a;
+  };
+  if (!ret || ret->isVoid() || ret->isNever())
+    sig.Ret.K = CxxArg::Ignore;
+  else if (crossesAsAggregate(ret))
+    sig.Ret = classifyCxxArgument(ret, intRegs, sseRegs, /*isReturn=*/true,
+                                  SourceRange(), "the result");
+  else {
+    sig.Ret.K = CxxArg::Direct;
+    sig.Ret.Ty = lowerReturn(ret);
+  }
+  intRegs = sseRegs = 0;
+  std::vector<llvm::Type *> fparams;
+  if (sig.Ret.K == CxxArg::Indirect || sig.Ret.K == CxxArg::ByVal) {
+    sig.Sret = true;
+    sig.SretTy = sig.Ret.Ty;
+    sig.SretAlign = sig.Ret.Align;
+    ++intRegs;
+    fparams.push_back(PtrTy);
+  }
+  for (Type *p : params) {
+    CxxArg a = crossesAsAggregate(p)
+                   ? classifyCxxArgument(p, intRegs, sseRegs, false,
+                                         SourceRange(), "an argument")
+                   : plain(p);
+    switch (a.K) {
+    case CxxArg::Direct: fparams.push_back(a.Ty); break;
+    case CxxArg::Coerce:
+      if (auto *st = dyn_cast<StructType>(a.Ty))
+        for (llvm::Type *e : st->elements())
+          fparams.push_back(e);
+      else
+        fparams.push_back(a.Ty);
+      break;
+    case CxxArg::Indirect:
+    case CxxArg::ByVal: fparams.push_back(PtrTy); break;
+    case CxxArg::Ignore: break;
+    }
+    sig.Args.push_back(a);
+  }
+  ClassifyingForC = saved;
+  llvm::Type *retTy = B->getVoidTy();
+  if (!sig.Sret && sig.Ret.K != CxxArg::Ignore)
+    retTy = sig.Ret.Ty;
+  sig.FT = FunctionType::get(retTy, fparams, variadic);
+  return &(CSignatures[key] = sig);
+}
+
+const CodeGen::CxxSignature *CodeGen::cSignatureFor(FunctionDecl *fn) {
+  if (!fn || !fn->Ty || !fn->IsExtern || isCxxExtern(fn) || fn->Body)
+    return nullptr;
+  return cSignatureFor(fn->Ty->params(), fn->Ty->result(), fn->IsVariadic);
+}
+
+Function *CodeGen::cAdapterFor(FunctionDecl *fn, Function *target) {
+  const CxxSignature *sig =
+      fn->Ty ? cSignatureFor(fn->Ty->params(), fn->Ty->result(), false)
+             : nullptr;
+  if (!sig || fn->IsVariadic || cSignatureFor(fn))
+    return target;
+  auto it = CAdapters.find(target);
+  if (it != CAdapters.end())
+    return it->second;
+
+  // A Rune function whose address C is given: an adapter that takes its
+  // arguments the C way and makes the Rune call.
+  auto *adapter = Function::Create(sig->FT, GlobalValue::InternalLinkage,
+                                   target->getName() + ".c", *M);
+  applyCxxAttributes(nullptr, adapter, *sig);
+  CAdapters[target] = adapter;
+
+  IRBuilderBase::InsertPointGuard guard(*B);
+  B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", adapter));
+  const DataLayout &dl = M->getDataLayout();
+  auto slotFor = [&](llvm::Type *a, llvm::Type *b) {
+    uint64_t size = std::max(dl.getTypeAllocSize(a).getFixedValue(),
+                             dl.getTypeAllocSize(b).getFixedValue());
+    unsigned align = std::max(dl.getABITypeAlign(a).value(),
+                              dl.getABITypeAlign(b).value());
+    auto *slot = B->CreateAlloca(ArrayType::get(B->getInt8Ty(), size));
+    slot->setAlignment(Align(align));
+    return slot;
+  };
+
+  auto arg = adapter->arg_begin();
+  Value *sret = sig->Sret ? &*arg++ : nullptr;
+  std::vector<Value *> args;
+  const std::vector<Type *> &params = fn->Ty->params();
+  for (size_t i = 0; i < sig->Args.size(); ++i) {
+    const CxxArg &a = sig->Args[i];
+    llvm::Type *runeTy = lower(params[i]);
+    switch (a.K) {
+    case CxxArg::Direct:
+      args.push_back(&*arg++);
+      break;
+    case CxxArg::Coerce: {
+      Value *slot = slotFor(runeTy, a.Ty);
+      Value *whole = PoisonValue::get(a.Ty);
+      if (auto *st = dyn_cast<StructType>(a.Ty))
+        for (unsigned e = 0; e < st->getNumElements(); ++e)
+          whole = B->CreateInsertValue(whole, &*arg++, e);
+      else
+        whole = &*arg++;
+      B->CreateStore(whole, slot);
+      args.push_back(B->CreateLoad(runeTy, slot));
+      break;
+    }
+    case CxxArg::Indirect:
+    case CxxArg::ByVal:
+      args.push_back(B->CreateLoad(runeTy, &*arg++));
+      break;
+    case CxxArg::Ignore:
+      args.push_back(Constant::getNullValue(runeTy));
+      break;
+    }
+  }
+  CallInst *call = B->CreateCall(target->getFunctionType(), target, args);
+  if (sig->Sret) {
+    B->CreateStore(call, sret);
+    B->CreateRetVoid();
+  } else if (sig->Ret.K == CxxArg::Coerce) {
+    Value *slot = slotFor(call->getType(), sig->Ret.Ty);
+    B->CreateStore(call, slot);
+    B->CreateRet(B->CreateLoad(sig->Ret.Ty, slot));
+  } else if (sig->Ret.K == CxxArg::Ignore || call->getType()->isVoidTy()) {
+    B->CreateRetVoid();
+  } else {
+    B->CreateRet(call);
+  }
+  return adapter;
 }
 
 } // namespace rune

@@ -297,7 +297,7 @@ fn spawn() -> bool {
     true
 }
 
-fn shift(dx: i64, dy: i64) -> bool {
+fn move(dx: i64, dy: i64) -> bool {
     let t = rotationOf(state.curr.kind, state.curr.r)
     if tryModify(state.curr.kind, t, state.curr.x, state.curr.y,
                  t, state.curr.x + dx, state.curr.y + dy) {
@@ -322,7 +322,7 @@ fn rotate(clockwise: bool) -> bool {
 /// One step of gravity. A piece that cannot fall on two steps running is
 /// done.
 fn step() {
-    let stopped = !shift(0, 1)
+    let stopped = !move(0, 1)
     if stopped && state.stopped { done() }
     state.stopped = stopped
 }
@@ -409,13 +409,13 @@ fn update() {
     }
 
     if state.controls[left].down && everyOther(left) {
-        shift(-1, 0)
+        move(-1, 0)
     } else if state.controls[right].down && everyOther(right) {
-        shift(1, 0)
+        move(1, 0)
     } else if state.controls[down].down && everyOther(down) {
-        if !shift(0, 1) { done() }
+        if !move(0, 1) { done() }
     } else if state.controls[fastDown].pressed {
-        while shift(0, 1) {}
+        while move(0, 1) {}
         done()
     }
 

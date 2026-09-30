@@ -1,6 +1,7 @@
 // `@link` and `@linkpath` at the top of a file declare what it needs from the
-// system linker. libm is what `cbrt` lives in.
-// EXPECT: 3.0
+// system linker. libm is what `fmod` and `hypot` live in — two functions
+// whose answers here are exact on every C library, which `cbrt` is not.
+// EXPECT: 1.5
 // EXPECT: 5.0
 @link("m")
 @linkpath("/usr/lib")
@@ -8,13 +9,13 @@
 import std::io
 
 extern "C" {
-    fn cbrt(x: f64) -> f64
+    fn fmod(x: f64, y: f64) -> f64
     fn hypot(a: f64, b: f64) -> f64
 }
 
 @safe("libm is linked by the directives at the top of this file")
 fn main() -> i64 {
-    io::println(unsafe { cbrt(27.0) }.$str())
+    io::println(unsafe { fmod(7.5, 2.0) }.$str())
     io::println(unsafe { hypot(3.0, 4.0) }.$str())
     0
 }

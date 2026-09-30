@@ -19,6 +19,10 @@
 #include "rune/Source.h"
 #include "rune/Type.h"
 
+#include <llvm/IR/DiagnosticHandler.h>
+#include <llvm/IR/DiagnosticInfo.h>
+#include <llvm/IR/DiagnosticPrinter.h>
+#include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/FileSystem.h>
@@ -243,6 +247,57 @@ llvm::CodeGenOptLevel codeGenOptLevel(unsigned optLevel) {
   }
 }
 
+/// Reports what the back end has to say at the Rune source it came from.
+/// An `asm::` call carries its source location as its `!srcloc` cookie.
+struct BackendDiagnostics : llvm::DiagnosticHandler {
+  explicit BackendDiagnostics(DiagnosticEngine &diags) : Diags(diags) {}
+  DiagnosticEngine &Diags;
+  bool Failed = false;
+
+  bool handleDiagnostics(const llvm::DiagnosticInfo &di) override {
+    const llvm::DiagnosticSeverity severity = di.getSeverity();
+    if (severity == llvm::DS_Remark || severity == llvm::DS_Note)
+      return true;
+    const bool error = severity == llvm::DS_Error;
+    uint64_t cookie = 0;
+    std::string message, line;
+    if (auto *ia = llvm::dyn_cast<llvm::DiagnosticInfoInlineAsm>(&di)) {
+      cookie = ia->getLocCookie();
+      message = ia->getMsgStr().str();
+    } else if (auto *sm = llvm::dyn_cast<llvm::DiagnosticInfoSrcMgr>(&di)) {
+      cookie = sm->getLocCookie();
+      message = sm->getSMDiag().getMessage().str();
+      line = sm->getSMDiag().getLineContents().str();
+    } else {
+      std::string text;
+      llvm::raw_string_ostream os(text);
+      llvm::DiagnosticPrinterRawOStream printer(os);
+      di.print(printer);
+      message = os.str();
+    }
+    SourceRange where;
+    if (cookie != 0 && cookie <= 0xFFFFFFFEull)
+      where = SourceRange(SourceLoc(static_cast<uint32_t>(cookie)));
+    if (error) {
+      Failed = true;
+      auto d = where.isValid()
+                   ? Diags.error(where, "inline assembly: {}", message.c_str())
+                   : Diags.error(SourceRange(), "the back end: {}",
+                                 message.c_str());
+      if (!line.empty())
+        d.note("in the assembly line `{}`", line.c_str());
+      if (message.find("constraint") != std::string::npos)
+        d.note("registers are written LLVM's way, `{eax}` or `{st}`; GCC's "
+               "letters `a`, `t` and `u` are read too");
+      d.code(509);
+    } else {
+      Diags.warn(where, "{}{}", where.isValid() ? "inline assembly: " : "",
+                 message.c_str());
+    }
+    return true;
+  }
+};
+
 /// Lowers the module to a native object or assembly file.
 bool writeMachineCode(llvm::Module &m, const std::string &path,
                       const CompilerOptions &opts, DiagnosticEngine &diags,
@@ -267,7 +322,8 @@ bool writeMachineCode(llvm::Module &m, const std::string &path,
   m.setTargetTriple(triple);
 
   std::error_code ec;
-  llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_None);
+  auto out = std::make_unique<llvm::raw_fd_ostream>(path, ec,
+                                                    llvm::sys::fs::OF_None);
   if (ec) {
     diags.fatal("cannot write '{}'", path).note(ec.message().c_str());
     return false;
@@ -275,12 +331,27 @@ bool writeMachineCode(llvm::Module &m, const std::string &path,
   llvm::legacy::PassManager pm;
   auto kind = assembly ? llvm::CodeGenFileType::AssemblyFile
                        : llvm::CodeGenFileType::ObjectFile;
-  if (tm->addPassesToEmitFile(pm, out, nullptr, kind)) {
+  if (tm->addPassesToEmitFile(pm, *out, nullptr, kind)) {
     diags.fatal("this target cannot emit {} files", assembly ? "assembly" : "object");
     return false;
   }
+  // The back end's own errors — almost always inline assembly it cannot
+  // assemble or registers it cannot find — come here rather than to stderr
+  // bare, and are reported at the `asm::` call they came from.
+  auto handler = std::make_unique<BackendDiagnostics>(diags);
+  BackendDiagnostics *seen = handler.get();
+  llvm::LLVMContext &ctx = m.getContext();
+  std::unique_ptr<llvm::DiagnosticHandler> previous =
+      ctx.getDiagnosticHandler();
+  ctx.setDiagnosticHandler(std::move(handler));
   pm.run(m);
-  out.flush();
+  ctx.setDiagnosticHandler(std::move(previous));
+  out->close();
+  if (seen->Failed) {
+    // Whatever was written is not an object anyone should link.
+    std::filesystem::remove(path, ec);
+    return false;
+  }
   return true;
 }
 
@@ -440,7 +511,15 @@ bool linkExecutable(const std::string &objPath,
   // everywhere GCC does. A MinGW build links it statically so the executable
   // does not go looking for `libstdc++-6.dll`.
   if (opts.LinkCxx) {
-    if (triple.isOSDarwin() || triple.isOSFreeBSD()) {
+    if (opts.CxxStdlib == "libc++" && !isWasm && !triple.isOSDarwin()) {
+      // Asked for by name: C++ built with `-stdlib=libc++` where the
+      // platform's own is libstdc++. Its ABI half is a library of its own
+      // everywhere but Apple.
+      argv.push_back("-lc++");
+      argv.push_back("-lc++abi");
+    } else if (opts.CxxStdlib == "libstdc++" && !isWindows) {
+      argv.push_back("-lstdc++");
+    } else if (triple.isOSDarwin() || triple.isOSFreeBSD()) {
       argv.push_back("-lc++");
     } else if (isWasm) {
       // The WASI SDK ships libc++, split in two as LLVM builds it.

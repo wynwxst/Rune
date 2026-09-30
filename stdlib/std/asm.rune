@@ -11,7 +11,12 @@
 // `$0` is the result where there is one and the first input where there is
 // not; the inputs follow in the order they were written. The constraint string
 // lists one constraint per operand, comma separated, outputs first — `"=r,r,r"`
-// is "a result in a register, and two inputs in registers".
+// is "a result in a register, and two inputs in registers". A particular
+// register is written in braces, `{eax}`; on x86, GCC's `t` and `u` — the top
+// two of the x87 register stack — are read as `{st}` and `{st(1)}`.
+//
+// What only the assembler can find — an instruction or register it does not
+// know — is still reported at the call that wrote it.
 //
 // This is the least portable thing in the language and the compiler cannot
 // check any of it: the instructions are handed to the assembler as written,

@@ -1536,6 +1536,9 @@ Value *CodeGen::emitCallPlain(CallExpr *c) {
 
   if (target && isCxxExtern(target))
     return emitCxxCall(c, target, nullptr);
+  if (const CxxSignature *sig = cSignatureFor(target))
+    return emitAbiCall(c, target, target->Ty->params(), target->IsVariadic,
+                       *sig, declareFunction(target), nullptr, false);
 
   if (target) {
     Function *f = declareFunction(target);
@@ -1556,6 +1559,11 @@ Value *CodeGen::emitCallPlain(CallExpr *c) {
   // would emit.
   if (ft && ft->is(TypeKind::CFunction)) {
     Value *target = emitRValue(c->Callee.get());
+    // A struct crossing by value goes the way C passes it.
+    if (const CxxSignature *sig = cSignatureFor(
+            ft->params(), ft->result(), ft->isVariadicFunction()))
+      return emitAbiCall(c, nullptr, ft->params(), ft->isVariadicFunction(),
+                         *sig, target, nullptr, false);
     std::vector<llvm::Type *> paramTys;
     for (Type *p : ft->params())
       paramTys.push_back(lower(p));
@@ -1617,7 +1625,27 @@ Value *CodeGen::emitInlineAsm(CallExpr *c, Type *resultType,
     return lit ? lit->Value : std::string();
   };
   const std::string templateText = literal(0);
-  const std::string constraints = literal(1);
+  std::string constraints = literal(1);
+
+  // GCC's x87 constraints: `t` is the top of the register stack and `u` the
+  // one below it. LLVM spells them as registers, the way Clang rewrites them.
+  const llvm::Triple asmTriple(M->getTargetTriple());
+  if (asmTriple.isX86()) {
+    std::string rewritten;
+    int depth = 0;
+    for (size_t i = 0; i < constraints.size(); ++i) {
+      char ch = constraints[i];
+      if (ch == '{') ++depth;
+      if (ch == '}') --depth;
+      if (depth == 0 && ch == 't')
+        rewritten += "{st}";
+      else if (depth == 0 && ch == 'u')
+        rewritten += "{st(1)}";
+      else
+        rewritten += ch;
+    }
+    constraints = rewritten;
+  }
 
   // Everything after the two literals is an operand, in the order written.
   std::vector<Value *> operands;
@@ -1658,6 +1686,14 @@ Value *CodeGen::emitInlineAsm(CallExpr *c, Type *resultType,
       llvm::InlineAsm::get(fnTy, templateText, constraints, hasSideEffects);
   CallInst *call = B->CreateCall(callee, operands);
   call->addFnAttr(llvm::Attribute::NoUnwind);
+  // Where it was written, for the back end: an error it finds in the
+  // template or the registers comes back with this, and is reported at the
+  // call (`writeMachineCode`). A source location is one number already.
+  if (c->Range.isValid())
+    call->setMetadata(
+        "srcloc",
+        MDNode::get(*Ctx, ConstantAsMetadata::get(B->getInt64(
+                              c->Range.begin().raw()))));
   return ret->isVoidTy() ? nullptr : call;
 }
 
@@ -3444,7 +3480,7 @@ Value *CodeGen::emitRValue(Expr *e) {
     if (auto *fd = dyn_cast<FunctionDecl>(r->Resolved)) {
       Function *target = declareFunction(fd);
       if (e->Ty && e->Ty->is(TypeKind::CFunction))
-        return target;
+        return cAdapterFor(fd, target);
       Function *thunk = thunkFor(target, e->Ty);
       Value *v = UndefValue::get(lower(e->Ty));
       v = B->CreateInsertValue(v, thunk, 0);

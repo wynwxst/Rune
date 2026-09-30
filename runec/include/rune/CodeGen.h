@@ -411,6 +411,24 @@ private:
   void applyCxxAttributes(llvm::CallBase *call, llvm::Function *fn,
                           const CxxSignature &sig);
   llvm::Value *emitCxxCall(CallExpr *c, FunctionDecl *fn, llvm::Value *self);
+  /// A call made the way `sig` says, whichever language is on the far side.
+  llvm::Value *emitAbiCall(CallExpr *c, FunctionDecl *fn,
+                           const std::vector<Type *> &paramTypes,
+                           bool variadic, const CxxSignature &sig,
+                           llvm::Value *callee, llvm::Value *self,
+                           bool isInitialiser);
+  /// The C calling convention for a signature, when a struct, tuple or array
+  /// crosses it by value; null when LLVM's own lowering already is C's.
+  const CxxSignature *cSignatureFor(const std::vector<Type *> &params,
+                                    Type *ret, bool variadic);
+  /// The same for a foreign `extern "C"` function; null for any other.
+  const CxxSignature *cSignatureFor(FunctionDecl *fn);
+  /// What C is handed for a Rune function taken as a `@cfunction`: `target`
+  /// itself, or an adapter taking its arguments the C way.
+  llvm::Function *cAdapterFor(FunctionDecl *fn, llvm::Function *target);
+  bool ClassifyingForC = false;
+  std::map<std::string, CxxSignature> CSignatures;
+  std::map<llvm::Function *, llvm::Function *> CAdapters;
   /// `cxx::alloc<T>()` / `cxx::free<T>(p)`: C++'s own heap.
   llvm::Value *emitCxxAlloc(CallExpr *c, Type *arg);
   void emitCxxFree(CallExpr *c);

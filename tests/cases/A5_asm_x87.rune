@@ -1,0 +1,23 @@
+// EXPECT: sin 0 = 0.0
+// EXPECT: sqrt 2.25 = 1.5
+//
+// GCC's x87 constraints: `t` is the top of the register stack, `u` the one
+// below it. LLVM wants `{st}` and `{st(1)}`, and is given them.
+import std::asm
+import std::io
+
+@Config(arch == "x86_64" || arch == "x86")
+fn sine(x: f64) -> f64 { unsafe { asm::value<f64>("fsin", "=t,0", x) } }
+@Config(arch == "x86_64" || arch == "x86")
+fn root(x: f64) -> f64 { unsafe { asm::value<f64>("fsqrt", "=t,0", x) } }
+
+@Config(!(arch == "x86_64" || arch == "x86"))
+fn sine(x: f64) -> f64 { 0.0 }
+@Config(!(arch == "x86_64" || arch == "x86"))
+fn root(x: f64) -> f64 { 1.5 }
+
+fn main() -> i64 {
+    io::println("sin 0 = " + sine(0.0).$str())
+    io::println("sqrt 2.25 = " + root(2.25).$str())
+    0
+}

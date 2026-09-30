@@ -93,6 +93,11 @@ struct CompilerOptions {
   /// when an `extern "C++"` block is seen; a build tool passes it when a
   /// package has C++ sources that only reach Rune through `extern "C"`.
   bool LinkCxx = false;
+  /// `--cxx-stdlib`: which C++ runtime `LinkCxx` links, `libc++` or
+  /// `libstdc++`. Empty means the platform's own: libc++ on Apple, FreeBSD
+  /// and wasm, libstdc++ elsewhere. C++ built with `-stdlib=libc++` on Linux
+  /// — an LLVM built that way, say — needs `libc++`.
+  std::string CxxStdlib;
 
   OutputKind Output = OutputKind::Executable;
   DumpKind Dump = DumpKind::Nothing;

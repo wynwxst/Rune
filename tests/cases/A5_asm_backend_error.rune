@@ -1,0 +1,11 @@
+// EXPECT-ERROR: inline assembly:
+//
+// The back end is where a template is assembled, so that is where a bad
+// register name is found. It is reported at the `asm::` call it came from,
+// not as a bare `error:` — and no half-written object is left behind.
+import std::asm
+
+fn main() -> i64 {
+    unsafe { asm::run("movl %eax, %notareg", "") }
+    0
+}

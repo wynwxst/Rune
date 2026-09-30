@@ -1,0 +1,39 @@
+// CXX: cxx/cabi.cpp
+// EXPECT: grow -1.0 -1.0 5.0 7.0
+// EXPECT: rotate 2 3 1
+// EXPECT: mixed 7.0
+// EXPECT: callback spin 3 1 2
+// EXPECT: area 15.0
+//
+// Structs crossing into C by value, and back: each is passed the way the
+// platform's C calling convention says — in memory, packed into registers,
+// or split between the integer and floating-point ones — and a Rune function
+// handed to C as a `@cfunction` takes its arguments the same way.
+import std::io
+
+struct Wide { x: f64, y: f64, w: f64, h: f64 }
+struct Three { a: i32, b: i32, c: i32 }
+struct Mixed { f: f32, i: i32, d: f64 }
+
+extern "C" {
+    fn rune_cabi_grow(r: Wide, by: f64) -> Wide
+    fn rune_cabi_rotate(t: Three) -> Three
+    fn rune_cabi_mixed(m: Mixed) -> f64
+    fn rune_cabi_callback(area: @cfunction(Wide) -> f64,
+                          spin: @cfunction(Three) -> Three) -> f64
+}
+
+fn area(r: Wide) -> f64 { r.w * r.h }
+fn spin(t: Three) -> Three { Three { a: t.c, b: t.a, c: t.b } }
+
+fn main() -> i64 {
+    let g = unsafe { rune_cabi_grow(Wide { x: 0.0, y: 0.0, w: 3.0, h: 5.0 }, 1.0) }
+    io::println("grow " + g.x.$str() + " " + g.y.$str() + " " + g.w.$str() + " " + g.h.$str())
+    let t = unsafe { rune_cabi_rotate(Three { a: 1, b: 2, c: 3 }) }
+    io::println("rotate " + t.a.$str() + " " + t.b.$str() + " " + t.c.$str())
+    let m = unsafe { rune_cabi_mixed(Mixed { f: 1.5, i: 2, d: 3.5 }) }
+    io::println("mixed " + m.$str())
+    let a = unsafe { rune_cabi_callback(area, spin) }
+    io::println("area " + a.$str())
+    0
+}

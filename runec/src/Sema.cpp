@@ -2227,11 +2227,16 @@ Symbol *Sema::lookupPath(const std::vector<std::string> &path, SourceRange range
     }
   }
   if (!sym) {
-    if (!quiet)
-      Diags.error(range, "cannot find '{}' in this scope", path[0])
-          .note("check the spelling, or add an `import` for the module that "
-                "declares it")
-          .code(203);
+    if (!quiet) {
+      auto d = Diags.error(range, "cannot find '{}' in this scope", path[0]);
+      if (path.size() == 1 && path[0] == "move")
+        d.note("`move(...)` calls a function named `move`; to hand a value "
+               "on, write `move value` or `value.$move()`");
+      else
+        d.note("check the spelling, or add an `import` for the module that "
+               "declares it");
+      d.code(203);
+    }
     return nullptr;
   }
   for (size_t i = 1; i < path.size(); ++i) {
