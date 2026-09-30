@@ -16,7 +16,11 @@
  *
  * Switching stacks is the one platform-specific piece. POSIX systems do it
  * with `ucontext`, which is old but everywhere; Windows has fibers, which are
- * the same idea under a different name.
+ * the same idea under a different name. WebAssembly has neither — its stack
+ * is not memory the program can point at. With wasi-threads each task gets
+ * a thread of its own instead, and only one of them runs at a time; without
+ * them a task runs on the stack of whoever starts it, and must finish
+ * without having to wait.
  *
  *===----------------------------------------------------------------------===*/
 
@@ -24,6 +28,13 @@
 #define _XOPEN_SOURCE 700
 #define _DARWIN_C_SOURCE
 #define _DEFAULT_SOURCE
+#endif
+
+/* See rune_runtime.c: WASI without threads offers the pthread calls as
+ * stubs, and only when asked for before the first include. */
+#if defined(__wasi__) && !defined(_REENTRANT)
+#define RUNE_SINGLE_THREADED 1
+#define _WASI_EMULATED_PTHREAD
 #endif
 
 #include "rune_runtime.h"
@@ -47,10 +58,12 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <unistd.h>
+#if !defined(__wasi__)
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <ucontext.h>
-#include <unistd.h>
+#endif
 #endif
 
 /* macOS marks `ucontext` deprecated and keeps shipping it, working, on every
@@ -84,6 +97,30 @@ typedef struct RuneExecutor RuneExecutor;
 typedef struct RuneFiber {
   LPVOID handle;
 } RuneFiber;
+
+#elif defined(__wasi__)
+
+#define RUNE_CTX_ASM 0
+
+/* The processor, as a baton: a thread runs while it holds its own, and a
+ * switch is handing it to the next and waiting to be handed it back. */
+typedef struct RuneBaton {
+  pthread_mutex_t lock;
+  pthread_cond_t cond;
+  int held;
+} RuneBaton;
+
+typedef struct RuneFiber {
+  int started;
+#if !defined(RUNE_SINGLE_THREADED)
+  RuneBaton baton;   /* a thread per task, of which one runs at a time */
+#endif
+} RuneFiber;
+
+#if !defined(RUNE_SINGLE_THREADED)
+static void baton_init(RuneBaton *b);
+static void baton_destroy(RuneBaton *b);
+#endif
 
 #else
 
@@ -286,7 +323,7 @@ static void stack_unmap(void *m, size_t size) {
   munmap(m, size);
 }
 
-#endif
+#endif /* stacks */
 
 /*===--------------------------------------------------------------------===*\
 |* Tasks and the executor
@@ -374,6 +411,12 @@ struct RuneExecutor {
 #ifdef _WIN32
   SOCKET wake;
   LPVOID rootFiber;
+#elif defined(__wasi__)
+  /* Nothing to poll: another thread's completion broadcasts `cond`. With
+   * threads, this is the baton the thread that uses tasks holds. */
+#if !defined(RUNE_SINGLE_THREADED)
+  RuneBaton rootBaton;
+#endif
 #else
   int wakeRead, wakeWrite;
 #if RUNE_CTX_ASM
@@ -427,6 +470,8 @@ static void wake_open(RuneExecutor *ex) {
   u_long on = 1;
   ioctlsocket(s, FIONBIO, &on);
   ex->wake = s;
+#elif defined(__wasi__)
+  (void)ex;
 #else
   int fds[2];
   if (pipe(fds) != 0)
@@ -445,6 +490,8 @@ static void wake_signal(RuneExecutor *ex) {
 #ifdef _WIN32
   char b = 1;
   send(ex->wake, &b, 1, 0);
+#elif defined(__wasi__)
+  (void)ex;
 #else
   char b = 1;
   ssize_t n = write(ex->wakeWrite, &b, 1);
@@ -452,6 +499,7 @@ static void wake_signal(RuneExecutor *ex) {
 #endif
 }
 
+#if !defined(__wasi__)
 static void wake_drain(RuneExecutor *ex) {
   char buf[64];
 #ifdef _WIN32
@@ -460,10 +508,13 @@ static void wake_drain(RuneExecutor *ex) {
   while (read(ex->wakeRead, buf, sizeof(buf)) > 0) {}
 #endif
 }
+#endif
 
 static void wake_close(RuneExecutor *ex) {
 #ifdef _WIN32
   closesocket(ex->wake);
+#elif defined(__wasi__)
+  (void)ex;
 #else
   close(ex->wakeRead);
   close(ex->wakeWrite);
@@ -481,6 +532,9 @@ static RuneExecutor *executor(void) {
   if (!ex->lock || !ex->cond)
     task_fatal("cannot create the task executor's lock");
   wake_open(ex);
+#if defined(__wasi__) && !defined(RUNE_SINGLE_THREADED)
+  baton_init(&ex->rootBaton);
+#endif
 #ifdef _WIN32
   ex->rootFiber = IsThreadAFiber() ? GetCurrentFiber() : ConvertThreadToFiber(NULL);
   if (!ex->rootFiber)
@@ -503,15 +557,20 @@ static void executor_destroy(void *raw) {
   if (!ex)
     return;
   wake_close(ex);
+#if defined(__wasi__) && !defined(RUNE_SINGLE_THREADED)
+  baton_destroy(&ex->rootBaton);
+#endif
   rune_mutex_dispose(ex->lock);
   rune_cond_dispose(ex->cond);
   free(ex->timers);
   free(ex->remote);
   free(ex->io);
   free(ex);
+#if !defined(__wasi__)
   for (size_t i = 0; i < g_stack_pool.count; ++i)
     munmap(g_stack_pool.mappings[i], g_stack_pool.sizes[i]);
   g_stack_pool.count = 0;
+#endif
   g_executor = NULL;
 }
 #endif
@@ -686,8 +745,10 @@ static void unpark(RuneTask *cur) {
 
 /*--- Switching -----------------------------------------------------------*/
 
+#if !defined(RUNE_SINGLE_THREADED)
 static void fiber_finish(RuneTask *t);
-#if !defined(_WIN32) && !RUNE_CTX_ASM
+#endif
+#if !defined(_WIN32) && !defined(__wasi__) && !RUNE_CTX_ASM
 static void fiber_main(void);
 #endif
 
@@ -715,6 +776,109 @@ static void fiber_release(RuneTask *t) {
 static void switch_to(RuneExecutor *ex, RuneTask *from, RuneTask *to) {
   (void)from;
   SwitchToFiber(to ? to->fiber.handle : ex->rootFiber);
+}
+
+#elif defined(__wasi__) && !defined(RUNE_SINGLE_THREADED)
+
+/* Stack switching, done with threads. Every task runs on a thread of its
+ * own, and the baton says which one may: `switch_to` hands it on and waits
+ * to be handed it back, so exactly one is ever running and the rest are
+ * parked where a stack switch would have left them. What is thread-local
+ * therefore has to be the *executor's* — each task thread is told which
+ * executor it belongs to before it runs anything. */
+
+static void baton_init(RuneBaton *b) {
+  pthread_mutex_init(&b->lock, NULL);
+  pthread_cond_init(&b->cond, NULL);
+  b->held = 0;
+}
+
+static void baton_destroy(RuneBaton *b) {
+  pthread_mutex_destroy(&b->lock);
+  pthread_cond_destroy(&b->cond);
+}
+
+static void baton_give(RuneBaton *b) {
+  pthread_mutex_lock(&b->lock);
+  b->held = 1;
+  pthread_cond_signal(&b->cond);
+  pthread_mutex_unlock(&b->lock);
+}
+
+static void baton_take(RuneBaton *b) {
+  pthread_mutex_lock(&b->lock);
+  while (!b->held)
+    pthread_cond_wait(&b->cond, &b->lock);
+  b->held = 0;
+  pthread_mutex_unlock(&b->lock);
+}
+
+static RuneBaton *baton_of(RuneExecutor *ex, RuneTask *t) {
+  return t ? &t->fiber.baton : &ex->rootBaton;
+}
+
+static void *fiber_thread(void *raw) {
+  RuneTask *t = (RuneTask *)raw;
+  g_executor = t->exec;
+  t->entry(t->payload);
+  fiber_finish(t);
+  return NULL;
+}
+
+static void fiber_make(RuneTask *t) {
+  baton_init(&t->fiber.baton);
+  t->fiberMade = 1;
+}
+
+static void fiber_release(RuneTask *t) {
+  if (t->fiberMade)
+    baton_destroy(&t->fiber.baton);
+  t->fiberMade = 0;
+}
+
+static void switch_to(RuneExecutor *ex, RuneTask *from, RuneTask *to) {
+  if (to && !to->fiber.started) {
+    /* The first switch into a task starts its thread, which runs at once:
+     * starting it is handing it the baton. Detached, because it ends by
+     * handing the baton on and nobody is left to join it. */
+    to->fiber.started = 1;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&attr, (size_t)g_stack_size);
+    pthread_t id;
+    int rc = pthread_create(&id, &attr, fiber_thread, to);
+    pthread_attr_destroy(&attr);
+    if (rc != 0)
+      task_fatal("cannot start a thread for a task");
+  } else {
+    baton_give(baton_of(ex, to));
+  }
+  baton_take(baton_of(ex, from));
+}
+
+#elif defined(__wasi__)
+
+/* Without a second stack the only switch there can be is the first one into
+ * a task, and it is a call: the task runs here, on this stack, and is done
+ * when the call returns. Anything else — a task parking to wait, yielding,
+ * or being resumed after either — would need its frames kept somewhere while
+ * other code ran, and WebAssembly keeps them nowhere a program can reach. */
+static void fiber_make(RuneTask *t) { t->fiberMade = 1; }
+
+static void fiber_release(RuneTask *t) { t->fiberMade = 0; }
+
+static void switch_to(RuneExecutor *ex, RuneTask *from, RuneTask *to) {
+  (void)ex;
+  if (to && to->resumer == from && !to->fiber.started) {
+    to->fiber.started = 1;
+    to->entry(to->payload);
+    task_complete(to);
+    return;
+  }
+  task_fatal("a task has to wait for something unfinished, and without "
+             "threads WebAssembly cannot suspend one: build for wasm-threads, "
+             "or let the task run to the end without waiting");
 }
 
 #else
@@ -803,6 +967,16 @@ static void task_yield(RuneExecutor *ex) {
   switch_to(ex, t, t->resumer);
 }
 
+#if defined(__wasi__) && !defined(RUNE_SINGLE_THREADED)
+/* The last thing a task's thread does: hand the baton back and end. Nothing
+ * of the task is touched after the hand-off, because whoever takes the baton
+ * may free it at once. */
+static void fiber_finish(RuneTask *t) {
+  RuneExecutor *ex = t->exec;
+  task_complete(t);
+  baton_give(baton_of(ex, t->resumer));
+}
+#elif !defined(__wasi__)
 /* The last thing a task's stack does. It never returns: the stack is torn
  * down by whoever frees the task, once nothing is running on it. */
 static void fiber_finish(RuneTask *t) {
@@ -811,6 +985,7 @@ static void fiber_finish(RuneTask *t) {
   switch_to(ex, t, t->resumer);
   abort();
 }
+#endif
 
 /*--- The loop -------------------------------------------------------------*/
 
@@ -849,6 +1024,28 @@ static void fire_timers(RuneExecutor *ex) {
  * of them — or the wake-up pipe — to become ready. Sockets that are ready
  * complete their tasks. */
 static void poll_io(RuneExecutor *ex, int timeoutMs) {
+#if defined(RUNE_SINGLE_THREADED)
+  /* No sockets can be made and no other thread can finish anything, so the
+   * only thing to wait for is the next timer. */
+  (void)ex;
+  if (timeoutMs < 0)
+    task_fatal("deadlock: waiting on a future that nothing will finish");
+  if (timeoutMs > 0)
+    rune_thread_sleep_ns((int64_t)timeoutMs * 1000000);
+  return;
+#elif defined(__wasi__)
+  /* No sockets can be made, so what can end the wait is the next timer, or
+   * another thread posting a completion — which broadcasts `cond`. */
+  rune_mutex_lock(ex->lock);
+  if (ex->remoteCount == 0) {
+    if (timeoutMs < 0)
+      rune_cond_wait(ex->cond, ex->lock);
+    else if (timeoutMs > 0)
+      rune_cond_wait_ns(ex->cond, ex->lock, (int64_t)timeoutMs * 1000000);
+  }
+  rune_mutex_unlock(ex->lock);
+  return;
+#else
 #ifdef _WIN32
   typedef WSAPOLLFD PollFd;
   const short kIn = POLLRDNORM, kOut = POLLWRNORM;
@@ -901,6 +1098,7 @@ static void poll_io(RuneExecutor *ex, int timeoutMs) {
     }
   }
   free(fds);
+#endif
 }
 
 /* Waits for something to become ready when nothing is: the next timer, a
@@ -1391,6 +1589,12 @@ static void *pool_worker(void *unused) {
 /* Runs `entry(argument)` on a worker thread, starting one if every worker
  * is busy and the pool is not yet full. */
 void rune_pool_submit(void *(*entry)(void *), void *argument) {
+#if defined(RUNE_SINGLE_THREADED)
+  /* No thread to hand it to: the job runs now, and whatever it completes is
+   * already complete by the time anyone waits on it. */
+  entry(argument);
+  return;
+#endif
   pool_ensure();
   RuneJob *job = (RuneJob *)calloc(1, sizeof(RuneJob));
   if (!job)

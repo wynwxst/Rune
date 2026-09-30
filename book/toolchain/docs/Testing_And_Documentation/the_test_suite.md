@@ -74,6 +74,18 @@ example ecosystem's two registries built from source, every package tested
 against dependencies installed from them, and both apps run. It is the test
 that a change to resolution or installation is felt by a realistic graph.
 
+## The cross-compilation test
+
+`rune_cross` is `tests/cross_test.py`, under a temporary `RUNE_HOME`. Its
+first half needs no toolchain: `rune targets` in and out of a package, a
+mistyped `--target` and its suggestion, a table with no `triple`, an unknown
+`base`, a WASI SDK pointed at an empty directory. Its second half needs the
+WASI SDK and wasmtime, and is skipped with a line saying so without them: a
+new package built and run for `wasm` and `wasm-threads`, the FFI example's
+tests run as WebAssembly, and a handful of `tests/cases` compiled with
+`runec --target` for each flavour and compared against their `// EXPECT:`
+lines. Run it alone with `python3 tests/cross_test.py build/bin`.
+
 ## The other checks
 
 The suite is not the only thing that exercises the compiler:
@@ -84,6 +96,7 @@ The suite is not the only thing that exercises the compiler:
 | `python3 tools/check_stdlib_docs.py` | Compiles and runs every program in the standard library's guide pages |
 | `rune build` over `examples/project/*` | Multi-package builds, dependencies, C sources, FFI |
 | `rune build --target mingw` plus `wine` | The COFF path, which the host build never touches |
+| `rune run --target wasm` and `--target wasm-threads` | A 32-bit target, static linking, and the runtime without sockets, processes or (in the first) threads |
 
 The reference build is the broadest of the three and takes a few minutes. Run
 it before anything that touches code generation — and do not rebuild `runec`

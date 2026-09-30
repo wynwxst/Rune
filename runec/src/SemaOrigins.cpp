@@ -15,6 +15,8 @@
 #include "rune/Sema.h"
 #include "rune/Zombie.h"
 
+#include <algorithm>
+
 namespace rune {
 
 namespace {

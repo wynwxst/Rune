@@ -29,6 +29,7 @@
 #include "Jobs.h"
 #include "Manifest.h"
 #include "Registry.h"
+#include "Targets.h"
 
 #include <algorithm>
 #include <cctype>
@@ -129,32 +130,6 @@ int runCommand(const std::string &cmd, bool verbose) {
 //===----------------------------------------------------------------------===//
 // Build options shared by every command
 //===----------------------------------------------------------------------===//
-
-/// A cross target, resolved once from the root package's manifest and the
-/// command line, then carried through every step of the build.
-struct ResolvedTarget {
-  bool Active = false;         ///< false means an ordinary host build
-  std::string Name;            ///< what `target/<name>/` is called
-  std::string Triple;
-  std::string Cc;
-  std::string Cxx;
-  std::string Ar;
-  std::string Sysroot;
-  std::string RuntimeDir;
-  std::string Runner;          ///< wine, qemu-aarch64, ... ; empty = cannot run
-  std::vector<std::string> LinkLibraries;
-  std::vector<std::string> LinkPaths;
-  std::vector<std::string> LinkArgs;
-
-  /// Enough to know whether a produced executable needs `.exe`. Parsing the
-  /// whole triple here would mean linking LLVM into the package driver for
-  /// one question.
-  bool isWindows() const {
-    return Triple.find("windows") != std::string::npos ||
-           Triple.find("mingw") != std::string::npos;
-  }
-  std::string exeSuffix() const { return isWindows() ? ".exe" : ""; }
-};
 
 struct Options {
   bool Release = false;
@@ -438,27 +413,7 @@ struct DependencyInputs {
 /// This is what lets a package have a C or C++ half at all: the compiler links
 /// one object, and nothing else knows how to produce one from a `.c` or a
 /// `.cpp`. Using the build's own `cc` is what makes such a package
-/// cross-compile.
-///
-/// The C++ driver is `[target.<name>] cxx` when the manifest names one, and
-/// otherwise the C driver with its suffix swapped — `…-gcc` becomes `…-g++`,
-/// `clang` becomes `clang++` — because a cross toolchain ships the two
-/// together and naming one is naming both.
-std::string cxxDriverFor(const ResolvedTarget &t) {
-  if (!t.Cxx.empty())
-    return t.Cxx;
-  if (t.Cc.empty())
-    return "c++";
-  static const std::pair<const char *, const char *> kPairs[] = {
-      {"-gcc", "-g++"}, {"gcc", "g++"}, {"clang", "clang++"}, {"cc", "c++"}};
-  for (const auto &pair : kPairs) {
-    const size_t n = strlen(pair.first);
-    if (t.Cc.size() >= n && t.Cc.compare(t.Cc.size() - n, n, pair.first) == 0)
-      return t.Cc.substr(0, t.Cc.size() - n) + pair.second;
-  }
-  return t.Cc;
-}
-
+/// cross-compile; the C++ driver is the one `cxxDriverFor` pairs with it.
 bool buildNativeSources(const Manifest &m, const Options &opts,
                         const fs::path &dir, const pm::FingerprintStore &stamps,
                         std::vector<std::string> &objects) {
@@ -495,7 +450,9 @@ bool buildNativeSources(const Manifest &m, const Options &opts,
                             (half.IsCxx ? ".cxx.o" : ".o"));
       objects.push_back(obj.string());
 
-      std::string cmd = quote(half.Driver) + " -c -fPIC";
+      std::string cmd = quote(half.Driver) + " -c";
+      if (wantsPic(opts.Target))
+        cmd += " -fPIC";
       if (half.IsCxx)
         cmd += " -std=" + quote(m.CxxStandard.empty() ? std::string("c++17")
                                                       : m.CxxStandard);
@@ -504,6 +461,8 @@ bool buildNativeSources(const Manifest &m, const Options &opts,
         cmd += " --target=" + quote(opts.Target.Triple);
       if (!opts.Target.Sysroot.empty())
         cmd += " --sysroot=" + quote(opts.Target.Sysroot);
+      for (const std::string &f : opts.Target.CFlags)
+        cmd += " " + quote(f);
       for (const std::string &f : half.Flags)
         cmd += " " + quote(f);
       cmd += " -o " + quote(obj.string()) + " " + quote(src);
@@ -1198,80 +1157,6 @@ int commandBuild(const Options &opts) {
   return 0;
 }
 
-/// Turns `--target <name>` into the toolchain to build with.
-///
-/// The name is a `[target.<name>]` table when there is one, and otherwise the
-/// triple itself — which covers the common case of a target that needs no
-/// toolchain configuration beyond the triple, and keeps `--target` usable in
-/// a package that has no `[target]` section at all.
-bool resolveTarget(const Manifest &m, Options &opts) {
-  const std::string &name = opts.TargetName;
-  ResolvedTarget &t = opts.Target;
-  if (const TargetSpec *spec = m.findTarget(name)) {
-    t.Active = true;
-    t.Name = spec->Name;
-    t.Triple = spec->Triple;
-    t.Cc = spec->Cc;
-    t.Cxx = spec->Cxx;
-    t.Ar = spec->Ar;
-    t.Sysroot = spec->Sysroot;
-    t.RuntimeDir = spec->RuntimeDir;
-    t.Runner = spec->Runner;
-    t.LinkLibraries = spec->LinkLibraries;
-    t.LinkPaths = spec->LinkPaths;
-    t.LinkArgs = spec->LinkArgs;
-    return true;
-  }
-  // A bare triple has at least two dashes; a mistyped table name usually has
-  // none, and saying which is which is more useful than either alone.
-  if (name.find('-') == std::string::npos) {
-    failLine("no target named '" + name + "' in Rune.toml");
-    if (m.Targets.empty()) {
-      note("declare one with a [target." + name + "] section, or pass a "
-           "target triple directly");
-    } else {
-      std::string names;
-      for (const TargetSpec &s : m.Targets)
-        names += (names.empty() ? "" : ", ") + s.Name;
-      note("configured targets: " + names);
-    }
-    return false;
-  }
-  t.Active = true;
-  t.Name = name;
-  t.Triple = name;
-  return true;
-}
-
-/// `rune targets` — what this package knows how to build for.
-int commandTargets(const Manifest &m) {
-  if (m.Targets.empty()) {
-    note("this package configures no targets");
-    note("add a [target.<name>] section with a `triple`, or pass a triple to "
-         "`--target` directly");
-    return 0;
-  }
-  for (const TargetSpec &t : m.Targets) {
-    std::cout << "  " << t.Name << "\n";
-    std::cout << "      triple  " << t.Triple << "\n";
-    if (!t.Cc.empty())
-      std::cout << "      cc      " << t.Cc << "\n";
-    if (!t.Cxx.empty())
-      std::cout << "      cxx     " << t.Cxx << "\n";
-    if (!t.Sysroot.empty())
-      std::cout << "      sysroot " << t.Sysroot << "\n";
-    if (!t.Runner.empty())
-      std::cout << "      runner  " << t.Runner << "\n";
-    if (!t.LinkLibraries.empty()) {
-      std::cout << "      link   ";
-      for (const std::string &l : t.LinkLibraries)
-        std::cout << " " << l;
-      std::cout << "\n";
-    }
-  }
-  return 0;
-}
-
 int commandRun(const Options &opts) {
   WorkspaceResult w = buildWorkspace(opts);
   if (!w.Ok) {
@@ -1289,9 +1174,15 @@ int commandRun(const Options &opts) {
   if (!canRunHere(opts)) {
     failLine("built for " + opts.Target.Triple + ", which this machine "
              "cannot run");
-    note("copy the executable to the target machine, or give [target." +
-         opts.Target.Name + "] a `runner` that can start it here "
-         "(wine, qemu-aarch64, `arch -x86_64`, ...)");
+    if (!opts.Target.WantedRunner.empty()) {
+      const std::string &want = opts.Target.WantedRunner;
+      note("install " + want.substr(0, want.find(' ')) +
+           " to run it here, or copy it to a machine that can");
+    } else {
+      note("copy the executable to the target machine, or give [target." +
+           opts.Target.Name + "] a `runner` that can start it here "
+           "(wine, qemu-aarch64, wasmtime, `arch -x86_64`, ...)");
+    }
     return 1;
   }
 
@@ -1541,22 +1432,6 @@ void primeToolchainCache(const Options &opts) {
   }
 }
 
-/// The archiver for a target. A cross toolchain names its tools after its
-/// triple, so `<triple>-gcc` sits beside `<triple>-ar`; deriving one from the
-/// other saves configuring what is almost always implied.
-std::string archiverFor(const ResolvedTarget &t) {
-  if (!t.Ar.empty())
-    return t.Ar;
-  if (t.Cc.empty())
-    return "ar";
-  for (const char *suffix : {"-gcc", "-clang", "-cc"}) {
-    size_t n = std::strlen(suffix);
-    if (t.Cc.size() > n && t.Cc.compare(t.Cc.size() - n, n, suffix) == 0)
-      return t.Cc.substr(0, t.Cc.size() - n) + "-ar";
-  }
-  return "ar";
-}
-
 /// Builds the Rune runtime for a cross target and caches it under
 /// `~/.rune/runtime/<triple>/`.
 ///
@@ -1609,13 +1484,17 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
   std::vector<std::string> objects;
   for (const std::string &src : sources) {
     fs::path obj = dir / (fs::path(src).stem().string() + ".o");
-    std::string cmd = quote(cc) + " -c -O2 -fPIC";
+    std::string cmd = quote(cc) + " -c -O2";
+    if (wantsPic(t))
+      cmd += " -fPIC";
     // A driver chosen for the target already knows its target; a generic one
     // has to be told, exactly as at link time.
     if (t.Cc.empty())
       cmd += " --target=" + quote(t.Triple);
     if (!t.Sysroot.empty())
       cmd += " --sysroot=" + quote(t.Sysroot);
+    for (const std::string &f : t.CFlags)
+      cmd += " " + quote(f);
     cmd += " -I" + quote((cRoot / "include").string());
     cmd += " -o " + quote(obj.string()) + " " + quote(src);
     if (runCommand(cmd, opts.Verbose) != 0) {
@@ -2285,7 +2164,9 @@ COMMANDS
                          --check only reports
     lsp                  Run the language server, for an editor, over stdin and stdout
     clean                Delete the target/ directory
-    targets              List the cross targets this package configures
+    targets              List what this machine can build for: the foreign
+                         targets (wasm, windows, linux-arm64, ...) and the
+                         package's own [target.<name>] tables
 
 PACKAGES
     search <regex>       Find packages in the configured registries
@@ -2318,7 +2199,8 @@ OPTIONS
     -j, --jobs <n>       Compile at most <n> things at once (default: cores)
     --cfg <name>         Set <name> for `@Config(...)`, on top of [build] cfg
     --cfg <key>=<value>  Give <key> a value, over what [config] says
-    --target <name>      Build for a [target.<name>] toolchain, or a triple
+    --target <name>      Build for another machine: a foreign target
+                         (`--target wasm`), a [target.<name>] table, or a triple
     --emit <kind>        llvm-ir | asm | obj | lib | exe — what to produce
                          instead of linking (default exe)
     -C, --directory <d>  Operate on the package in <d> instead of .
@@ -2530,7 +2412,7 @@ int main(int argc, char **argv) {
     std::string error;
     if (loadManifest(opts.PackageDir, root, error)) {
       if (command == "targets")
-        return commandTargets(root);
+        return listTargets(&root);
       // `[build] target` is what this package builds for when nothing on the
       // command line says otherwise. `[build] emit` works the same way.
       if (opts.TargetName.empty())
@@ -2551,8 +2433,13 @@ int main(int argc, char **argv) {
         opts.EmitSet = true;
       }
       if (!opts.TargetName.empty()) {
-        if (!resolveTarget(root, opts))
+        TargetProblem problem;
+        if (!resolveTarget(root, opts.TargetName, opts.Target, problem)) {
+          failLine(problem.Message);
+          for (const std::string &n : problem.Notes)
+            note(n);
           return 1;
+        }
         // A cross build needs a runtime built for its target. One named in
         // the manifest is taken as given; otherwise it is built and cached.
         if (opts.Target.RuntimeDir.empty()) {
@@ -2561,6 +2448,10 @@ int main(int argc, char **argv) {
             return 1;
         }
       }
+    } else if (command == "targets" &&
+               !fs::exists(fs::path(opts.PackageDir) / "Rune.toml")) {
+      // Outside a package there are still the foreign targets to show.
+      return listTargets(nullptr);
     } else if (command == "targets" || !opts.TargetName.empty()) {
       failLine(error);
       return 1;
@@ -2573,13 +2464,6 @@ int main(int argc, char **argv) {
   if (command == "test") return commandTest(opts);
   if (command == "doc") return commandDoc(opts);
   if (command == "clean") return commandClean(opts);
-  // `targets` is answered above, where the manifest is already in hand; it
-  // only reaches here when there is no manifest to read.
-  if (command == "targets") {
-    failLine("`rune targets` needs a package; no Rune.toml here");
-    return 1;
-  }
-
   failLine("unknown command '" + command + "'");
   note("run `rune --help` for the list of commands");
   return 2;

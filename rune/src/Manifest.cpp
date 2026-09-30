@@ -1,4 +1,5 @@
 #include "Manifest.h"
+#include "Targets.h"
 
 #include "Toml.h"
 
@@ -206,19 +207,23 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
       TargetSpec t;
       t.Name = entry.first;
       const TomlValue &v = entry.second;
+      if (const TomlValue *x = v.find("base")) t.Base = x->stringOr("");
       if (const TomlValue *x = v.find("triple")) t.Triple = x->stringOr("");
       if (const TomlValue *x = v.find("cc")) t.Cc = x->stringOr("");
       if (const TomlValue *x = v.find("cxx")) t.Cxx = x->stringOr("");
       if (const TomlValue *x = v.find("ar")) t.Ar = x->stringOr("");
       if (const TomlValue *x = v.find("sysroot")) t.Sysroot = x->stringOr("");
+      if (const TomlValue *x = v.find("sdk")) t.Sdk = x->stringOr("");
       if (const TomlValue *x = v.find("runtime-dir")) t.RuntimeDir = x->stringOr("");
       if (const TomlValue *x = v.find("runner")) t.Runner = x->stringOr("");
+      t.CFlags = stringList(v.find("c-flags"));
       t.LinkLibraries = stringList(v.find("link"));
       t.LinkPaths = stringList(v.find("link-paths"));
       t.LinkArgs = stringList(v.find("link-args"));
-      // A target with no triple names nothing; the mistake is worth saying
-      // rather than building for the host under another name.
-      if (t.Triple.empty()) {
+      // A target with no triple, and no foreign target to take one from,
+      // names nothing; the mistake is worth saying rather than building for
+      // the host under another name.
+      if (t.Triple.empty() && t.Base.empty() && !findForeignTarget(t.Name)) {
         error = manifestPath.string() + ": [target." + t.Name +
                 "] has no `triple`";
         return false;
@@ -229,6 +234,7 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
           p = (root / p).lexically_normal().string();
       };
       absolutise(t.Sysroot);
+      absolutise(t.Sdk);
       absolutise(t.RuntimeDir);
       for (std::string &p : t.LinkPaths)
         absolutise(p);

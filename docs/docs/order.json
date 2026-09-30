@@ -465,6 +465,8 @@
   "what_is_not_here.md"
  ],
  "Cross_Compilation": [
+  "foreign_targets.md",
+  "webassembly.md",
   "a_target_triple.md",
   "naming_a_target_in_the_manifest.md",
   "where_the_output_goes.md",

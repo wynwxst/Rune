@@ -13747,20 +13747,115 @@ SECTIONS.append(Sec(
     "cross", "tooling", "Cross compilation",
     "Building for a machine that is not the one you are on. The compiler "
     "already emits code for any target LLVM knows; what a cross build needs "
-    "beyond that is a toolchain to link with, and that is what the manifest "
-    "describes.",
+    "beyond that is a toolchain to link with. For the common targets `rune` "
+    "finds that toolchain itself; for the rest, the manifest names it.",
     [
+        H("Foreign targets"),
+        P("A handful of targets are built in, by name. Each knows its triple, "
+          "where its toolchain is usually installed, and what can run its "
+          "programs here, so building for one takes nothing but the name."),
+        SH("""$ rune build --target wasm         # WebAssembly, with the WASI SDK
+$ rune run --target windows        # built with mingw-w64, run under wine
+$ rune test --target linux-arm64   # built with GCC, run under qemu"""),
+        T(["Name", "Triple", "Builds with", "Runs here with"],
+          [["`wasm`", "`wasm32-wasip1`", "the WASI SDK", "`wasmtime`, `wasmer` or `wasm3`"],
+           ["`wasm-threads`", "`wasm32-wasip1-threads`", "the WASI SDK", "`wasmtime`, with threads on"],
+           ["`windows`", "`x86_64-w64-mingw32`", "`x86_64-w64-mingw32-gcc`", "`wine`"],
+           ["`linux-arm64`", "`aarch64-linux-gnu`", "`aarch64-linux-gnu-gcc`", "`qemu-aarch64`"],
+           ["`linux-x64`", "`x86_64-linux-gnu`", "`x86_64-linux-gnu-gcc`", "`qemu-x86_64`"],
+           ["`linux-riscv64`", "`riscv64-linux-gnu`", "`riscv64-linux-gnu-gcc`", "`qemu-riscv64`"]],
+          caption="Each also answers to other spellings — `wasi`, `mingw`, "
+                  "`linux-aarch64`, and its own triple."),
+        P("`rune targets` lists them, and says for each whether its toolchain "
+          "was found and whether this machine can run what it builds — and, "
+          "when something is missing, how to get it. It works outside a "
+          "package too."),
+        SH("""$ rune targets
+Foreign targets  (built in; --target <name>)
+  wasm            wasm32-wasip1
+      WebAssembly with WASI, built with the WASI SDK
+      ✓ builds with /opt/wasi-sdk/bin/wasm32-wasip1-clang
+      ✓ runs with wasmtime run -S inherit-env=y --dir=.
+  windows         x86_64-w64-mingw32
+      64-bit Windows, built with mingw-w64
+      ✗ cannot find 'x86_64-w64-mingw32-gcc', which windows builds with
+        install mingw-w64: `apt install gcc-mingw-w64-x86-64` or `brew install mingw-w64`
+        or name another compiler: `cc = "..."` in [target.windows]
+  ..."""),
+        P("A name that is none of these is a mistake worth catching early, "
+          "so a close one is suggested:"),
+        SH("""$ rune build --target wams
+● no target named 'wams'
+  ─  note: did you mean 'wasm'?
+  ─  note: `rune targets` lists every target this package can build for; a target triple works too"""),
+
+        H("WebAssembly"),
+        P("`--target wasm` builds a WebAssembly module that uses WASI for "
+          "what a program needs from outside itself — standard streams, "
+          "files, the clock, the environment, its arguments. The module is "
+          "`<name>.wasm`, and anything that runs WASI runs it: wasmtime, "
+          "wasmer, wasm3, a browser with a WASI shim, Node's `wasi` module."),
+        P("It is built with the [WASI SDK](https://github.com/WebAssembly/wasi-sdk): "
+          "clang, `wasm-ld` and wasi-libc in one directory. `rune` looks for "
+          "it in `$WASI_SDK_PATH`, then where its installers put it — "
+          "`/opt/wasi-sdk`, a versioned `/opt/wasi-sdk-*`, "
+          "`~/.rune/toolchains/wasi-sdk`, `~/wasi-sdk` — and uses the "
+          "`<triple>-clang` it ships, so nothing else has to be told the "
+          "target."),
+        SH("""$ export WASI_SDK_PATH=/opt/wasi-sdk-25.0-x86_64-linux
+$ rune new hello && cd hello
+$ rune run --target wasm
+○ Preparing runtime for wasm32-wasip1
+○ Compiling hello v0.1.0
+○ Running target/wasm/debug/hello.wasm
+Hello from hello!
+$ wasmtime target/wasm/debug/hello.wasm"""),
+        P("`rune run` and `rune test` start the module under the first of "
+          "wasmtime, wasmer and wasm3 that is installed, with the current "
+          "directory and the environment passed through — the two things a "
+          "native program gets without asking, and a WASI one only when "
+          "granted. A module run by hand gets only what its runner grants: "
+          "`wasmtime --dir=. hello.wasm` to let it see the files here."),
+        T(["", "`wasm`", "`wasm-threads`"],
+          [["Files, streams, clock, environment, arguments", "yes", "yes"],
+           ["`std::thread`", "no: starting one panics", "yes, with wasi-threads"],
+           ["`std::task`", "a task that runs to the end without waiting; one "
+            "that has to wait panics", "yes"],
+           ["`std::net`", "no: every call fails", "no: every call fails"],
+           ["`std::process` commands", "no: running one fails", "no"],
+           ["Tracebacks", "the runner's own", "the runner's own"]],
+          caption="What WASI preview 1 provides, and so what a module can do."),
+        P("The differences are the platform's, not the compiler's. WASI "
+          "preview 1 can use a socket it was handed but cannot make one, and "
+          "has no processes. WebAssembly's stack is not memory a program can "
+          "point at, so a task cannot be parked on one: under `wasm-threads` "
+          "each task runs on a thread of its own, one at a time, and a switch "
+          "is handing the processor from one to the next; under plain `wasm` "
+          "there is only the one stack, and a task runs on it to the end."),
+        N("A threaded module imports its memory rather than defining it — "
+          "every thread is an instance of its own, and they share that "
+          "memory — and fewer runtimes accept one. `wasm-threads` is a target "
+          "of its own for that reason; wasmtime runs it with "
+          "`-W threads=y -S threads=y`.",
+          label="Why threads are a separate target"),
+        P("Code that has to differ asks `@Config(family == \"wasm\")` or "
+          "`@Config(os == \"wasi\")` — see **Conditional compilation** — and "
+          "`std::arch` says `wasm32` with a 32-bit `usize`."),
+
         H("A target triple"),
-        P("`--target` takes a triple and the compiler emits for it. Nothing "
-          "else has to change: the object is a real object for that machine, "
-          "in that machine's format."),
+        P("`--target` also takes a triple directly, for a target that needs "
+          "no toolchain beyond the one already here — which is most of them "
+          "when the host compiler can reach the target, as Apple's clang can "
+          "reach `x86_64-apple-darwin`. The compiler emits a real object for "
+          "that machine, in that machine's format."),
         SH("""$ runec --target x86_64-w64-mingw32 -c -o hello.o hello.rune
 $ file hello.o
 hello.o: Intel amd64 COFF object file"""),
         P("Linking is the part that needs help. A linker is platform "
           "software: it knows one set of startup files, one libc, one "
           "executable format. Cross-compiling means naming the one that "
-          "belongs to the target."),
+          "belongs to the target — which is what a foreign target does for "
+          "you, and what these flags do by hand."),
         T(["Flag", "Does"],
           [["`--target <triple>`", "what to emit for"],
            ["`--cc <program>`", "the toolchain driver that links"],
@@ -13768,60 +13863,88 @@ hello.o: Intel amd64 COFF object file"""),
            ["`--runtime-dir <dir>`", "where its `libruneruntime.a` is"],
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
            ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"]]),
-        N("A driver named for its target — `x86_64-w64-mingw32-gcc` — is "
-          "already the right compiler and is left alone. Only a general one "
-          "such as `clang` is told the target, because it is one binary for "
-          "all of them.",
+        SH("""$ runec --target wasm32-wasip1 \\
+        --cc /opt/wasi-sdk/bin/wasm32-wasip1-clang \\
+        --sysroot /opt/wasi-sdk/share/wasi-sysroot \\
+        --runtime-dir ~/.rune/runtime/wasm32-wasip1 \\
+        -o hello.wasm hello.rune"""),
+        N("A driver named for its target — `x86_64-w64-mingw32-gcc`, "
+          "`wasm32-wasip1-clang` — is already the right compiler and is left "
+          "alone. Only a general one such as `clang` is told the target, "
+          "because it is one binary for all of them.",
           label="Why `--cc` and `--target` are separate"),
 
         H("Naming a target in the manifest"),
-        P("A package that is built for the same machines repeatedly says so "
-          "once. `[target.<name>]` describes a toolchain; naming one does not "
-          "build for it, `--target` does."),
+        P("A package that is built for the same machines repeatedly, or "
+          "whose toolchain is somewhere a foreign target would not look, "
+          "says so once. `[target.<name>]` describes a toolchain; naming one "
+          "does not build for it — `--target` does, or `[build] target` when "
+          "the command line does not say."),
+        P("A table may start from a foreign target and change only what "
+          "differs: with `base`, or by being named after one and giving no "
+          "`triple`. What it names wins; what it leaves out is found as the "
+          "foreign target would find it."),
         S('''[package]
 name = "report"
 version = "0.1.0"
 
-[target.mingw]
-triple = "x86_64-w64-mingw32"
-cc = "x86_64-w64-mingw32-gcc"
-# Extra libraries this target needs, added to the package's own.
-link = ["ws2_32"]
-# How to run one of its binaries on *this* machine. Without it, `rune run`
-# and `rune test` build and stop, rather than pretend.
-runner = "wine"
+# The foreign target `wasm`, with the SDK somewhere of this project's own.
+[target.wasm]
+sdk = "../toolchains/wasi-sdk"
 
+# Another name for it, run under a different runtime.
+[target.web]
+base = "wasm"
+runner = "wasmer run --dir=."
+
+# A target from scratch: everything named.
 [target.pi]
 triple = "aarch64-unknown-linux-gnu"
 cc = "aarch64-linux-gnu-gcc"
 sysroot = "/opt/pi-sysroot"
-runner = "qemu-aarch64"''', mode="frag", title="Two targets in Rune.toml"),
+# How to run one of its binaries on *this* machine. Without it, `rune run`
+# and `rune test` build and stop, rather than pretend.
+runner = "qemu-aarch64 -L /opt/pi-sysroot"''', mode="frag",
+          title="Three targets in Rune.toml"),
+        T(["Key", "Means"],
+          [["`base`", "the foreign target to start from"],
+           ["`triple`", "passed to `runec --target`; needed unless there is a base"],
+           ["`cc`", "the C driver that compiles the runtime and links"],
+           ["`cxx`", "the C++ driver; derived from `cc` when absent"],
+           ["`ar`", "the archiver; derived from `cc` when absent"],
+           ["`sysroot`", "passed as `--sysroot`"],
+           ["`sdk`", "where the WASI SDK is, for a target based on `wasm`"],
+           ["`runner`", "how to start a built program here"],
+           ["`runtime-dir`", "a prebuilt `libruneruntime.a` to use instead of building one"],
+           ["`c-flags`", "added to every C compile for the target, the runtime's included"],
+           ["`link`, `link-paths`, `link-args`", "native libraries the *target* needs, on top of the package's"]],
+          caption="Relative paths are relative to Rune.toml."),
         SH("""$ rune targets
-  mingw
-      triple  x86_64-w64-mingw32
-      cc      x86_64-w64-mingw32-gcc
-      runner  wine
-  pi
-      triple  aarch64-unknown-linux-gnu
-      cc      aarch64-linux-gnu-gcc
-      runner  qemu-aarch64
+In Rune.toml
+  wasm            wasm32-wasip1
+      the foreign target wasm, adjusted
+      ✓ builds with /work/toolchains/wasi-sdk/bin/wasm32-wasip1-clang
+      ✓ runs with wasmtime run -S inherit-env=y --dir=.
+  web             wasm32-wasip1
+      the foreign target wasm, adjusted
+      ...
 
-$ rune build --target mingw
-$ rune test --target mingw          # built, then run under wine"""),
-        P("`--target` also takes a triple directly, for a target that needs "
-          "no configuration beyond one — which is most of them when the host "
-          "compiler can already reach the target, as Apple's clang can reach "
-          "`x86_64-apple-darwin`."),
+$ rune build --target web
+$ rune test --target pi             # built, then run under qemu"""),
 
         H("Where the output goes"),
-        P("A cross build gets a directory of its own, so host and cross "
-          "artefacts never overwrite each other and switching between them "
-          "rebuilds nothing."),
-        SH("""target/debug/report              # the host
-target/mingw/debug/report.exe    # --target mingw
-target/pi/debug/report           # --target pi"""),
+        P("A cross build gets a directory of its own, named after the target, "
+          "so host and cross artefacts never overwrite each other and "
+          "switching between them rebuilds nothing. A foreign target asked "
+          "for by another spelling — `--target wasi` — still builds into its "
+          "own name's directory."),
+        SH("""target/debug/report                # the host
+target/windows/debug/report.exe    # --target windows
+target/wasm/debug/report.wasm      # --target wasm
+target/pi/debug/report             # --target pi"""),
         N("The `.exe` is added for a Windows target, because a PE image is "
-          "only executable with it.", label="Executable suffix"),
+          "only executable with it, and `.wasm` for WebAssembly, because "
+          "every runtime expects it.", label="Executable suffix"),
 
         H("The runtime"),
         P("Every Rune program links a small runtime, half C and half Rune, "
@@ -13830,28 +13953,28 @@ target/pi/debug/report           # --target pi"""),
           "`~/.rune/runtime/<triple>/`, using the same toolchain the rest of "
           "the build uses. A prebuilt one is used instead when "
           "`runtime-dir` names it."),
-        SH("""$ rune build --target mingw
+        SH("""$ rune build --target windows
 ○ Preparing runtime for x86_64-w64-mingw32
 ○ Compiling report v0.1.0
 ● Finished debug profile"""),
 
         H("Running what you built"),
         P("A binary for another machine cannot simply be started. With a "
-          "`runner`, `rune run` and `rune test` go through it; without one "
-          "they build and say so, rather than reporting a test as passed "
-          "when it never ran."),
-        SH("""$ rune run --target mingw          # no `runner` configured
+          "runner — the foreign target's, when one is installed, or the "
+          "table's `runner` — `rune run` and `rune test` go through it; "
+          "without one they build and say so, rather than reporting a test "
+          "as passed when it never ran."),
+        SH("""$ rune run --target windows        # wine is not installed
 ● built for x86_64-w64-mingw32, which this machine cannot run
-  ─  note: copy the executable to the target machine, or give [target.mingw]
-           a `runner` that can start it here (wine, qemu-aarch64, ...)"""),
+  ─  note: install wine to run it here, or copy it to a machine that can"""),
 
         H("C and C++ sources"),
         P("A package with a C or C++ half lists it, and `rune` compiles it "
           "with whichever toolchain the build is using — so the native code "
           "crosses along with the Rune, and a package with an FFI shim needs "
-          "nothing special to target another machine. The C++ driver is the "
-          "one that goes with `cc` unless `[target.<name>] cxx` names "
-          "another."),
+          "nothing special to target another machine, WebAssembly included. "
+          "The C++ driver is the one that goes with `cc` unless "
+          "`[target.<name>] cxx` names another."),
         S('''[build]
 c-sources = ["c/shim.c"]
 c-flags = ["-Wall", "-Wextra"]
@@ -13860,8 +13983,8 @@ cxx-flags = ["-Wall", "-Wextra"]''', mode="frag",
           title="Compiled with the build's own cc and c++"),
 
         H("What does not cross"),
-        P("The generated code is correct for every target LLVM supports. Three "
-          "things are narrower than that:"),
+        P("The generated code is correct for every target LLVM supports. A "
+          "few things are narrower than that:"),
         T(["", "State"],
           [["Struct by value across the C boundary",
             "not on Windows x64 — rejected rather than misread; see "
@@ -13870,20 +13993,25 @@ cxx-flags = ["-Wall", "-Wextra"]''', mode="frag",
             "the program aborts as it should, but the text does not reach "
             "standard error"],
            ["`extern \"C++\"`",
-            "every Itanium-ABI target — Linux, macOS, the BSDs, MinGW; not "
-            "`-windows-msvc`"],
+            "every Itanium-ABI target — Linux, macOS, the BSDs, MinGW, "
+            "WebAssembly; not `-windows-msvc`"],
+           ["Threads, sockets and processes on WebAssembly",
+            "what WASI preview 1 provides; see **WebAssembly** above"],
+           ["Shared libraries on WebAssembly",
+            "none — a library is a `.rul`, linked into the module"],
            ["Everything else in the FFI",
             "portable: scalars, pointers, `CString`, `@cfunction`, `@export`"]]),
 
         H("32-bit targets"),
         P("`usize` and `isize` are the target's pointer width, so a 32-bit "
-          "build sizes them at 4 bytes and everything measured in them — an "
-          "allocation, `mem::offset`, a container's index — follows. The "
-          "standard library declares C's `size_t` as `usize` and a file "
-          "offset as `isize` for the same reason: a `u64` in either place "
-          "would pass a doubled argument to libc on such a target."),
+          "build — `wasm32`, `i686` — sizes them at 4 bytes and everything "
+          "measured in them — an allocation, `mem::offset`, a container's "
+          "index — follows. The standard library declares C's `size_t` as "
+          "`usize` and a file offset as `isize` for the same reason: a `u64` "
+          "in either place would pass a doubled argument to libc on such a "
+          "target."),
         SH("""$ runec --target i686-w64-mingw32 -c -o hello.o hello.rune
-$ rune test --target win32          # a [target.win32] whose runner is wine"""),
+$ rune test --target wasm           # wasm32: a 32-bit target too"""),
         N("C's `long` is pointer-sized everywhere Rune targets except 64-bit "
           "Windows, where it stays 32 bits. `isize` is the closest spelling "
           "Rune has, and it is what the file-offset declarations use; on "
@@ -13897,7 +14025,10 @@ $ rune test --target win32          # a [target.win32] whose runner is wine"""),
     keywords=["cross", "target", "triple", "mingw", "windows", "toolchain",
               "sysroot", "runner", "wine", "qemu", "c-sources", "runtime",
               "cc", "linker", "exe", "arm", "aarch64", "32-bit", "i686",
-              "wasm32", "usize", "isize", "pointer width", "size_t"]))
+              "wasm32", "usize", "isize", "pointer width", "size_t",
+              "foreign target", "wasm", "webassembly", "wasi", "wasi-sdk",
+              "wasmtime", "wasmer", "wasm-threads", "base", "sdk",
+              "rune targets"]))
 
 
 # ===========================================================================

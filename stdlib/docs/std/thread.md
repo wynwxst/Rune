@@ -95,3 +95,10 @@ fn main() -> i64 {
     0
 }
 ```
+
+## On WebAssembly
+
+Built with `--target wasm-threads`, threads are WASI threads and everything
+here works. Built with `--target wasm`, the module has no threads to start:
+`spawn` panics with "cannot start a thread". WASI has no way to ask how many
+cores there are, so `hardwareThreads` is 1 under either.

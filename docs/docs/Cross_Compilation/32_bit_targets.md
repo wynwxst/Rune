@@ -1,10 +1,10 @@
 # 32-bit targets
 
-`usize` and `isize` are the target's pointer width, so a 32-bit build sizes them at 4 bytes and everything measured in them — an allocation, `mem::offset`, a container's index — follows. The standard library declares C's `size_t` as `usize` and a file offset as `isize` for the same reason: a `u64` in either place would pass a doubled argument to libc on such a target.
+`usize` and `isize` are the target's pointer width, so a 32-bit build — `wasm32`, `i686` — sizes them at 4 bytes and everything measured in them — an allocation, `mem::offset`, a container's index — follows. The standard library declares C's `size_t` as `usize` and a file offset as `isize` for the same reason: a `u64` in either place would pass a doubled argument to libc on such a target.
 
 ```sh
 $ runec --target i686-w64-mingw32 -c -o hello.o hello.rune
-$ rune test --target win32          # a [target.win32] whose runner is wine
+$ rune test --target wasm           # wasm32: a 32-bit target too
 ```
 
 > [!NOTE]

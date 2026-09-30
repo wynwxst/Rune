@@ -29,12 +29,18 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/CodeGen.h>
 
 #include <map>
 #include <set>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace llvm {
+class TargetMachine;
+class Triple;
+} // namespace llvm
 
 namespace rune {
 
@@ -600,6 +606,18 @@ void optimizeModule(llvm::Module &m, unsigned level);
 /// knows, and this build knows all of them so that a cross compile can name
 /// any of them.
 void initialiseTargets();
+
+/// The target machine for `triple`, set up the way every Rune compile wants
+/// it; null (with `err` filled in) when LLVM has no backend for the triple.
+///
+/// Three places ask for one — the pointer width, the module's data layout
+/// and the machine code itself — and they must agree, so they share this.
+/// Most targets want position-independent code; WebAssembly is linked
+/// statically by `wasm-ld`, and its `-threads` flavour needs the atomics and
+/// bulk-memory features before its memory can be shared.
+std::unique_ptr<llvm::TargetMachine>
+createTargetMachine(const llvm::Triple &triple, std::string &err,
+                    llvm::CodeGenOptLevel level = llvm::CodeGenOptLevel::Default);
 
 } // namespace rune
 

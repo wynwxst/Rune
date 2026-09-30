@@ -36,7 +36,7 @@ namespace rune {
 
 namespace {
 
-enum class Arch : uint8_t { X86_64, AArch64, X86, Other };
+enum class Arch : uint8_t { X86_64, AArch64, X86, Wasm, Other };
 
 struct AbiTarget {
   Arch arch = Arch::Other;
@@ -51,6 +51,8 @@ AbiTarget abiTargetOf(const llvm::Triple &t) {
   case llvm::Triple::aarch64:
   case llvm::Triple::aarch64_be: a.arch = Arch::AArch64; break;
   case llvm::Triple::x86: a.arch = Arch::X86; break;
+  case llvm::Triple::wasm32:
+  case llvm::Triple::wasm64: a.arch = Arch::Wasm; break;
   default: break;
   }
   a.windows = t.isOSWindows();
@@ -320,6 +322,19 @@ CodeGen::CxxArg CodeGen::classifyCxxArgument(Type *t, unsigned &intRegs,
     // Every aggregate argument is copied onto the stack, 4-byte aligned.
     return indirect(CxxArg::ByVal, 4);
   }
+  case Arch::Wasm: {
+    // WebAssembly's C ABI: an aggregate that is one scalar travels as that
+    // scalar; any other goes as a pointer to a copy, and comes back through
+    // a hidden one.
+    if (leaves.size() == 1 &&
+        size == dl.getTypeAllocSize(leaves[0].Ty).getFixedValue()) {
+      if (isFloatLeaf(leaves[0].Ty)) ++sseRegs; else ++intRegs;
+      return coerceTo(leaves[0].Ty);
+    }
+    if (isReturn)
+      return indirect(CxxArg::Indirect, align);
+    return indirect(CxxArg::ByVal, align);
+  }
   case Arch::Other:
     break;
   }
@@ -396,6 +411,11 @@ const CodeGen::CxxSignature &CodeGen::cxxSignatureFor(FunctionDecl *fn) {
   llvm::Type *retTy = B->getVoidTy();
   if (!sig.Sret && sig.Ret.K != CxxArg::Ignore)
     retTy = sig.Ret.Ty;
+  // wasm-ld does not link a call whose type differs from the definition's —
+  // it traps instead — so a `this` nobody reads is still declared.
+  if (cxx.CtorsReturnThis && sig.HasThis &&
+      (isCxxConstructor(fn) || isCxxDestructor(fn)))
+    retTy = PtrTy;
   sig.FT = FunctionType::get(retTy, params, fn->IsVariadic);
   if (sig.HasThis && cxx.ThisCall)
     sig.CC = CallingConv::X86_ThisCall;

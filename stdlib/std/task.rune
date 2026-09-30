@@ -599,12 +599,14 @@ pub async fn all<T>(futures: vector::Vector<Future<T>>) -> vector::Vector<T> {
 fn waitAny<T>(futures: &vector::Vector<Future<T>>) -> i64 {
     let count = futures.length()
     if count == 0 { process::panic("first: no futures to wait for") }
-    let raw = mem::allocator.allocate((count * 8) as usize)
+    // One pointer per task, the width the runtime reads them at: four bytes
+    // on a 32-bit target such as wasm32, eight on the rest.
+    let raw = mem::allocator.allocate(count as usize * mem::size_of::<*var u8>())
     if mem::isNull(raw) { process::panic("cannot allocate a wait list") }
-    let tasks = unsafe { raw as *var u64 }
+    let tasks = unsafe { raw as *var *var u8 }
     var i = 0
     while i < count {
-        unsafe { tasks[i] = futures.look(i).task() as u64 }
+        unsafe { tasks[i] = futures.look(i).task() }
         i += 1
     }
     let index = unsafe { rune_task_wait_any(raw, count) }
@@ -617,12 +619,12 @@ fn waitAny<T>(futures: &vector::Vector<Future<T>>) -> i64 {
 @suspend
 @safe("two task pointers in a block sized for two, freed here")
 fn waitEither(a: *var u8, b: *var u8) -> i64 {
-    let raw = mem::allocator.allocate(16)
+    let raw = mem::allocator.allocate(2 * mem::size_of::<*var u8>())
     if mem::isNull(raw) { process::panic("cannot allocate a wait list") }
-    let tasks = unsafe { raw as *var u64 }
+    let tasks = unsafe { raw as *var *var u8 }
     unsafe {
-        tasks[0] = a as u64
-        tasks[1] = b as u64
+        tasks[0] = a
+        tasks[1] = b
     }
     let index = unsafe { rune_task_wait_any(raw, 2) }
     mem::allocator.deallocate(raw)

@@ -69,7 +69,7 @@ Each of these has a page in [The compiler](../The_Compiler/index.md).
 | `runec/include/rune/` | Every header. One per phase, plus `AST.h`, `Type.h` and `TokenKinds.def`. |
 | `runec/src/` | The phases themselves. `Sema.cpp` and `SemaExpr.cpp` are the largest by a wide margin. |
 | `runec/tools/runec_main.cpp` | Seven lines: calls `runCompilerMain`. |
-| `rune/src/` | The package manager: `main.cpp`, plus `Manifest`, `Toml`, `Jobs` and `Fingerprint`. |
+| `rune/src/` | The package manager: `main.cpp`, plus `Manifest`, `Targets`, `Toml`, `Jobs` and `Fingerprint`. |
 | `tests/cases/` | End-to-end tests, one file each. |
 | `docs/reference/content.py` | The language reference, as data. |
 | `book/` | This book and the beginner's guide. |

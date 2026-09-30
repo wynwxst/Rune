@@ -370,6 +370,15 @@ pending, no thread working — is reported as a deadlock rather than hung. A
 task that is parked forever keeps its stack and whatever it holds until the
 program ends, and the exit report says so.
 
+## On WebAssembly
+
+A task needs a stack of its own to park on, and WebAssembly's stack is not
+memory a program can point at. Built with `--target wasm-threads`, each task
+runs on a thread of its own, one at a time, and everything here works. Built
+with `--target wasm`, there is only the one stack: a task runs on it from
+start to finish when it is started, and one that has to wait for something
+unfinished panics, saying so.
+
 ## Reference
 
 | Name | Signature | Does |

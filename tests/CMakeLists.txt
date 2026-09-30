@@ -39,6 +39,14 @@ if(RUNE_PYTHON3)
             check --rune $<TARGET_FILE:rune>)
 endif()
 
+# Cross targets: foreign targets and `[target]` tables resolved, and — with the
+# WASI SDK and wasmtime installed — WebAssembly built and run, both flavours.
+if(RUNE_PYTHON3)
+  add_test(NAME rune_cross
+    COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/cross_test.py
+            ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # The editor tooling: `rune-lint` over files with known problems, and a whole
 # language server session driven the way an editor drives it.
 if(RUNE_PYTHON3)

@@ -50,10 +50,13 @@ CxxTarget cxxTargetFor(const std::string &triple, unsigned pointerBits) {
     t.OS = CxxTarget::Os::Windows;
   else if (has("linux") || has("freebsd") || has("netbsd") || has("openbsd"))
     t.OS = CxxTarget::Os::Linux;
+  else if (arch.rfind("wasm", 0) == 0)
+    t.OS = CxxTarget::Os::Wasm;
   t.LongBits = (t.OS == CxxTarget::Os::Windows || is32) ? 32 : 64;
   t.CharUnsigned = arm64 && t.OS != CxxTarget::Os::Darwin;
   t.Itanium = !has("msvc");
   t.ThisCall = t.OS == CxxTarget::Os::Windows && is32;
+  t.CtorsReturnThis = t.OS == CxxTarget::Os::Wasm;
   // AAPCS64 leaves the upper bits of a `bool` or a small integer argument
   // unspecified; every other target we build for extends them, and Apple's
   // arm64 variant requires it.
@@ -61,8 +64,11 @@ CxxTarget cxxTargetFor(const std::string &triple, unsigned pointerBits) {
   t.BoolZeroExt = !aapcs;
   t.SmallIntExt = !aapcs;
   // `size_t` is `unsigned long` on LP64, `unsigned long long` on Win64 and
-  // `unsigned int` on a 32-bit target.
-  const char sizeCode = is32 ? 'j' : (t.OS == CxxTarget::Os::Windows ? 'y' : 'm');
+  // `unsigned int` on a 32-bit target — except wasm32, where it is a 32-bit
+  // `unsigned long`.
+  const char sizeCode =
+      is32 ? (t.OS == CxxTarget::Os::Wasm ? 'm' : 'j')
+           : (t.OS == CxxTarget::Os::Windows ? 'y' : 'm');
   t.OperatorNew = std::string("_Znw") + sizeCode;
   t.OperatorDelete = "_ZdlPv";
   return t;
@@ -127,8 +133,16 @@ const ScalarSpec *findScalar(const std::string &name) {
 }
 
 const char *codeFor(const ScalarSpec &s, const CxxTarget &t) {
-  if (t.PointerBits == 32)
+  if (t.PointerBits == 32) {
+    // wasm32 spells the pointer-sized types `long` where other 32-bit targets
+    // spell them `int`. `long` is 32 bits there too, so only the mangling
+    // differs — which is the part that has to match.
+    const bool pointerSized = (s.Bits32[0] == 'i' || s.Bits32[0] == 'j') &&
+                              (s.Linux[0] == 'l' || s.Linux[0] == 'm');
+    if (t.OS == CxxTarget::Os::Wasm && pointerSized)
+      return s.Linux;
     return s.Bits32;
+  }
   switch (t.OS) {
   case CxxTarget::Os::Darwin: return s.Darwin;
   case CxxTarget::Os::Windows: return s.Win64;

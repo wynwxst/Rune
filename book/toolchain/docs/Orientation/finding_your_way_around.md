@@ -18,7 +18,8 @@ which ones is usually predictable from what kind of change it is.
 | `Ownership.cpp` | 490 | Borrows, escapes, and the no-escape flag the code generator reads. |
 
 `rune/src/main.cpp` (1,900 lines) is the package manager: the graph, the steps,
-the commands.
+the commands. `rune/src/Targets.cpp` is what `--target` means: the foreign
+targets and how their toolchains are found.
 
 ## Where to start, by kind of change
 
@@ -32,6 +33,7 @@ the commands.
 | Add a standard-library function | `stdlib/std/*.rune` — nothing in C++ |
 | Add something the compiler must answer itself | An `@intrinsic` in `stdlib/`, handled in `CodeGenExpr.cpp` |
 | Change what a build does | `rune/src/main.cpp` |
+| Add a cross target, or change how one is found | `rune/src/Targets.cpp` |
 | Add a test | `tests/cases/` |
 | Document something | `docs/reference/content.py` |
 

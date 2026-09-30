@@ -26,11 +26,16 @@ struct Dependency {
 
 /// A cross-compilation target named in `[target.<name>]`.
 ///
-/// Only `triple` is required. Everything else describes the toolchain that
-/// builds for it — which is the part that cannot be guessed, because a cross
-/// toolchain is installed wherever its owner put it.
+/// It needs a `triple`, or a foreign target to start from (see Targets.h).
+/// Everything else describes the toolchain that builds for it — which is the
+/// part a foreign target can usually find, and otherwise cannot be guessed,
+/// because a cross toolchain is installed wherever its owner put it.
 struct TargetSpec {
   std::string Name;        ///< the table's key, e.g. "mingw"
+  /// `base = "wasm"`: the foreign target this one starts from, every key
+  /// below overriding what it would have found. A table named after a
+  /// foreign target, with no `triple`, starts from that one.
+  std::string Base;
   std::string Triple;      ///< LLVM target triple
   std::string Cc;          ///< link driver, e.g. "x86_64-w64-mingw32-gcc"
   /// C++ compiler for this target's `cxx-sources`, e.g.
@@ -38,10 +43,15 @@ struct TargetSpec {
   std::string Cxx;
   std::string Ar;          ///< archiver; derived from `cc` when not given
   std::string Sysroot;
+  /// `sdk`: where the WASI SDK was unpacked, for a target based on `wasm`.
+  std::string Sdk;
   std::string RuntimeDir;  ///< where this target's libruneruntime.a lives
   /// How to run a binary built for this target on this machine, e.g. "wine"
   /// or "qemu-aarch64". Empty means it cannot be run here.
   std::string Runner;
+  /// `c-flags`: added to every C compile for this target, the runtime's
+  /// included.
+  std::vector<std::string> CFlags;
   std::vector<std::string> LinkLibraries;
   std::vector<std::string> LinkPaths;
   std::vector<std::string> LinkArgs;

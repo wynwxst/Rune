@@ -24,7 +24,7 @@ namespace rune {
 /// typedef `int64_t` resolves to, whether member functions use `thiscall`.
 /// Filled in from the target triple by `cxxTargetFor`.
 struct CxxTarget {
-  enum class Os : uint8_t { Linux, Darwin, Windows, Other };
+  enum class Os : uint8_t { Linux, Darwin, Windows, Wasm, Other };
   Os OS = Os::Other;
   unsigned PointerBits = 64;
   /// 32 on Windows and on every 32-bit target, 64 elsewhere.
@@ -36,6 +36,10 @@ struct CxxTarget {
   bool Itanium = true;
   /// i386 Windows: non-static member functions take `this` in ECX.
   bool ThisCall = false;
+  /// WebAssembly: a constructor and a destructor hand `this` back. Nothing
+  /// reads it, but the declared type has to say so or the call and the
+  /// definition disagree.
+  bool CtorsReturnThis = false;
   /// Whether a `bool` argument is passed zero-extended (Darwin and x86 do;
   /// AAPCS64 on Linux does not promise it, so neither side may assume it).
   bool BoolZeroExt = true;

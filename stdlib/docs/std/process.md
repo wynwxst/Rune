@@ -70,3 +70,9 @@ fn main() -> i64 {
     0
 }
 ```
+
+## On WebAssembly
+
+A WASI module has its arguments, its environment and `exit`, but no way to
+start another program: `Command::run` fails as it does for a program that is
+not there, and hands back `nil`.

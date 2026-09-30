@@ -247,15 +247,9 @@ void CodeGen::applyTargetLayout() {
   // to ELF. Normalising first turns it into `x86_64-w64-windows-gnu`.
   llvm::Triple triple(llvm::Triple::normalize(tripleStr));
   std::string err;
-  if (const llvm::Target *t = llvm::TargetRegistry::lookupTarget(triple, err)) {
-    llvm::TargetOptions targetOpts;
-    std::unique_ptr<llvm::TargetMachine> tm(t->createTargetMachine(
-        triple, "generic", "", targetOpts,
-        std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_)));
-    if (tm) {
-      M->setDataLayout(tm->createDataLayout());
-      M->setTargetTriple(triple);
-    }
+  if (std::unique_ptr<llvm::TargetMachine> tm = createTargetMachine(triple, err)) {
+    M->setDataLayout(tm->createDataLayout());
+    M->setTargetTriple(triple);
   }
 }
 
@@ -3914,7 +3908,12 @@ void CodeGen::emitEntryPoint() {
   }
 
   auto *ft = FunctionType::get(B->getInt32Ty(), {B->getInt32Ty(), PtrTy}, false);
-  auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, "main", *M);
+  // WebAssembly has no variadic-by-convention `main`: wasi-libc's start code
+  // calls `__main_argc_argv` when the program wants its arguments, which is
+  // what clang renames a C `main(argc, argv)` to on that target.
+  const char *entryName =
+      llvm::Triple(M->getTargetTriple()).isWasm() ? "__main_argc_argv" : "main";
+  auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, entryName, *M);
   auto *entry = BasicBlock::Create(*Ctx, "entry", f);
   B->SetInsertPoint(entry);
 
@@ -4095,6 +4094,27 @@ void initialiseTargets() {
     return true;
   }();
   (void)once;
+}
+
+std::unique_ptr<llvm::TargetMachine>
+createTargetMachine(const llvm::Triple &triple, std::string &err,
+                    llvm::CodeGenOptLevel level) {
+  initialiseTargets();
+  const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, err);
+  if (!target)
+    return nullptr;
+  llvm::Reloc::Model reloc = llvm::Reloc::PIC_;
+  std::string features;
+  if (triple.isWasm()) {
+    reloc = llvm::Reloc::Static;
+    if (triple.str().find("threads") != std::string::npos)
+      features = "+atomics,+bulk-memory,+mutable-globals";
+  }
+  llvm::TargetOptions targetOpts;
+  return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(
+      triple, "generic", features, targetOpts,
+      std::optional<llvm::Reloc::Model>(reloc),
+      std::optional<llvm::CodeModel::Model>(), level));
 }
 
 void optimizeModule(llvm::Module &m, unsigned level) {

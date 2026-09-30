@@ -80,6 +80,10 @@ fn main() -> i64 {
 }
 ```
 
+On WebAssembly — `--target wasm` or `wasm-threads` — every call fails with
+`NetError::PermissionDenied`: WASI preview 1 can use a socket it was handed
+but has no way to make one.
+
 ## Sockets driven by tasks
 
 `AsyncListener` and `AsyncStream` are the same sockets set not to wait: each

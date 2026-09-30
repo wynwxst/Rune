@@ -6,6 +6,16 @@
 #define _CRT_RAND_S
 #endif
 
+/* WebAssembly under WASI has no threads unless the module was built for the
+ * `wasm32-wasip1-threads` flavour (which defines `_REENTRANT`). Without them
+ * wasi-libc still offers the pthread calls as stubs, when asked for before
+ * the first include: locks become no-ops, and starting a thread fails the
+ * way it would on a machine that had run out of them. */
+#if defined(__wasi__) && !defined(_REENTRANT)
+#define RUNE_SINGLE_THREADED 1
+#define _WASI_EMULATED_PTHREAD
+#endif
+
 #include "rune_runtime.h"
 
 #include <stdio.h>
@@ -79,7 +89,7 @@ typedef struct WeakEntry {
 static WeakEntry *g_weak_table[RUNE_WEAK_BUCKETS];
 
 static size_t weak_bucket(const void *target) {
-  uintptr_t v = (uintptr_t)target;
+  uint64_t v = (uint64_t)(uintptr_t)target;
   v ^= v >> 16;
   v *= 0x9E3779B97F4A7C15ULL;
   return (size_t)((v >> 32) % RUNE_WEAK_BUCKETS);
@@ -734,6 +744,12 @@ RuneString *rune_string_from_f64_fixed(double v, int64_t places) {
 }
 
 RuneString *rune_string_from_f64(double v) {
+  /* A NaN's sign bit says nothing about the number, and which one an
+   * operation produces is the hardware's choice — x86 sets it, WebAssembly
+   * does not — so it is left out rather than printed as "-nan" on some
+   * machines and "nan" on others. */
+  if (v != v)
+    return rune_string_from_cstr("nan");
   char buf[64];
   /* Shortest representation that reads back as the same double. */
   int n = snprintf(buf, sizeof(buf), "%.17g", v);
@@ -1830,6 +1846,75 @@ int64_t rune_monotonic_ns(void) {
  * simpler than two that nearly do.
  *==========================================================================*/
 
+#if defined(__wasi__)
+
+/* WASI preview 1 can use a socket it was handed but has no way to make one:
+ * there is no name lookup, no `socket()` and no `connect()`. Every call says
+ * so the way a failed call does anywhere else, so `std::net` reports an error
+ * rather than the program failing to link. */
+
+static int64_t g_net_error = 0;
+
+void rune_net_start(void) {}
+
+static int64_t rune_net_unsupported(void) {
+  g_net_error = 8; /* permission denied: the sandbox does not allow it */
+  return -1;
+}
+
+int64_t rune_net_last_error(void) { return g_net_error; }
+int64_t rune_net_listen(const char *host, int32_t port, int32_t backlog) {
+  (void)host; (void)port; (void)backlog;
+  return rune_net_unsupported();
+}
+int64_t rune_net_connect(const char *host, int32_t port) {
+  (void)host; (void)port;
+  return rune_net_unsupported();
+}
+int64_t rune_net_accept(int64_t fd, char *peer_out, int64_t peer_cap,
+                        int32_t *port_out) {
+  (void)fd; (void)peer_out; (void)peer_cap; (void)port_out;
+  return rune_net_unsupported();
+}
+int64_t rune_net_read(int64_t fd, void *buffer, int64_t count) {
+  (void)fd; (void)buffer; (void)count;
+  return rune_net_unsupported();
+}
+int64_t rune_net_write(int64_t fd, const void *data, int64_t count) {
+  (void)fd; (void)data; (void)count;
+  return rune_net_unsupported();
+}
+int32_t rune_net_shutdown(int64_t fd, int32_t how) {
+  (void)fd; (void)how;
+  return (int32_t)rune_net_unsupported();
+}
+int32_t rune_net_close(int64_t fd) {
+  (void)fd;
+  return (int32_t)rune_net_unsupported();
+}
+int64_t rune_net_dup(int64_t fd) {
+  (void)fd;
+  return rune_net_unsupported();
+}
+int32_t rune_net_set_nonblocking(int64_t fd, int32_t on) {
+  (void)fd; (void)on;
+  return (int32_t)rune_net_unsupported();
+}
+int32_t rune_net_set_nodelay(int64_t fd, int32_t on) {
+  (void)fd; (void)on;
+  return (int32_t)rune_net_unsupported();
+}
+int32_t rune_net_set_timeout_ms(int64_t fd, int64_t ms, int32_t for_read) {
+  (void)fd; (void)ms; (void)for_read;
+  return (int32_t)rune_net_unsupported();
+}
+int32_t rune_net_local_port(int64_t fd) {
+  (void)fd;
+  return (int32_t)rune_net_unsupported();
+}
+
+#else /* sockets the platform can make */
+
 #ifdef _WIN32
 
 #include <winsock2.h>
@@ -2188,6 +2273,8 @@ int32_t rune_net_local_port(int64_t fd) {
   return port;
 }
 
+#endif /* sockets the platform can make */
+
 /*==========================================================================*
  * Environment, entropy and the wall clock
  *
@@ -2311,7 +2398,8 @@ int8_t rune_os_entropy(uint8_t *out, int64_t count) {
       out[i] = (uint8_t)(v >> (8 * b));
   }
   return 1;
-#elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__)
+#elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
+    defined(__wasi__)
   arc4random_buf(out, (size_t)count);
   return 1;
 #else

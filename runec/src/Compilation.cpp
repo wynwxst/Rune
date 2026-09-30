@@ -190,18 +190,10 @@ llvm::Triple targetTripleOf(const CompilerOptions &opts) {
 /// registered for the triple the compile is going to fail later anyway; the
 /// triple's own idea of the width keeps type checking sensible until then.
 unsigned targetPointerBits(const CompilerOptions &opts) {
-  initialiseTargets();
-
   const llvm::Triple triple = targetTripleOf(opts);
   std::string err;
-  if (const llvm::Target *t = llvm::TargetRegistry::lookupTarget(triple, err)) {
-    llvm::TargetOptions targetOpts;
-    std::unique_ptr<llvm::TargetMachine> tm(t->createTargetMachine(
-        triple, "generic", "", targetOpts,
-        std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_)));
-    if (tm)
-      return tm->createDataLayout().getPointerSizeInBits();
-  }
+  if (std::unique_ptr<llvm::TargetMachine> tm = createTargetMachine(triple, err))
+    return tm->createDataLayout().getPointerSizeInBits();
   return llvm::Triple::getArchPointerBitWidth(triple.getArch());
 }
 
@@ -224,9 +216,17 @@ std::string defaultOutputName(const CompilerOptions &opts) {
   }
   case OutputKind::Docs: return stem + ".rdoc";
   // A PE image is only executable with the suffix, and a cross build is
-  // usually copied to the machine it runs on rather than run in place.
-  default:
-    return targetTripleOf(opts).isOSWindows() ? stem + ".exe" : stem;
+  // usually copied to the machine it runs on rather than run in place. A
+  // WebAssembly module is not executable at all without a runtime to load
+  // it, and every one of them expects the suffix.
+  default: {
+    const llvm::Triple triple = targetTripleOf(opts);
+    if (triple.isOSWindows())
+      return stem + ".exe";
+    if (triple.isWasm())
+      return stem + ".wasm";
+    return stem;
+  }
   }
 }
 
@@ -246,29 +246,22 @@ llvm::CodeGenOptLevel codeGenOptLevel(unsigned optLevel) {
 bool writeMachineCode(llvm::Module &m, const std::string &path,
                       const CompilerOptions &opts, DiagnosticEngine &diags,
                       bool assembly) {
-  initialiseTargets();
-
   std::string tripleStr = opts.TargetTriple.empty()
                               ? llvm::sys::getDefaultTargetTriple()
                               : opts.TargetTriple;
   // See CodeGen: an un-normalised alias parses as an unknown OS.
   llvm::Triple triple(llvm::Triple::normalize(tripleStr));
-  std::string err;
-  const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, err);
-  if (!target) {
-    diags.fatal("no backend for target '{}'", tripleStr).note(err.c_str());
-    return false;
-  }
-
-  llvm::TargetOptions targetOpts;
-  auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
   // The back end runs its own optimisation pipeline, and left to itself it
   // picks the `-O2` one whatever `-O` asked for. A debug build then pays for
   // scheduling and register-allocation work it did not want, which is most of
   // what an unoptimised compile spends its time on.
-  std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
-      triple, "generic", "", targetOpts, rm,
-      std::optional<llvm::CodeModel::Model>(), codeGenOptLevel(opts.OptLevel)));
+  std::string err;
+  std::unique_ptr<llvm::TargetMachine> tm =
+      createTargetMachine(triple, err, codeGenOptLevel(opts.OptLevel));
+  if (!tm) {
+    diags.fatal("no backend for target '{}'", tripleStr).note(err.c_str());
+    return false;
+  }
   m.setDataLayout(tm->createDataLayout());
   m.setTargetTriple(triple);
 
@@ -374,6 +367,13 @@ bool linkExecutable(const std::string &objPath,
 
   const llvm::Triple triple = targetTripleOf(opts);
   const bool isWindows = triple.isOSWindows();
+  const bool isWasm = triple.isWasm();
+
+  if (shared && isWasm) {
+    diags.fatal("WebAssembly has no shared libraries")
+        .note("build a `.rul` library or an executable module instead");
+    return false;
+  }
 
   if (shared) {
     argv.push_back("-shared");
@@ -391,8 +391,28 @@ bool linkExecutable(const std::string &objPath,
   // A debug build exports its symbols so a traceback can name the frames it
   // walks; without this the dynamic linker can only resolve the exported ones.
   // A PE image exports through a different mechanism and has no such flag.
-  if (opts.DebugInfo && !isWindows)
+  // WebAssembly has no dynamic linker to ask, and its traps carry their own
+  // backtrace.
+  if (opts.DebugInfo && !isWindows && !isWasm)
     argv.push_back("-rdynamic");
+
+  // What WASI leaves out, the SDK emulates, and the runtime asks for those
+  // emulations when it is compiled; here is where they are linked. With the
+  // `-threads` flavour the threads are real: every thread is an instance of
+  // its own, so the memory has to come from outside — imported, shared, and
+  // with a ceiling it can grow to (the whole of wasm32's 4 GB).
+  if (isWasm) {
+    if (triple.str().find("threads") != std::string::npos) {
+      argv.push_back("-pthread");
+      argv.push_back("-Wl,--import-memory,--export-memory,"
+                     "--max-memory=4294967296");
+    } else {
+      argv.push_back("-lwasi-emulated-pthread");
+    }
+    // wasm-ld reserves 64 KB of stack unless told otherwise; a native main
+    // thread has 8 MB, and Rune code is written expecting about that.
+    argv.push_back("-Wl,-z,stack-size=8388608");
+  }
 
   for (const std::string &dir : opts.LinkPaths)
     argv.push_back("-L" + dir);
@@ -412,6 +432,10 @@ bool linkExecutable(const std::string &objPath,
   if (opts.LinkCxx) {
     if (triple.isOSDarwin() || triple.isOSFreeBSD()) {
       argv.push_back("-lc++");
+    } else if (isWasm) {
+      // The WASI SDK ships libc++, split in two as LLVM builds it.
+      argv.push_back("-lc++");
+      argv.push_back("-lc++abi");
     } else if (isWindows) {
       // `-static-libstdc++` is a `g++`-driver spelling and this is `gcc`, so
       // the linker is told directly. `-lgcc_eh` is what libstdc++'s unwinder
@@ -562,7 +586,10 @@ bool buildMacroPackageImpl(const SourceManager &sm, DiagnosticEngine &diags,
   nested.OutputKindFromFlag = true;
   nested.OutputPath = program.string();
   nested.StdlibDir = opts.StdlibDir;
-  nested.RuntimeLibDir = opts.RuntimeLibDir;
+  // A cross build's `--runtime-dir` is the target's runtime; the macro
+  // program runs here, and links the one built for here.
+  nested.RuntimeLibDir =
+      opts.TargetTriple.empty() ? opts.RuntimeLibDir : RUNE_RUNTIME_LIB_DIR;
   nested.ImportPaths = opts.ImportPaths;
   nested.NoColor = opts.NoColor;
   nested.ForceColor = opts.ForceColor;

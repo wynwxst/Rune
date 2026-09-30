@@ -141,8 +141,8 @@ geometry = { path = "../geometry" }
 ```
 
 Commands: `rune new`, `init`, `build`, `run`, `test`, `doc`, `check`, `clean`,
-each accepting `--release`. `rune run <name>` picks one executable,
-`rune run --all` runs every one.
+each accepting `--release` and `--target <name>`, plus `rune targets`.
+`rune run <name>` picks one executable, `rune run --all` runs every one.
 
 ### Linting and editors
 
@@ -159,6 +159,47 @@ Each has a book of its own, built and opened like any other documentation:
 rune doc lint          # the rules, configuring them, fixes, output for tools
 rune doc lsp           # setting up an editor, what the server does, troubleshooting
 ```
+
+### Cross compilation and WebAssembly
+
+`--target` builds for another machine. The common ones are built in as
+*foreign targets*, each of which finds its own toolchain and knows what can run
+its programs here:
+
+```bash
+rune build --target wasm          # a WASI module, with the WASI SDK
+rune run --target wasm            # ...and run it under wasmtime
+rune run --target wasm-threads    # the same, with real threads
+rune test --target windows        # mingw-w64, run under wine
+rune build --target linux-arm64   # aarch64-linux-gnu-gcc, run under qemu
+rune targets                      # what this machine can build, and run, for
+```
+
+WebAssembly is built with the [WASI SDK](https://github.com/WebAssembly/wasi-sdk),
+found through `$WASI_SDK_PATH` or where its installers put it (`/opt/wasi-sdk`,
+`/opt/wasi-sdk-*`, `~/.rune/toolchains/wasi-sdk`), and produces
+`target/wasm/<profile>/<name>.wasm`. Everything WASI preview 1 offers works —
+standard streams, files, the clock, the environment, arguments, and C and C++
+halves of a package. `std::net` and `std::process` commands do not, because
+WASI cannot open a socket or start a process; threads, and tasks that have to
+wait, need `wasm-threads`.
+
+A toolchain somewhere unusual, or a target that is not built in, goes in the
+manifest — as a foreign target with a key or two changed, or from scratch:
+
+```toml
+[target.wasm]
+sdk = "../toolchains/wasi-sdk"
+
+[target.pi]
+triple = "aarch64-unknown-linux-gnu"
+cc = "aarch64-linux-gnu-gcc"
+sysroot = "/opt/pi-sysroot"
+runner = "qemu-aarch64 -L /opt/pi-sysroot"
+```
+
+The reference's *Cross compilation* section has the rest, including driving
+`runec` by hand.
 
 ### Incremental and concurrent builds
 
