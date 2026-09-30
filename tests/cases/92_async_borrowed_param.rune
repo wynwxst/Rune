@@ -1,0 +1,14 @@
+// An `async fn`'s body runs as a task that may outlive the call, so it takes
+// its parameters by value: a borrow of the caller's slot is refused. A
+// shared borrow of a class is the handle itself, and is fine.
+// EXPECT-ERROR: an `async fn` cannot take 'count' by borrow
+import std::task
+
+class Log { var lines: i64
+    fn init(self) { self.lines = 0 } }
+
+async fn fine(log: &Log) -> i64 { log.lines }
+
+async fn bump(count: &var i64) { *count += 1 }
+
+fn main() -> i64 { 0 }

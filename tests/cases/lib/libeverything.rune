@@ -1,0 +1,235 @@
+// Every kind of public declaration Rune has, in one library.
+//
+// A `.rul` carries its modules' source, and whatever imports it re-parses
+// that source into modules of its own. So everything here is checked twice —
+// once when the library is built, and again inside the consumer — and the
+// second time is where a boundary bug shows up. What the consumer then has
+// to be able to do is the other half: name these, call them, construct them,
+// match them, *extend* them, and *bind* its own marks to them.
+//
+// See `B4_library_surface`, which does exactly that.
+
+import std::io
+import std::collections::vector
+
+//===--------------------------------------------------------------------===//
+// Values
+//===--------------------------------------------------------------------===//
+
+/// An immutable global. It folds to a constant, so reading one across the
+/// boundary costs nothing.
+pub let version: i64 = 3
+
+/// A mutable one. There is a single copy, and the consumer writes the same
+/// storage the library does.
+pub global var tally: i64 = 0
+
+//===--------------------------------------------------------------------===//
+// Types
+//===--------------------------------------------------------------------===//
+
+/// A plain struct, with a default so it can be written short.
+pub struct Point {
+    pub x: i64 = 0
+    pub y: i64 = 0
+}
+
+/// A generic one. The consumer instantiates it with its own types.
+pub struct Pair<A, B> {
+    pub first: A
+    pub second: B
+}
+
+/// A struct that inherits: the parent's fields come first, so a `Tagged` may
+/// be read as a `Point` on the other side of the boundary too.
+pub struct Tagged : Point {
+    pub label: String = ""
+}
+
+/// A struct that owns something, so its `deinit` has to travel with it.
+pub struct Resource {
+    pub name: String = ""
+
+    fn deinit(&self) { }
+}
+
+/// A simple enum.
+pub enum Colour { Red, Green, Blue }
+
+/// One with payloads, and one that inherits from it.
+pub enum Shape {
+    Circle(f64)
+    Rect(f64, f64)
+}
+
+pub enum Solid : Shape {
+    Cube(f64)
+}
+
+/// A generic enum.
+pub enum Slot<T> {
+    Empty
+    Filled(T)
+}
+
+/// A class: reference semantics, an initialiser, and a subclass.
+pub class Counter {
+    var count: i64
+
+    fn init(self, start: i64) { self.count = start }
+
+    pub fn bump(&var self) -> i64 {
+        self.count += 1
+        self.count
+    }
+
+    pub fn value(&self) -> i64 { self.count }
+}
+
+pub class Doubling : Counter {
+    fn init(self, start: i64) { super.init(start) }
+
+    pub fn bump(&var self) -> i64 {
+        super.bump()
+        super.bump()
+        self.value()
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Aliases
+//===--------------------------------------------------------------------===//
+
+/// A plain alias, and one with parameters of its own.
+pub type Distance = f64
+pub type Row<T> = vector::Vector<T>
+
+//===--------------------------------------------------------------------===//
+// Marks
+//===--------------------------------------------------------------------===//
+
+/// A mark with a requirement and a default body — the consumer implements
+/// one and inherits the other.
+pub mark Named {
+    fn name(&self) -> String
+    fn shout(&self) -> String { self.name() + "!" }
+}
+
+/// A mark with an associated type, and a super-mark.
+pub mark Holder: Named {
+    type Held
+    fn held(&self) -> Self::Held
+}
+
+/// An automatic mark: nobody implements it, and a type has it when every
+/// part of it does.
+@auto
+pub mark Plain {}
+
+//===--------------------------------------------------------------------===//
+// Binds
+//===--------------------------------------------------------------------===//
+
+pub bind Named to Point {
+    fn name(&self) -> String { "(" + self.x.$str() + "," + self.y.$str() + ")" }
+}
+
+/// A generic bind: every `Pair` the consumer makes gets this.
+pub bind<A, B> Named to Pair<A, B> {
+    fn name(&self) -> String { "a pair" }
+}
+
+/// An operator overload, which the consumer writes as `+`.
+pub bind operator::add to Point {
+    fn add(&self, other: Point) -> Point {
+        Point { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+pub bind operator::eq to Point {
+    fn eq(&self, other: &Point) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+
+/// A conversion, which the consumer writes as `into` — or not at all, where
+/// the destination is written down.
+pub bind Point into Distance {
+    fn convert(&self) -> Distance { (self.x + self.y) as f64 }
+}
+
+pub bind io::Display to Point {
+    fn display(&self) -> String { self.name() }
+}
+
+//===--------------------------------------------------------------------===//
+// Functions
+//===--------------------------------------------------------------------===//
+
+/// A plain function.
+pub fn origin() -> Point { Point { } }
+
+/// One with a default argument.
+pub fn shifted(p: Point, by: i64 = 1) -> Point {
+    Point { x: p.x + by, y: p.y + by }
+}
+
+/// A generic one, with a bound.
+pub fn describe<T: Named>(value: &T) -> String { value.shout() }
+
+/// One that takes a closure, so the consumer may leave its types out.
+pub fn applyTwice(f: @function(i64) -> i64, n: i64) -> i64 { f(f(n)) }
+
+/// One that hands back a generic type made of the caller's own.
+pub fn paired<A, B>(a: A, b: B) -> Pair<A, B> {
+    Pair<A, B> { first: a, second: b }
+}
+
+/// One whose result is a mark object.
+pub fn anyNamed(p: Point) -> dyn Named { p }
+
+/// One whose result is opaque: the consumer sees the mark and not the type.
+pub fn someNamed(p: Point) -> some Named { p }
+
+//===--------------------------------------------------------------------===//
+// Extends
+//===--------------------------------------------------------------------===//
+
+/// Methods on the library's own type, written apart from it.
+pub extend Point {
+    pub fn manhattan(&self) -> i64 { self.x + self.y }
+    pub fn scaled(&self, by: i64) -> Point {
+        Point { x: self.x * by, y: self.y * by }
+    }
+}
+
+/// And on a generic one.
+pub extend<A, B> Pair<A, B> {
+    pub fn swapped(self) -> Pair<B, A> {
+        Pair<B, A> { first: self.second, second: self.first }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Macros
+//===--------------------------------------------------------------------===//
+
+/// A macro is in scope wherever the library is, the way a `pub` one always
+/// is: macros are gathered from every file before any is parsed.
+pub macro twicePoint {
+    ($p: expr) => { libeverything::shifted(libeverything::shifted($p)) }
+}
+
+//===--------------------------------------------------------------------===//
+// Foreign declarations
+//===--------------------------------------------------------------------===//
+
+extern "C" {
+    fn strlen(s: CString) -> usize
+}
+
+/// A wrapper, so the consumer need not repeat the declaration.
+@safe("the argument is a Rune string's own NUL-terminated bytes")
+pub fn lengthOf(text: String) -> i64 {
+    unsafe { strlen(text.$cstr()) as i64 }
+}

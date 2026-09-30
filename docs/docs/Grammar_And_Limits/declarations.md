@@ -9,7 +9,7 @@ declaration   ::= { decorator } [ "pub" ] item
 item          ::= function | struct | class | enum | mark | bind
                 | extend | global | typealias | externBlock
 
-function      ::= "fn" identifier [ generics ] "(" params ")"
+function      ::= [ "async" ] "fn" identifier [ generics ] "(" params ")"
                   [ "->" type ] { where } block
 params        ::= [ param { "," param } [ "," "..." ] ]
 param         ::= [ label ] identifier ":" type [ "=" expression ]
@@ -33,7 +33,12 @@ bindTarget    ::= markPath [ "<" type { "," type } ">" ]
 extend        ::= "extend" type [ where ] "{" { member } "}"
 global        ::= "global" identifier ":" type "=" expression
 typealias     ::= "type" identifier [ generics ] "=" type
-externBlock   ::= "extern" stringLit "{" { externFn } "}"
+externBlock   ::= "extern" stringLit "{" { externItem } "}"
+externItem    ::= externFn | externVar | cxxNamespace | cxxType
+cxxNamespace  ::= "namespace" identifier "{" { externItem } "}"
+cxxType       ::= ( "class" | "struct" ) identifier [ generics ]
+                  [ ":" identifier ] "{" { member } "}"
+                | enum
 
 generics      ::= "<" genericParam { "," genericParam } ">"
 genericParam  ::= identifier [ ":" bound { "+" bound } ]

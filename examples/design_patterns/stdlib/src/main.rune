@@ -1,0 +1,15 @@
+import std::io
+struct PasswordManager {
+  master_pass: String,
+  passwords: [String:String] = [:]
+}
+
+extend PasswordManager{
+  fn new(master_pass: String) -> Self {
+    Self {master_pass}
+  }
+}
+fn main() -> i64 {
+    io::println("Hello from stdlib!")
+    0
+}

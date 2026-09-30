@@ -41,3 +41,40 @@ fn main() -> i64 {
     0
 }
 ```
+
+A generic type is extended the same way. Written without arguments, `extend` uses the names the type declares; written with them, it names them itself. Either way the methods belong to the type, so every instantiation has them — and two blocks may both add to one type.
+
+**Extending a generic type**
+
+```rune
+import std::io
+
+struct Pair<A, B> { first: A, second: B }
+
+extend Pair {
+    /// `A` and `B` are the type's own parameters.
+    fn swapped(&self) -> Pair<B, A> {
+        Pair<B, A> { first: self.second.$clone(), second: self.first.$clone() }
+    }
+}
+
+extend<X, Y> Pair<X, Y> {
+    /// The same thing, with names of this block's choosing.
+    fn describe(&self) -> String where X: io::Display, Y: io::Display {
+        self.first.display() + "|" + self.second.display()
+    }
+}
+
+fn main() -> i64 {
+    let p = Pair<i64, String> { first: 3, second: "three" }
+    io::println(p.describe())
+    let q = p.swapped()
+    io::println(q.first + " " + q.second.$str())
+    0
+}
+```
+
+> [!WARNING]
+> **All of them, in order**
+>
+> The parameters line up one for one: `extend<A, B> Pair<A, B>`. Naming a shape instead — `extend<A> Pair<A, i64>` — would be a partial specialisation, methods on some instantiations and not others, which this language does not have.

@@ -1,0 +1,104 @@
+@type(Executable)
+
+extern "C" {
+    fn strlen(Of: CString) -> i32
+}
+
+import std::{mem}
+
+struct str {
+    ptr: *var u8
+    len: int
+    ctr: int /* counter for iterator */
+}
+
+extend str {
+
+}
+
+@safe("CString points to NUL terminated and result becomes NUL terminated")
+fn new(string: CString /* literal or from String */) -> str {
+    len = strlen(string)
+    let block = mem::allocator.allocate((len+1) as u64)
+    ptr = unsafe {block as *var u8}
+    mem::copy(src: string as *var u8, dst: block, bytes: len as u64)
+    block[len] = 0
+    str {ptr: ptr, len: len, ctr: len}
+}
+
+bind operator::"[]" to str {
+    @safe("Bounds checking is implemented")
+    fn index(&self,idx: i64) -> u8? {
+        if (idx >= self.len || idx < 0) {
+            nil
+        } else {
+            self.ptr[idx]
+        }
+    }
+    @safe("Bounds checking is implemented")
+    fn indexSet(&var self, idx: i64, value: u8?) {
+        if (idx < self.len && idx >= 0) {
+            match value {
+                Some(byte) => {
+                    self.ptr[idx] = byte
+                },
+                _ => {}
+            }
+        }
+    }
+}
+
+bind std::iter::Iterator to str {
+    type Item = u8
+    @safe("Bounds checking is used")
+    fn next(&var self) -> Self::Item? {
+        //println!("Ctr: {}",self.ctr)
+        self.ctr -= 1
+        idx = self.len-(self.ctr+1)
+        //println!("res: {}",idx)
+        if (idx >= self.len || idx < 0) {
+            nil
+        } else {
+            self.ptr[idx]
+        }
+        // why doesn't self[idx] work?
+        // self[idx]
+    }
+}
+
+
+bind std::io::Display to str {
+    @safe("Safe cast")
+    fn display(&self) -> String {
+        var res = ""
+        for i in 0..self.len {
+            res += self.ptr[i] as Character
+        }
+        res
+    }
+}
+
+fn main() -> i64 {
+    hello = new("Hello World")
+    hello[0] = 'N' as u8
+    println!("My string: {} hello[0] = {} | {:#x}", hello, hello.index(0).unwrap() as Character,unsafe {hello.ptr as u64} )
+
+    println!("{}",hello
+    .take_while(||(n: Byte) -> bool {
+        if n == ' ' as u8 {
+            false
+        } else {
+            true
+        }
+    })
+    .map(||(n: Byte) -> Character {
+        n as Character
+    })
+    .collect()
+    )
+
+    /*for byte in hello {
+        println!("{}", byte as Character)
+    }*/
+    0
+}

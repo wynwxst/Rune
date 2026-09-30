@@ -1,0 +1,174 @@
+@type(Executable)
+import std::mem::*
+import std::testing
+// fix having to import testing for assert!
+
+pub enum List<T> {
+    Link{ handle: Handle<List<T>>?, value: T }
+    Empty
+
+    pub fn new(self) -> List<T> {
+        Empty
+    }
+
+    pub fn prepend(self, value: T) -> List<T> {
+        List::Link {handle: Handle<List<T>>(self), value: value}
+    }
+
+    pub fn get(&self, idx: int, count: int = 0) -> T? {
+        println!("{idx}, {count}")
+        if idx < count {
+            return nil
+        }
+        match self {
+            List::Link {handle, value} => {
+                if idx == count {
+                    return value
+                }
+                match handle {
+                    Some(Handle) => {
+                        (*Handle).get(idx,count+1)
+                    },
+                    None => {
+                        nil
+                    }
+                }
+            },
+            Empty => {
+                nil
+            }
+        }
+    }
+
+}
+
+// add extend generic or allow references to original generics from extend
+/* eg.
+
+extend List {
+    fn prepend(self, value: T) -> List<T> {
+        List::Link {handle: Handle<List<T>>(self), value: value}
+    }
+}
+
+*/
+
+
+
+struct LinkList<T> {
+    value: T?
+    next: Handle<LinkList<T>>?
+
+
+
+    pub fn add(&var self, value: T, count: int = 0) {
+        match self.value {
+            None => {
+                self.value = value
+            },
+            Some(val) => {
+                match &self.next { /* compiler should mention that a value needs to be borrowed 
+                    otherwise it gets 'taken' leaving it empty */
+                    None => {
+                        println!("{count}: Next'd!")
+                        self.next = Handle(LinkList{value: value, next: nil})
+                    },
+                    Some(handle) => {
+                        println!("{count} : Recurse")
+                        (*handle).add(value, count+1)
+                    }
+                }
+            }
+        }
+    }
+
+    @safe("Read only reference")
+    pub fn get(&self, idx: int) -> T? {
+        var ll = self
+        for i in 0..idx {
+            println!("Entry!")
+            ptr = &ll.next
+            match ll.next {
+                Some(handle) => {
+                    ll = handle.get_ref()
+                },
+                None => {
+                    println!("No next!")
+                    return nil
+                }
+            }
+        }
+        println!("Exit!")
+        (*ll).value
+    }
+}
+
+pub fn LinkedList_new<T>() -> LinkList<T> {
+    LinkList<T> {value: nil, next: nil}
+}
+
+
+
+
+
+class LL<T> {
+    head: LNode<T>
+
+    fn init(&self){
+        self.head = nil
+    }
+
+    fn add(&var self,value: T){
+        let new_node: LNode<T> = Handle(Node{value: value, next: None}) /* improve generic resolution */
+        match &self.head {
+            Some(Head) => {
+
+            },
+            _ => {
+                self.head = take(new_node)
+            }
+        } 
+    }
+}
+
+
+
+
+type LNode<T> = Option<Handle<Node<T>>>
+
+struct Node<T> {
+    value: T 
+    next: LNode<T>
+}
+
+fn main() -> i64 {
+    /*var list = List<String>::Empty.new()
+    list = list.prepend("1 eeeeee")
+    list = list.prepend("3 eeee")
+    //println!("{}, {}",list.get(0).unwrap(), list.get(1).unwrap())
+    //assert!(list.get(0).unwrap() == "3" && list.get(1).unwrap() == "1")
+
+    ll = LinkedList_new<i64>()
+    println!("!")
+    ll.add(5)
+    println!("!-")
+    ll.add(7)
+    //ll.next.unwrap()
+    println!("!--")
+    ll.add(6,80)
+    println!("!---")
+
+    println!("{}, ?? ,{}", ll.get(0).unwrap(), ll.get(1).unwrap())
+
+    */
+
+    ll = LL<i64>()
+
+    ll.add(1)
+    ll.add(7)
+
+
+
+
+    0
+}

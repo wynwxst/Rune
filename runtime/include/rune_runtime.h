@@ -49,6 +49,14 @@ void *rune_retain(void *obj);
 void rune_release(void *obj);
 /* Current strong count, for tests and debugging. */
 int64_t rune_refcount(void *obj);
+
+/* The teardown queue: `enter` says whether to destroy the object now or
+ * leave it to the teardown already running on this thread, `next` hands back
+ * what was queued, and `leave` ends the outermost one. See the comment beside
+ * their definitions. */
+int rune_teardown_enter(void *obj);
+void *rune_teardown_next(void);
+void rune_teardown_leave(void);
 /* True if `obj` is an instance of `ti` or one of its subclasses. */
 int rune_is_kind_of(const void *obj, const RuneTypeInfo *ti);
 
@@ -105,6 +113,8 @@ void rune_mutex_dispose(void *m);
 /* A condition variable: how a thread waits for something another will do. */
 void *rune_cond_new(void);
 void rune_cond_wait(void *c, void *m);
+/* The same, giving up after `nanos` if nothing has signalled by then. */
+void rune_cond_wait_ns(void *c, void *m, int64_t nanos);
 void rune_cond_signal(void *c);
 void rune_cond_broadcast(void *c);
 void rune_cond_dispose(void *c);
@@ -112,6 +122,39 @@ void rune_cond_dispose(void *c);
 /* The weak table is the one piece of runtime state every thread shares. */
 void rune_weak_lock(void);
 void rune_weak_unlock(void);
+
+/*--- Tasks --------------------------------------------------------------*/
+
+/* What `std::task` runs on: stacks that can stop in the middle of a call and
+ * be picked up again, and a per-thread executor that keeps the ready ones.
+ * See rune_task.c. */
+void *rune_task_new(void (*entry)(void *), void *payload);
+void rune_task_start(void *task);
+/* 0: done with a value; 1: the waiter was cancelled; 2: the task ended
+ * without a value. */
+int64_t rune_task_wait(void *task);
+int64_t rune_task_wait_any(void *tasks, int64_t count);
+int64_t rune_task_is_done(void *task);
+void rune_task_yield_now(void);
+void *rune_task_timer(int64_t nanos);
+void *rune_task_io(int64_t fd, int64_t events);
+void *rune_task_external(void);
+void *rune_task_manual(void);
+void rune_task_complete(void *task);
+void rune_task_complete_remote(void *task);
+void rune_task_wait_posted(void *task);
+void rune_task_cancel(void *task);
+int64_t rune_task_is_cancelled(void *task);
+int64_t rune_task_exited_cancelled(void *task);
+void rune_task_suspend_enter(void);
+int64_t rune_task_suspend_leave(void);
+void rune_task_free(void *task);
+int64_t rune_task_in_task(void);
+int64_t rune_task_stack_size(void);
+void rune_task_set_stack_size(int64_t bytes);
+/* Worker threads for jobs that would otherwise hold up an executor. */
+void rune_pool_submit(void *(*entry)(void *), void *argument);
+int64_t rune_pool_size(void);
 
 /*--- Panics -------------------------------------------------------------*/
 
@@ -213,6 +256,7 @@ uint64_t rune_hash_mix(uint64_t acc, uint64_t v);
 uint64_t rune_cstring_hash(const char *p);
 uint8_t rune_string_byte_at(const RuneString *s, int64_t i, const char *loc);
 /* Unicode scalar at byte offset `i`; advances `*next` past it. */
+uint32_t rune_string_char_after(const RuneString *s, int64_t at, int64_t *next);
 uint32_t rune_string_char_at(const RuneString *s, int64_t i, int64_t *next,
                              const char *loc);
 int64_t rune_string_find(const RuneString *hay, const RuneString *needle);
@@ -241,6 +285,38 @@ RuneString *rune_read_line(void);
 /* The same, but says whether a line was actually read: `*more` is zero at end
    of input, which is what tells an empty line apart from no line at all. */
 RuneString *rune_read_line_checked(int8_t *more);
+/* Exactly `count` bytes of stdin, however many reads that takes. `*ok` is
+   zero when the input ended first; what did arrive is still returned. This is
+   what a length-prefixed protocol on stdin needs, where a line reader would
+   stop at the first newline inside the payload. */
+RuneString *rune_read_stdin_exact(int64_t count, int8_t *ok);
+/* Pushes buffered stdout to the operating system. */
+void rune_flush_stdout(void);
+/* Makes stdin unbuffered; must come before the first read. */
+void rune_stdin_unbuffer(void);
+/* Whether stdin has input (or its end) within `millis` milliseconds. Only
+   meaningful for unbuffered stdin, which the stdio buffer cannot hide. */
+int8_t rune_stdin_waiting(int64_t millis);
+
+/*--- Child processes ----------------------------------------------------*/
+
+/* Running another program and collecting what it printed. Built up in steps
+   so an argument list never has to cross the boundary as one value: make a
+   command, add its arguments one at a time, run it, then read each stream.
+
+   The program is found through PATH when its name has no separator. Both
+   streams are read as they arrive, so a child that fills one pipe while the
+   other is being waited on cannot deadlock. */
+void *rune_command_new(const RuneString *program);
+void rune_command_arg(void *cmd, const RuneString *arg);
+/* The directory the child starts in; the parent's own when never set. */
+void rune_command_directory(void *cmd, const RuneString *dir);
+/* The exit status, 128 + the signal when a signal ended it, or -1 when the
+   program could not be started at all. */
+int64_t rune_command_run(void *cmd);
+/* What the child wrote: `which` is 1 for stdout and 2 for stderr. */
+RuneString *rune_command_output(void *cmd, int64_t which);
+void rune_command_free(void *cmd);
 
 /*--- Process ------------------------------------------------------------*/
 
@@ -301,6 +377,8 @@ int64_t rune_net_write(int64_t fd, const void *data, int64_t count);
 int32_t rune_net_shutdown(int64_t fd, int32_t how);
 int32_t rune_net_close(int64_t fd);
 /* Nagle off, so a small reply leaves immediately. */
+int64_t rune_net_dup(int64_t fd);
+int32_t rune_net_set_nonblocking(int64_t fd, int32_t on);
 int32_t rune_net_set_nodelay(int64_t fd, int32_t on);
 /* 0 clears the timeout. `for_read` picks SO_RCVTIMEO over SO_SNDTIMEO. */
 int32_t rune_net_set_timeout_ms(int64_t fd, int64_t ms, int32_t for_read);

@@ -1,0 +1,622 @@
+// The formatter: how `rune fmt` and the language server lay out Rune source.
+//
+// Formatting a file goes through five steps, each on the text the last one
+// left:
+//
+//   1. the linter's style fixes — a `;` that ends nothing, `while true`,
+//      `== true`, a repeated import, trailing whitespace, tab indentation;
+//   2. what the compiler knows written out: the type of every binding that
+//      has none, and the label of every argument given by position — the
+//      same things an editor shows greyed out as inlay hints;
+//   3. the top of the file put in order: its directives (`@type`, `@link`,
+//      a file-wide `@lint`), then its imports, standard library first, then
+//      type aliases, then globals, then everything else as it was;
+//   4. indentation worked out again from the brackets, four spaces a level,
+//      with a statement that runs onto another line indented once more;
+//   5. blank lines: never two in a row, none just inside a `{` or before a
+//      `}`, one between top-level declarations, one newline at the end.
+//
+// Step 2 needs a file that checks. One that does not is still laid out, and
+// told so. A file that checks is checked again afterwards: if the result
+// would not, what was written in is left out, and if even the layout breaks
+// it, the file is left alone.
+
+import std::io
+import std::json
+import std::process
+import std::collections::vector
+import runetools::syntax
+import runetools::project
+import runetools::lint
+
+/// What to do beyond laying the file out.
+pub class Options {
+    /// Write each unannotated binding's type in.
+    pub types: bool
+    /// Label each argument given by position.
+    pub labels: bool
+    /// Put the top of the file in order.
+    pub reorder: bool
+    /// Apply the linter's style fixes.
+    pub lintFixes: bool
+
+    fn init(self) {
+        self.types = true
+        self.labels = true
+        self.reorder = true
+        self.lintFixes = true
+    }
+}
+
+/// A formatted file, and a word about anything that was held back.
+pub class Formatted {
+    pub text: String
+    /// Empty, or why part of the formatting was not done.
+    pub note: String
+
+    fn init(self, text: String, note: String) {
+        self.text = text
+        self.note = note
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Step 1: the linter's style fixes
+//===--------------------------------------------------------------------===//
+
+/// The rules whose fixes change only how the code looks.
+pub fn styleRules() -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    for r in ["unnecessary-semicolon", "trailing-whitespace", "tab-indentation", "while-true", "bool-comparison",
+              "duplicate-import"] {
+        out.push(r.$clone())
+    }
+    out
+}
+
+/// `text` with the style fixes applied — those the file's own `@lint`
+/// directives have not turned off.
+pub fn styleFixes(p: &var project::Project, path: &String, text: String) -> String {
+    p.setOverlay(path.$clone(), text.$clone())
+    let m = p.load(path)
+    if m < 0 { return text }
+    p.loadImports(m, 1)
+    var cfg = lint::Config()
+    cfg.set("all", "allow")
+    for r in styleRules() { cfg.set(r, "warn") }
+    var fixable = vector::Vector<lint::Finding>()
+    for f in lint::run(p, m, cfg) {
+        if !f.edits.isEmpty() { fixable.push(f.$clone()) }
+    }
+    if fixable.isEmpty() { return text }
+    lint::applyFixes(text, fixable)
+}
+
+//===--------------------------------------------------------------------===//
+// Step 2: what the compiler knows
+//===--------------------------------------------------------------------===//
+
+/// Text to insert at a byte offset.
+pub class Insert {
+    pub at: i64
+    pub text: String
+    pub kind: String
+
+    fn init(self, at: i64, text: String, kind: String) {
+        self.at = at
+        self.text = text
+        self.kind = kind
+    }
+}
+
+/// What the compiler said about a file.
+pub class Asked {
+    /// It ran and the file checked.
+    pub ok: bool
+    /// The first error, when it did not.
+    pub error: String
+    pub inserts: vector::Vector<Insert>
+
+    fn init(self) {
+        self.ok = false
+        self.error = ""
+        self.inserts = vector::Vector<Insert>()
+    }
+}
+
+/// Runs the compiler over `text` standing in for `path`, asking `flags` of
+/// it; `scratch` is a file it may write `text` to.
+fn ask(p: &var project::Project, runec: &String, path: &String, text: &String, scratch: &String,
+       flags: [String]) -> process::Output? {
+    match io::writeString(scratch.$clone(), text.$clone()) {
+        Ok(_n) => {},
+        Err(_e) => return nil,
+    }
+    var cmd = project::compileCommand(p, runec, path, scratch, flags)
+    cmd.run()
+}
+
+/// The first error in a compile's JSON diagnostics, or "".
+fn firstError(out: &process::Output) -> String {
+    for line in project::linesOf(out.stderr) {
+        if line.$isEmpty() || line.$byteAt(0) != 123 { continue }
+        match json::parse(line.$clone()) {
+            Ok(d) => {
+                let sev = match d.get("severity") { Some(v) => v.asText() ?? "", None => "" }
+                if sev == "error" || sev == "fatal" {
+                    let msg = match d.get("message") { Some(v) => v.asText() ?? "", None => "" }
+                    let ln = match d.get("line") { Some(v) => v.asInt() ?? 0, None => 0 }
+                    return "line " + ln.$str() + ": " + msg
+                }
+            },
+            Err(_e) => {},
+        }
+    }
+    if out.status != 0 { return "the compiler failed with status " + out.status.$str() }
+    ""
+}
+
+/// Whether `text`, standing in for `path`, checks.
+pub fn checks(p: &var project::Project, runec: &String, path: &String, text: &String, scratch: &String) -> bool {
+    match ask(p, runec, path, text, scratch, ["--check"]) {
+        Some(out) => firstError(out).$isEmpty(),
+        None => false,
+    }
+}
+
+/// The types and labels the compiler would write into `text`.
+pub fn compilerInserts(p: &var project::Project, runec: &String, path: &String, text: &String,
+                       scratch: &String) -> Asked {
+    var out = Asked()
+    let ran = ask(p, runec, path, text, scratch, ["--query-hints", path.$clone()])
+    if ran.isNil() {
+        out.error = "could not run " + runec
+        return out
+    }
+    let result = ran.unwrap()
+    out.error = firstError(result)
+    if !out.error.$isEmpty() { return out }
+    for line in project::linesOf(result.stdout) {
+        if line.$isEmpty() || line.$byteAt(0) != 123 { continue }
+        match json::parse(line.$clone()) {
+            Ok(v) => {
+                match v.get("hints") {
+                    Some(list) => {
+                        var i = 0
+                        while i < list.length() {
+                            if list.index(i) is Some(h) {
+                                let insert = match h.get("insert") { Some(x) => x.asText() ?? "", None => "" }
+                                let at = match h.get("offset") { Some(x) => x.asInt() ?? -1, None => -1 }
+                                let kind = match h.get("kind") { Some(x) => x.asText() ?? "", None => "" }
+                                if !insert.$isEmpty() && at >= 0 { out.inserts.push(Insert(at, insert, kind)) }
+                            }
+                            i += 1
+                        }
+                        out.ok = true
+                    },
+                    None => {},
+                }
+            },
+            Err(_e) => {},
+        }
+    }
+    if !out.ok && out.error.$isEmpty() { out.error = "the compiler gave no answer" }
+    out
+}
+
+/// `text` with the inserts `opts` asks for made.
+pub fn applyInserts(text: &String, inserts: &vector::Vector<Insert>, opts: &Options) -> String {
+    var out = io::Bytes()
+    var from = 0
+    for ins in inserts {
+        let wanted = if ins.kind == "type" { opts.types } else { opts.labels }
+        if !wanted || ins.at < from || ins.at > text.$length() { continue }
+        out.appendText(text.$substring(from, ins.at))
+        out.appendText(ins.text)
+        from = ins.at
+    }
+    out.appendText(text.$substring(from, text.$length()))
+    out.toString()
+}
+
+//===--------------------------------------------------------------------===//
+// Step 3: the top of the file in order
+//===--------------------------------------------------------------------===//
+
+/// One top-level piece of a file: a declaration or statement with the
+/// comments and decorators above it.
+class Chunk {
+    pub kind: String      // header, directive, import, alias, global, item, trailer
+    pub text: String
+    pub key: String       // what imports sort by
+
+    fn init(self, kind: String, text: String, key: String) {
+        self.kind = kind
+        self.text = text
+        self.key = key
+    }
+}
+
+/// Whether token `i` opens or closes a bracket: +1, -1 or 0.
+fn bracket(lx: &syntax::Lexed, i: i64) -> i64 {
+    let t = lx.at(i)
+    if t.kind != syntax::Kind::Punct { return 0 }
+    if t.text == "(" || t.text == "[" || t.text == "{" { return 1 }
+    if t.text == ")" || t.text == "]" || t.text == "}" { return -1 }
+    0
+}
+
+/// The token after the decorator whose `@` is at `i`.
+fn pastDecorator(lx: &syntax::Lexed, i: i64) -> i64 {
+    var j = i + 2
+    if lx.isText(j, "(") { j = lx.closing(j) + 1 }
+    j
+}
+
+/// Past newlines and decorators, from `i`.
+fn pastDecorators(lx: &syntax::Lexed, i: i64) -> i64 {
+    var j = i
+    loop {
+        if lx.isNewline(j) { j += 1 }
+        elif lx.isText(j, "@") && !lx.isText(j + 1, "function") && !lx.isText(j + 1, "cfunction") {
+            j = pastDecorator(lx, j)
+        } else { break }
+    }
+    j
+}
+
+/// The index of the Newline token that ends the top-level item starting at
+/// token `i`, or of the `End` token.
+fn itemEnd(lx: &syntax::Lexed, i: i64) -> i64 {
+    var depth = 0
+    var j = i
+    while !lx.isEnd(j) {
+        depth += bracket(lx, j)
+        if depth <= 0 && lx.isNewline(j) { return j }
+        j += 1
+    }
+    j
+}
+
+/// The byte offset where line `line` starts.
+fn lineStart(lx: &syntax::Lexed, line: i64) -> i64 {
+    if line >= lx.lineStarts.length() { return lx.source.$length() }
+    lx.lineStarts.get(line)
+}
+
+/// Whether line `line` is blank.
+fn blankLine(lx: &syntax::Lexed, line: i64) -> bool {
+    syntax::collapse(lx.lineText(line)).$isEmpty()
+}
+
+/// The first line of the comments directly above line `line`: running up
+/// through comment-only lines, stopping at a blank one or at `floor`.
+fn attachedFrom(lx: &syntax::Lexed, line: i64, floor: i64, commentLines: &vector::Vector<bool>) -> i64 {
+    var l = line
+    while l - 1 >= floor && l - 1 < commentLines.length() && commentLines.get(l - 1) { l -= 1 }
+    l
+}
+
+fn trimEnd(text: &String) -> String {
+    var n = text.$length()
+    while n > 0 {
+        let b = text.$byteAt(n - 1)
+        if b == 32 || b == 10 || b == 13 || b == 9 { n -= 1 } else { break }
+    }
+    text.$substring(0, n)
+}
+
+fn trimStart(text: &String) -> String {
+    var i = 0
+    while i < text.$length() {
+        let b = text.$byteAt(i)
+        if b == 32 || b == 10 || b == 13 || b == 9 { i += 1 } else { break }
+    }
+    text.$substring(i, text.$length())
+}
+
+/// `text` with its top-level pieces put in order: directives, imports, type
+/// aliases, globals, then the rest as they were.
+pub fn arrange(text: &String) -> String {
+    let lx = syntax::lex(text.$clone())
+    let lines = lx.lineCount()
+    // Which lines hold nothing but comment.
+    var hasToken = vector::Vector<bool>()
+    var hasComment = vector::Vector<bool>()
+    var l = 0
+    while l < lines { hasToken.push(false); hasComment.push(false); l += 1 }
+    for t in lx.tokens {
+        if t.kind != syntax::Kind::Newline && t.kind != syntax::Kind::End && t.line < lines {
+            hasToken.replace(t.line, true)
+        }
+    }
+    for c in lx.comments {
+        var cl = c.line
+        let last = lx.lineOf(c.end - 1)
+        while cl <= last && cl < lines { hasComment.replace(cl, true); cl += 1 }
+    }
+    var commentLines = vector::Vector<bool>()
+    l = 0
+    while l < lines { commentLines.push(hasComment.get(l) && !hasToken.get(l)); l += 1 }
+
+    var chunks = vector::Vector<Chunk>()
+    var i = 0
+    var floorLine = 0          // the first line not yet in a chunk
+    var sawItem = false
+    // A comment block at the very top, apart from what follows by a blank
+    // line, is the file's header and stays first.
+    while lx.isNewline(i) { i += 1 }
+    if !lx.isEnd(i) {
+        let first = lx.at(i).line
+        let from = attachedFrom(lx, first, 0, commentLines)
+        if from > 0 {
+            let header = trimEnd(text.$substring(0, lineStart(lx, from)))
+            if !header.$isEmpty() { chunks.push(Chunk("header", header, "")) }
+            floorLine = from
+        }
+    }
+    while !lx.isEnd(i) {
+        if lx.isNewline(i) { i += 1; continue }
+        let startTok = i
+        // A run of decorators is part of what comes after it — unless it is
+        // one of the file's own directives.
+        var body = pastDecorators(lx, i)
+        var kind = "item"
+        if lx.isText(i, "@") {
+            let name = lx.text(i + 1)
+            let after = pastDecorator(lx, i)
+            let next = pastDecorators(lx, after)
+            let fileWideLint = !sawItem && name == "lint" && (lx.isEnd(next) || lx.isText(next, "import"))
+            if name == "type" || name == "link" || name == "linkpath" || fileWideLint {
+                kind = "directive"
+                body = after
+            }
+        }
+        var endTok = body
+        if kind == "directive" {
+            endTok = body
+        } else {
+            endTok = itemEnd(lx, body)
+            var k = body
+            if lx.isText(k, "pub") { k += 1 }
+            let w = lx.text(k)
+            if w == "import" { kind = "import" }
+            elif w == "type" && !lx.isText(k + 1, "(") { kind = "alias" }
+            elif w == "global" { kind = "global" }
+            sawItem = sawItem || kind != "import"
+        }
+        let firstLine = lx.at(startTok).line
+        let from = attachedFrom(lx, firstLine, floorLine, commentLines)
+        // Comments between the last piece and this one, apart from it by a
+        // blank line, travel with it all the same.
+        var start = lineStart(lx, from)
+        if from > floorLine { start = lineStart(lx, floorLine) }
+        let endOffset = if lx.isEnd(endTok) { text.$length() }
+                        elif kind == "directive" { lx.at(endTok - 1).end } else { lx.at(endTok).start }
+        // A comment after the item on its last line is part of it.
+        let lastLine = lx.lineOf(if endOffset > 0 { endOffset - 1 } else { 0 })
+        var stop = endOffset
+        let lineEnd = if lastLine + 1 < lines { lineStart(lx, lastLine + 1) - 1 } else { text.$length() }
+        if stop < lineEnd { stop = lineEnd }
+        let piece = trimEnd(text.$substring(start, stop))
+        var key = ""
+        if kind == "import" {
+            var k = body + 1
+            while !lx.isEnd(k) && !lx.isNewline(k) { key += lx.text(k); k += 1 }
+            key = (if key.$find("std::") == 0 { "0" } else { "1" }) + key
+        }
+        if !syntax::collapse(piece).$isEmpty() { chunks.push(Chunk(kind, trimStart(piece), key)) }
+        floorLine = lastLine + 1
+        i = if kind == "directive" { endTok } else { endTok + 1 }
+    }
+    if floorLine < lines {
+        let rest = trimEnd(text.$substring(lineStart(lx, floorLine), text.$length()))
+        if !syntax::collapse(rest).$isEmpty() { chunks.push(Chunk("trailer", trimStart(rest), "")) }
+    }
+
+    // Imports sorted — the standard library's first — and without repeats.
+    var imports = vector::Vector<Chunk>()
+    for c in chunks { if c.kind == "import" { imports.push(c.$clone()) } }
+    var a = 1
+    while a < imports.length() {
+        var b = a
+        while b > 0 && imports.look(b - 1).key > imports.look(b).key {
+            imports.swap(b - 1, b)
+            b -= 1
+        }
+        a += 1
+    }
+
+    var out = io::Bytes()
+    var any = false
+    var group = ""
+    for kind in ["header", "directive", "import", "alias", "global", "item", "trailer"] {
+        var list = vector::Vector<Chunk>()
+        if kind == "import" { list = imports } else {
+            for c in chunks { if c.kind == kind { list.push(c.$clone()) } }
+        }
+        var last = ""
+        for c in list {
+            if kind == "import" && c.text == last { continue }
+            if any {
+                // Within a group of one-liners, one line each; around
+                // anything longer, and between groups, a blank line.
+                let oneLine = c.text.$find("\n") < 0 && last.$find("\n") < 0
+                let tight = group == kind && oneLine && kind != "item" && kind != "header" && kind != "trailer"
+                out.appendText(if tight { "\n" } else { "\n\n" })
+            }
+            out.appendText(c.text)
+            any = true
+            group = kind
+            last = c.text.$clone()
+        }
+    }
+    if any { out.appendText("\n") }
+    out.toString()
+}
+
+//===--------------------------------------------------------------------===//
+// Steps 4 and 5: indentation and blank lines
+//===--------------------------------------------------------------------===//
+
+fn spaces(n: i64) -> String {
+    var s = ""
+    var i = 0
+    while i < n { s += " "; i += 1 }
+    s
+}
+
+/// Whether a line ending in `t` carries its statement on to the next.
+fn continuesAfter(t: &String) -> bool {
+    for op in ["+", "-", "*", "/", "%", "&&", "||", "??", "=", "==", "!=", "<=", ">=", "->", "=>", "+=", "-=",
+               "*=", "/=", "%=", "&", "|", "^", "<<", ">>", ".", "as", "is", "in"] {
+        if t == op { return true }
+    }
+    false
+}
+
+/// Whether a line starting with `t` carries on the statement before it.
+fn continuesBefore(t: &String) -> bool {
+    for op in [".", "?.", "+", "*", "/", "%", "&&", "||", "??", "==", "!=", "<=", ">=", "->", "|", "^"] {
+        if t == op { return true }
+    }
+    false
+}
+
+/// `text` indented from its brackets, four spaces a level, with blank lines
+/// tidied. A line that starts inside a string or a block comment is left
+/// exactly as it is.
+pub fn reindent(text: &String) -> String {
+    let lx = syntax::lex(text.$clone())
+    let lines = lx.lineCount()
+    // Per line: its first token, and whether it starts inside a token or a
+    // comment that began on an earlier line.
+    var firstTok = vector::Vector<i64>()
+    var verbatim = vector::Vector<bool>()
+    var l = 0
+    while l < lines { firstTok.push(-1); verbatim.push(false); l += 1 }
+    var t = 0
+    while t < lx.count() {
+        let tok = lx.at(t)
+        if tok.kind != syntax::Kind::Newline && tok.kind != syntax::Kind::End {
+            if tok.line < lines && firstTok.get(tok.line) < 0 { firstTok.replace(tok.line, t) }
+            var ml = tok.line + 1
+            let last = lx.lineOf(tok.end - 1)
+            while ml <= last && ml < lines { verbatim.replace(ml, true); ml += 1 }
+        }
+        t += 1
+    }
+    for c in lx.comments {
+        var ml = c.line + 1
+        let last = lx.lineOf(c.end - 1)
+        while ml <= last && ml < lines { verbatim.replace(ml, true); ml += 1 }
+    }
+
+    // The indentation of the line each open bracket was opened on, and the
+    // bracket.
+    var openIndent = vector::Vector<i64>()
+    var openChar = vector::Vector<String>()
+    var out = io::Bytes()
+    var prevCodeLast = -1     // the last token of the last line with code
+    var pendingBlank = false
+    var wroteAny = false
+    var lastWritten = ""      // the last line written, trimmed
+    l = 0
+    while l < lines {
+        let raw = lx.lineText(l)
+        let trimmed = trimEnd(trimStart(raw))
+        if verbatim.get(l) {
+            // Inside a string or comment: as it was, trailing space and all.
+            out.appendText("\n" + raw)
+            l += 1
+            continue
+        }
+        if trimmed.$isEmpty() {
+            pendingBlank = wroteAny
+            l += 1
+            continue
+        }
+        let ft = firstTok.get(l)
+        var indent = 0
+        let startsWithCloser = ft >= 0 && bracket(lx, ft) < 0
+        if startsWithCloser {
+            indent = if openIndent.isEmpty() { 0 } else { openIndent.get(openIndent.length() - 1) }
+        } else {
+            indent = if openIndent.isEmpty() { 0 } else { openIndent.get(openIndent.length() - 1) + 4 }
+            // A statement carried on from the line before: no Newline token
+            // ended that line, inside a block rather than a bracket list.
+            let inBlock = openChar.isEmpty() || openChar.get(openChar.length() - 1) == "{"
+            if ft >= 0 && prevCodeLast >= 0 && inBlock {
+                var ended = false
+                var k = prevCodeLast + 1
+                while k < ft {
+                    if lx.isNewline(k) { ended = true }
+                    k += 1
+                }
+                // The lexer ends no statement after a generic's `>`, so the
+                // missing Newline alone does not make a continuation: an
+                // operator on either side of the break does.
+                if !ended && (continuesAfter(lx.text(prevCodeLast)) || continuesBefore(lx.text(ft))) {
+                    indent += 4
+                }
+            }
+        }
+        // Blank lines: one at most, none just inside a `{` or before a `}`.
+        let afterOpen = !lastWritten.$isEmpty() && lastWritten.$byteAt(lastWritten.$length() - 1) == 123
+        if pendingBlank && !startsWithCloser && !afterOpen {
+            out.appendText("\n")
+        }
+        pendingBlank = false
+        if wroteAny { out.appendText("\n") }
+        out.appendText(spaces(indent) + trimEnd(trimStart(raw)))
+        wroteAny = true
+        lastWritten = trimmed
+        // The brackets this line opens and closes.
+        if ft >= 0 {
+            var k = ft
+            while !lx.isEnd(k) && lx.at(k).line == l {
+                let b = bracket(lx, k)
+                if b > 0 { openIndent.push(indent); openChar.push(lx.text(k)) }
+                elif b < 0 && !openIndent.isEmpty() {
+                    openIndent.pop()
+                    openChar.pop()
+                }
+                if !lx.isNewline(k) { prevCodeLast = k }
+                k += 1
+            }
+        }
+        l += 1
+    }
+    let body = trimEnd(out.toString())
+    if body.$isEmpty() { return "" }
+    body + "\n"
+}
+
+/// `text` laid out: put in order (unless `reorder` is off) and indented.
+pub fn layout(text: &String, reorder: bool) -> String {
+    let arranged = if reorder { arrange(text) } else { text.$clone() }
+    reindent(arranged)
+}
+
+//===--------------------------------------------------------------------===//
+// All of it
+//===--------------------------------------------------------------------===//
+
+/// `text`, the contents of `path`, formatted. `runec` is the compiler, and
+/// `scratch` a file it may use to hand text to it.
+pub fn format(p: &var project::Project, runec: &String, path: &String, text: String, scratch: &String,
+              opts: &Options) -> Formatted {
+    let fixed = if opts.lintFixes { styleFixes(p, path, text.$clone()) } else { text.$clone() }
+    let plain = layout(fixed, opts.reorder)
+    if !opts.types && !opts.labels { return Formatted(plain, "") }
+    let asked = compilerInserts(p, runec, path, fixed, scratch)
+    if !asked.ok {
+        return Formatted(plain, "not type-checked (" + asked.error + "): laid out only")
+    }
+    let full = layout(applyInserts(fixed, asked.inserts, opts), opts.reorder)
+    if full == text || checks(p, runec, path, full, scratch) { return Formatted(full, "") }
+    if checks(p, runec, path, plain, scratch) {
+        return Formatted(plain, "writing types and labels in would stop it compiling: laid out only")
+    }
+    Formatted(text, "formatting would stop it compiling: left alone")
+}

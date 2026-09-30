@@ -1,0 +1,9 @@
+// What a closure captures is only known where it is written, so `offload`
+// takes one written in the call.
+// EXPECT-ERROR: 'offload' runs its closure on another thread, so the closure has to be written here
+import std::task
+
+fn main() -> i64 {
+    let g = ||() -> i64 { 3 }
+    task::offload(g).wait()
+}

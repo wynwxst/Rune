@@ -1,6 +1,6 @@
 # What single ownership does without
 
-Two things that only make sense with a count are gone. A `weak` field cannot tell when its target has been freed without one, so it is an error; keep an index or a borrow instead. And a type that exists to be shared — `thread::Arc`, `mem::retain`/`release` — is marked unavailable, with the alternative named in the message.
+A `weak` field cannot tell when its target has been freed without a count, so it is an error; keep a `mem::Arena<T>` handle or an ordinary borrow instead. A library can also mark a type reference-counting-only with `@zombie_unavailable("…")`, and reaching for it under `--memory zombie` fails with the alternative spelled out.
 
 **`weak` needs a count**
 
@@ -17,8 +17,3 @@ fn main() -> i64 { 0 }
 > **When you know better**
 >
 > Two escape hatches exist for the code the checker cannot vouch for. `@zombie("reason")` on a function tells the checker to trust its body, the way `@safe` does for an unsafe call; its signature is still the contract callers are held to. And `unsafe { }` leaves raw pointers untracked, exactly as under reference counting.
-
-> [!WARNING]
-> **Standard library**
->
-> The core of the standard library is being brought over to compile under both memory models; until it is, some modules that lean on shared containers are checked but not yet clean under `--memory zombie`. The language, the checker and the code generator are complete — this is library work, tracked in the roadmap.

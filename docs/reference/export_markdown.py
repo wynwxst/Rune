@@ -26,13 +26,20 @@ OUT = ROOT / "docs" / "docs"
 KEEP = {"target", "order.json"}
 
 
+# `C++` and `Calling C` would otherwise land in one folder, because every
+# character a path cannot carry is simply dropped. A doubled `+` is a name in
+# its own right, so it is spelled out; a lone one stays punctuation.
+def spell_plusplus(title: str) -> str:
+    return title.replace("++", " plus plus ")
+
+
 def folder_name(title: str) -> str:
-    words = re.findall(r"[A-Za-z0-9]+", title.replace("`", ""))
+    words = re.findall(r"[A-Za-z0-9]+", spell_plusplus(title).replace("`", ""))
     return "_".join(w[0].upper() + w[1:] for w in words) or "Section"
 
 
 def file_slug(title: str) -> str:
-    t = title.replace("`", "")
+    t = spell_plusplus(title).replace("`", "")
     # Standalone operators keep a readable word; `std::io` stays a separator.
     t = re.sub(r"(?<![A-Za-z0-9])::(?![A-Za-z0-9])", " coloncolon ", t)
     t = t.replace("::", " ")

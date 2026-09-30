@@ -51,7 +51,7 @@ fn main() -> i64 {
     // The whole tree, files only, relative to where the walk began.
     var found = io::walkDirectory(root, 4)
     var names = vector::Vector<String>()
-    for p in found { names.push(p) }
+    for p in found { names.push(p.$clone()) }
     var i = 1
     while i < names.length() {
         var j = i

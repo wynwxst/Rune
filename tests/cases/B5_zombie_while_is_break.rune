@@ -1,0 +1,28 @@
+// FLAGS: --memory zombie
+// EXPECT: first a0
+// EXPECT: seen a1
+// EXPECT: seen a3
+// EXPECT: done
+// `break` and `continue` out of `while x is Some(v)` must release this
+// turn's subject; the leak check fails the case if they do not.
+fn nth(i: int) -> String? {
+    if i < 5 { Some("a" + i.$str()) } else { nil }
+}
+
+fn main() {
+    var i = 0
+    while nth(i) is Some(line) {
+        println!("first {}", line)
+        break
+    }
+    while nth(i) is Some(_) {
+        i += 1
+        break
+    }
+    while nth(i) is Some(line) {
+        i += 1
+        if i % 2 == 1 { continue }
+        println!("seen {}", line)
+    }
+    println!("done")
+}

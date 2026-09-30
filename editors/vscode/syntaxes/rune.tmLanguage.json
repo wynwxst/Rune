@@ -1,0 +1,688 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Rune",
+  "scopeName": "source.rune",
+  "fileTypes": [
+    "rune"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#decorators"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#characters"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#imports"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#macros"
+    },
+    {
+      "include": "#intrinsics"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#paths"
+    },
+    {
+      "include": "#members"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.rune",
+          "begin": "///(?!/)",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.rune"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "name": "markup.inline.raw.rune",
+              "match": "`[^`]*`"
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.rune",
+          "begin": "//",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.rune"
+            }
+          },
+          "end": "$"
+        },
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.rune",
+      "begin": "/\\*",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.begin.rune"
+        }
+      },
+      "end": "\\*/",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.end.rune"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "lint-directive": {
+      "comment": "@lint(allow(rule, ...), warn(...), note(...)): the linter's directive.",
+      "name": "meta.attribute.lint.rune",
+      "begin": "(@)(lint)\\s*(\\()",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.rune"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.rune"
+        },
+        "3": {
+          "name": "punctuation.section.parens.begin.rune"
+        }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.parens.end.rune"
+        }
+      },
+      "patterns": [
+        {
+          "begin": "\\b(allow|warn|note)\\s*(\\()",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.other.lint.rune"
+            },
+            "2": {
+              "name": "punctuation.section.parens.begin.rune"
+            }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.parens.end.rune"
+            }
+          },
+          "patterns": [
+            {
+              "match": "\\ball\\b",
+              "name": "constant.language.lint.all.rune"
+            },
+            {
+              "match": "[A-Za-z][A-Za-z0-9_-]*",
+              "name": "constant.other.lint-rule.rune"
+            },
+            {
+              "match": ",",
+              "name": "punctuation.separator.comma.rune"
+            }
+          ]
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.rune"
+        },
+        {
+          "include": "#comments"
+        }
+      ]
+    },
+    "decorators": {
+      "patterns": [
+        {
+          "include": "#lint-directive"
+        },
+        {
+          "comment": "@function(...) and @cfunction(...) are function types, not decorators.",
+          "match": "(@)(function|cfunction)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.type.rune"
+            },
+            "2": {
+              "name": "storage.type.function.rune"
+            }
+          }
+        },
+        {
+          "name": "meta.attribute.rune",
+          "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.decorator.rune"
+            },
+            "2": {
+              "name": "entity.name.function.decorator.rune"
+            }
+          }
+        }
+      ]
+    },
+    "escapes": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.rune",
+          "match": "\\\\(?:[ntr0\\\\\"'e]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]{1,6}\\})"
+        },
+        {
+          "name": "invalid.illegal.escape.rune",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "placeholders": {
+      "comment": "`{}` and `{:>8.2}` in the strings `format!`, `println!` and friends read.",
+      "patterns": [
+        {
+          "name": "constant.character.escape.brace.rune",
+          "match": "\\{\\{|\\}\\}"
+        },
+        {
+          "name": "constant.other.placeholder.rune",
+          "match": "\\{(?::[^{}\"]*)?\\}"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.other.raw.rune",
+          "begin": "\\b(r)(#*)(\")",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.type.string.rune"
+            },
+            "2": {
+              "name": "punctuation.definition.string.begin.rune"
+            },
+            "3": {
+              "name": "punctuation.definition.string.begin.rune"
+            }
+          },
+          "end": "(\")(\\2)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.rune"
+            },
+            "2": {
+              "name": "punctuation.definition.string.end.rune"
+            }
+          }
+        },
+        {
+          "name": "string.quoted.triple.rune",
+          "begin": "\"\"\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.rune"
+            }
+          },
+          "end": "\"\"\"",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.rune"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#escapes"
+            },
+            {
+              "include": "#placeholders"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.rune",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.rune"
+            }
+          },
+          "end": "\"|$",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.rune"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#escapes"
+            },
+            {
+              "include": "#placeholders"
+            }
+          ]
+        }
+      ]
+    },
+    "characters": {
+      "name": "string.quoted.single.rune",
+      "match": "(')(\\\\(?:[ntr0\\\\\"'e]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]{1,6}\\})|[^\\\\'\\n])(')",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.string.begin.rune"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#escapes"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.string.end.rune"
+        }
+      }
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.rune",
+          "match": "\\b0[xX][0-9A-Fa-f_]+(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize)?\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.numeric.rune"
+            }
+          }
+        },
+        {
+          "name": "constant.numeric.binary.rune",
+          "match": "\\b0[bB][01_]+(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize)?\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.numeric.rune"
+            }
+          }
+        },
+        {
+          "name": "constant.numeric.octal.rune",
+          "match": "\\b0[oO][0-7_]+(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize)?\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.numeric.rune"
+            }
+          }
+        },
+        {
+          "comment": "A fraction needs a digit after the `.`: `1..5` is a range.",
+          "name": "constant.numeric.float.rune",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*(?:[eE][+-]?[0-9][0-9_]*)?|[eE][+-]?[0-9][0-9_]*)(f32|f64)?\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.numeric.rune"
+            }
+          }
+        },
+        {
+          "name": "constant.numeric.integer.rune",
+          "match": "\\b[0-9][0-9_]*(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64)?\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.numeric.rune"
+            }
+          }
+        }
+      ]
+    },
+    "imports": {
+      "name": "meta.import.rune",
+      "begin": "\\b(import)\\b",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.import.rune"
+        }
+      },
+      "end": "(?=//|/\\*|;)|$",
+      "patterns": [
+        {
+          "match": "\\bas\\b",
+          "name": "keyword.other.as.rune"
+        },
+        {
+          "match": "\\*",
+          "name": "keyword.operator.glob.rune"
+        },
+        {
+          "match": "::",
+          "name": "punctuation.separator.namespace.rune"
+        },
+        {
+          "match": "[{},]",
+          "name": "punctuation.separator.rune"
+        },
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+          "name": "entity.name.namespace.rune"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.fn.rune"
+            },
+            "2": {
+              "name": "entity.name.function.rune"
+            }
+          }
+        },
+        {
+          "match": "\\b(class|struct|enum|mark)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.$1.rune"
+            },
+            "2": {
+              "name": "entity.name.type.rune"
+            }
+          }
+        },
+        {
+          "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?:<[^=]*>)?\\s*=)",
+          "captures": {
+            "1": {
+              "name": "storage.type.alias.rune"
+            },
+            "2": {
+              "name": "entity.name.type.alias.rune"
+            }
+          }
+        },
+        {
+          "match": "\\b(macro)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.macro.rune"
+            },
+            "2": {
+              "name": "entity.name.function.macro.rune"
+            }
+          }
+        },
+        {
+          "match": "\\b(global)\\s+(?:(var|let)\\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.global.rune"
+            },
+            "2": {
+              "name": "storage.modifier.rune"
+            },
+            "3": {
+              "name": "variable.other.global.rune"
+            }
+          }
+        },
+        {
+          "match": "\\b(let|var|mut)\\s+([a-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.rune"
+            },
+            "2": {
+              "name": "variable.other.declaration.rune"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.conditional.rune",
+          "match": "\\b(if|elif|else|match)\\b"
+        },
+        {
+          "name": "keyword.control.loop.rune",
+          "match": "\\b(while|loop|for|in)\\b"
+        },
+        {
+          "name": "keyword.control.flow.rune",
+          "match": "\\b(return|break|continue|defer|await)\\b"
+        },
+        {
+          "name": "keyword.other.fn.rune",
+          "match": "\\bfn\\b"
+        },
+        {
+          "name": "storage.type.rune",
+          "match": "\\b(class|struct|enum|mark|type)\\b"
+        },
+        {
+          "name": "storage.modifier.rune",
+          "match": "\\b(pub|var|let|mut|global|extern|unsafe|async|weak|uniq|move|dyn|some|ref)\\b"
+        },
+        {
+          "name": "keyword.other.rune",
+          "match": "\\b(bind|to|into|extend|operator|where|as|is|super|macro)\\b"
+        },
+        {
+          "name": "variable.language.self.rune",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "storage.type.self.rune",
+          "match": "\\bSelf\\b"
+        },
+        {
+          "name": "constant.language.boolean.rune",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.rune",
+          "match": "\\bnil\\b"
+        }
+      ]
+    },
+    "macros": {
+      "comment": "`println!(...)`, `vec![...]`: a name, `!`, and a bracket.",
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(!)(?=\\s*[(\\[{])",
+      "captures": {
+        "1": {
+          "name": "entity.name.function.macro.rune"
+        },
+        "2": {
+          "name": "punctuation.definition.macro.rune"
+        }
+      }
+    },
+    "intrinsics": {
+      "comment": "`.$length()`: the members the compiler itself provides.",
+      "match": "(?<=\\.)(\\$)([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.intrinsic.rune"
+        },
+        "2": {
+          "name": "support.function.intrinsic.rune"
+        }
+      }
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.rune",
+          "match": "\\b(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64|bool)\\b"
+        },
+        {
+          "name": "support.type.rune",
+          "match": "\\b(String|CString|Character|Never|Any|Option|Result)\\b"
+        },
+        {
+          "name": "support.constant.core.rune",
+          "match": "\\b(Some|None|Ok|Err)\\b"
+        },
+        {
+          "name": "constant.other.caps.rune",
+          "match": "\\b[A-Z][A-Z0-9]*_[A-Z0-9_]*\\b|\\b[A-Z]{2,}[0-9]*\\b(?![a-z])"
+        },
+        {
+          "name": "entity.name.type.rune",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "comment": "A method call: after a `.`, before a `(` or a generic argument list.",
+          "match": "(?<=\\.)([a-z_][A-Za-z0-9_]*)(?=\\s*(?:<[^<>()]*>)?\\()",
+          "name": "entity.name.function.method.rune"
+        },
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "name": "entity.name.function.call.rune"
+        }
+      ]
+    },
+    "paths": {
+      "match": "\\b([a-z_][A-Za-z0-9_]*)(?=::)",
+      "name": "entity.name.namespace.rune"
+    },
+    "members": {
+      "match": "(?<=\\.)([a-z_][A-Za-z0-9_]*|[0-9]+)\\b",
+      "name": "variable.other.member.rune"
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.rune",
+          "match": "->|=>"
+        },
+        {
+          "name": "punctuation.separator.namespace.rune",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.coalesce.rune",
+          "match": "\\?\\?"
+        },
+        {
+          "name": "keyword.operator.range.rune",
+          "match": "\\.\\.=|\\.\\.\\.|\\.\\."
+        },
+        {
+          "name": "keyword.operator.assignment.compound.rune",
+          "match": "<<=|>>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^="
+        },
+        {
+          "name": "keyword.operator.comparison.rune",
+          "match": "==|!=|<=|>="
+        },
+        {
+          "name": "keyword.operator.logical.rune",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.bitwise.rune",
+          "match": "<<|>>|\\^|~"
+        },
+        {
+          "name": "keyword.operator.assignment.rune",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.question.rune",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.borrow.rune",
+          "match": "&"
+        },
+        {
+          "name": "keyword.operator.bitwise.rune",
+          "match": "\\|"
+        },
+        {
+          "name": "keyword.operator.comparison.rune",
+          "match": "<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.rune",
+          "match": "[-+*/%]"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.rune",
+          "match": ","
+        },
+        {
+          "name": "punctuation.terminator.statement.rune",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.accessor.dot.rune",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.separator.colon.rune",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.brackets.curly.rune",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.brackets.round.rune",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.brackets.square.rune",
+          "match": "[\\[\\]]"
+        }
+      ]
+    }
+  }
+}

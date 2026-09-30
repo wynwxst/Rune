@@ -1,0 +1,20 @@
+// A task that was cancelled has no result. `.await` on it is a panic;
+// `outcome()` is the way to ask when that is possible.
+// EXPECT: cancelled
+// EXPECT-PANIC: awaited a task that was cancelled
+import std::io
+import std::task
+import std::time
+
+async fn slow() -> i64 {
+    task::sleep(time::milliseconds(50)).await
+    1
+}
+
+async fn main() -> i64 {
+    let s = slow()
+    s.cancel()
+    task::sleep(time::milliseconds(1)).await
+    io::println("cancelled")
+    s.await
+}

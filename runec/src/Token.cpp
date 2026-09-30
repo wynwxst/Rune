@@ -49,6 +49,8 @@ bool canEndStatement(Tok k) {
   case Tok::KwReturn:
   case Tok::KwBreak:
   case Tok::KwContinue:
+  // `value.await` is a complete expression, exactly as `value?` is.
+  case Tok::KwAwait:
     return true;
   default:
     return false;

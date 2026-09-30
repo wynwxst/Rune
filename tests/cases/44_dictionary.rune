@@ -114,7 +114,7 @@ fn main() -> i64 {
         let m = dictionary::mapOf(["x", "y", "z"], [1, 2, 3])
         var names: [3:String] = ["", "", ""]
         var k = 0
-        for key in m.keysOf() { names[k] = key; k += 1 }
+        for key in m.keysOf() { names[k] = key.$clone(); k += 1 }
         var joined = ""
         for key in slice::sortedBy(names, ||(a: String, b: String) -> bool { a < b }) {
             joined += key

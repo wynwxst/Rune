@@ -1,0 +1,49 @@
+// EXPECT: len 2
+// EXPECT: nested 2 2
+// EXPECT: strings x y
+// EXPECT: closing first
+// EXPECT: closing second
+//
+// `vec![...]` hands its elements *over*. The array it writes exists only to
+// carry them, so `drain` takes each one out and leaves the slot empty —
+// which is what lets a vector hold values that own something without the
+// array owning them too, and destroying them a second time.
+//
+// The slice `drain` walks is a view of that array where it already is, not
+// of a copy: a value taken out through the view has to be taken out of what
+// the statement will clean up.
+//
+// Reading such a value back *out* of a container is a separate matter and
+// still copies — `at` and `for` both hand back a value — so this case only
+// covers building one.
+import std::io
+import std::mem
+import std::collections::vector
+
+mark Speaker { fn speak(&self) -> String }
+struct Dog {}
+bind Speaker to Dog { fn speak(&self) -> String { "Woof!" } }
+
+struct Owned {
+    name: String
+    fn deinit(&self) { println!("closing {}", self.name) }
+}
+
+fn main() -> i64 {
+    let boxes: vector::Vector<mem::Box<dyn Speaker>> = vec![mem::boxed(Dog {})]
+    println!("len {}", (boxes.length() + 1).$str())
+
+    // Vectors of vectors: each inner one is handed over, not shared.
+    let a = vec![1, 2]
+    let b = vec![3, 4]
+    let nested = vec![a, b]
+    println!("nested {} {}", nested.length().$str(),
+             nested.at(0).unwrap().length().$str())
+
+    let words = vec!["x", "y"]
+    println!("strings {} {}", words.at(0).unwrap(), words.at(1).unwrap())
+
+    // Each of these is destroyed once, by the vector.
+    let owners = vec![Owned { name: "first" }, Owned { name: "second" }]
+    0
+}

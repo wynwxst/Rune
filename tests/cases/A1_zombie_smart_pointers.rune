@@ -1,0 +1,128 @@
+// FLAGS: --memory zombie
+// EXPECT: box 42
+// EXPECT: node n 7
+// EXPECT: dup 1 1
+// EXPECT: boxed gone: one
+// EXPECT: released: one
+// EXPECT: rc strong 1
+// EXPECT: rc strong 2
+// EXPECT: rc value hello
+// EXPECT: weak 1 alive true
+// EXPECT: upgraded hello
+// EXPECT: strong 2
+// EXPECT: counter 3
+// EXPECT: released: held
+// EXPECT: after: alive false
+// EXPECT: upgrade nil
+// EXPECT: shared cell 42
+// EXPECT: child sees parent root
+// EXPECT: released: root
+// EXPECT: handle 41 -> 42
+// EXPECT: same false eq true
+// EXPECT: swapped 2 1
+// EXPECT: shown 7
+//
+// The same as `A1_smart_pointers`, under single ownership: the counts are
+// fields this module keeps, so an `Rc` behaves the same where the compiler
+// emits no counting at all.
+//
+// The three owning pointers `std::mem` offers, and what tells them apart. A
+// `Box` has one owner and is moved; an `Rc` has as many as ask for one and
+// counts them in a field of its own, so it means the same thing under either
+// memory model; a `Weak` watches an `Rc` without keeping it alive, which is
+// what lets a child point back at its parent.
+import std::io
+import std::mem
+
+struct Node { name: String, weight: i64 }
+
+struct Tracked {
+    label: String
+
+    fn deinit(&self) { println!("released: {}", self.label) }
+}
+
+struct Child {
+    parent: mem::Weak<Tracked>
+}
+
+fn main() -> i64 {
+    // --- Box: one owner -------------------------------------------------
+    var b = mem::boxed(41)
+    *b.touch() = *b.look() + 1
+    println!("box {}", *b)
+
+    var n = mem::boxed(Node { name: "n", weight: 1 })
+    n.touch().weight = 7
+    println!("node {} {}", n.look().name, n.look().weight.$str())
+
+    let first = mem::boxed(1)
+    let second = first.duplicate()
+    println!("dup {} {}", *first, *second)
+
+    // A box destroys what it holds when it goes.
+    {
+        let owned = mem::boxed(Tracked { label: "one" })
+        println!("boxed gone: {}", owned.look().label)
+    }
+
+    // --- Rc: shared ownership, counted here ------------------------------
+    let a = mem::shared("hello")
+    println!("rc strong {}", a.strongCount().$str())
+    let c = a.$clone()
+    println!("rc strong {}", a.strongCount().$str())
+    println!("rc value {}", *c)
+
+    let w = a.downgrade()
+    println!("weak {} alive {}", a.weakCount().$str(), w.isAlive().$str())
+    match w.upgrade() {
+        Some(u) => println!("upgraded {}", *u),
+        None => println!("gone"),
+    }
+    println!("strong {}", a.strongCount().$str())
+
+    // The value goes when the last owner does, and the `Weak` then says so
+    // rather than dangling.
+    var watcher: mem::Weak<Tracked>
+    {
+        let held = mem::shared(Tracked { label: "held" })
+        watcher = held.downgrade()
+        println!("counter {}", (held.strongCount() + held.weakCount() + 1).$str())
+    }
+    println!("after: alive {}", watcher.isAlive().$str())
+    match watcher.upgrade() {
+        Some(u) => println!("upgrade some {}", u.look().label),
+        None => println!("upgrade nil"),
+    }
+
+    // Sharing is read-only, so a value that has to change goes in a `Checked`
+    // and is borrowed for the write.
+    let cell = mem::shared(mem::Checked<i64>(0))
+    let alias = cell.$clone()
+    { var write = alias.look().borrowVar(); *write = 42 }
+    println!("shared cell {}", (*cell.look().borrow()).$str())
+
+    // A back-edge that does not own: the parent goes when its own owner does,
+    // although the child still points at it.
+    {
+        let parent = mem::shared(Tracked { label: "root" })
+        let kid = Child { parent: parent.downgrade() }
+        match kid.parent.upgrade() {
+            Some(p) => println!("child sees parent {}", p.look().label),
+            None => println!("child sees nothing"),
+        }
+    }
+
+    // --- Handle, with its edges filed off --------------------------------
+    var h = mem::of(41)
+    let was = h.replace(42)
+    println!("handle {} -> {}", was.$str(), *h)
+    let other = h.duplicate()
+    println!("same {} eq {}", h.sameAs(&other).$str(), (h == other).$str())
+    var x = mem::of(1)
+    var y = mem::of(2)
+    x.swap(&var y)
+    println!("swapped {} {}", *x, *y)
+    println!("shown {}", mem::of(7))
+    0
+}

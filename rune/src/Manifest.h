@@ -2,6 +2,7 @@
 #ifndef RUNE_MANIFEST_H
 #define RUNE_MANIFEST_H
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,11 @@ struct Dependency {
   /// The registry it must come from, by the name `rune registry list`
   /// shows; empty means whichever configured registry has it.
   std::string Registry;
+  /// `config = { backend = "vulkan" }` — what this project chooses for the
+  /// keys that package declares in its own `[config]`. Values are written as
+  /// they would be compared: a string as itself, a number or a boolean as it
+  /// prints.
+  std::map<std::string, std::string> Config;
 };
 
 /// A cross-compilation target named in `[target.<name>]`.
@@ -27,6 +33,9 @@ struct TargetSpec {
   std::string Name;        ///< the table's key, e.g. "mingw"
   std::string Triple;      ///< LLVM target triple
   std::string Cc;          ///< link driver, e.g. "x86_64-w64-mingw32-gcc"
+  /// C++ compiler for this target's `cxx-sources`, e.g.
+  /// "x86_64-w64-mingw32-g++". Derived from `cc` when not given.
+  std::string Cxx;
   std::string Ar;          ///< archiver; derived from `cc` when not given
   std::string Sysroot;
   std::string RuntimeDir;  ///< where this target's libruneruntime.a lives
@@ -104,9 +113,20 @@ struct Manifest {
   /// rest of the build uses, so a package with a C half cross-compiles too.
   std::vector<std::string> CSources;
   std::vector<std::string> CFlags;       ///< [build] c-flags
+  /// [build] cxx-sources = ["cxx/shim.cpp"] — the same, for a C++ half. A
+  /// package that has one links the C++ runtime, whether or not its Rune
+  /// declares the functions in an `extern "C++"` block.
+  std::vector<std::string> CxxSources;
+  std::vector<std::string> CxxFlags;     ///< [build] cxx-flags
+  /// [build] cxx-standard = "c++17" — what `-std=` the C++ half is built to.
+  std::string CxxStandard;
   /// `[build] cfg = ["fast-math"]` — names `@Config(...)` should treat as set.
   /// A dependency's name is set too, so a package can ask whether it has one.
   std::vector<std::string> ConfigFlags;
+  /// `[config] backend = "metal"` — keys of this package's own, compared in
+  /// `@Config(backend == metal)`. A package that depends on this one may
+  /// choose them instead; see `Dependency::Config`.
+  std::map<std::string, std::string> Config;
   std::vector<std::string> LinkArgs;     ///< [build] link-args
 
   // [dependencies]

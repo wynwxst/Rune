@@ -1,0 +1,10 @@
+[package]
+name = "tasks"
+version = "0.1.0"
+edition = "2026"
+description = "One thread doing several things at once: async fn, .await, and std::task."
+
+[build]
+safety = "full"
+optimize = 0
+debug = true

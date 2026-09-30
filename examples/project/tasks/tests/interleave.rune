@@ -1,0 +1,39 @@
+// Tasks take turns at their awaits, and a future keeps its value for every
+// asking.
+import std::task
+import std::testing
+import std::time
+import std::collections::vector
+
+async fn tick(log: vector::Vector<i64>, id: i64, times: i64) {
+    var i = 0
+    while i < times {
+        log.push(id)
+        task::yieldNow()
+        i += 1
+    }
+}
+
+async fn slow(v: i64) -> i64 {
+    task::sleep(time::milliseconds(2)).await
+    v
+}
+
+async fn main() -> i64 {
+    let log = vector::Vector<i64>()
+    let a = tick(log, 1, 3)
+    let b = tick(log, 2, 3)
+    a.await
+    b.await
+    // Two tasks, each yielding after every step: the log alternates.
+    testing::equal("six ticks", log.length(), 6)
+    testing::equal("first from a", log.get(0), 1)
+    testing::equal("then b", log.get(1), 2)
+    testing::equal("then a again", log.get(2), 1)
+
+    let f = slow(7)
+    testing::equal("first await", f.await, 7)
+    testing::equal("second await sees the same value", f.await, 7)
+    testing::isTrue("done after await", f.isDone())
+    testing::summary()
+}

@@ -1,0 +1,205 @@
+@type(Executable)
+
+// Linked lists under single ownership.
+//
+// A list is the shape that asks the most of a memory model: every node owns
+// the next, a walk borrows one link at a time, and the whole chain has to be
+// given back in the end. All three forms below run under `--memory zombie`
+// with no reference count anywhere — and none of them needs `unsafe`.
+//
+//   * `List<T>`      an enum, the classic: `Empty` or a link that owns the rest
+//   * `Queue<T>`     a struct around that enum, with push, pop and a walk
+//   * `Chain<T>`     a class holding an optional handle, and a `&var` walk
+//                    that appends at the far end
+//
+// The two accessors that make the walks possible are `Handle::look` (a
+// borrow of what the handle owns) and `Handle::touch` (the same, to write
+// through). `*handle` hands back a *copy*, which under single ownership means
+// cloning the whole of the rest of the list — right, but not what a walk
+// wants.
+
+import std::mem::{Handle}
+import std::{mem, io}
+
+//===--------------------------------------------------------------------===//
+// The classic enum
+//===--------------------------------------------------------------------===//
+
+pub enum List<T> {
+    Empty
+    More(Handle<Node<T>>)
+}
+
+pub struct Node<T> {
+    elem: T
+    next: List<T>
+}
+
+pub struct Queue<T> { head: List<T> }
+
+/// `extend` on a generic type uses the names the type declares.
+extend Queue {
+    pub fn new() -> Queue<T> { Queue<T> { head: List::Empty } }
+
+    /// At the front: the old head becomes the new node's tail, in one move.
+    pub fn push(&var self, value: T) {
+        self.head = List::More(Handle<Node<T>>(Node<T> {
+            elem: value,
+            next: mem::replace(&var self.head, List::Empty)
+        }))
+    }
+
+    /// Off the front. The node is taken out of the list, its tail becomes the
+    /// new head, and the element comes back to the caller.
+    pub fn pop(&var self) -> T? {
+        match mem::replace(&var self.head, List::Empty) {
+            List::Empty => nil,
+            List::More(node) => {
+                self.head = (*node).next
+                Some((*node).elem)
+            }
+        }
+    }
+
+    /// A walk: one borrow at a time, nothing cloned, nothing moved.
+    pub fn length(&self) -> i64 {
+        var n = 0
+        var cur = &self.head
+        while cur is List::More(node) {
+            n += 1
+            cur = &node.look().next
+        }
+        n
+    }
+
+    pub fn first(&self) -> T? {
+        match &self.head {
+            List::More(node) => Some(node.look().elem.$clone()),
+            List::Empty => nil
+        }
+    }
+
+    /// At the back, which is the walk that has to be able to write: the
+    /// cursor is a `&var` all the way to the empty link at the end.
+    pub fn append(&var self, value: T) {
+        var cur = &var self.head
+        loop {
+            match cur {
+                List::Empty => break,
+                List::More(node) => cur = &var node.touch().next
+            }
+        }
+        *cur = List::More(Handle<Node<T>>(Node<T> {
+            elem: value, next: List::Empty
+        }))
+    }
+
+    /// Reversal in place: each node is moved out, pointed at what has been
+    /// done so far, and put back.
+    pub fn reverse(&var self) {
+        var done: List<T> = List::Empty
+        loop {
+            match mem::replace(&var self.head, List::Empty) {
+                List::Empty => break,
+                List::More(node) => {
+                    var n = (*node)
+                    self.head = mem::replace(&var n.next, List::Empty)
+                    n.next = done
+                    done = List::More(Handle<Node<T>>(n))
+                }
+            }
+        }
+        self.head = done
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// The same as a class, over an optional handle
+//===--------------------------------------------------------------------===//
+
+pub struct Cell<T> {
+    value: T
+    next: Handle<Cell<T>>?
+}
+
+pub class Chain<T> {
+    head: Handle<Cell<T>>?
+
+    fn init(self) { self.head = nil }
+
+    pub fn prepend(&var self, value: T) {
+        self.head = Some(Handle<Cell<T>>(Cell<T> {
+            value: value,
+            next: mem::replace(&var self.head, nil)
+        }))
+    }
+
+    pub fn append(&var self, value: T) {
+        var cur = &var self.head
+        loop {
+            match cur {
+                Some(cell) => cur = &var cell.touch().next,
+                None => break
+            }
+        }
+        *cur = Some(Handle<Cell<T>>(Cell<T> { value: value, next: nil }))
+    }
+
+    pub fn length(&self) -> i64 {
+        var n = 0
+        var cur = &self.head
+        while cur is Some(cell) {
+            n += 1
+            cur = &cell.look().next
+        }
+        n
+    }
+
+    pub fn first(&self) -> T? {
+        match &self.head {
+            Some(cell) => Some(cell.look().value.$clone()),
+            None => nil
+        }
+    }
+
+    /// Reading and writing through the same walk.
+    pub fn doubleAll(&var self) {
+        var cur = &var self.head
+        loop {
+            match cur {
+                Some(cell) => {
+                    cell.touch().value = cell.look().value * 2
+                    cur = &var cell.touch().next
+                },
+                None => break
+            }
+        }
+    }
+}
+
+fn main() -> i64 {
+    var queue = Queue<String>::new()
+    queue.push("b")
+    queue.push("a")
+    queue.append("c")
+    println!("queue: {} long, first {}", queue.length(), queue.first().or("?"))
+    queue.reverse()
+    println!("reversed: first {}", queue.first().or("?"))
+    println!("popped: {}", queue.pop().or("?"))
+
+    var chain = Chain<i64>()
+    chain.prepend(2)
+    chain.prepend(1)
+    chain.append(3)
+    println!("chain: {} long, first {}", chain.length(), chain.first().or(0))
+    chain.doubleAll()
+    println!("doubled: first {}", chain.first().or(0))
+
+    // Long enough that a destruction per stack frame would not fit: the
+    // runtime queues what it reaches instead of nesting the calls.
+    var long = Queue<i64>::new()
+    var i = 0
+    while i < 200000 { long.push(i); i += 1 }
+    println!("long: {} links", long.length())
+    0
+}

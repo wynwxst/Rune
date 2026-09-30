@@ -1,0 +1,160 @@
+{
+  "name": "rune-lang",
+  "displayName": "Rune",
+  "description": "Rune language support: syntax highlighting, diagnostics from the compiler and linter, code completion, hover, go to definition, references and quick fixes.",
+  "version": "0.1.0",
+  "publisher": "rune-lang",
+  "license": "SEE LICENSE IN README.md",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": ["rune", "language server", "lsp"],
+  "main": "./extension.js",
+  "activationEvents": [
+    "workspaceContains:**/Rune.toml"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "rune",
+        "aliases": ["Rune", "rune"],
+        "extensions": [".rune"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rune",
+        "scopeName": "source.rune",
+        "path": "./syntaxes/rune.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.rune.codeblock",
+        "path": "./syntaxes/rune.markdown.tmLanguage.json",
+        "injectTo": ["text.html.markdown"],
+        "embeddedLanguages": {
+          "meta.embedded.block.rune": "rune"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Rune",
+      "properties": {
+        "rune.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The program that runs the language server. Either `rune` (the toolchain driver, which is started as `rune lsp`) or `rune-lsp` itself. Empty means `rune` on `PATH`."
+        },
+        "rune.server.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Further arguments for the language server."
+        },
+        "rune.stdlib": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Where the standard library is: the directory holding `std/`. Empty means the toolchain's own."
+        },
+        "rune.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run the compiler when a file is opened or saved (`rune check` in a package, `runec --check` otherwise) and show its diagnostics."
+        },
+        "rune.check.onChange": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Also run the compiler as you type, once typing pauses, checking unsaved files as they stand in the editor. Every error a build would report shows — type errors, the borrow checker's, macro expansion."
+        },
+        "rune.check.delay": {
+          "type": "integer",
+          "default": 400,
+          "minimum": 0,
+          "markdownDescription": "How long typing must pause, in milliseconds, before `#rune.check.onChange#` runs the compiler."
+        },
+        "rune.inlayHints.types": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the inferred type of each binding written without one, greyed out after its name. Double-click one to write it in."
+        },
+        "rune.inlayHints.parameters": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the parameter each positional argument goes to, greyed out before it. Double-click one to write the label in. An argument that is already a variable of the same name gets none."
+        },
+        "rune.check.memory": {
+          "type": "string",
+          "enum": ["arc", "zombie"],
+          "default": "arc",
+          "markdownDescription": "The memory model a file outside any package is checked in. `zombie` shows the borrow checker's errors. Inside a package, `[build] memory` in its `Rune.toml` decides."
+        },
+        "rune.lint.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the linter's findings as you type."
+        },
+        "rune.lint.allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Lint rules to turn off, by name (`rune lint --list` names them). `all` turns every rule off. A package's `[lint]` table in `Rune.toml` applies first."
+        },
+        "rune.lint.warn": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Lint rules to turn on, including the ones that are off by default, such as `missing-docs`."
+        },
+        "rune.lint.maxLineLength": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "The limit for `line-too-long`. `0` keeps the package's setting, or 120."
+        },
+        "rune.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Log the conversation with the language server to its output channel."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "rune.restartServer",
+        "title": "Restart Language Server",
+        "category": "Rune"
+      },
+      {
+        "command": "rune.showOutput",
+        "title": "Show Language Server Output",
+        "category": "Rune"
+      },
+      {
+        "command": "rune.fixAll",
+        "title": "Fix All Auto-fixable Lint Problems",
+        "category": "Rune"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "rune.fixAll", "when": "editorLangId == rune" }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node test/grammar.test.js",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^4.0.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
+  }
+}

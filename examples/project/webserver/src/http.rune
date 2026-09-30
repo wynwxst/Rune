@@ -159,7 +159,7 @@ pub fn readRequest(
             if length > BODY_LIMIT { return Err(RequestError::TooLarge) }
             if length > 0 {
                 var body = io::Bytes()
-                match source.inner().readExact(body, length) {
+                match source.inner().readExact(& var body, length) {
                     Ok(n) => request.body = body.toString(),
                     Err(e) => {},
                 }

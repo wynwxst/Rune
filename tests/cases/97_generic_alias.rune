@@ -1,0 +1,53 @@
+// EXPECT: 6
+// EXPECT: ab
+// EXPECT: seven 7
+// EXPECT: 5
+// EXPECT: point 4
+// EXPECT: vector 9
+//
+// A generic alias stands for a different type at every use: `Gen<i64>` is a
+// slice of integers and `Gen<String>` a slice of strings. It used to resolve
+// once and hand that first answer to everyone.
+import std::io
+import std::collections::vector
+
+type Gen<T> = [T]
+type Pair<A, B> = (A, B)
+type Plain = i64
+type Spot<T> = Point<T>
+type Table<T> = vector::Vector<T>
+
+struct Point<T> { x: T, y: T }
+
+fn total(values: Gen<i64>) -> i64 {
+    var t = 0
+    for v in values { t += v }
+    t
+}
+
+fn joined(words: Gen<String>) -> String {
+    var s = ""
+    for w in words { s += w }
+    s
+}
+
+fn swap(p: Pair<i64, String>) -> Pair<String, i64> { (p.1, p.0) }
+
+fn main() -> i64 {
+    let ns: [3:i64] = [1, 2, 3]
+    let ws: [2:String] = ["a", "b"]
+    io::println(total(ns).$str())
+    io::println(joined(ws))
+    let s = swap((7, "seven"))
+    io::println(s.0 + " " + s.1.$str())
+    let n: Plain = 5
+    io::println(n.$str())
+
+    // Built through the alias, as the type it stands for.
+    let p = Spot<i64> { x: 1, y: 3 }
+    io::println("point " + (p.x + p.y).$str())
+    var t = Table<i64>()
+    t.push(9)
+    io::println("vector " + t.at(0).or(0).$str())
+    0
+}

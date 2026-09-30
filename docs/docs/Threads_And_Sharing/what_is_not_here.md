@@ -2,7 +2,6 @@
 
 | Missing | Instead |
 | --- | --- |
-| `async` / `await` | a thread and a join, or a channel |
 | a closure as a thread entry | a top-level `fn` and an argument |
 | a bounded channel | `Channel` grows; `send` never blocks |
 | `select` over several channels | one channel, or a thread for each |
@@ -13,3 +12,5 @@
 > **Globals are not checked**
 >
 > That last row is the sharp edge worth knowing: `Send` and `Sync` check what *crosses*, and a `global var` crosses nothing — it is simply already there. Keep globals immutable in a program that starts threads.
+
+For several things in progress on *one* thread — waiting on each other rather than running at once — see **Tasks and futures**: `async fn`, `.await`, and `std::task`.

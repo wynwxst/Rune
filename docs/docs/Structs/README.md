@@ -12,3 +12,4 @@ A struct is a value type: assigning one copies it. Fields are private unless mar
 - [Destroying a value](destroying_a_value.md)
 - [Handing an owning value on](handing_an_owning_value_on.md)
 - [`@resource`: a field that has to be released](resource_a_field_that_has_to_be_released.md)
+- [One struct extending another](one_struct_extending_another.md)

@@ -1,0 +1,21 @@
+// EXPECT-ERROR: cannot be copied by the compiler
+//
+// A value that owns something is not copied field by field: the copy would
+// close the same descriptor twice. The type says what copying it means by
+// writing `clone`.
+import std::io
+
+struct Descriptor { @resource fd: i32 = -1 }
+
+extend Descriptor {
+    @safe("the descriptor is ours, and the flag stops a second close")
+    fn deinit(&var self) {
+        if self.fd >= 0 { self.fd = -1 }
+    }
+}
+
+fn main() -> i64 {
+    let one = Descriptor { fd: 7 }
+    let two = one.$clone()
+    0
+}

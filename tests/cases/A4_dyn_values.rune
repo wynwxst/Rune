@@ -1,0 +1,51 @@
+// EXPECT: string:hello
+// EXPECT: i64:42
+// EXPECT: bool:true
+// EXPECT: P:9
+// EXPECT: ptr:0
+// EXPECT: ptr:4096
+// EXPECT: cstr:true
+//
+// A `dyn Mark` holds whatever the mark is bound to, not only a class. What a
+// value type costs is a box; what the box has to get right is which of the
+// value and its address the implementation is expecting — and that is not
+// answered by "is the self parameter a pointer", because the type behind the
+// mark may itself be one.
+import std::io
+
+mark Tell { fn tell(&self) -> String }
+
+struct P { x: i64 }
+
+bind Tell to String  { fn tell(&self) -> String { "string:" + self } }
+bind Tell to i64     { fn tell(&self) -> String { "i64:" + self.$str() } }
+bind Tell to bool    { fn tell(&self) -> String { "bool:" + self.$str() } }
+bind Tell to P       { fn tell(&self) -> String { "P:" + self.x.$str() } }
+
+bind Tell to *var u8 {
+    @safe("the address is read, never the memory at it")
+    fn tell(&self) -> String { "ptr:" + unsafe { self as u64 }.$str() }
+}
+
+bind Tell to CString {
+    @safe("the address is read, never the memory at it")
+    fn tell(&self) -> String {
+        "cstr:" + (unsafe { (self as *var u8) as u64 } != 0).$str()
+    }
+}
+
+fn say(t: dyn Tell) -> String { t.tell() }
+
+@unsafe fn main() -> i64 {
+    println!("{}", say("hello"))
+    println!("{}", say(42))
+    println!("{}", say(true))
+    println!("{}", say(P { x: 9 }))
+    let nothing: *var u8 = 0 as *var u8
+    println!("{}", say(nothing))
+    let somewhere: *var u8 = 4096 as *var u8
+    println!("{}", say(somewhere))
+    let c: CString = "bytes"
+    println!("{}", say(c))
+    0
+}

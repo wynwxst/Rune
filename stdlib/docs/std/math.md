@@ -23,6 +23,41 @@ fn main() -> i64 {
 }
 ```
 
+## Decimal places
+
+`roundTo`, `truncateTo`, `floorTo` and `ceilTo` round to a number of decimal
+places, and `roundWith` takes a `Rounding` mode — including `HalfEven`, banker's
+rounding. They round the decimal that was *meant*: a scaled value within float
+error of a whole number (or of a half) is taken to be exactly that, so
+`truncateTo(0.29, 2)` is `0.29` rather than the `0.28` that cutting off
+`28.999999999999996` would give. A negative `places` rounds to tens, hundreds
+and so on.
+
+For money, count in whole units: `scaled` turns an amount into hundredths (or
+any `10^-places`), `unscaled` turns it back, and `splitDecimal` gives the whole
+part and the digits after the point, carrying when rounding says to.
+
+```rune
+import std::io
+import std::math
+import std::text
+
+fn main() -> i64 {
+    io::println(math::truncateTo(0.29, 2))                          // 0.29
+    io::println(math::roundTo(2.675, 2))                            // 2.68
+    io::println(math::roundTo(1234.0, -2))                          // 1200.0
+    io::println(math::ceilTo(0.1 + 0.2, 1))                         // 0.3
+    io::println(math::roundWith(2.25, 1, math::Rounding::HalfEven)) // 2.2
+    io::println(math::roundToStep(1.23, 0.05))                      // 1.25
+
+    let cents = math::scaled(103.4, 2) + math::scaled(0.29, 2)      // 10369
+    io::println(math::unscaled(cents, 2))                           // 103.69
+    let (dollars, rest) = math::splitDecimal(19.999, 2)             // (20, 0)
+    io::println("$" + dollars.$str() + "." + text::padStart(rest.$str(), 2, '0'))
+    0
+}
+```
+
 ## Integers
 
 ```rune

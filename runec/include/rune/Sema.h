@@ -15,6 +15,7 @@
 #define RUNE_SEMA_H
 
 #include "rune/AST.h"
+#include "rune/CxxInterop.h"
 #include "rune/Diagnostics.h"
 #include "rune/Driver.h"
 #include "rune/Type.h"
@@ -244,6 +245,13 @@ public:
   /// generator can call it directly.
   static FunctionDecl *userClone(Type *t);
 
+  /// What `extern "C++"` declarations are mangled and typed for. Set from the
+  /// target triple before `check`; the host's conventions otherwise.
+  void setCxxTarget(const CxxTarget &t) { Cxx = t; }
+  const CxxTarget &cxxTarget() const { return Cxx; }
+  /// True once an `extern "C++"` block has been seen: the program needs the
+  /// C++ runtime linked in.
+  bool usesCxx() const { return UsesCxx; }
 
 
 private:
@@ -258,6 +266,8 @@ private:
   DumpKind Dump;
   bool ZombieStdlib;
   SemaResult Result;
+  CxxTarget Cxx = cxxTargetFor("");
+  bool UsesCxx = false;
 
   std::vector<Module *> Modules;
   std::map<std::string, Module *> ModulesByName;
@@ -268,6 +278,9 @@ private:
   /// Nodes synthesised during checking (monomorphised clones, lifted
   /// closures); Sema owns them for the rest of the compilation.
   std::vector<std::unique_ptr<Decl>> Synthesised;
+  /// Names the next lifted closure; one number per closure, whatever else
+  /// was collected in between.
+  unsigned ClosureCounter = 0;
 
   //=== Scopes ===========================================================//
   std::vector<std::unique_ptr<Scope>> ScopeStorage;
@@ -321,6 +334,8 @@ private:
   /// The `As` mark, which `into` dispatches through.
   MarkDecl *AsDecl = nullptr;
   /// `Iterator`, which `for` drives, and `Sequence`, which hands one over.
+  /// `std::dictionary::Map`, which `[K:V]` is sugar for.
+  NominalDecl *MapDecl = nullptr;
   MarkDecl *IteratorDecl = nullptr;
   MarkDecl *SequenceDecl = nullptr;
   /// Instantiation chain, so a failure inside a generic can point back at the
@@ -465,6 +480,9 @@ private:
   /// range for diagnostics.
   std::vector<std::pair<std::string, SourceRange>> aliasesOf(Decl *d);
   void registerMethods(NominalDecl *nd);
+  /// Evaluates the variants' declared values: the tags, and a float-valued
+  /// enum's raw values.
+  void assignVariantValues(EnumDecl *e);
   /// Gives a `weak` field its Option type and checks that it refers to a class.
   void applyWeakField(FieldDecl *f);
   /// Finds `std::option::Option` and `std::result::Result` once every module
@@ -515,6 +533,35 @@ private:
   /// Reports `what` as unavailable on a `some` and returns true, or returns
   /// false when `t` is not one.
   bool rejectOpaqueUse(Type *t, SourceRange at, const std::string &what);
+  /// `Queue<String>::new(...)`: the arguments belong to the type, so the
+  /// type is instantiated and the method looked up on the instantiation.
+  /// Null when the path does not name one, leaving the ordinary lookup to it.
+  Symbol *lookupStaticOnInstantiation(DeclRefExpr *ref);
+  /// `.Red` / `::seconds(5)`: the member named on whatever type the context
+  /// is expecting. Null when there is no expected type, or it has no such
+  /// member.
+  /// Type expressions built while deciding whether `[X:Y]` is a map. They
+  /// are resolved, so something points at them; this owns them.
+  std::vector<TypeReprPtr> SpeculativeTypeReprs;
+  /// `struct Derived : Base` — puts the parent's fields (or variants) at the
+  /// front of the child's, once, before anything reads them.
+  void spliceInheritance(NominalDecl *nd);
+  /// The type an array length names, when it names one: `[String:i64]` is a
+  /// map, `[3:i64]` an array.
+  Type *typeWrittenAsSize(Expr *size);
+  /// `Map<K, V>`, the type `[K:V]` is sugar for.
+  Type *mapOf(Type *key, Type *value, SourceRange range);
+  /// The variant of `expected` called `name`, if it has one.
+  Symbol *variantOfExpected(const std::string &name, Type *expected);
+  /// True when a set of type-parameter bindings makes a call work — every
+  /// parameter answered, every argument convertible, the result convertible
+  /// to where it is going.
+  bool fitsCall(FunctionDecl *f, const std::vector<Type *> &formals,
+                const std::vector<Type *> &argTypes,
+                const std::map<std::string, Type *> &bindings, Type *expected);
+  Symbol *resolveInferredPath(DeclRefExpr *ref, Type *expected);
+  /// The message for a `.name` that could not be resolved.
+  Type *reportInferredPathFailure(DeclRefExpr *ref, Type *expected);
   NominalDecl *lookupNominal(const std::vector<std::string> &path,
                              SourceRange range, bool quiet = false);
   Type *typeOfNominal(NominalDecl *nd, const std::vector<TypeReprPtr> &args,
@@ -522,6 +569,12 @@ private:
 
   //=== Declarations =====================================================//
   void checkFunction(FunctionDecl *fn, Type *selfType, ClassDecl *selfClass);
+  /// Refuses the parameters an `async fn` cannot take: borrows that would
+  /// outlive the call. See the definition for the rule.
+  void checkAsyncSignature(FunctionDecl *fn);
+  /// A closure argument to a `@sendable` function: written at the call, and
+  /// capturing only `Send` values.
+  void checkSendableClosure(Expr *arg, const std::string &calleeName);
   void checkNominalBodies(NominalDecl *nd);
   /// Type-checks `field: T = <default>` initialisers, which are evaluated at
   /// each construction site rather than once.
@@ -534,6 +587,12 @@ private:
   MarkDecl *SyncDecl = nullptr;
   bool checkWhereClauses(const std::vector<WhereClause> &clauses,
                          SourceRange at, const std::string &owner);
+  /// Whether a method of an instantiated generic type is there for this
+  /// instantiation: its own `where` clauses, asked of the type's arguments.
+  /// `Vector<T>::at` is `where T: Clone`, so `Vector<Box<i64>>` has no `at`.
+  /// Quiet unless `report`, when the unmet bound is reported at `at`.
+  bool methodWhereHolds(FunctionDecl *fn, SourceRange at, bool report);
+  std::map<FunctionDecl *, bool> MethodWhereAnswers;
   void checkBind(BindDecl *b);
   void checkExtend(ExtendDecl *e);
   /// A mark requirement's type as the implementing type reads it: every
@@ -626,7 +685,36 @@ private:
                               const std::vector<Symbol> &candidates);
   Scope *scopeForModule(Module *m);
   std::string mangleFunction(const FunctionDecl *fn,
-                             const std::vector<Type *> &typeArgs) const;
+                             const std::vector<Type *> &typeArgs);
+  //=== extern "C++" =======================================================//
+  /// The Itanium symbol for an `extern "C++"` function, reporting anything in
+  /// its signature that has no C++ spelling.
+  std::string mangleCxx(const FunctionDecl *fn);
+  /// Binds a generic type's parameters to the arguments an instantiation was
+  /// made with, under every name they answer to — the type's own, and any an
+  /// `extend` block introduced for them.
+  static void bindTemplateGenerics(const NominalDecl *tmpl,
+                                   const std::vector<Type *> &args,
+                                   std::map<std::string, Type *> &out);
+  /// Folds an `extend` on a generic type into that type's declaration, so its
+  /// methods are instantiated with it. Returns false when the target is not a
+  /// generic template, leaving the ordinary path to handle it.
+  bool foldGenericExtend(ExtendDecl *e);
+  /// Resolves `class D : B` and checks what an `extern "C++"` type declares.
+  void resolveCxxType(NominalDecl *nd);
+  /// The base chain of a C++ class, nearest first, or empty.
+  static std::vector<NominalDecl *> cxxBasesOf(NominalDecl *nd);
+  /// True when a pointer to `from` may be handed to a C++ parameter of type
+  /// `to`: the same pointee, or a derived class where a base is wanted, and
+  /// a raw pointer where C++ wrote a reference.
+  bool cxxPointerConvertible(Type *from, Type *to);
+  /// Reports a C++ `class` used by value, which Rune never holds: only a
+  /// pointer or a borrow to one.
+  void rejectCxxClassByValue(Type *t, SourceRange where, const char *role);
+  /// A bare mark where a value's type was wanted. `dyn Mark` or a bound is
+  /// what was meant, and saying so here keeps the mistake from surfacing far
+  /// away, inside whatever generic was asked to hold it.
+  void rejectMarkByValue(Type *t, SourceRange where, const char *role);
   /// Reorders labelled arguments, fills defaults and checks each against its
   /// parameter type. `paramTypes` excludes `self`.
   bool matchCallArguments(CallExpr *c, const std::vector<Param> &params,
@@ -679,6 +767,12 @@ private:
   bool evalConstInt(const Expr *e, int64_t &out);
   /// Reports a mismatch unless one side is already an error type.
   void requireConvertible(Expr *e, Type *from, Type *to, const char *context);
+  /// A value that does not fit where it is going, but whose type says how to
+  /// get there. `bind Celsius into Fahrenheit` makes the conversion available
+  /// wherever the destination is written down — an argument, an annotated
+  /// binding, a field of a struct literal, a declared result — and this is
+  /// where the call is put in. True when it rewrote `slot`.
+  bool insertImplicitConversion(ExprPtr &slot, Type *from, Type *to);
   bool isLValue(const Expr *e) const;
   /// Emits "cannot assign to ..." with a related note at the binding site.
   bool requireMutable(Expr *e, const char *action);
@@ -690,6 +784,23 @@ private:
 
   FunctionDecl *lookupMethod(Type *receiver, const std::string &name,
                              NominalDecl **ownerOut = nullptr);
+  /// `look` or `touch` on `receiver`, when it has one with the shape a
+  /// stand-in needs: no arguments, and a borrow of something else as the
+  /// result. Null when the type is not a stand-in for anything.
+  FunctionDecl *pointeeAccessor(Type *receiver, bool wantMutable);
+  /// `h.field` where `h` is a `Handle`, a `Box`, an `Rc` — anything that
+  /// lends what it holds. Rewrites `m`'s base into the borrow and returns the
+  /// member's type, or null when the base is not a stand-in.
+  Type *reachThroughPointee(MemberExpr *m, Type *expected, bool forCall);
+  /// True when `e` is on the path from an assignment's left-hand side down to
+  /// its root binding — the places a write actually passes through, as
+  /// against an index or an argument evaluated along the way.
+  bool onWriteSpine(const Expr *e) const;
+  /// The left-hand side currently being checked, for `onWriteSpine`.
+  const Expr *WriteSpine = nullptr;
+  /// How many stand-ins deep the current member access has reached, so a
+  /// type that lends itself cannot loop.
+  unsigned PointeeDepth = 0;
   /// The implementation of `name` that `mark` supplies for `receiver`,
   /// searching the mark's super-marks too. Null when the type is not bound to
   /// it, or the mark has no such member.
@@ -714,6 +825,47 @@ private:
   /// is what an overload may never replace.
   bool builtinOperatorApplies(const std::string &op, Type *lhs, Type *rhs);
   bool typeConformsTo(Type *t, MarkDecl *mark);
+  //=== Automatic marks ===================================================//
+  /// Validates `@auto` on a mark and records it.
+  void checkAutoMark(MarkDecl *mk);
+  /// The automatic marks `@never(...)` refuses for this type.
+  const std::vector<MarkDecl *> &refusedMarks(NominalDecl *nd);
+  /// Whether `t` has the automatic mark `mark`, structurally.
+  bool typeHasAutoMark(Type *t, MarkDecl *mark, std::set<Type *> &seen);
+  /// A conditional `bind` of an automatic mark to `t`'s template whose
+  /// bounds hold, asked with the same `seen` so a cycle assumes the best.
+  bool conditionalAutoBindHolds(Type *t, MarkDecl *mark,
+                                std::set<Type *> &seen);
+  /// Every bind written against a generic template, and the module it was
+  /// written in, as instantiation found them.
+  std::map<NominalDecl *, std::vector<std::pair<Module *, BindDecl *>>>
+      TemplateBinds;
+  /// Every module's binds are registered: a conditional bind turned down
+  /// from here on is turned down for good.
+  bool ShapesDone = false;
+  /// `drainPendingInstantiations` is running; a nested call leaves the
+  /// queue to it.
+  bool DrainingInstantiations = false;
+  /// Which binds have been applied to which types, so none is applied twice.
+  std::set<std::pair<Type *, BindDecl *>> RegisteredBinds;
+  struct DeferredConditionalBind {
+    NominalDecl *Inst;
+    Module *M;
+    BindDecl *B;
+    std::map<std::string, Type *> Args;
+  };
+  std::vector<DeferredConditionalBind> DeferredConditionalBinds;
+  void resolveSuppliedSignatures(NominalDecl *inst);
+  Type *indexResult(IndexExpr *i, FunctionDecl *impl);
+  unsigned ForItemCounter = 0;
+  /// Which part of `t` is the reason it does not have `mark`.
+  std::string whyNotAutoMark(Type *t, MarkDecl *mark);
+  //=== Copying ===========================================================//
+  /// The part of `t` whose `deinit` a memberwise copy would duplicate.
+  NominalDecl *cloneDuplicatesObligation(Type *t, std::set<Type *> &seen);
+  /// Reports `value.$clone()` on a type the compiler must not copy.
+  void checkClonable(Type *t, SourceRange at);
+  std::map<NominalDecl *, std::vector<MarkDecl *>> RefusedMarks;
 
   //=== Specialisation ===================================================//
   // More than one `bind` can apply to one type: a general

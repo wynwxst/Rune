@@ -1,0 +1,181 @@
+// std::arch — what the machine being built for is like.
+//
+// Everything here is decided while compiling, from the target triple. A type
+// alias *is* the type it names, and a number is in the object file as that
+// number — `arch::bits` is `64` there, not something worked out at startup.
+// (The three that are text — `name`, `os`, `family` — are strings, so they
+// are made once when the program starts, like any other.)
+//
+//     import std::arch
+//
+//     let n: arch::size = 0               // the machine word, signed
+//     if arch::bits == 64 { ... }         // folded away on either target
+//
+// A cross build answers for the *target*, never for the machine doing the
+// compiling — which is the whole point of asking here rather than at run
+// time.
+//
+// These are the same answers `@Config` gives, in a form you can compute with.
+// Reach for `@Config` when a declaration should not exist at all on a target,
+// and for these when a value or a type depends on it.
+
+//===--------------------------------------------------------------------===//
+// The machine word
+//===--------------------------------------------------------------------===//
+
+/// The signed integer the size of a pointer: `i64` on a 64-bit target, `i32`
+/// on a 32-bit one. What an offset, a difference or an index naturally is.
+@Config(pointer_width == "64")
+pub type size = i64
+@Config(pointer_width == "32")
+pub type size = i32
+@Config(pointer_width != "64" && pointer_width != "32")
+pub type size = i64
+
+/// The unsigned integer the size of a pointer. What a length or a count
+/// naturally is, and what `mem::size_of` hands back.
+@Config(pointer_width == "64")
+pub type usize = u64
+@Config(pointer_width == "32")
+pub type usize = u32
+@Config(pointer_width != "64" && pointer_width != "32")
+pub type usize = u64
+
+/// The float the size of a word: `f64` on a 64-bit target, `f32` on a 32-bit
+/// one. This is a *size* rule, not a speed one — a 32-bit target may well
+/// compute in `f64`, and should say so by writing `f64`.
+@Config(pointer_width == "64")
+pub type float = f64
+@Config(pointer_width == "32")
+pub type float = f32
+@Config(pointer_width != "64" && pointer_width != "32")
+pub type float = f64
+
+//===--------------------------------------------------------------------===//
+// Sizes
+//===--------------------------------------------------------------------===//
+
+/// How many bits a pointer has.
+@Config(pointer_width == "64")
+pub let bits: i64 = 64
+@Config(pointer_width == "32")
+pub let bits: i64 = 32
+@Config(pointer_width != "64" && pointer_width != "32")
+pub let bits: i64 = 64
+
+/// How many bytes a pointer has — `bits / 8`, written out.
+@Config(pointer_width == "64")
+pub let pointerSize: i64 = 8
+@Config(pointer_width == "32")
+pub let pointerSize: i64 = 4
+@Config(pointer_width != "64" && pointer_width != "32")
+pub let pointerSize: i64 = 8
+
+/// True on a 64-bit target.
+@Config(pointer_width == "64")
+pub let is64Bit: bool = true
+@Config(pointer_width != "64")
+pub let is64Bit: bool = false
+
+/// True on a 32-bit target.
+@Config(pointer_width == "32")
+pub let is32Bit: bool = true
+@Config(pointer_width != "32")
+pub let is32Bit: bool = false
+
+//===--------------------------------------------------------------------===//
+// Byte order
+//===--------------------------------------------------------------------===//
+
+/// `little` or `big`.
+@Config(endian == "little")
+pub let endian: String = "little"
+@Config(endian == "big")
+pub let endian: String = "big"
+
+/// True when the least significant byte comes first.
+@Config(endian == "little")
+pub let littleEndian: bool = true
+@Config(endian != "little")
+pub let littleEndian: bool = false
+
+/// True when the most significant byte comes first.
+@Config(endian == "big")
+pub let bigEndian: bool = true
+@Config(endian != "big")
+pub let bigEndian: bool = false
+
+//===--------------------------------------------------------------------===//
+// Which machine, and which system
+//===--------------------------------------------------------------------===//
+
+/// The architecture: `aarch64`, `x86_64`, `x86`, `arm`, `riscv32`,
+/// `riscv64`, `wasm32`, `wasm64`, `powerpc64`, or `unknown`.
+@Config(arch == "aarch64")
+pub let name: String = "aarch64"
+@Config(arch == "x86_64")
+pub let name: String = "x86_64"
+@Config(arch == "x86")
+pub let name: String = "x86"
+@Config(arch == "arm")
+pub let name: String = "arm"
+@Config(arch == "riscv32")
+pub let name: String = "riscv32"
+@Config(arch == "riscv64")
+pub let name: String = "riscv64"
+@Config(arch == "wasm32")
+pub let name: String = "wasm32"
+@Config(arch == "wasm64")
+pub let name: String = "wasm64"
+@Config(arch == "powerpc64")
+pub let name: String = "powerpc64"
+@Config(arch != "aarch64" && arch != "x86_64" && arch != "x86" &&
+        arch != "arm" && arch != "riscv32" && arch != "riscv64" &&
+        arch != "wasm32" && arch != "wasm64" && arch != "powerpc64")
+pub let name: String = "unknown"
+
+/// The operating system: `macos`, `windows`, `linux`, `ios`, `android`,
+/// `freebsd`, `openbsd`, `netbsd`, `solaris`, `wasi`, or `unknown`.
+@Config(os == "macos")
+pub let os: String = "macos"
+@Config(os == "windows")
+pub let os: String = "windows"
+@Config(os == "linux")
+pub let os: String = "linux"
+@Config(os == "ios")
+pub let os: String = "ios"
+@Config(os == "android")
+pub let os: String = "android"
+@Config(os == "freebsd")
+pub let os: String = "freebsd"
+@Config(os == "openbsd")
+pub let os: String = "openbsd"
+@Config(os == "netbsd")
+pub let os: String = "netbsd"
+@Config(os == "solaris")
+pub let os: String = "solaris"
+@Config(os == "wasi")
+pub let os: String = "wasi"
+@Config(os != "macos" && os != "windows" && os != "linux" && os != "ios" &&
+        os != "android" && os != "freebsd" && os != "openbsd" &&
+        os != "netbsd" && os != "solaris" && os != "wasi")
+pub let os: String = "unknown"
+
+/// The family the system belongs to: `unix`, `windows` or `wasm`.
+@Config(family == "unix")
+pub let family: String = "unix"
+@Config(family == "windows")
+pub let family: String = "windows"
+@Config(family == "wasm")
+pub let family: String = "wasm"
+@Config(family != "unix" && family != "windows" && family != "wasm")
+pub let family: String = "unknown"
+
+/// The whole target triple, as LLVM normalised it —
+/// `arm64-apple-macosx15.0.0`, `x86_64-w64-windows-gnu`.
+///
+/// The one thing about a target that is not a fixed list, so it is the
+/// compiler's own answer rather than a `@Config` branch. It costs nothing at
+/// run time: the string is in the object file.
+@intrinsic("target_triple")
+pub fn triple() -> String

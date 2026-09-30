@@ -1,0 +1,1498 @@
+// Everything the tools know beyond one file: where imports lead, what a
+// package's manifest says, and what type an expression has.
+//
+// The type inference here is deliberately shallow. It follows what an
+// editor needs most — `let` bindings, constructor calls, field and method
+// chains, the standard library's generics — and answers "don't know" for
+// the rest rather than guessing. The compiler remains the authority: this
+// only has to be right often enough to offer the members of a value.
+
+import std::io
+import std::env
+import std::process
+import std::collections::vector
+import std::dictionary
+import runetools::syntax
+import runetools::index
+
+//===--------------------------------------------------------------------===//
+// Paths
+//===--------------------------------------------------------------------===//
+
+/// The directory part of `path`, without its trailing separator.
+pub fn dirOf(path: &String) -> String {
+    var i = path.$length() - 1
+    while i >= 0 {
+        let b = path.$byteAt(i)
+        if b == 47 || b == 92 {
+            if i == 0 { return "/" }
+            return path.$substring(0, i)
+        }
+        i -= 1
+    }
+    "."
+}
+
+/// The last component of `path`.
+pub fn fileOf(path: &String) -> String {
+    var i = path.$length() - 1
+    while i >= 0 {
+        let b = path.$byteAt(i)
+        if b == 47 || b == 92 { return path.$substring(i + 1, path.$length()) }
+        i -= 1
+    }
+    path.$clone()
+}
+
+/// `a/b`, with exactly one separator between them.
+pub fn join(a: &String, b: &String) -> String {
+    if a.$isEmpty() { return b.$clone() }
+    let last = a.$byteAt(a.$length() - 1)
+    if last == 47 || last == 92 { return a + b }
+    a + "/" + b
+}
+
+/// `path` with `.` and `..` components removed, where that can be done
+/// without looking at the file system.
+pub fn normalize(path: &String) -> String {
+    var parts = vector::Vector<String>()
+    var from = 0
+    var i = 0
+    let n = path.$length()
+    while i <= n {
+        if i == n || path.$byteAt(i) == 47 || path.$byteAt(i) == 92 {
+            let part = path.$substring(from, i)
+            if part == ".." && parts.length() > 0 && parts.look(parts.length() - 1) != ".." &&
+                    !parts.look(parts.length() - 1).$isEmpty() {
+                parts.pop()
+            } elif part != "." && !(part.$isEmpty() && parts.length() > 0) {
+                parts.push(part)
+            }
+            from = i + 1
+        }
+        i += 1
+    }
+    var out = ""
+    var k = 0
+    while k < parts.length() {
+        if k > 0 { out += "/" }
+        out += parts.look(k)
+        k += 1
+    }
+    if out.$isEmpty() && n > 0 && path.$byteAt(0) == 47 { return "/" }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Manifests
+//===--------------------------------------------------------------------===//
+
+/// What the tools read from a `Rune.toml`: the package's name and where its
+/// path dependencies are, and its `[lint]` table.
+pub class Manifest {
+    pub root: String
+    pub name: String
+    /// Dependency name to its directory.
+    pub deps: dictionary::Map<String, String>
+    pub lintAllow: vector::Vector<String>
+    pub lintWarn: vector::Vector<String>
+    pub maxLineLength: i64
+
+    fn init(self) {
+        self.root = ""
+        self.name = ""
+        self.deps = dictionary::Map<String, String>()
+        self.lintAllow = vector::Vector<String>()
+        self.lintWarn = vector::Vector<String>()
+        self.maxLineLength = 0
+    }
+}
+
+/// The strings in a TOML array written on one line: `["a", "b"]`.
+fn stringList(value: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var i = 0
+    let n = value.$length()
+    while i < n {
+        if value.$byteAt(i) == 34 {
+            var e = i + 1
+            while e < n && value.$byteAt(e) != 34 { e += 1 }
+            out.push(value.$substring(i + 1, e))
+            i = e + 1
+            continue
+        }
+        i += 1
+    }
+    out
+}
+
+/// The value of `key = "..."` inside an inline table, or "".
+fn inlineString(table: &String, key: &String) -> String {
+    var at = table.$find(key)
+    while at >= 0 {
+        var i = at + key.$length()
+        while i < table.$length() && table.$byteAt(i) == 32 { i += 1 }
+        if i < table.$length() && table.$byteAt(i) == 61 {
+            i += 1
+            while i < table.$length() && table.$byteAt(i) == 32 { i += 1 }
+            if i < table.$length() && table.$byteAt(i) == 34 {
+                var e = i + 1
+                while e < table.$length() && table.$byteAt(e) != 34 { e += 1 }
+                return table.$substring(i + 1, e)
+            }
+        }
+        let rest = table.$substring(at + 1, table.$length()).$find(key)
+        at = if rest < 0 { -1 } else { at + 1 + rest }
+    }
+    ""
+}
+
+/// Reads the parts of a manifest the tools use. Enough TOML for what
+/// `rune new` writes; anything else is skipped rather than refused.
+pub fn readManifest(root: String, text: &String) -> Manifest {
+    var m = Manifest()
+    m.root = root
+    var section = ""
+    for raw in linesOf(text) {
+        let line = syntax::collapse(raw)
+        if line.$isEmpty() || line.$byteAt(0) == 35 { continue }
+        if line.$byteAt(0) == 91 {
+            section = line.$substring(1, line.$length() - 1)
+            continue
+        }
+        let eq = line.$find("=")
+        if eq < 0 { continue }
+        let key = syntax::collapse(line.$substring(0, eq))
+        let value = syntax::collapse(line.$substring(eq + 1, line.$length()))
+        if section == "package" && key == "name" {
+            m.name = stringList(value).at(0) ?? ""
+        } elif section == "dependencies" {
+            let p = inlineString(value, "path")
+            if !p.$isEmpty() {
+                let dir = if p.$byteAt(0) == 47 { p } else { normalize(join(m.root, p)) }
+                m.deps.put(key, dir)
+            }
+        } elif section == "lint" {
+            if key == "allow" { m.lintAllow = stringList(value) }
+            elif key == "warn" { m.lintWarn = stringList(value) }
+            elif key == "max-line-length" { m.maxLineLength = value.$toInt() ?? 0 }
+        }
+    }
+    m
+}
+
+//===--------------------------------------------------------------------===//
+// Types, as the inference sees them
+//===--------------------------------------------------------------------===//
+
+/// A type as written, and the module it was written in — which is where the
+/// names in it mean something. `module` is -1 for a builtin.
+pub class TypeRef {
+    pub text: String
+    pub module: i64
+
+    fn init(self, text: String, module: i64) {
+        self.text = text
+        self.module = module
+    }
+
+    pub fn known(&self) -> bool { !self.text.$isEmpty() }
+    pub fn name(&self) -> String { index::baseName(self.text) }
+}
+
+pub fn unknownType() -> TypeRef { TypeRef("", -1) }
+
+/// A member of a type, found somewhere in the loaded modules. `typeText` has
+/// the receiver's type arguments put in for the type's parameters.
+pub class Member {
+    pub module: i64
+    pub symbol: i64
+    pub typeText: String
+
+    fn init(self, module: i64, symbol: i64, typeText: String) {
+        self.module = module
+        self.symbol = symbol
+        self.typeText = typeText
+    }
+}
+
+/// What a name at some position refers to.
+pub class Resolved {
+    /// A declaration: its module and symbol index.
+    pub module: i64
+    pub symbol: i64
+    /// A local: its index in the function's bindings.
+    pub binding: i64
+    /// A module named by an import.
+    pub importedModule: i64
+    pub importPath: String
+    /// The type of the thing named, when it has one and it is known.
+    pub typeRef: TypeRef
+
+    fn init(self) {
+        self.module = -1
+        self.symbol = -1
+        self.binding = -1
+        self.importedModule = -1
+        self.importPath = ""
+        self.typeRef = unknownType()
+    }
+
+    pub fn found(&self) -> bool {
+        self.symbol >= 0 || self.binding >= 0 || self.importedModule >= 0 || !self.importPath.$isEmpty()
+    }
+}
+
+/// Puts `values` in for the names in `names` wherever they appear as whole
+/// words in `text`: `T?` with T = Token is `Token?`.
+pub fn substitute(text: &String, names: &vector::Vector<String>, values: &vector::Vector<String>) -> String {
+    if names.isEmpty() || values.isEmpty() { return text.$clone() }
+    var out = ""
+    var i = 0
+    let n = text.$length()
+    while i < n {
+        let b = text.$byteAt(i) as i64
+        if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 {
+            var e = i
+            while e < n {
+                let c = text.$byteAt(e) as i64
+                if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || (c >= 48 &&
+                        c <= 57) { e += 1 } else { break }
+            }
+            let word = text.$substring(i, e)
+            var replaced = false
+            var k = 0
+            while k < names.length() && k < values.length() {
+                if names.look(k) == word && !(i >= 2 && text.$byteAt(i - 1) == 58) {
+                    out += values.look(k)
+                    replaced = true
+                    break
+                }
+                k += 1
+            }
+            if !replaced { out += word }
+            i = e
+            continue
+        }
+        out += text.$substring(i, i + 1)
+        i += 1
+    }
+    out
+}
+
+/// The type the compiler gives the intrinsic `.$name(...)` on `receiver`.
+pub fn intrinsicType(receiver: &String, name: &String) -> String {
+    match name {
+        "length" => "i64", "len" => "i64", "charCount" => "i64", "find" => "i64",
+        "isEmpty" => "bool", "at" => "Character", "byteAt" => "u8",
+        "substring" => "String", "repeat" => "String", "str" => "String",
+        "toInt" => "i64?", "toFloat" => "f64?", "cstr" => "CString", "hash" => "u64",
+        "clone" => receiver.$clone(),
+        "checkedAdd" => receiver + "?", "checkedSub" => receiver + "?", "checkedMul" => receiver + "?",
+        _ => receiver.$clone(),
+    }
+}
+
+/// The intrinsics a value of type `name` answers to, for completion.
+pub fn intrinsicsFor(name: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    if name == "String" {
+        for m in ["length", "charCount", "isEmpty", "at", "byteAt", "substring", "find",
+                  "repeat", "toInt", "toFloat", "cstr", "hash"] { out.push(m) }
+    } elif name == "[]" {
+        out.push("length")
+        out.push("isEmpty")
+    } elif name == "i8" || name == "i16" || name == "i32" || name == "i64" || name == "isize" ||
+            name == "u8" || name == "u16" || name == "u32" || name == "u64" || name == "usize" {
+        for m in ["wrappingAdd", "wrappingSub", "wrappingMul", "saturatingAdd",
+                  "saturatingSub", "saturatingMul", "checkedAdd", "checkedSub", "checkedMul"] { out.push(m) }
+    }
+    if name == "String" || syntax::isBuiltinType(name) || name == "bool" { out.push("str") }
+    out.push("clone")
+    out
+}
+
+/// The signature an intrinsic shows in completion.
+pub fn intrinsicDetail(receiver: &String, name: &String) -> String {
+    let params = match name {
+        "at" => "index: i64", "byteAt" => "index: i64", "substring" => "from: i64, upto: i64",
+        "find" => "needle: &String", "repeat" => "times: i64",
+        "wrappingAdd" => "other: Self", "wrappingSub" => "other: Self", "wrappingMul" => "other: Self",
+        "saturatingAdd" => "other: Self", "saturatingSub" => "other: Self", "saturatingMul" => "other: Self",
+        "checkedAdd" => "other: Self", "checkedSub" => "other: Self", "checkedMul" => "other: Self",
+        _ => "",
+    }
+    "fn $" + name + "(" + params + ") -> " + intrinsicType(receiver, name)
+}
+
+//===--------------------------------------------------------------------===//
+// The project
+//===--------------------------------------------------------------------===//
+
+/// Every file the tools have read, and what they know about each.
+pub class Project {
+    /// The directory holding `std/`.
+    pub stdlib: String
+    pub modules: vector::Vector<index::Index>
+    byPath: dictionary::Map<String, i64>
+    /// Text the editor has that the disk does not, by path.
+    overlays: dictionary::Map<String, String>
+    /// Manifests by package root; "" caches a directory with none.
+    manifests: dictionary::Map<String, i64>
+    pub manifestList: vector::Vector<Manifest>
+    /// Where each module's imports lead, by module: `-1` for one that could
+    /// not be found. Filled by `loadImports`.
+    importTargets: vector::Vector<vector::Vector<i64>>
+    /// Per module, per import: 1 when it names an item inside the target
+    /// module (`import a::b::{f}`) rather than the module itself.
+    importItems: vector::Vector<vector::Vector<i64>>
+    prelude: vector::Vector<i64>
+
+    fn init(self, stdlib: String) {
+        self.stdlib = stdlib
+        self.modules = vector::Vector<index::Index>()
+        self.byPath = dictionary::Map<String, i64>()
+        self.overlays = dictionary::Map<String, String>()
+        self.manifests = dictionary::Map<String, i64>()
+        self.manifestList = vector::Vector<Manifest>()
+        self.importTargets = vector::Vector<vector::Vector<i64>>()
+        self.importItems = vector::Vector<vector::Vector<i64>>()
+        self.prelude = vector::Vector<i64>()
+    }
+
+    pub fn module(&self, id: i64) -> &index::Index from self { self.modules.look(id) }
+
+    pub fn moduleCount(&self) -> i64 { self.modules.length() }
+
+    /// The id of an already loaded module, or -1.
+    pub fn idOf(&self, path: &String) -> i64 { self.byPath.atOr(path, -1) }
+
+    /// Makes `text` what `path` holds, as far as the tools are concerned,
+    /// until `dropOverlay`. Re-reads the module if it is already loaded.
+    pub fn setOverlay(&var self, path: String, text: String) {
+        self.overlays.put(path.$clone(), text)
+        let id = self.idOf(path)
+        if id >= 0 { self.reindex(id) }
+    }
+
+    /// Goes back to the disk for `path`.
+    pub fn dropOverlay(&var self, path: &String) {
+        self.overlays.remove(path)
+        let id = self.idOf(path)
+        if id >= 0 { self.reindex(id) }
+    }
+
+    /// Re-reads module `id` from its overlay or the disk.
+    pub fn reindex(&var self, id: i64) {
+        let path = self.modules.look(id).path.$clone()
+        let text = self.readSource(path)
+        self.modules.replace(id, index::build(path, syntax::lex(text)))
+        self.importTargets.replace(id, vector::Vector<i64>())
+        self.importItems.replace(id, vector::Vector<i64>())
+    }
+
+    /// The editor's text for `path`, or the file's.
+    pub fn readSource(&self, path: &String) -> String {
+        if self.overlays.peek(path) is Some(text) { return text.$clone() }
+        match io::readToString(path) {
+            Ok(text) => text,
+            Err(_e) => "",
+        }
+    }
+
+    /// The module read from `path`, loading it the first time. -1 when the
+    /// file is neither open nor on disk.
+    pub fn load(&var self, path: &String) -> i64 {
+        let known = self.idOf(path)
+        if known >= 0 { return known }
+        if !self.overlays.holds(path) && !io::exists(path) { return -1 }
+        let text = self.readSource(path)
+        let id = self.modules.length()
+        self.modules.push(index::build(path.$clone(), syntax::lex(text)))
+        self.importTargets.push(vector::Vector<i64>())
+        self.importItems.push(vector::Vector<i64>())
+        self.byPath.put(path.$clone(), id)
+        id
+    }
+
+    /// Loads module `id`'s imports, and theirs, `depth` levels down; and the
+    /// prelude every module sees.
+    pub fn loadImports(&var self, id: i64, depth: i64) {
+        if self.prelude.isEmpty() && !self.stdlib.$isEmpty() {
+            for name in ["option", "result"] {
+                let p = join(join(self.stdlib, "std"), name + ".rune")
+                let m = self.load(p)
+                if m >= 0 { self.prelude.push(m) }
+            }
+        }
+        if id < 0 || id >= self.modules.length() { return }
+        var targets = vector::Vector<i64>()
+        var items = vector::Vector<i64>()
+        let from = self.modules.look(id).path.$clone()
+        var paths = vector::Vector<String>()
+        var itemFlags = vector::Vector<i64>()
+        var segs = vector::Vector<vector::Vector<String>>()
+        for imp in self.modules.look(id).imports { segs.push(imp.segments.$clone()) }
+        for sg in segs {
+            var path = self.resolveImport(from, sg)
+            var item = 0
+            // Not a module: perhaps an item inside one, `import a::b::{f}`.
+            if path.$isEmpty() && sg.length() > 1 {
+                var parent = sg.$clone()
+                parent.pop()
+                path = self.resolveImport(from, parent)
+                if !path.$isEmpty() { item = 1 }
+            }
+            paths.push(path)
+            itemFlags.push(item)
+        }
+        for p in paths {
+            let m = if p.$isEmpty() { -1 } else { self.load(p) }
+            targets.push(m)
+        }
+        for f in itemFlags { items.push(f) }
+        self.importTargets.replace(id, targets.$clone())
+        self.importItems.replace(id, items)
+        if depth > 0 {
+            for m in targets {
+                if m >= 0 && self.importTargets.look(m).length() != self.modules.look(m).imports.length() {
+                    self.loadImports(m, depth - 1)
+                }
+            }
+        }
+    }
+
+    /// Whether module `id`'s import number `i` names an item, not a module.
+    pub fn importIsItem(&self, id: i64, i: i64) -> bool {
+        if id < 0 || id >= self.importItems.length() { return false }
+        let ts = self.importItems.look(id)
+        i >= 0 && i < ts.length() && ts.get(i) == 1
+    }
+
+    /// Where module `id`'s import number `i` leads, or -1.
+    pub fn importTarget(&self, id: i64, i: i64) -> i64 {
+        if id < 0 || id >= self.importTargets.length() { return -1 }
+        let ts = self.importTargets.look(id)
+        if i < 0 || i >= ts.length() { return -1 }
+        ts.get(i)
+    }
+
+    /// The manifest of the package holding `path`, or -1 when it is in none.
+    pub fn manifestFor(&var self, path: &String) -> i64 {
+        var dir = dirOf(path)
+        var steps = 0
+        var tried = vector::Vector<String>()
+        while steps < 40 {
+            if self.manifests.holds(dir) {
+                let m = self.manifests.atOr(dir, -1)
+                for t in tried { self.manifests.put(t.$clone(), m) }
+                return m
+            }
+            tried.push(dir.$clone())
+            let toml = join(dir, "Rune.toml")
+            if io::exists(toml) {
+                let text = self.readSource(toml)
+                let id = self.manifestList.length()
+                self.manifestList.push(readManifest(dir.$clone(), text))
+                for t in tried { self.manifests.put(t.$clone(), id) }
+                return id
+            }
+            let up = dirOf(dir)
+            if up == dir || up.$isEmpty() || up == "." { break }
+            dir = up
+            steps += 1
+        }
+        for t in tried { self.manifests.put(t.$clone(), -1) }
+        -1
+    }
+
+    pub fn manifest(&self, id: i64) -> &Manifest from self { self.manifestList.look(id) }
+
+    /// Forgets every manifest read, so the next question reads them again.
+    pub fn forgetManifests(&var self) {
+        self.manifests = dictionary::Map<String, i64>()
+        self.manifestList = vector::Vector<Manifest>()
+    }
+
+    /// The file `import a::b::c` in the file at `from` means, or "".
+    pub fn resolveImport(&var self, from: &String, segments: &vector::Vector<String>) -> String {
+        if segments.isEmpty() { return "" }
+        let first = segments.get(0)
+        var rest = ""
+        var k = 1
+        while k < segments.length() {
+            if !rest.$isEmpty() { rest += "/" }
+            rest += segments.look(k)
+            k += 1
+        }
+        if first == "std" {
+            if rest.$isEmpty() || self.stdlib.$isEmpty() { return "" }
+            let p = join(join(self.stdlib, "std"), rest + ".rune")
+            return if io::exists(p) || self.overlays.holds(p) { p } else { "" }
+        }
+        let mid = self.manifestFor(from)
+        if mid >= 0 {
+            let root = self.manifest(mid).root.$clone()
+            let name = self.manifest(mid).name.$clone()
+            if first == name {
+                let found = packageModule(root, name, rest)
+                if !found.$isEmpty() { return found }
+            }
+            if self.manifest(mid).deps.peek(first) is Some(dep) {
+                let depDir = dep.$clone()
+                let depManifest = self.manifestFor(join(depDir, "Rune.toml"))
+                let depName = if depManifest >= 0 { self.manifest(depManifest).name.$clone() } else { first.$clone() }
+                let found = packageModule(depDir, depName, rest)
+                if !found.$isEmpty() { return found }
+            }
+        }
+        // Files built together outside a package: `runec --module tools a.rune
+        // b.rune` makes `b.rune` the module `tools::b`, wherever it is. Look
+        // beside the importing file and in a folder named after the root.
+        let dir = dirOf(from)
+        var candidates = vector::Vector<String>()
+        if !rest.$isEmpty() {
+            candidates.push(join(dir, rest + ".rune"))
+            candidates.push(join(join(dir, first), rest + ".rune"))
+            candidates.push(join(join(dirOf(dir), first), rest + ".rune"))
+        } else {
+            candidates.push(join(dir, first + ".rune"))
+        }
+        for c in candidates {
+            if io::exists(c) || self.overlays.holds(c) { return normalize(c) }
+        }
+        ""
+    }
+
+    //=== Finding declarations ===========================================//
+
+    /// The modules whose names module `id` can use unqualified: itself and
+    /// the prelude.
+    fn scopeModules(&self, id: i64) -> vector::Vector<i64> {
+        var out = vector::Vector<i64>()
+        out.push(id)
+        for p in self.prelude { if p != id { out.push(p) } }
+        out
+    }
+
+    /// The type named `name` as seen from module `from`, as (module, symbol);
+    /// `name` may be qualified: `vector::Vector`.
+    pub fn findType(&self, from: i64, text: &String) -> Member {
+        let name = index::baseName(text)
+        if name.$isEmpty() { return Member(-1, -1, "") }
+        // A qualified name goes through that import.
+        var t = syntax::collapse(text)
+        while t.$length() > 0 && t.$byteAt(0) == 38 { t = syntax::collapse(t.$substring(1, t.$length())) }
+        if t.$length() > 4 && t.$substring(0, 4) == "var " { t = t.$substring(4, t.$length()) }
+        let lt = t.$find("<")
+        let head = if lt > 0 { t.$substring(0, lt) } else { t.$clone() }
+        let sep = head.$find("::")
+        if sep > 0 && from >= 0 {
+            let alias = head.$substring(0, sep)
+            let imp = self.module(from).importNamed(alias)
+            if imp >= 0 {
+                let m = self.importTarget(from, imp)
+                if m >= 0 {
+                    let s = self.module(m).findType(name)
+                    if s >= 0 { return Member(m, s, "") }
+                }
+            }
+        }
+        if from >= 0 {
+            for m in self.scopeModules(from) {
+                let s = self.module(m).findType(name)
+                if s >= 0 { return Member(m, s, "") }
+            }
+            let mod = self.module(from)
+            var i = 0
+            while i < mod.imports.length() {
+                let m = self.importTarget(from, i)
+                if m >= 0 {
+                    let s = self.module(m).findType(name)
+                    if s >= 0 { return Member(m, s, "") }
+                }
+                i += 1
+            }
+        }
+        var m = 0
+        while m < self.modules.length() {
+            let s = self.modules.look(m).findType(name)
+            if s >= 0 { return Member(m, s, "") }
+            m += 1
+        }
+        Member(-1, -1, "")
+    }
+
+    /// Every member of `t`: fields, methods, variants and associated types,
+    /// from its own declaration and every `extend` and `bind` loaded, then
+    /// its superclass's. A name is listed once — the nearest wins.
+    pub fn members(&self, t: &TypeRef) -> vector::Vector<Member> {
+        var out = vector::Vector<Member>()
+        var seen = dictionary::Map<String, i64>()
+        var current = t.text.$clone()
+        var currentModule = t.module
+        var hops = 0
+        while hops < 8 {
+            let name = index::baseName(current)
+            if name.$isEmpty() { break }
+            let decl = self.findType(currentModule, current)
+            var generics = vector::Vector<String>()
+            if decl.module >= 0 {
+                for g in self.module(decl.module).symbol(decl.symbol).generics { generics.push(g.$clone()) }
+            }
+            let args = index::typeArgs(current)
+            var m = 0
+            while m < self.modules.length() {
+                let mod = self.modules.look(m)
+                var i = 0
+                while i < mod.symbols.length() {
+                    let s = mod.symbols.look(i)
+                    if s.container == name && !seen.holds(s.name) && s.kind != "class" && s.kind != "struct" {
+                        var ty = substitute(s.typeText, generics, args)
+                        if ty == "Self" || ty == "&Self" { ty = current.$clone() }
+                        seen.put(s.name.$clone(), 1)
+                        out.push(Member(m, i, ty))
+                    }
+                    i += 1
+                }
+                m += 1
+            }
+            if decl.module < 0 { break }
+            let base = self.module(decl.module).symbol(decl.symbol).base.$clone()
+            if base.$isEmpty() { break }
+            current = base
+            currentModule = decl.module
+            hops += 1
+        }
+        out
+    }
+
+    /// The member of `t` called `name`, or one with module -1.
+    pub fn member(&self, t: &TypeRef, name: &String) -> Member {
+        for m in self.members(t) {
+            if self.module(m.module).symbol(m.symbol).name == name { return Member(m.module, m.symbol,
+                    m.typeText.$clone()) }
+        }
+        Member(-1, -1, "")
+    }
+
+    /// The top-level declaration `name` visible in module `from` without a
+    /// qualifier: its own, then the prelude's. (module, symbol).
+    pub fn findTopLevel(&self, from: i64, name: &String) -> Member {
+        for m in self.scopeModules(from) {
+            let mod = self.module(m)
+            var i = 0
+            while i < mod.symbols.length() {
+                let s = mod.symbols.look(i)
+                if s.name == name && s.container.$isEmpty() { return Member(m, i, s.typeText.$clone()) }
+                i += 1
+            }
+            // Variants of the prelude's enums are in scope bare: `Some`, `Ok`.
+            if m != from {
+                var j = 0
+                while j < mod.symbols.length() {
+                    let s = mod.symbols.look(j)
+                    if s.name == name && s.kind == "variant" { return Member(m, j, s.typeText.$clone()) }
+                    j += 1
+                }
+            }
+        }
+        // `import a::{f}` and `import a::*` put items in scope by name.
+        if from >= 0 {
+            let mod = self.module(from)
+            var i = mod.imports.length() - 1
+            while i >= 0 {
+                let imp = mod.imports.look(i)
+                let target = self.importTarget(from, i)
+                if target >= 0 {
+                    if imp.isGlob {
+                        let s = self.findIn(target, name)
+                        if s >= 0 && self.module(target).symbol(s).isPublic { return Member(target, s,
+                                self.module(target).symbol(s).typeText.$clone()) }
+                    } elif self.importIsItem(from, i) && imp.alias == name {
+                        let s = self.findIn(target, imp.segments.look(imp.segments.length() - 1))
+                        if s >= 0 { return Member(target, s, self.module(target).symbol(s).typeText.$clone()) }
+                    }
+                }
+                i -= 1
+            }
+        }
+        Member(-1, -1, "")
+    }
+
+    /// The top-level declaration `name` in module `m` itself, or -1.
+    pub fn findIn(&self, m: i64, name: &String) -> i64 {
+        if m < 0 { return -1 }
+        let mod = self.module(m)
+        var i = 0
+        while i < mod.symbols.length() {
+            let s = mod.symbols.look(i)
+            if s.name == name && s.container.$isEmpty() { return i }
+            i += 1
+        }
+        -1
+    }
+
+    //=== Types of expressions ===========================================//
+
+    /// The type of `self` inside function `fnSym` of module `m`.
+    pub fn selfType(&self, m: i64, fnSym: i64) -> TypeRef {
+        if fnSym < 0 { return unknownType() }
+        let s = self.module(m).symbol(fnSym)
+        if s.container.$isEmpty() { return unknownType() }
+        let decl = self.findType(m, s.container)
+        if decl.module >= 0 {
+            let d = self.module(decl.module).symbol(decl.symbol)
+            if d.generics.isEmpty() { return TypeRef(d.name.$clone(), decl.module) }
+            var text = d.name + "<"
+            var k = 0
+            while k < d.generics.length() {
+                if k > 0 { text += ", " }
+                text += d.generics.look(k)
+                k += 1
+            }
+            return TypeRef(text + ">", decl.module)
+        }
+        TypeRef(s.container.$clone(), m)
+    }
+
+    /// The type of binding `b` in function `fnSym` of module `m`.
+    pub fn bindingType(&self, m: i64, fnSym: i64, bs: &vector::Vector<index::Binding>, b: i64, depth: i64) -> TypeRef {
+        let bd = bs.look(b)
+        if bd.kind == "self" { return self.selfType(m, fnSym) }
+        if !bd.typeText.$isEmpty() { return TypeRef(bd.typeText.$clone(), m) }
+        if depth > 6 || bd.initFrom < 0 { return unknownType() }
+        let init = self.typeOf(m, fnSym, bs, bd.initFrom, bd.initTo, depth + 1)
+        if bd.kind == "for" {
+            // Iterating yields the element: `Vector<T>` and `[T]` give `T`,
+            // and a range gives integers.
+            if !init.known() { return unknownType() }
+            let name = init.name()
+            if name == "Range" { return TypeRef("i64", -1) }
+            if name == "Map" {
+                let args = index::typeArgs(init.text)
+                if args.length() == 2 { return TypeRef("(" + args.get(0) + ", " + args.get(1) + ")", init.module) }
+            }
+            if name == "String" { return TypeRef("Character", -1) }
+            let args = index::typeArgs(init.text)
+            if args.length() >= 1 { return TypeRef(args.get(0), init.module) }
+            // An iterator: whatever its `next` hands back.
+            let next = self.member(init, "next")
+            if next.module >= 0 {
+                let inner = index::typeArgs(next.typeText)
+                if inner.length() >= 1 { return TypeRef(inner.get(0), next.module) }
+            }
+            return unknownType()
+        }
+        init
+    }
+
+    /// The type of the expression in tokens `from..to` of module `m`, inside
+    /// function `fnSym` (-1 at the top level) whose bindings are `bs`.
+    pub fn typeOf(&self, m: i64, fnSym: i64, bs: &vector::Vector<index::Binding>,
+                  from: i64, upto: i64, depth: i64) -> TypeRef {
+        if depth > 12 || from > upto || m < 0 { return unknownType() }
+        let lx = self.module(m).lexed
+        var a = from
+        var b = upto
+        while a <= b && (lx.isNewline(a) || lx.isText(a, "&") || lx.isText(a, "var") ||
+                         lx.isText(a, "move") || lx.isText(a, "-") || lx.isText(a, "*")) { a += 1 }
+        while b >= a && (lx.isNewline(b) || lx.isText(b, ";") || lx.isText(b, ",")) { b -= 1 }
+        if a > b { return unknownType() }
+        if lx.isText(a, "!") { return TypeRef("bool", -1) }
+
+        // Binary operators outside brackets decide the type of the whole.
+        var depthNow = 0
+        var cmp = false
+        var arith = -1
+        var coalesce = -1
+        var asAt = -1
+        var range = false
+        var i = a
+        while i <= b {
+            let t = lx.at(i)
+            if t.kind == syntax::Kind::Punct {
+                let x = t.text.$clone()
+                if x == "(" || x == "[" || x == "{" { depthNow += 1 }
+                elif x == ")" || x == "]" || x == "}" { depthNow -= 1 }
+                elif depthNow == 0 {
+                    if x == "<" && i > a && lx.isIdent(i - 1) {
+                        // Generic arguments, not less-than.
+                        let close = lx.closingAngle(i)
+                        if close != i && (lx.isText(close + 1, "(") || lx.isText(close + 1, "::") ||
+                                          lx.isText(close + 1, "{") || close == b) {
+                            i = close + 1
+                            continue
+                        }
+                    }
+                    if x == "==" || x == "!=" || x == "<" || x == ">" || x == "<=" || x == ">=" ||
+                            x == "&&" || x == "||" { cmp = true }
+                    elif x == "??" && coalesce < 0 { coalesce = i }
+                    elif x == ".." || x == "..=" { range = true }
+                    elif (x == "+" || x == "-" || x == "*" || x == "/" || x == "%" || x == "<<" ||
+                          x == ">>" || x == "&" || x == "|" || x == "^") && arith < 0 && i > a { arith = i }
+                }
+            } elif t.kind == syntax::Kind::Keyword && depthNow == 0 {
+                if t.text == "is" { cmp = true }
+                elif t.text == "as" && asAt < 0 { asAt = i }
+            }
+            i += 1
+        }
+        if cmp { return TypeRef("bool", -1) }
+        if range { return TypeRef("Range", -1) }
+        if coalesce >= 0 {
+            let left = self.typeOf(m, fnSym, bs, a, coalesce - 1, depth + 1)
+            if left.known() && left.name() == "Option" {
+                let args = index::typeArgs(left.text)
+                if args.length() == 1 { return TypeRef(args.get(0), left.module) }
+            }
+            return self.typeOf(m, fnSym, bs, coalesce + 1, b, depth + 1)
+        }
+        if asAt >= 0 { return TypeRef(syntax::collapse(lx.span(asAt + 1, b)), m) }
+        if arith >= 0 {
+            let left = self.typeOf(m, fnSym, bs, a, arith - 1, depth + 1)
+            if left.known() { return left }
+            return self.typeOf(m, fnSym, bs, arith + 1, b, depth + 1)
+        }
+
+        // `if` and `match` have the type of their first branch.
+        if lx.isText(a, "if") || lx.isText(a, "unsafe") || lx.isText(a, "match") || lx.isText(a, "{") {
+            var open = a
+            while open <= b && !lx.isText(open, "{") { open += 1 }
+            if lx.isText(a, "if") || lx.isText(a, "match") {
+                // Skip the condition: the first `{` at bracket depth zero.
+                var d = 0
+                open = a + 1
+                while open <= b {
+                    if lx.isText(open, "(") || lx.isText(open, "[") { d += 1 }
+                    if lx.isText(open, ")") || lx.isText(open, "]") { d -= 1 }
+                    if d == 0 && lx.isText(open, "{") { break }
+                    open += 1
+                }
+            }
+            if open > b { return unknownType() }
+            let close = lx.closing(open)
+            if lx.isText(a, "match") {
+                var arrow = open + 1
+                var d = 0
+                while arrow < close {
+                    if lx.isText(arrow, "(") || lx.isText(arrow, "[") || lx.isText(arrow, "{") { d += 1 }
+                    if lx.isText(arrow, ")") || lx.isText(arrow, "]") || lx.isText(arrow, "}") { d -= 1 }
+                    if d == 0 && lx.isText(arrow, "=>") { break }
+                    arrow += 1
+                }
+                if arrow >= close { return unknownType() }
+                let end = armEnd(lx, arrow + 1, close)
+                return self.typeOf(m, fnSym, bs, arrow + 1, end, depth + 1)
+            }
+            // The block's last statement.
+            var start = open + 1
+            var k = open + 1
+            var d = 0
+            while k < close {
+                if lx.isText(k, "(") || lx.isText(k, "[") || lx.isText(k, "{") { d += 1 }
+                if lx.isText(k, ")") || lx.isText(k, "]") || lx.isText(k, "}") { d -= 1 }
+                if d == 0 && (lx.isNewline(k) || lx.isText(k, ";")) && k + 1 < close { start = k + 1 }
+                k += 1
+            }
+            return self.typeOf(m, fnSym, bs, start, close - 1, depth + 1)
+        }
+
+        // A primary, then a chain of `.x`, `.x(...)`, `(...)`, `[...]`, `?`.
+        var cur = unknownType()
+        var p = a
+        let t0 = lx.at(p)
+        if t0.kind == syntax::Kind::Str { cur = TypeRef("String", -1); p += 1 }
+        elif t0.kind == syntax::Kind::Char { cur = TypeRef("Character", -1); p += 1 }
+        elif t0.kind == syntax::Kind::Int { cur = TypeRef(numberSuffix(t0.text, "i64"), -1); p += 1 }
+        elif t0.kind == syntax::Kind::Float { cur = TypeRef(numberSuffix(t0.text, "f64"), -1); p += 1 }
+        elif lx.isText(p, "true") || lx.isText(p, "false") { cur = TypeRef("bool", -1); p += 1 }
+        elif lx.isText(p, "nil") { cur = TypeRef("Option", -1); p += 1 }
+        elif lx.isText(p, "self") || lx.isText(p, "Self") {
+            cur = self.selfType(m, fnSym)
+            p += 1
+            if lx.isText(p - 1, "Self") && lx.isText(p, "::") && p + 1 <= b {
+                let mem = self.member(cur, lx.text(p + 1))
+                p += 2
+                cur = self.memberValue(mem, lx, p, b, cur)
+                if lx.isText(p, "(") { p = lx.closing(p) + 1 }
+            }
+        } elif lx.isText(p, "(") {
+            let close = lx.closing(p)
+            let parts = index::splitTop(lx, p + 1, close - 1)
+            if parts.length() == 2 { cur = self.typeOf(m, fnSym, bs, p + 1, close - 1, depth + 1) }
+            else { cur = TypeRef("()", -1) }
+            p = close + 1
+        } elif lx.isText(p, "[") {
+            let close = lx.closing(p)
+            let parts = index::splitTop(lx, p + 1, close - 1)
+            if parts.length() >= 2 {
+                let first = self.typeOf(m, fnSym, bs, parts.get(0), parts.get(1), depth + 1)
+                cur = TypeRef("[" + first.text + "]", first.module)
+            } else {
+                cur = TypeRef("[]", -1)
+            }
+            p = close + 1
+        } elif lx.isIdent(p) {
+            // A macro: `format!(...)` is a String, `vec!` a Vector.
+            if lx.isText(p + 1, "!") {
+                let name = lx.text(p)
+                if name == "format" { cur = TypeRef("String", -1) }
+                elif name == "vec" { cur = TypeRef("vector::Vector", m) }
+                p += 2
+                if lx.isText(p, "(") || lx.isText(p, "[") { p = lx.closing(p) + 1 }
+            } else {
+                let r = self.resolvePath(m, fnSym, bs, p, b, depth)
+                cur = TypeRef(r.typeRef.text.$clone(), r.typeRef.module)
+                p = self.pathEnd(lx, p, b)
+                // The path named a function or a type: calling it gives its
+                // result, and a `{ ... }` after a type builds one.
+                if lx.isText(p, "(") && p <= b {
+                    p = lx.closing(p) + 1
+                } elif lx.isText(p, "{") && p <= b && r.symbol >= 0 && self.module(r.module).symbol(r.symbol).isType() {
+                    p = lx.closing(p) + 1
+                }
+            }
+        } else {
+            return unknownType()
+        }
+
+        while p <= b && cur.known() {
+            if lx.isText(p, "?") {
+                let args = index::typeArgs(cur.text)
+                let name = cur.name()
+                if name == "Option" && args.length() >= 1 { cur = TypeRef(args.get(0), cur.module) }
+                elif name == "Result" && args.length() >= 1 { cur = TypeRef(args.get(0), cur.module) }
+                p += 1
+                continue
+            }
+            if lx.isText(p, "[") {
+                let close = lx.closing(p)
+                let args = index::typeArgs(cur.text)
+                if cur.name() == "Map" && args.length() == 2 { cur = TypeRef(args.get(1), cur.module) }
+                elif args.length() >= 1 { cur = TypeRef(args.get(0), cur.module) }
+                else { cur = unknownType() }
+                p = close + 1
+                continue
+            }
+            if lx.isText(p, ".") {
+                if lx.isText(p + 1, "$") && lx.isIdent(p + 2) {
+                    cur = TypeRef(intrinsicType(cur.text, lx.text(p + 2)), cur.module)
+                    p += 3
+                    if lx.isText(p, "(") { p = lx.closing(p) + 1 }
+                    continue
+                }
+                if lx.isText(p + 1, "await") { p += 2; continue }
+                if !lx.isIdent(p + 1) { return unknownType() }
+                let mem = self.member(cur, lx.text(p + 1))
+                p += 2
+                if lx.isText(p, "<") {
+                    let close = lx.closingAngle(p)
+                    if close != p { p = close + 1 }
+                }
+                cur = self.memberValue(mem, lx, p, b, cur)
+                if lx.isText(p, "(") { p = lx.closing(p) + 1 }
+                continue
+            }
+            if lx.isText(p, "(") {
+                // Calling a function value: `@function(A) -> R` gives `R`.
+                let arrow = cur.text.$find("->")
+                cur = if arrow > 0 { TypeRef(syntax::collapse(cur.text.$substring(arrow + 2, cur.text.$length())),
+                                             cur.module) } else { unknownType() }
+                p = lx.closing(p) + 1
+                continue
+            }
+            break
+        }
+        cur
+    }
+
+    /// The value a member gives: a field's type, or — when it is called —
+    /// a method's result. Unknown when the member was not found.
+    fn memberValue(&self, mem: &Member, lx: &syntax::Lexed, p: i64, b: i64, receiver: &TypeRef) -> TypeRef {
+        if mem.module < 0 { return unknownType() }
+        let s = self.module(mem.module).symbol(mem.symbol)
+        if s.kind == "variant" { return TypeRef(receiver.text.$clone(), receiver.module) }
+        TypeRef(mem.typeText.$clone(), mem.module)
+    }
+
+    /// The token after the path starting at `p`: `a::b::C<T>` and so on.
+    pub fn pathEnd(&self, lx: &syntax::Lexed, p: i64, b: i64) -> i64 {
+        var q = p
+        while q <= b && (lx.isIdent(q) || lx.isText(q, "Self") || lx.isText(q, "self") || lx.isText(q, "super")) {
+            q += 1
+            if lx.isText(q, "<") && lx.isText(q + 0, "<") {
+                let close = lx.closingAngle(q)
+                if close != q && (lx.isText(close + 1, "(") || lx.isText(close + 1, "::") || lx.isText(close + 1,
+                        "{")) {
+                    q = close + 1
+                }
+            }
+            if lx.isText(q, "::") && q + 1 <= b && !lx.isText(q + 1, "<") { q += 1 } else { break }
+        }
+        q
+    }
+
+    /// What the path at token `p` (`x`, `io::println`, `Point::origin`,
+    /// `vector::Vector<i64>`) names, and the type of using it as a value —
+    /// for a type, the type itself; for a function, its result.
+    pub fn resolvePath(&self, m: i64, fnSym: i64, bs: &vector::Vector<index::Binding>,
+                       p: i64, b: i64, depth: i64) -> Resolved {
+        var r = Resolved()
+        let lx = self.module(m).lexed
+        let first = lx.text(p)
+        var q = p
+        // A local shadows everything.
+        if !lx.isText(p + 1, "::") {
+            let local = index::resolveLocal(bs, first, p)
+            if local >= 0 {
+                r.binding = local
+                r.typeRef = self.bindingType(m, fnSym, bs, local, depth + 1)
+                return r
+            }
+        }
+        // Where the path starts: this module's names or the prelude, an
+        // import, or a type.
+        var curModule = -1
+        var curSym = -1
+        var curType = unknownType()
+        let top = self.findTopLevel(m, first)
+        if top.module >= 0 {
+            curModule = top.module
+            curSym = top.symbol
+        } else {
+            let imp = self.module(m).importNamed(first)
+            if imp >= 0 && !self.importIsItem(m, imp) {
+                r.importedModule = self.importTarget(m, imp)
+                r.importPath = self.module(m).imports.look(imp).path.$clone()
+                curModule = r.importedModule
+            } elif syntax::isBuiltinType(first) || first == "Self" {
+                curType = if first == "Self" { self.selfType(m, fnSym) } else { TypeRef(first.$clone(), -1) }
+            } else {
+                // Declared somewhere loaded, and reachable through a path the
+                // index could not follow: take the type anywhere.
+                let t = self.findType(m, first)
+                if t.module >= 0 { curModule = t.module; curSym = t.symbol }
+            }
+        }
+        q = p + 1
+        if lx.isText(q, "<") {
+            let close = lx.closingAngle(q)
+            if close != q { q = close + 1 }
+        }
+        while lx.isText(q, "::") && lx.isIdent(q + 1) && q + 1 <= b {
+            let name = lx.text(q + 1)
+            if curSym >= 0 && curModule >= 0 {
+                // A member of a type: a variant, a static function, an
+                // associated type.
+                let owner = self.module(curModule).symbol(curSym)
+                if owner.isType() {
+                    let mem = self.member(TypeRef(owner.name.$clone(), curModule), name)
+                    if mem.module < 0 { return r }
+                    curModule = mem.module
+                    curSym = mem.symbol
+                } else {
+                    return r
+                }
+            } elif r.importedModule >= 0 && curSym < 0 && curModule == r.importedModule {
+                let s = self.findIn(curModule, name)
+                if s < 0 { r.importedModule = -1; return r }
+                curSym = s
+                r.importedModule = -1
+                r.importPath = ""
+            } elif curType.known() {
+                let mem = self.member(curType, name)
+                if mem.module < 0 { return r }
+                curModule = mem.module
+                curSym = mem.symbol
+                curType = unknownType()
+            } else {
+                // `std::io::println` written out in full.
+                return r
+            }
+            q += 2
+            if lx.isText(q, "<") {
+                let close = lx.closingAngle(q)
+                if close != q && (lx.isText(close + 1, "(") || lx.isText(close + 1, "::") || lx.isText(close + 1,
+                        "{")) {
+                    q = close + 1
+                }
+            }
+        }
+        if curType.known() {
+            r.typeRef = curType
+            return r
+        }
+        if curSym < 0 { return r }
+        r.module = curModule
+        r.symbol = curSym
+        let s = self.module(curModule).symbol(curSym)
+        if s.isType() {
+            // The type itself, with the arguments written after it, if any.
+            let _lt = lx.at(p).start
+            let end = self.pathEnd(lx, p, b) - 1
+            var text = syntax::collapse(lx.span(p, end))
+            if text.$find("::") >= 0 && text.$find("<") < 0 { text = s.name.$clone() }
+            if s.kind == "type" && !s.typeText.$isEmpty() && s.generics.isEmpty() {
+                r.typeRef = TypeRef(s.typeText.$clone(), curModule)
+            } else {
+                r.typeRef = TypeRef(if text.$find("<") > 0 { text } else { s.name.$clone() },
+                                    if text.$find("<") > 0 { m } else { curModule })
+            }
+        } elif s.kind == "variant" {
+            r.typeRef = TypeRef(s.container.$clone(), curModule)
+        } elif s.isCallable() {
+            var ty = s.typeText.$clone()
+            if ty == "Self" && !s.container.$isEmpty() { ty = s.container.$clone() }
+            r.typeRef = TypeRef(ty, curModule)
+        } else {
+            r.typeRef = TypeRef(s.typeText.$clone(), curModule)
+        }
+        r
+    }
+
+    //=== What a name is =================================================//
+
+    /// The start of the receiver expression that ends at token `end` (the
+    /// token before a `.`): walks back over names, calls, indexing, `?`, and
+    /// the `.` and `::` between them.
+    pub fn receiverStart(&self, lx: &syntax::Lexed, end: i64) -> i64 {
+        var j = end
+        while j >= 0 {
+            if lx.isText(j, ")") || lx.isText(j, "]") {
+                j = lx.opening(j) - 1
+                // A generic call: `Vector<i64>()`.
+                if lx.isText(j, ">") {
+                    var k = j
+                    var d = 0
+                    while k >= 0 {
+                        if lx.isText(k, ">") { d += 1 }
+                        elif lx.isText(k, ">>") { d += 2 }
+                        elif lx.isText(k, "<") { d -= 1; if d == 0 { break } }
+                        elif lx.isNewline(k) || lx.isText(k, ";") || lx.isText(k, "{") { break }
+                        k -= 1
+                    }
+                    if d == 0 { j = k - 1 }
+                }
+                if lx.isIdent(j) || lx.isText(j, "self") || lx.isText(j, "Self") { continue }
+                if lx.isText(j, "!") && lx.isIdent(j - 1) { j -= 2; break }
+                return j + 1
+            }
+            if lx.isText(j, "?") { j -= 1; continue }
+            let t = lx.at(j)
+            if t.kind == syntax::Kind::Ident || lx.isText(j, "self") || lx.isText(j, "Self") ||
+                    lx.isText(j, "super") || t.kind == syntax::Kind::Str ||
+                    t.kind == syntax::Kind::Int || t.kind == syntax::Kind::Float || t.kind == syntax::Kind::Char {
+                if lx.isText(j - 1, ".") || lx.isText(j - 1, "::") {
+                    j -= 2
+                    if lx.isText(j, "$") { j -= 1 }
+                    continue
+                }
+                if lx.isText(j - 1, "$") && lx.isText(j - 2, ".") { j -= 3; continue }
+                return j
+            }
+            return j + 1
+        }
+        0
+    }
+
+    /// What the name at token `tok` of module `m` refers to.
+    pub fn resolveAt(&self, m: i64, tok: i64) -> Resolved {
+        var r = Resolved()
+        let ix = self.module(m)
+        let lx = ix.lexed
+        if !lx.isIdent(tok) && !lx.isText(tok, "self") && !lx.isText(tok, "Self") { return r }
+        let name = lx.text(tok)
+
+        // A declaration's own name.
+        var i = 0
+        while i < ix.symbols.length() {
+            if ix.symbols.look(i).nameTok == tok {
+                r.module = m
+                r.symbol = i
+                r.typeRef = TypeRef(ix.symbols.look(i).typeText.$clone(), m)
+                return r
+            }
+            i += 1
+        }
+        // An import's own name.
+        i = 0
+        while i < ix.imports.length() {
+            let imp = ix.imports.look(i)
+            if imp.startTok < tok && tok <= imp.endTok {
+                // The segment names a module, which may be partway along.
+                r.importedModule = if tok == imp.aliasTok || tok == imp.endTok { self.importTarget(m, i) } else { -1 }
+                r.importPath = imp.path.$clone()
+                return r
+            }
+            i += 1
+        }
+
+        let fnSym = ix.enclosingFunction(tok)
+        let bs = if fnSym >= 0 { index::bindings(ix, fnSym) } else { vector::Vector<index::Binding>() }
+
+        // After a `.`: a member of whatever is before it.
+        if lx.isText(tok - 1, ".") || (lx.isText(tok - 1, "$") && lx.isText(tok - 2, ".")) {
+            let dot = if lx.isText(tok - 1, ".") { tok - 1 } else { tok - 2 }
+            let start = self.receiverStart(lx, dot - 1)
+            let recv = self.typeOf(m, fnSym, bs, start, dot - 1, 0)
+            if !recv.known() { return r }
+            if lx.isText(tok - 1, "$") {
+                r.typeRef = TypeRef(intrinsicType(recv.text, name), -1)
+                return r
+            }
+            let mem = self.member(recv, name)
+            if mem.module >= 0 {
+                r.module = mem.module
+                r.symbol = mem.symbol
+                r.typeRef = TypeRef(mem.typeText.$clone(), mem.module)
+            }
+            return r
+        }
+        // Part of a path: resolve from its first segment up to here.
+        var start = tok
+        while lx.isText(start - 1, "::") && (lx.isIdent(start - 2) || lx.isText(start - 2, "Self")) { start -= 2 }
+        if lx.isText(start - 1, ">") && lx.isText(tok - 1, "::") {
+            // `Vector<T>::new`: step back over the arguments.
+            var k = start - 1
+            var d = 0
+            while k > 0 {
+                if lx.isText(k, ">") { d += 1 } elif lx.isText(k, "<") { d -= 1; if d == 0 { break } }
+                k -= 1
+            }
+            if lx.isIdent(k - 1) { start = k - 1 }
+        }
+        // A field label in a struct literal, `Point { x: 1 }`, names a field.
+        if lx.isText(tok + 1, ":") && !lx.isText(tok + 1, "::") {
+            let open = self.enclosingBrace(lx, tok)
+            if open > 0 && (lx.isIdent(open - 1) || lx.isText(open - 1, ">")) && fnSym >= 0 {
+                let t = self.typeOf(m, fnSym, bs, self.receiverStart(lx, open - 1), open - 1, 0)
+                if t.known() {
+                    let mem = self.member(t, name)
+                    if mem.module >= 0 {
+                        r.module = mem.module
+                        r.symbol = mem.symbol
+                        r.typeRef = TypeRef(mem.typeText.$clone(), mem.module)
+                        return r
+                    }
+                }
+            }
+        }
+        if start == tok {
+            let local = index::resolveLocal(bs, name, tok)
+            if local >= 0 {
+                r.binding = local
+                r.typeRef = self.bindingType(m, fnSym, bs, local, 0)
+                return r
+            }
+            if name == "self" {
+                r.typeRef = self.selfType(m, fnSym)
+                if fnSym >= 0 {
+                    let decl = self.findType(m, ix.symbols.look(fnSym).container)
+                    r.module = decl.module
+                    r.symbol = decl.symbol
+                }
+                return r
+            }
+        }
+        // Resolve the path from `start`, stopping at `tok`.
+        let res = self.resolvePath(m, fnSym, bs, start, tok, 0)
+        res
+    }
+
+    /// The `{` opening the innermost brace block around token `tok`, or -1.
+    fn enclosingBrace(&self, lx: &syntax::Lexed, tok: i64) -> i64 {
+        var d = 0
+        var k = tok - 1
+        while k >= 0 {
+            if lx.isText(k, "}") { d += 1 }
+            elif lx.isText(k, "{") {
+                if d == 0 { return k }
+                d -= 1
+            }
+            k -= 1
+        }
+        -1
+    }
+}
+
+/// The file of module `rest` (`a/b` for `pkg::a::b`) in the package at
+/// `root` called `name`, or "". The package module itself is `src/lib.rune`,
+/// `src/main.rune` or `src/<name>.rune`.
+fn packageModule(root: &String, name: &String, rest: &String) -> String {
+    let src = join(root, "src")
+    if rest.$isEmpty() {
+        for f in ["lib.rune", "main.rune"] {
+            let p = join(src, f)
+            if io::exists(p) { return p }
+        }
+        let own = join(src, name + ".rune")
+        return if io::exists(own) { own } else { "" }
+    }
+    let p = join(src, rest + ".rune")
+    if io::exists(p) { p } else { "" }
+}
+
+/// The end of a `match` arm's body starting at `from`, within `close`.
+fn armEnd(lx: &syntax::Lexed, from: i64, close: i64) -> i64 {
+    if lx.isText(from, "{") { return lx.closing(from) }
+    var d = 0
+    var e = from
+    while e < close {
+        if lx.isText(e, "(") || lx.isText(e, "[") || lx.isText(e, "{") { d += 1 }
+        elif lx.isText(e, ")") || lx.isText(e, "]") || lx.isText(e, "}") { d -= 1 }
+        elif d == 0 && (lx.isText(e, ",") || lx.isNewline(e)) { break }
+        e += 1
+    }
+    e - 1
+}
+
+/// The type a number literal's suffix names, or `otherwise`.
+fn numberSuffix(text: &String, otherwise: String) -> String {
+    for s in ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize", "f32", "f64"] {
+        let n = s.$length()
+        if text.$length() > n && text.$substring(text.$length() - n, text.$length()) == s {
+            // Hex digits can look like a suffix: `0xf64` is a number.
+            if text.$length() > 1 && (text.$byteAt(1) == 120 || text.$byteAt(1) == 88) &&
+                    s.$byteAt(0) == 102 { continue }
+            return s
+        }
+    }
+    otherwise
+}
+
+/// The lines of `text`, split on `\n` with any `\r` before it removed.
+pub fn linesOf(text: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var from = 0
+    var i = 0
+    let n = text.$length()
+    while i <= n {
+        if i == n || text.$byteAt(i) == 10 {
+            var e = i
+            if e > from && text.$byteAt(e - 1) == 13 { e -= 1 }
+            out.push(text.$substring(from, e))
+            from = i + 1
+        }
+        i += 1
+    }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Finding things on disk
+//===--------------------------------------------------------------------===//
+
+/// `path` made absolute against the current directory, and normalised.
+pub fn absolute(path: &String) -> String {
+    if path.$isEmpty() { return path.$clone() }
+    let b = path.$byteAt(0)
+    // `/x`, `C:/x` and `C:\x` are already absolute.
+    if b == 47 || b == 92 || (path.$length() > 2 && path.$byteAt(1) == 58) { return normalize(path) }
+    let cwd = env::currentDirectory() ?? "."
+    normalize(join(cwd, path))
+}
+
+/// The standard library: `explicit` when given, then `$RUNE_STDLIB`, then
+/// the source tree or installation the program was run from, then
+/// `~/.rune/stdlib`. "" when none of them has a `std/`.
+pub fn findStdlib(explicit: &String, program: &String) -> String {
+    var candidates = vector::Vector<String>()
+    if !explicit.$isEmpty() { candidates.push(explicit.$clone()) }
+    if env::get("RUNE_STDLIB") is Some(s) { candidates.push(s) }
+    let bin = dirOf(absolute(program))
+    candidates.push(join(dirOf(dirOf(bin)), "stdlib"))       // build/bin → stdlib
+    candidates.push(join(dirOf(bin), "stdlib"))
+    candidates.push(join(join(dirOf(bin), "share"), "stdlib"))
+    if env::home() is Some(h) { candidates.push(join(join(h, ".rune"), "stdlib")) }
+    for c in candidates {
+        if io::isDirectory(join(c, "std")) { return absolute(c) }
+    }
+    ""
+}
+
+/// Every `.rune` file under `dir`, skipping build output and hidden folders.
+pub fn sourcesUnder(dir: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    for rel in io::walkDirectory(dir, 32) {
+        if !rel.$isEmpty() && rel.$byteAt(0) == 46 { continue }
+        if rel.$find("target/") == 0 || rel.$find("/target/") >= 0 || rel.$find("/.") >= 0 ||
+                rel.$find("node_modules") >= 0 { continue }
+        let n = rel.$length()
+        if n > 5 && rel.$substring(n - 5, n) == ".rune" { out.push(join(dir, rel)) }
+    }
+    out
+}
+
+/// Whether the module at `path` is a package's output root: it has a
+/// `main`, or says with `@type` what it produces (a macro package aside).
+pub fn isRootModule(ix: &index::Index) -> bool {
+    if !ix.fileType.$isEmpty() && ix.fileType != "Macros" { return true }
+    for s in ix.symbols {
+        if s.name == "main" && s.kind == "function" { return true }
+    }
+    false
+}
+
+/// The compile that checks `path` the way the build would: in a package,
+/// with the package's other modules and the libraries built for it; on its
+/// own otherwise. `overlay`, when not empty, is a file whose text stands in
+/// for `path`'s; `flags` come first.
+pub fn compileCommand(p: &var Project, runec: &String, path: &String, overlay: &String,
+                      flags: [String]) -> process::Command {
+    var cmd = process::Command(runec.$clone())
+    for f in flags { cmd.arg(f.$clone()) }
+    if !overlay.$isEmpty() {
+        cmd.arg("--source")
+        cmd.arg(path + "=" + overlay)
+    }
+    cmd.arg("--diagnostic-format")
+    cmd.arg("json")
+    if !p.stdlib.$isEmpty() {
+        cmd.arg("--stdlib")
+        cmd.arg(p.stdlib.$clone())
+    }
+    let mid = p.manifestFor(path)
+    if mid < 0 {
+        cmd.arg(path.$clone())
+        return cmd
+    }
+    let root = p.manifest(mid).root.$clone()
+    let name = p.manifest(mid).name.$clone()
+    let target = join(root, "target")
+    for profile in ["debug", "release"] {
+        cmd.arg("-I")
+        cmd.arg(join(join(target, profile), "deps"))
+        cmd.arg("-I")
+        cmd.arg(join(target, profile))
+    }
+    let lib = join(join(root, "src"), "lib.rune")
+    let hasLib = io::exists(lib)
+    // Every file under src/, sorted into roots and the components compiled
+    // into each root.
+    var components = vector::Vector<String>()
+    var ownIsRoot = false
+    for f in sourcesUnder(join(root, "src")) {
+        let id = p.load(f)
+        if id < 0 { continue }
+        let isRoot = isRootModule(p.module(id)) || f == lib
+        if f == path { ownIsRoot = isRoot }
+        elif !isRoot { components.push(f.$clone()) }
+    }
+    let stem = fileOf(path)
+    let bare = if stem.$length() > 5 { stem.$substring(0, stem.$length() - 5) } else { stem.$clone() }
+    cmd.arg("--module")
+    if ownIsRoot && path != lib && hasLib {
+        // A binary beside a library is compiled against the library, and
+        // under a name of its own so that `import <package>` finds the
+        // library rather than itself.
+        cmd.arg(name + "__bin_" + bare)
+        cmd.arg(path.$clone())
+        return cmd
+    }
+    cmd.arg(name)
+    if !ownIsRoot && hasLib { cmd.arg(lib) }
+    cmd.arg(path.$clone())
+    for c in components { cmd.arg(c.$clone()) }
+    cmd
+}

@@ -1,0 +1,81 @@
+// The C++ half, checked shape by shape.
+//
+// Each assertion below is a calling-convention question as much as a
+// behavioural one: a `Vec2` travels in two floating-point registers on one
+// target and through memory on another, a `Wide` always through memory, a
+// `Pair` packed into a single integer register — and a member function takes
+// `this` first, which is not how Rune passes a receiver of its own.
+
+import std::testing
+import std::cxx
+import ffi
+
+@safe("every pointer here is one the C++ half handed out, or storage made for it")
+fn main() -> i64 {
+    // Structs by value, in and back out.
+    assertEq!(ffi::vectorLengthSquared(ffi::Vec2 { x: 3.0, y: 4.0 }), 25.0)
+    let bigger = ffi::vectorScaled(ffi::Vec2 { x: 1.5, y: 2.5 }, 2.0)
+    assertEq!(bigger.x, 3.0)
+    assertEq!(bigger.y, 5.0)
+
+    let swapped = ffi::pairSwapped(ffi::Pair { a: 1, b: 2 })
+    assertEq!(swapped.a as i64, 2)
+    assertEq!(swapped.b as i64, 1)
+
+    // Too wide for registers anywhere: by memory, and back through a hidden
+    // pointer the caller supplies.
+    let wide = ffi::wideTripled(ffi::Wide { a: 1, b: 2, c: 3 })
+    assertEq!(wide.a as i64, 3)
+    assertEq!(wide.b as i64, 6)
+    assertEq!(wide.c as i64, 9)
+
+    // A C++ reference parameter, in both directions.
+    assertEq!(ffi::pairSum(ffi::Pair { a: 20, b: 22 }), 42)
+    assertEq!(ffi::bumped(5, 10), 15)
+
+    // A template, instantiated twice over different element types — two
+    // different C++ specialisations, and two different symbols.
+    assertEq!(ffi::totalOf([10, 20, 30]), 60)
+    assertEq!(ffi::totalOf([]), 0)
+    assertEq!(ffi::totalOfDoubles([0.25, 0.5]), 0.75)
+
+    // An enum declared in the block is C++'s `int`.
+    assert!(ffi::nextColour(ffi::Colour::Red) == ffi::Colour::Green)
+    assert!(ffi::nextColour(ffi::Colour::Blue) == ffi::Colour::Blue)
+
+    // An object: storage from C++'s heap, the constructor on it, members
+    // through `this`, then the destructor and the storage back.
+    assertEq!(ffi::liveCount(), 0)
+    let counter = cxx::alloc<ffi::Counter>()
+    counter.init(10)
+    assertEq!(ffi::liveCount(), 1)
+    counter.setStep(5)
+    assertEq!(counter.next() as i64, 10)
+    assertEq!(counter.next() as i64, 15)
+    assertEq!(counter.peek() as i64, 20)
+    let state = counter.state()
+    assertEq!(state.a as i64, 20)
+    assertEq!(state.b as i64, 5)
+    counter.deinit()
+    cxx::free(counter)
+    assertEq!(ffi::liveCount(), 0)
+
+    // The library's own factory, which allocates on the C++ side.
+    let made = ffi::Counter::make(100)
+    assertEq!(ffi::liveCount(), 1)
+    assertEq!(made.peek() as i64, 100)
+    ffi::Counter::destroy(made)
+    assertEq!(ffi::liveCount(), 0)
+
+    // A derived class: its base's members are reached on the same `this`.
+    let stepper = cxx::alloc<ffi::Stepper>()
+    stepper.init(1, 3)
+    assertEq!(stepper.peek() as i64, 1)
+    assertEq!(stepper.twice() as i64, 4)
+    assertEq!(stepper.peek() as i64, 7)
+    stepper.deinit()
+    cxx::free(stepper)
+    assertEq!(ffi::liveCount(), 0)
+
+    testing::summary()
+}

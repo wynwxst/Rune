@@ -85,8 +85,8 @@ struct Person { pub name: String, pub age: i64 }
 
 fn adults(people: vector::Vector<Person>) -> vector::Vector<String> {
     vector::collect(
-        people.filter(||(p: Person) -> bool { p.age >= 18 })
-              .map(||(p: Person) -> String { p.name }))
+        people.filter(||(p: &Person) -> bool { p.age >= 18 })
+              .map(||(p: &Person) -> String { p.name.$clone() }))
 }
 
 //===--------------------------------------------------------------------===//

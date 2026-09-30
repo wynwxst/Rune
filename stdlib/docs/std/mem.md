@@ -54,6 +54,71 @@ fn main() -> i64 {
 }
 ```
 
+## Borrowing what a handle owns
+
+`get()` and `*h` hand back a **copy**. `look()` and `touch()` hand back the
+value where it lies — a borrow that lasts as long as the handle does — which
+is what a structure built out of handles is walked with: copying at every
+step would copy the rest of the structure with it.
+
+```rune
+import std::io
+import std::mem
+import std::mem::{Handle}
+
+struct Cell { value: i64, next: Handle<Cell>? }
+
+fn main() -> i64 {
+    var chain = Handle<Cell>(Cell {
+        value: 1,
+        next: Some(Handle<Cell>(Cell { value: 2, next: nil }))
+    })
+
+    // Reading: one borrow at a time.
+    var total = 0
+    var cur = &chain.look().next
+    total += chain.look().value
+    while cur is Some(cell) {
+        total += cell.look().value
+        cur = &cell.look().next
+    }
+    io::println(total)
+
+    // Writing through the same shape.
+    chain.touch().value = 10
+    io::println(chain.look().value)
+    0
+}
+```
+
+## Copying: `Clone`
+
+`mem::Clone` is an **automatic** mark: a type has it when every part of it
+has it, so a struct of numbers has it without saying so. Two things do not:
+anything that runs a `deinit` — a destructor is a promise the compiler
+cannot read — and anything it cannot look into, such as a closure or an
+`Any`. A type that owns something says what copying it means by writing
+`fn clone(&self) -> Self`, which `$clone()` then calls, and claims the mark
+with `bind mem::Clone to ...`.
+
+```rune
+import std::io
+import std::mem
+
+struct Point { x: i64, y: i64 }
+
+fn twice<T: mem::Clone>(value: &T) -> (T, T) {
+    (value.$clone(), value.$clone())
+}
+
+fn main() -> i64 {
+    let p = Point { x: 1, y: 2 }
+    let pair = twice(&p)
+    io::println(pair.0.x + pair.1.y)
+    0
+}
+```
+
 ## Raw memory as a slice
 
 `slice_of<T>(block, count)` makes a `[T]` out of an address and a count,

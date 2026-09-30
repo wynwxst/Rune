@@ -17,7 +17,8 @@ A growable array, and the worked example for everything above: every unsafe oper
 | `reserve` | `(&var self, wanted: i64)` | room for `wanted` |
 | `asSlice` | `(&self) -> [T]` | every element as a slice over the vector's own storage — no copy |
 | `v[i]` / `v[i] = x` |  | the direct forms — **abort** out of range, where `at` and `set` answer |
-| `from` | `<T>(values: [T]) -> Vector<T>` | builds one from an array or slice |
+| `from` | `<T>(values: [T]) -> Vector<T>` | builds one from an array or slice — every element is copied, so `T` must be copyable |
+| `drain` | `<T>(values: [T]) -> Vector<T>` | the same, by **moving** each element out of `values`; this is what `vec!` expands to, and it is why a `vec!` of owning values works |
 
 **A vector of numbers**
 

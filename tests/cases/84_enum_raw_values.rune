@@ -1,0 +1,43 @@
+// EXPECT: 1.43
+// EXPECT: 0.76
+// EXPECT: 1
+// EXPECT: gbp
+// EXPECT: true
+// EXPECT: -1
+// EXPECT: 0
+// EXPECT: 11
+// EXPECT: -40.5
+// EXPECT: 3.19
+//
+// A variant's value may be negative, or a float. A float-valued enum keeps
+// each variant's value beside its tag, and `as` gives it back as any number.
+import std::io
+import std::fmt
+
+enum Currency { USD = 1f64, AUD = 1.43, GBP = 0.76 }
+enum Level { Low = -1, Mid, High = 10, Top }
+enum Temp { Cold = -40.5f32, Hot = 45 }
+
+fn name(c: Currency) -> String {
+    match c {
+        Currency::USD => "usd",
+        Currency::AUD => "aud",
+        Currency::GBP => "gbp",
+    }
+}
+
+fn main() -> i64 {
+    io::println(Currency::AUD as f64)
+    io::println(Currency::GBP as f64)
+    io::println(Currency::AUD as i64)
+    io::println(name(Currency::GBP))
+    io::println(Currency::AUD == Currency::AUD)
+    io::println(Level::Low as i64)
+    io::println(Level::Mid as i64)
+    io::println(Level::Top as i64)
+    io::println(Temp::Cold as f64)
+    var total = 0.0
+    for c in [Currency::USD, Currency::AUD, Currency::GBP] { total += c as f64 }
+    io::println(fmt::fixed(total, 2))
+    0
+}

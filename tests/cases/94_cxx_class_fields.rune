@@ -1,0 +1,13 @@
+// EXPECT-ERROR: opaque to Rune
+//
+// Fields belong to a `struct`, whose layout both sides agree on. A `class` is
+// reached through its member functions.
+extern "C++" {
+    namespace demo {
+        class Counter {
+            value: c_int
+        }
+    }
+}
+
+fn main() -> i64 { 0 }

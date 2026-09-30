@@ -30,7 +30,7 @@ pub fn names() -> vector::Vector<String> {
 pub fn measure(names: vector::Vector<String>) -> vector::Vector<Sized> {
     var out = vector::Vector<Sized>()
     for name in names {
-        out.push(Sized { name: name, length: name.$length() })
+        out.push(Sized { name: name.$clone(), length: name.$length() })
     }
     out
 }

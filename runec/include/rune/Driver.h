@@ -2,7 +2,10 @@
 #ifndef RUNE_DRIVER_H
 #define RUNE_DRIVER_H
 
+#include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rune {
@@ -44,6 +47,7 @@ enum class OutputKind {
   Executable, ///< Link into a runnable program.
   Object,     ///< Emit a .o only.
   Library,    ///< Emit a .rul (object + interface metadata).
+  Shared,     ///< Emit a native shared library (.dylib / .so / .dll).
   LLVMIR,     ///< Emit textual .ll.
   Assembly,   ///< Emit target .s.
   Docs,       ///< Emit a documentation sidecar (.rdoc) and nothing else.
@@ -63,7 +67,10 @@ struct CompilerOptions {
   std::vector<std::string> Inputs;
   /// `--cfg <name>`: names `@Config` should treat as set.
   std::vector<std::string> ConfigFlags;
-  std::vector<std::string> ImportPaths;  ///< -L: where to find .rul libraries
+  /// `--cfg <key>=<value>`: keys `@Config` compares against, the way `os` and
+  /// `arch` are compared. A package's `[config]` table arrives this way.
+  std::vector<std::pair<std::string, std::string>> ConfigValues;
+  std::vector<std::string> ImportPaths;  ///< -I: where to find .rul libraries
   std::vector<std::string> LinkLibraries;///< -l: extra native libraries
   std::vector<std::string> LinkPaths;    ///< -L for the system linker
   std::string OutputPath;
@@ -74,8 +81,16 @@ struct CompilerOptions {
   std::string LinkDriver;
   /// `--sysroot` handed to the link driver; empty leaves it alone.
   std::string Sysroot;
+  /// Set while building a `@type(Macros)` package, which is an ordinary
+  /// compilation of those very files: without it they would be skipped again
+  /// and the package would be empty.
+  bool MacroPackage = false;
   /// Extra arguments appended to the link command verbatim.
   std::vector<std::string> LinkArgs;
+  /// `--link-cxx`: link the target's C++ runtime. Set by the compiler itself
+  /// when an `extern "C++"` block is seen; a build tool passes it when a
+  /// package has C++ sources that only reach Rune through `extern "C"`.
+  bool LinkCxx = false;
 
   OutputKind Output = OutputKind::Executable;
   DumpKind Dump = DumpKind::Nothing;
@@ -96,6 +111,24 @@ struct CompilerOptions {
   bool OutputKindFromFlag = false;
   bool ForceColor = false;
   bool NoColor = false;
+  /// `--diagnostic-format json`: one JSON object per diagnostic on stderr.
+  bool JsonDiagnostics = false;
+  /// `--diagnostic-format short`: `file:line:col: error: message` lines.
+  bool ShortDiagnostics = false;
+  /// `--source <path>=<file>`: compile `path` as the text in `file` says,
+  /// reporting it as `path`. How an editor has an unsaved buffer checked.
+  std::map<std::string, std::string> SourceOverrides;
+  /// `--query-members <file>:<start>:<end>`: after checking, print the type
+  /// of the expression spanning those bytes of `file`, and its members, as
+  /// JSON on stdout — and produce nothing else.
+  std::string QueryFile;
+  uint32_t QueryStart = 0;
+  uint32_t QueryEnd = 0;
+  /// `--query-hints <file>`: after checking, print the types of the file's
+  /// unannotated bindings and the parameter names of its positional
+  /// arguments, as JSON — what an editor shows greyed out and a formatter
+  /// can write in.
+  bool QueryHints = false;
   bool WarningsAsErrors = false;
   bool NoWarnings = false;
   bool NoStdlib = false;

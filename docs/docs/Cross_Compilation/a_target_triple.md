@@ -17,6 +17,7 @@ Linking is the part that needs help. A linker is platform software: it knows one
 | `--sysroot <dir>` | where that target's headers and libraries are |
 | `--runtime-dir <dir>` | where its `libruneruntime.a` is |
 | `--link-arg <arg>` | appended to the link command verbatim |
+| `--link-cxx` | link the C++ runtime (implied by `extern "C++"`) |
 
 > [!NOTE]
 > **Why `--cc` and `--target` are separate**

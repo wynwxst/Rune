@@ -9,15 +9,3 @@
 @export("rune_add")
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 ```
-
-**An unrecognised decorator**
-
-```rune
-@notarealdecorator
-fn f() -> i64 { 0 }
-```
-
-> [!NOTE]
-> **Placement**
->
-> Decorators sit on their own line above the declaration, or inline before it — both parse. One per line reads better when there are several.

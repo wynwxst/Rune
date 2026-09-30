@@ -79,3 +79,63 @@ fn main() -> i64 {
     0
 }
 ```
+
+## Sockets driven by tasks
+
+`AsyncListener` and `AsyncStream` are the same sockets set not to wait: each
+`accept`, `read` and `write` tries at once and, if nothing is ready, parks
+the task on the socket until it is, while the other tasks run. One thread
+serves many connections; `connectAsync` resolves and connects on a worker.
+
+```rune
+import std::io
+import std::net
+import std::task
+import std::collections::vector
+
+async fn serve(server: net::AsyncListener, count: i64) -> i64 {
+    var served = 0
+    while served < count {
+        match server.accept().await {
+            Ok(conn) => { handle(conn); served += 1 },
+            Err(e) => { io::println(net::describe(e)); return served },
+        }
+    }
+    served
+}
+
+async fn handle(conn: net::AsyncStream) {
+    var c = conn
+    if c.read(1024).await is Ok(bytes) {
+        c.writeText("echo: " + bytes.toString()).await
+        c.shutdown(net::Shutdown::Write)
+    }
+}
+
+async fn client(port: i32, message: String) -> String {
+    match net::connectAsync("127.0.0.1", port).await {
+        Ok(conn) => {
+            var c = conn
+            c.writeText(message).await
+            c.shutdown(net::Shutdown::Write)
+            c.readAll().await.unwrap()
+        },
+        Err(e) => net::describe(e),
+    }
+}
+
+async fn main() -> i64 {
+    var server = net::listenAsync("127.0.0.1", 0).unwrap()
+    let port = server.port()
+    let serving = serve(server, 2)
+    for r in task::all(vec![client(port, "one"), client(port, "two")]).await {
+        io::println(r)
+    }
+    io::println(serving.await)
+    0
+}
+```
+
+A `TcpStream`, a `TcpListener` and the `Async` pair all have a `clone` that
+duplicates the descriptor, so a `$clone()` — an `unwrap()` under single
+ownership, a read out of a `Vector` — never leaves two owners with one.

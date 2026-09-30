@@ -1,17 +1,17 @@
 # Which registry
 
-Every registry has a name: the one its `index.toml` declares, which `rune pkg init` takes from the directory or `--name`. A client adds a registry under that name, or under an alias of its own with `--name`, and the name is how the two are told apart from then on. Once added, a registry stays added — `~/.rune/registries.toml` keeps it for every project on the machine — until `rune pkg server remove` drops it.
+Every registry has a name: the one its `index.toml` declares, which `rune pkg init` takes from the directory or `--name`. A client adds a registry under that name, or under an alias of its own with `--name`, and the name is how the two are told apart from then on. Once added, a registry stays added — `~/.rune/registries.toml` keeps it for every project on the machine — until `rune registry remove` drops it.
 
 ```sh
-$ rune pkg server add http://packages.example.org
+$ rune registry add http://packages.example.org
 ● Added registry 'example' at http://packages.example.org (214 releases)
-$ rune pkg server add file:///Volumes/shared/lab --name lab
+$ rune registry add file:///Volumes/shared/lab --name lab
 ● Added registry 'lab' at file:///Volumes/shared/lab (3 releases)
   ─  note: it calls itself 'research-lab'; here it is `lab`, as in `rune add lab::<package>`
-$ rune pkg server list
+$ rune registry list
 example  http://packages.example.org    214 releases
 lab      file:///Volumes/shared/lab     3 releases  calls itself 'research-lab'
-$ rune pkg server remove lab
+$ rune registry remove lab
 ● Removed registry 'lab' (file:///Volumes/shared/lab)
 ```
 

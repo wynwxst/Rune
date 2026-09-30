@@ -72,7 +72,7 @@ enum class NodeKind : uint8_t {
   // --- Type expressions ---
   NamedType, PointerType, ArrayType, SliceType, TupleType,
   FunctionTypeRepr, OptionalType, DynType, SelfType, InferType, UniqType,
-  SomeType,
+  SomeType, TypeOfType,
 
   // --- Patterns ---
   WildcardPat, BindingPat, LiteralPat, TuplePat, StructPat, EnumPat,
@@ -201,6 +201,11 @@ struct GenericParam {
   std::string Name;
   std::vector<TypeReprPtr> Bounds;
   SourceRange Range;
+  /// Other names that stand for this parameter. An `extend` block on a
+  /// generic type writes its own — `extend<A> List<A>` calls `T` `A` — and
+  /// its methods are folded into the type, so the type's parameter answers to
+  /// both names wherever those methods are resolved.
+  std::vector<std::string> Aliases;
 };
 
 /// `where T: Mark` — additional bounds written after the signature.
@@ -323,6 +328,17 @@ struct SomeTypeRepr : TypeRepr {
   SomeTypeRepr() : TypeRepr(NodeKind::SomeType) {}
 };
 
+/// `typeof(expr)` — whatever type the expression has, without evaluating it.
+///
+/// A macro writing a signature out of the values it was handed needs this:
+/// `@cfunction(objc_object, objc_object $(, typeof($item))*)` builds the
+/// foreign signature from the arguments rather than asking the caller to
+/// spell it a second time.
+struct TypeOfRepr : TypeRepr {
+  ExprPtr Operand;
+  TypeOfRepr() : TypeRepr(NodeKind::TypeOfType) {}
+};
+
 struct SelfTypeRepr : TypeRepr {
   SelfTypeRepr() : TypeRepr(NodeKind::SelfType) {}
 };
@@ -344,6 +360,9 @@ struct BindingPattern : Pattern {
   std::string Name;
   bool IsMutable = false;
   bool ByRef = false;
+  /// Written `.Red`: the name is something on the type being matched, never
+  /// a new binding. Sema says so plainly when there is no such variant.
+  bool MustBeVariant = false;
   PatternPtr Sub;           ///< `name @ subpattern`
   VarDecl *Binding = nullptr;
   /// A bare name in a match arm may name a unit enum variant rather than
@@ -507,6 +526,9 @@ struct DeclRefExpr : Expr {
   Decl *Resolved = nullptr;         ///< set by Sema
   /// Set when the path names an enum variant, e.g. `Colour::Red`.
   int VariantIndex = -1;
+  /// Written `.Red` or `::seconds(5)`: the owning type was left out, and is
+  /// whatever the context expects. Sema puts the name back on the front.
+  bool FromInferredType = false;
   /// Set when this mention of a `Unique` local hands the value away — an
   /// assignment into another `Unique` slot, or a return. Codegen empties the
   /// slot so the scope does not release what it no longer owns.
@@ -565,8 +587,20 @@ struct CallExpr : Expr {
   FunctionDecl *Target = nullptr;
   /// Argument order after labelled arguments are matched to parameters.
   std::vector<unsigned> ArgOrder;
+  /// For each argument given by position, the name of the parameter it
+  /// landed in — the label it could have been written with; empty for a
+  /// labelled argument or one with no named parameter. Editors show these.
+  std::vector<std::string> ParamLabels;
   /// True when this is a method call whose receiver is Callee's base.
   bool IsMethodCall = false;
+  /// The `look()`/`touch()` inserted to reach through a stand-in — a
+  /// `Handle`, a `Box`, an `Rc`. Only diagnostics use it: a write refused
+  /// because the stand-in lends for reading only should say so.
+  bool PointeeAccess = false;
+  /// The `Path::empty()` a builder block stands for. Only diagnostics use it:
+  /// a type that is not a `Builder` has no `empty`, and the message should
+  /// say that rather than talk about a method nobody wrote.
+  bool BuilderSeed = false;
   /// Set when the callee is a compiler builtin rather than a declaration.
   BuiltinMethod Builtin = BuiltinMethod::None;
   /// Set when the call constructs a class instance (`Dog("rex")`).
@@ -574,6 +608,10 @@ struct CallExpr : Expr {
   /// Set when the call constructs a tuple-shaped enum variant.
   EnumDecl *ConstructsEnum = nullptr;
   int ConstructsVariant = -1;
+  /// `reflect::conforms<T, M>()`: the answer, worked out while checking —
+  /// where conformance is known, including the automatic marks the code
+  /// generator has no way to ask about. -1 until then.
+  int8_t ReflectAnswer = -1;
   CallExpr() : Expr(NodeKind::Call) {}
 };
 
@@ -602,15 +640,26 @@ struct MemberExpr : Expr {
   /// Set when the base is a borrow that must be taken implicitly so the
   /// method can receive `&self`.
   bool NeedsAddressOfBase = false;
+  /// Written `value.await`. The parser rewrites it into a call of the
+  /// `await` method `std::task::Future` declares; this says so, for the
+  /// error a value that is not a future gets.
+  bool IsAwait = false;
   MemberExpr() : Expr(NodeKind::Member) {}
 };
 
 struct IndexExpr : Expr {
   ExprPtr Base, Index;
   SourceRange BracketRange;
-  IndexExpr() : Expr(NodeKind::Index) {}  /// `p[n]` where `p` is a raw pointer: plain offset arithmetic, no bounds.
+  IndexExpr() : Expr(NodeKind::Index) {}
+  /// `p[n]` where `p` is a raw pointer: plain offset arithmetic, no bounds.
   bool ThroughRawPointer = false;
-
+  /// `text[i]` on a `String`: the i-th character, read out of the UTF-8 —
+  /// a value, never a place, and the same read as `text.$at(i)`.
+  bool StringChar = false;
+  /// The overload lends the element (`index -> &T from self`) and the element
+  /// is plain data, so `v[i]` reads it out: `let n = v[i]` is a number, as it
+  /// would be for an array. An element that owns something stays lent.
+  bool ReadsThrough = false;
 };
 
 struct CastExpr : Expr {
@@ -659,6 +708,13 @@ struct ClosureExpr : Expr {
   FunctionDecl *Lifted = nullptr;  ///< synthesised top-level function
   /// Written `move ||(...)`. Captures are copied either way — this says so.
   bool IsMove = false;
+  /// The body of an `async fn`, an `async ||` closure or an `async { }`
+  /// block, as the parser rewrote it: a closure handed to `std::task::spawn`
+  /// to run as a task. `.await` is allowed directly inside one of these and
+  /// nowhere else; the parser enforces that, and Sema words its messages
+  /// for the function the programmer wrote rather than the closure it
+  /// became.
+  bool IsAsyncBody = false;
   ClosureExpr() : Expr(NodeKind::Closure) {}
 };
 
@@ -940,12 +996,22 @@ struct FunctionDecl : ValueDecl {
   bool OriginsResolved = false;
   bool IsExtern = false;
   std::string ExternABI;
+  /// For an `extern "C++"` free function: the namespaces it was declared in,
+  /// outermost first. A method's scope is its owning type's.
+  std::vector<std::string> CxxScope;
+  /// `@operator("new")` on an `extern "C++"` member: the C++ operator this
+  /// declares, spelled as C++ spells it after the keyword.
+  std::string CxxOperator;
   bool IsVariadic = false;
   /// Declared by an imported `.rul`. The body is present (generics need it)
   /// but the compiled code already lives in that library's object file, so
   /// CodeGen only emits a declaration. Instantiated clones clear this.
   bool IsImported = false;
   bool IsVirtual = false;            ///< a class method reachable via vtable
+  /// A method of an instantiated generic type whose own `where` this
+  /// instantiation does not meet: never checked, never emitted, and refused
+  /// wherever it is called. Its vtable slot is empty.
+  bool WhereUnmet = false;
   bool IsOverride = false;
   bool IsStatic = false;             ///< no self parameter but namespaced
   /// The type this method belongs to, for methods reached through `extend` or
@@ -975,6 +1041,13 @@ struct FunctionDecl : ValueDecl {
   ClosureExpr *SourceClosure = nullptr;
   std::vector<Capture> Captures;
   void *CodeGenFn = nullptr;
+  /// Declared `async fn`. The parser has already rewritten it: the written
+  /// result type `T` became `std::task::Future<T>`, and the body became a
+  /// closure handed to `std::task::spawn`. What is left of the original is
+  /// this flag and `AsyncResult`, for diagnostics and documentation, which
+  /// describe the function as it was written.
+  bool IsAsync = false;
+  TypeReprPtr AsyncResult;
 
   FunctionDecl() : ValueDecl(NodeKind::Function) {}
 };
@@ -999,6 +1072,26 @@ struct FieldDecl : ValueDecl {
 /// Types the compiler itself needs to know about by name.
 enum class LangItem : uint8_t { NotSpecial, Option, Result };
 
+/// What a type declared inside `extern "C++"` knows about its other half.
+///
+/// A `struct` there is a C++ struct Rune lays out identically and may hold by
+/// value; a `class` is opaque — its size is `@size(N)` or unknown — and only
+/// ever reached through a pointer. `Scope` is the C++ path the name lives
+/// under (namespaces, then enclosing classes), which is what its mangled
+/// symbols are built from; Rune's own scope stays flat.
+struct CxxDeclInfo {
+  std::vector<std::string> Scope;
+  bool IsClass = false;
+  uint64_t Size = 0;           ///< `@size(N)`, or 0 when not given
+  unsigned Align = 0;          ///< `@align(N)`, or 0 for the default
+  /// `class Derived : Base` — a pointer to the derived class converts to one
+  /// to the base, and the base's methods are reachable through it. Single,
+  /// non-virtual inheritance only: `this` is the same address for both.
+  std::string BaseName;
+  SourceRange BaseRange;
+  struct NominalDecl *BaseDecl = nullptr;   ///< set by Sema
+};
+
 /// A nominal type that owns fields and methods.
 struct NominalDecl : Decl {
   /// Set when this declaration is one the language depends on, so `T?`, `nil`
@@ -1021,6 +1114,21 @@ struct NominalDecl : Decl {
   /// value it lives in is destroyed, which is what makes a value able to own
   /// something a reference count cannot see — a file descriptor, a lock.
   FunctionDecl *Deinit = nullptr;
+  /// The type's own `clone(&self) -> Self`, wherever it was written — in the
+  /// body, in an `extend`, or supplied by a `bind`. `$clone()` calls it
+  /// instead of copying the type member by member, which is what a type
+  /// holding something a copy must not duplicate depends on.
+  FunctionDecl *CloneFn = nullptr;
+  /// `struct Derived : Base` / `enum Derived : Base` — the type this one
+  /// extends. Its fields come first, or its variants do, so a `Derived` is a
+  /// `Base` with more on the end and may be read as one.
+  TypeReprPtr Inherits;
+  NominalDecl *InheritsDecl = nullptr;   ///< set by Sema
+  /// Set once the parent's members have been spliced in, so it happens once
+  /// however many things ask.
+  bool InheritanceDone = false;
+  /// Present when this type was declared inside an `extern "C++"` block.
+  std::unique_ptr<CxxDeclInfo> Cxx;
 
   using Decl::Decl;
 };
@@ -1037,7 +1145,10 @@ struct EnumVariantDecl : Decl {
   std::vector<std::unique_ptr<FieldDecl>> Fields;
   ExprPtr Discriminant;
   unsigned Index = 0;
+  /// The tag: the declared integer value, or the next one after the last.
   int64_t Value = 0;
+  /// The declared value of a float-valued enum's variant (see `RawFloat`).
+  double FloatValue = 0;
   EnumVariantDecl() : Decl(NodeKind::EnumVariant) {}
 };
 
@@ -1045,6 +1156,11 @@ struct EnumDecl : NominalDecl {
   std::vector<std::unique_ptr<EnumVariantDecl>> Variants;
   /// True when every variant is a unit variant (a plain tagged enum).
   bool IsSimple = true;
+  /// `f64` or `f32` when the variants' values are floats, `USD = 1.0`,
+  /// `AUD = 1.43`: the tags are then just 0, 1, 2…, each variant keeps its
+  /// value in `FloatValue`, and `as` gives that value. Null for the usual
+  /// integer-valued enum, whose tags are its values.
+  Type *RawFloat = nullptr;
   EnumDecl() : NominalDecl(NodeKind::Enum) {}
 };
 
@@ -1076,6 +1192,10 @@ struct MarkDecl : NominalDecl {
   std::vector<MarkDecl *> Supers;
   /// `type Item` — every binding has to say what it is.
   std::vector<std::unique_ptr<AssociatedTypeDecl>> AssociatedTypes;
+  /// `@auto`: a mark nobody implements. It asks nothing of a type, so the
+  /// compiler answers for it — a type has it when every part has it — and a
+  /// `bind` or a `@never` says otherwise where the structure cannot.
+  bool IsAuto = false;
   MarkDecl() : NominalDecl(NodeKind::Mark) {}
 };
 
@@ -1108,6 +1228,10 @@ struct ExtendDecl : Decl {
   TypeReprPtr TargetType;
   std::vector<std::unique_ptr<FunctionDecl>> Methods;
   Type *ResolvedTarget = nullptr;
+  /// Set when the target is a generic type: the methods have been folded into
+  /// that type's declaration, so every instantiation clones them along with
+  /// the ones written inside the type. Nothing is left here to register.
+  bool FoldedIntoTemplate = false;
   ExtendDecl() : Decl(NodeKind::Extend) {}
 };
 
@@ -1115,6 +1239,8 @@ struct GlobalVarDecl : ValueDecl {
   TypeReprPtr TypeAnnotation;
   ExprPtr Init;
   bool IsMutable = false;
+  /// For an `extern "C++"` variable: the namespaces it was declared in.
+  std::vector<std::string> CxxScope;
   VarDecl *Storage = nullptr;
   void *CodeGenGlobal = nullptr;
   GlobalVarDecl() : ValueDecl(NodeKind::GlobalVar) {}
@@ -1132,7 +1258,12 @@ struct ImportDecl : Decl {
   ImportDecl() : Decl(NodeKind::Import) {}
 };
 
-/// `extern "C" { ... }`
+/// `extern "C" { ... }` or `extern "C++" { ... }`.
+///
+/// The types an `extern "C++"` block declares — its classes, structs and
+/// enums — are not kept here: the parser hoists them to the module's own
+/// declaration list, each carrying a `CxxDeclInfo`, so every later pass sees
+/// an ordinary nominal type.
 struct ExternDecl : Decl {
   std::string ABI;
   std::vector<std::unique_ptr<FunctionDecl>> Functions;

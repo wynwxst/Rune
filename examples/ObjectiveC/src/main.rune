@@ -1,0 +1,232 @@
+// Cocoa from Rune, through the Objective-C runtime's C entry points.
+//
+// There is no Objective-C in this file. `objc_getClass`, `sel_registerName`
+// and `objc_msgSend` are plain C functions, and everything above them is
+// Rune. What the file is really about is making that readable: a pub mark for
+// "something the runtime will take", a pub macro that writes each message's
+// signature out of the arguments, and conversions the compiler puts in so the
+// call sites say what they mean and nothing else.
+//
+//     cd examples/ObjectiveC && rune run
+
+import std::io
+import std::Macro
+
+type objc_object = *var u8
+
+//===--------------------------------------------------------------------===//
+// Anything the runtime will take
+//===--------------------------------------------------------------------===//
+
+/// A value `objc_msgSend` can be handed: it knows which pointer it is, and it
+/// can be made back from one.
+pub mark ObjC_Object {
+    pub fn from_ptr(ptr: objc_object) -> Self
+    pub fn as_ptr(&self) -> objc_object
+}
+
+@safe("a null pointer is never read through; it only stands for `nil`")
+pub fn null_ptr() -> objc_object { unsafe { 0 as *var u8 } }
+
+/// An object reference — `id` in Objective-C.
+pub struct id { object: objc_object }
+
+/// A selector: an interned method name.
+pub struct Selector { object: objc_object }
+
+/// A class object. A class is an object too, which is why messages reach it
+/// exactly the way they reach an instance.
+pub struct Class { id: objc_object }
+
+bind ObjC_Object to objc_object {
+    pub fn from_ptr(ptr: objc_object) -> Self { ptr }
+    pub fn as_ptr(&self) -> objc_object { self }
+}
+
+bind ObjC_Object to id {
+    pub fn from_ptr(ptr: objc_object) -> Self { id { object: ptr } }
+    pub fn as_ptr(&self) -> objc_object { self.object }
+}
+
+bind ObjC_Object to Selector {
+    pub fn from_ptr(ptr: objc_object) -> Self { Selector { object: ptr } }
+    pub fn as_ptr(&self) -> objc_object { self.object }
+}
+
+bind ObjC_Object to Class {
+    pub fn from_ptr(ptr: objc_object) -> Self { Class { id: ptr } }
+    pub fn as_ptr(&self) -> objc_object { self.id }
+}
+
+// A C string is already the address of NUL-terminated bytes, which is exactly
+// what `stringWithUTF8String:` is asking for.
+bind ObjC_Object to CString {
+    @safe("a CString is already the address of NUL-terminated bytes")
+    pub fn from_ptr(ptr: objc_object) -> Self { unsafe { ptr as CString } }
+
+    @safe("the same address, read back as the pointer it is")
+    pub fn as_ptr(&self) -> objc_object { unsafe { self as *var u8 } }
+}
+
+//===--------------------------------------------------------------------===//
+// The three C entry points everything else is built on
+//===--------------------------------------------------------------------===//
+
+extern "C" {
+    pub fn objc_getClass(name: CString) -> objc_object
+    pub fn sel_registerName(str: CString) -> objc_object
+    pub fn objc_msgSend(id: objc_object, sel: objc_object, ...) -> objc_object
+}
+
+/// `SendMsg!(receiver, selector, args...)` — a message, with its signature
+/// worked out from the arguments.
+///
+/// This is not a convenience. `objc_msgSend` is declared variadic and is
+/// **not** variadic in fact: it jumps straight to the method, which expects
+/// its arguments the way a normal function would take them. On arm64 a
+/// variadic argument goes on the stack while a normal one goes in a register,
+/// so calling `objc_msgSend(obj, sel, x)` through the variadic declaration
+/// puts `x` where nothing will look for it, and the process dies somewhere
+/// inside Cocoa with no clue as to why. Every message has to go through a
+/// signature that matches the method.
+///
+/// `typeof` reads each argument's type where the pub macro expands, so that
+/// signature is built out of the call itself rather than written a second
+/// time and kept in step by hand.
+pub macro SendMsg {
+    ($recv: expr, $sel: expr $(, $item: expr)*) => {
+        (objc_msgSend as @cfunction(objc_object, objc_object
+                                    $(, typeof($item))*) -> objc_object)(
+            $recv.as_ptr(), $sel.as_ptr() $(, $item)*)
+    }
+}
+
+
+
+/// The same, with the signature spelled out — for the message whose arguments
+/// are not the types you want them passed as.
+pub macro SendMsgAs {
+    ($($item: expr),*) => {
+        objc_msgSend as @cfunction(objc_object, objc_object
+                                   $(, $item)*) -> objc_object
+    }
+}
+
+// Every one of these sends a message named by a string. Nothing checks that
+// the receiver understands it, or that the arguments match what it expects,
+// so the whole surface is `@unsafe` and says so once, here.
+extend Selector {
+    @unsafe pub fn new(str: CString) -> Self {
+        Selector { object: sel_registerName(str) }
+    }
+}
+
+extend Class {
+    @unsafe pub fn new(str: CString) -> Self { Class { id: objc_getClass(str) } }
+    pub fn from_id(ID: id) -> Self { Class { id: ID.as_ptr() } }
+
+    /// A message with no arguments.
+    @unsafe pub fn select(&self, method: CString) -> id {
+        id::from_ptr(SendMsg!(self, Selector::new(method)))
+    }
+
+    /// A message with one object argument. It takes a `dyn ObjC_Object`, so
+    /// an `id`, a `Class`, a `CString` or a bare pointer all go in without
+    /// the call site converting anything.
+    @unsafe pub fn call(&self, method: CString, arg: dyn ObjC_Object) -> id {
+        id::from_ptr(SendMsg!(self, Selector::new(method), arg.as_ptr()))
+    }
+
+    pub fn update(&var self, id: objc_object) { self.id = id }
+}
+
+extend id {
+    /// The same two, for an instance rather than a class.
+    @unsafe pub fn select(&self, method: CString) -> id {
+        id::from_ptr(SendMsg!(self, Selector::new(method)))
+    }
+
+    @unsafe pub fn call(&self, method: CString, arg: dyn ObjC_Object) -> id {
+        id::from_ptr(SendMsg!(self, Selector::new(method), arg.as_ptr()))
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Geometry, laid out the way Cocoa expects
+//===--------------------------------------------------------------------===//
+
+pub struct CGPoint { pub x: f64, pub y: f64 }
+pub struct CGSize { pub width: f64, pub height: f64 }
+pub struct CGRect { pub origin: CGPoint, pub size: CGSize }
+
+// `(x, y)` and `(w, h)` are how a rectangle is written at a call site. These
+// say what that means once, so no call site has to.
+bind (f64, f64) into CGPoint {
+    pub fn convert(&self) -> CGPoint { CGPoint { x: self.0, y: self.1 } }
+}
+bind (f64, f64) into CGSize {
+    pub fn convert(&self) -> CGSize { CGSize { width: self.0, height: self.1 } }
+}
+
+bind (CGPoint, CGSize) into CGRect {
+    pub fn convert(&self) -> CGRect { CGRect { origin: self.0, size: self.1 } }
+}
+
+extend CGRect {
+    pub fn new(origin: (f64, f64), size: (f64, f64)) -> Self {
+        CGRect { origin: origin, size: size }
+    }
+}
+
+enum Style {
+    Titled = 1 << 0
+    Closable = 1 << 1
+    Resizable = 1 << 3
+}
+
+/// A `String` is what one writes; `stringWithUTF8String:` wants bytes.
+@unsafe pub fn nsstring(text: String) -> id {
+    Class::new("NSString").call("stringWithUTF8String:", text.$cstr())
+}
+
+@unsafe pub fn main() -> i64 {
+    let app = Class::from_id(
+        Class::new("NSApplication").select("sharedApplication"))
+
+    var window = Class::from_id(Class::new("NSWindow").select("alloc"))
+
+    // The fields take `(f64, f64)` because `bind (f64, f64) into CGPoint`
+    // has already said what that means.
+    let rect: CGRect = ((100.0,100.0) into CGPoint,(500.0,300.0) into CGSize)
+    //CGRect { origin: (100.0, 100.0), size: (500.0, 300.0) }
+    let style: u64 = Style::Titled as u64 | Style::Closable as u64 | Style::Resizable as u64
+
+    // `false` rather than a hand-rolled `NO: i8 = 0`: a boolean goes where a
+    // number is asked for by name, and `defer:` is a `BOOL`.
+    window = Class::from_id(id::from_ptr(SendMsg!(
+        window,
+        Selector::new("initWithContentRect:styleMask:backing:defer:"),
+        rect,
+        style,
+        2 as int,
+        false
+    )))
+
+    window.call("setTitle:", nsstring("Hello World"))
+
+    // A label, built and placed the same way.
+    var text = Class::new("NSTextField").select("alloc")
+    text = id::from_ptr(SendMsg!(text, Selector::new("initWithFrame:"),
+                                 CGRect::new((170.0, 130.0), (160.0, 30.0))))
+    text.call("setStringValue:", nsstring("Hello world!"))
+
+    window.select("contentView").call("addSubview:", text)
+
+    // `null_ptr()` is `nil`: the sender this message does not use. It goes
+    // through `dyn ObjC_Object` like any other argument.
+    window.call("makeKeyAndOrderFront:", null_ptr())
+
+    io::println("Hello from Objective-C!")
+    app.select("run")
+    0
+}

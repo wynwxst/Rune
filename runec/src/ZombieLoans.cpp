@@ -807,8 +807,9 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
         return;
       }
       LocalId lr = B.Places.get(l.Place).Root;
-      // A borrow of a global outlives every named place — it coerces down.
-      if (B.Locals[lr].K == Local::Global)
+      // A borrow of a global — or of a string literal, which is immortal —
+      // outlives every named place: it coerces down.
+      if (B.Locals[lr].K == Local::Global || B.Locals[lr].Immortal)
         return;
       if (!allowedRoots.count(lr))
         offender = &l;
@@ -870,6 +871,12 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
         // it is "returns a borrow of a local", said once, at the return.
         if ((a.A == Access::Drop || a.A == Access::StorageDead) &&
             B.Origins[o].K == Origin::Result)
+          return;
+        // A literal's temporary going out of scope takes nothing with it:
+        // the object it named is immortal, and the borrow is of that.
+        if ((a.A == Access::Drop || a.A == Access::StorageDead) &&
+            B.Loans[l].Place != kNone &&
+            B.Locals[B.Places.get(B.Loans[l].Place).Root].Immortal)
           return;
         report(a, l, s, at, st, deep);
       });
@@ -971,12 +978,29 @@ void LoanAnalysis::collectResult() {
           Out.ResultFrom.push_back(e);
         return;
       }
-      if (root.K == Local::Global) {
+      if (root.K == Local::Global || root.Immortal) {
         FromEntry e;
         e.Global = true;
         if (seen.insert({kNone, {}}).second)
           Out.ResultFrom.push_back(e);
         return;
+      }
+      // Through a local that is itself a borrow — `&slice[i]`, `&(*r).f`:
+      // a reborrow. What it may point at is bounded by what that local
+      // borrowed, which flowed into the result with it, and is judged there.
+      {
+        Place prefix{p.Root, {}};
+        for (const Projection &pr : p.Proj) {
+          if (pr.K == Projection::Deref) {
+            Type *pt = placeType(B, B.Places.intern(prefix));
+            if (pt && (pt->is(TypeKind::Slice) ||
+                       (pt->is(TypeKind::Pointer) && !pt->isRawPointer() &&
+                        !pt->isWeakPointer())))
+              return;
+            break;
+          }
+          prefix.Proj.push_back(pr);
+        }
       }
       // A local, a temporary: gone when this returns.
       auto d = Diags.error(l.Range,

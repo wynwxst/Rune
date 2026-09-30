@@ -25,7 +25,7 @@ pub class Report {
         self.lines.push(self.sections.$str() + ". " + name)
     }
 
-    pub fn line(&var self, text: String) { self.lines.push("   " + text) }
+    pub fn line(&var self, text: &String) { self.lines.push("   " + text) }
 
     /// A summary of `values`: count, mean, median, spread, extremes, and a
     /// histogram sketched as a sparkline.

@@ -64,3 +64,6 @@ A definition is `macro name { (pattern) => { expansion } }`, with as many rules 
 - [Visibility](visibility.md)
 - [The macros the standard library provides](the_macros_the_standard_library_provides.md)
 - [What is reported](what_is_reported.md)
+- [When a pattern is not enough](when_a_pattern_is_not_enough.md)
+- [What a macro is given](what_a_macro_is_given.md)
+- [What is reported, for these](what_is_reported_for_these.md)

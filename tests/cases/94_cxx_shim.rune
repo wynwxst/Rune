@@ -1,0 +1,170 @@
+// CXX: cxx/shim.cpp
+// EXPECT: add: 5
+// EXPECT: addLong: 1000002
+// EXPECT: big: 42
+// EXPECT: scaleD: 5.0
+// EXPECT: flip: true
+// EXPECT: swap: 2 1
+// EXPECT: scale: 3.0 5.0
+// EXPECT: triple: 3 6 9
+// EXPECT: mix: 42 1.5
+// EXPECT: inc3: 2 3 4
+// EXPECT: sr: 5 5
+// EXPECT: next: 2 1
+// EXPECT: sumRef: 42
+// EXPECT: bump: 15
+// EXPECT: callback: 42
+// EXPECT: sumSpan: 60
+// EXPECT: sumSpanD: 0.75
+// EXPECT: counter: 7
+// EXPECT: Counter(10)
+// EXPECT: next: 10 15 peek 20
+// EXPECT: pair: 20 5
+// EXPECT: bigOf: 20 5 25
+// EXPECT: at: 35
+// EXPECT: ~Counter(20)
+// EXPECT: operator new(8, 0)
+// EXPECT: Counter(100)
+// EXPECT: made: 100
+// EXPECT: ~Counter(100)
+// EXPECT: operator new(8, 42)
+// EXPECT: Counter(1)
+// EXPECT: ~Counter(1)
+// EXPECT: Counter(7)
+// EXPECT: named: seven 7
+// EXPECT: named next: 7 9
+//
+// Every kind of declaration an `extern "C++"` block can make, called against
+// a library compiled by a C++ compiler: the symbols have to be mangled
+// exactly, and each struct has to travel the way the platform's C++ ABI
+// passes it — split across registers, packed into one, or copied to memory.
+import std::io
+import std::cxx
+
+extern "C++" {
+    namespace geo {
+        struct Pair { a: c_int, b: c_int }          // two INTEGER halves of one register
+        struct Vec2 { x: f64, y: f64 }              // two SSE eightbytes / an HFA
+        struct Big { a: c_long, b: c_long, c: c_long } // too wide: by memory, result by hidden pointer
+        struct Mixed { i: c_int, d: f64 }           // INTEGER then SSE
+        struct Bytes3 { a: u8, b: u8, c: u8 }       // three bytes: `i24`
+        struct SR { p: CString, n: c_size_t }       // a pointer and a size
+        struct Span<T> { data: *T, len: c_size_t }  // a template, instantiated twice
+        enum Colour { Red = 1, Green = 2, Blue = 4 }
+
+        fn add(a: c_int, b: c_int) -> c_int
+        fn addLong(a: c_long, b: c_long) -> c_long
+        fn big(v: c_ulonglong) -> c_ulonglong
+        fn scaleD(v: f64, f: f32) -> f64
+        fn flip(b: bool) -> bool
+        fn swap(p: Pair) -> Pair
+        fn scale(v: Vec2, k: f64) -> Vec2
+        fn triple(b: Big) -> Big
+        fn mix(m: Mixed) -> Mixed
+        fn inc3(b: Bytes3) -> Bytes3
+        fn srlen(s: SR) -> c_size_t
+        fn mksr(p: CString) -> SR
+        fn next(c: Colour) -> Colour
+        fn colourValue(c: Colour) -> c_int
+        fn sumRef(p: &Pair) -> c_int               // `const Pair &`
+        fn bump(x: &var c_int)                     // `int &`
+        fn callback(f: @cfunction(c_int, c_int) -> c_int, a: c_int, b: c_int) -> c_int
+        fn sumSpan(s: Span<c_long>) -> c_long
+        fn sumSpanD(s: Span<f64>) -> f64
+        var counter: c_int
+
+        @size(8)
+        class Counter {
+            fn init(&var self, start: c_int)        // Counter::Counter(int)
+            fn deinit(&var self)                    // Counter::~Counter()
+            fn next(&var self) -> c_int
+            fn peek(&self) -> c_int                 // const
+            fn setStep(&var self, s: c_int)
+            fn make(s: c_int) -> *var Counter       // static
+            fn destroy(c: *var Counter)
+            fn pair(&self) -> Pair
+            fn bigOf(&self) -> Big
+            @operator("[]")
+            fn at(&self, i: c_int) -> c_int
+            @operator("new")
+            fn allocate(n: c_size_t, tag: c_int) -> *var c_void
+            @operator("delete")
+            fn release(p: *var c_void)
+        }
+
+        @size(16)
+        class Named : Counter {
+            fn init(&var self, start: c_int, name: CString)
+            fn name(&self) -> CString
+        }
+    }
+}
+
+fn mul(a: c_int, b: c_int) -> c_int { a * b }
+
+@safe("the shim is linked, and every pointer below is one it handed out or a live local")
+fn main() -> i64 {
+    io::println("add: " + add(2, 3).$str())
+    io::println("addLong: " + addLong(1000000, 2).$str())
+    io::println("big: " + big(21).$str())
+    io::println("scaleD: " + scaleD(2.5, 2.0).$str())
+    io::println("flip: " + flip(false).$str())
+    let sw = swap(Pair { a: 1, b: 2 })
+    io::println("swap: " + sw.a.$str() + " " + sw.b.$str())
+    let sc = scale(Vec2 { x: 1.5, y: 2.5 }, 2.0)
+    io::println("scale: " + sc.x.$str() + " " + sc.y.$str())
+    let tr = triple(Big { a: 1, b: 2, c: 3 })
+    io::println("triple: " + tr.a.$str() + " " + tr.b.$str() + " " + tr.c.$str())
+    let mx = mix(Mixed { i: 41, d: 0.5 })
+    io::println("mix: " + mx.i.$str() + " " + mx.d.$str())
+    let b3 = inc3(Bytes3 { a: 1, b: 2, c: 3 })
+    io::println("inc3: " + b3.a.$str() + " " + b3.b.$str() + " " + b3.c.$str())
+    let sr = mksr("hello")
+    io::println("sr: " + srlen(sr).$str() + " " + sr.n.$str())
+    io::println("next: " + colourValue(next(Colour::Red)).$str() + " " +
+                colourValue(next(Colour::Blue)).$str())
+    let p = Pair { a: 20, b: 22 }
+    io::println("sumRef: " + sumRef(&p).$str())
+    var x: c_int = 5
+    bump(&var x)
+    io::println("bump: " + x.$str())
+    io::println("callback: " + callback(mul, 6, 7).$str())
+    let longs: [3:c_long] = [10, 20, 30]
+    io::println("sumSpan: " + sumSpan(Span<c_long> { data: &longs[0] as *c_long, len: 3 }).$str())
+    let doubles: [2:f64] = [0.25, 0.5]
+    io::println("sumSpanD: " + sumSpanD(Span<f64> { data: &doubles[0] as *f64, len: 2 }).$str())
+    io::println("counter: " + counter.$str())
+
+    // Storage from C++'s heap, the constructor on it, the destructor, and back.
+    let c = cxx::alloc<Counter>()
+    c.init(10)
+    c.setStep(5)
+    io::println("next: " + c.next().$str() + " " + c.next().$str() + " peek " + c.peek().$str())
+    let pr = c.pair()
+    io::println("pair: " + pr.a.$str() + " " + pr.b.$str())
+    let bg = c.bigOf()
+    io::println("bigOf: " + bg.a.$str() + " " + bg.b.$str() + " " + bg.c.$str())
+    io::println("at: " + c.at(3).$str())
+    c.deinit()
+    cxx::free(c)
+
+    // A static factory and its counterpart.
+    let m = Counter::make(100)
+    io::println("made: " + m.peek().$str())
+    Counter::destroy(m)
+
+    // The class's own `operator new` and `operator delete`.
+    let raw = Counter::allocate(8, 42)
+    let c2 = raw as *var Counter
+    c2.init(1)
+    c2.deinit()
+    Counter::release(raw)
+
+    // A derived class reaches its base's members; `this` is the same address.
+    let n = cxx::alloc<Named>()
+    n.init(7, "seven")
+    io::println("named: " + n.name().$str() + " " + n.peek().$str())
+    n.setStep(2)
+    io::println("named next: " + n.next().$str() + " " + n.next().$str())
+    0
+}

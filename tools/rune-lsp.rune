@@ -1,0 +1,1928 @@
+@type(Executable)
+// The Rune language server.
+//
+//     rune-lsp [--stdlib <dir>] [--runec <path>] [--rune <path>]
+//
+// Speaks the Language Server Protocol over standard input and output, so any
+// editor with an LSP client can use it; `editors/vscode` is the one this
+// repository ships. `rune lsp` starts it with the toolchain's own paths.
+//
+// What it answers, and where the answer comes from:
+//
+//   * diagnostics — the linter's on every change, which needs nothing but
+//     the text, and the compiler's — type errors, the borrow checker's,
+//     everything a build would say — when a file is opened or saved and
+//     whenever typing pauses: `rune check` inside a package, `runec --check`
+//     for a file on its own, with unsaved buffers standing in for their
+//     files;
+//   * completion, hover, go to definition, references, highlights, document
+//     symbols and signature help — from `runetools`, which indexes the open
+//     files, what they import and the standard library;
+//   * quick fixes — the edits a lint finding carries.
+//
+// Requests are answered one at a time, in order. Nothing here is slow enough
+// to need more: the index of a large file takes a few milliseconds, and the
+// compiler runs only when no message is waiting to be answered.
+
+import std::io
+import std::process
+import std::json
+import std::text
+import std::env
+import std::random
+import std::collections::vector
+import std::dictionary
+import runetools::syntax
+import runetools::index
+import runetools::project
+import runetools::lint
+
+//===--------------------------------------------------------------------===//
+// The wire
+//===--------------------------------------------------------------------===//
+
+/// The next message's body, or nil at the end of input. The header is read
+/// a byte at a time with `readExactly`, never `readLine`, so that on Windows
+/// the stream is in binary mode from its first byte.
+fn readMessage() -> String? {
+    var header = io::Bytes()
+    var length = -1
+    loop {
+        // One header line, up to its "\r\n".
+        var line = ""
+        loop {
+            match io::readExactly(1) {
+                Some(b) => {
+                    if b == "\n" { break }
+                    if b != "\r" { line += b }
+                },
+                None => return nil,
+            }
+        }
+        if line.$isEmpty() {
+            if length >= 0 { break }
+            continue
+        }
+        let colon = line.$find(":")
+        if colon > 0 && text::lower(line.$substring(0, colon)) == "content-length" {
+            length = syntax::collapse(line.$substring(colon + 1, line.$length())).$toInt() ?? -1
+        }
+        header.appendText(line)
+    }
+    io::readExactly(length)
+}
+
+fn send(body: &String) {
+    io::print("Content-Length: " + body.$length().$str() + "\r\n\r\n")
+    io::print(body)
+    io::flush()
+}
+
+fn respond(id: &String, result: &String) {
+    send("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + result + "}")
+}
+
+fn respondError(id: &String, code: i64, message: &String) {
+    send("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"error\":{\"code\":" + code.$str() +
+         ",\"message\":" + json::quote(message) + "}}")
+}
+
+fn notify(method: &String, params: &String) {
+    send("{\"jsonrpc\":\"2.0\",\"method\":" + json::quote(method) + ",\"params\":" + params + "}")
+}
+
+/// A message for the client's output channel.
+fn log(message: &String) {
+    notify("window/logMessage", "{\"type\":4,\"message\":" + json::quote("rune-lsp: " + message) + "}")
+}
+
+//===--------------------------------------------------------------------===//
+// Reading requests
+//===--------------------------------------------------------------------===//
+
+/// The value at `path` inside `v`, one member name per step.
+fn dig(v: &json::Value, path: [String]) -> json::Value? {
+    var cur = v.$clone()
+    for name in path {
+        match cur.get(name.$clone()) {
+            Some(next) => cur = next,
+            None => return nil,
+        }
+    }
+    cur
+}
+
+fn textAt(v: &json::Value, path: [String]) -> String {
+    match dig(v, path) {
+        Some(x) => x.asText() ?? "",
+        None => "",
+    }
+}
+
+fn intAt(v: &json::Value, path: [String], fallback: i64) -> i64 {
+    match dig(v, path) {
+        Some(x) => x.asInt() ?? fallback,
+        None => fallback,
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Paths and positions
+//===--------------------------------------------------------------------===//
+
+fn hexValue(b: i64) -> i64 {
+    if b >= 48 && b <= 57 { return b - 48 }
+    if b >= 97 && b <= 102 { return b - 87 }
+    if b >= 65 && b <= 70 { return b - 55 }
+    -1
+}
+
+/// `file:///a/b%20c.rune` → `/a/b c.rune`; `file:///c%3A/x` → `c:/x`.
+fn uriToPath(uri: &String) -> String {
+    var s = uri.$clone()
+    if s.$length() >= 7 && s.$substring(0, 7) == "file://" { s = s.$substring(7, s.$length()) }
+    var out = io::Bytes()
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        if b == 37 && i + 2 < s.$length() {
+            let hi = hexValue(s.$byteAt(i + 1) as i64)
+            let lo = hexValue(s.$byteAt(i + 2) as i64)
+            if hi >= 0 && lo >= 0 {
+                out.push((hi * 16 + lo) as u8)
+                i += 3
+                continue
+            }
+        }
+        out.push(b as u8)
+        i += 1
+    }
+    var path = out.toString()
+    // `/c:/x` is a Windows path with the URI's leading slash.
+    if path.$length() > 3 && path.$byteAt(0) == 47 && path.$byteAt(2) == 58 { path = path.$substring(1,
+            path.$length()) }
+    path
+}
+
+/// `/a/b c.rune` → `file:///a/b%20c.rune`.
+fn pathToUri(path: &String) -> String {
+    let hex = "0123456789ABCDEF"
+    var out = "file://"
+    if path.$length() > 1 && path.$byteAt(1) == 58 { out += "/" }
+    var i = 0
+    var from = 0
+    while i < path.$length() {
+        let b = path.$byteAt(i) as i64
+        let plain = (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) ||
+                    b == 47 || b == 45 || b == 46 || b == 95 || b == 126
+        if !plain {
+            out += path.$substring(from, i)
+            let c = if b == 92 { 47 } else { b }
+            if c == 47 { out += "/" }
+            else { out += "%" + hex.$substring(c / 16, c / 16 + 1) + hex.$substring(c % 16, c % 16 + 1) }
+            from = i + 1
+        }
+        i += 1
+    }
+    out + path.$substring(from, path.$length())
+}
+
+/// The byte offset of an LSP position (line, UTF-16 character) in `lx`.
+fn offsetAt(lx: &syntax::Lexed, line: i64, character: i64) -> i64 {
+    if line >= lx.lineCount() { return lx.source.$length() }
+    let text = lx.lineText(line)
+    var units = 0
+    var i = 0
+    while i < text.$length() && units < character {
+        let b = text.$byteAt(i) as i64
+        var width = 1
+        if b >= 240 { width = 4; units += 2 }
+        elif b >= 224 { width = 3; units += 1 }
+        elif b >= 192 { width = 2; units += 1 }
+        else { units += 1 }
+        i += width
+    }
+    lx.offsetOf(line, if i > text.$length() { text.$length() } else { i })
+}
+
+/// The LSP position of byte `offset` in `lx`, as JSON.
+fn positionOf(lx: &syntax::Lexed, offset: i64) -> String {
+    let line = lx.lineOf(offset)
+    let text = lx.lineText(line)
+    var col = offset - lx.lineStarts.get(line)
+    if col > text.$length() { col = text.$length() }
+    var units = 0
+    var i = 0
+    while i < col {
+        let b = text.$byteAt(i) as i64
+        if b >= 240 { units += 2 } elif b < 128 || b >= 192 { units += 1 }
+        i += 1
+    }
+    "{\"line\":" + line.$str() + ",\"character\":" + units.$str() + "}"
+}
+
+fn rangeOf(lx: &syntax::Lexed, start: i64, end: i64) -> String {
+    "{\"start\":" + positionOf(lx, start) + ",\"end\":" + positionOf(lx, end) + "}"
+}
+
+/// The range of 1-based `line` and 0-based byte `column`s, as the compiler
+/// reports them, clamped to the text.
+///
+/// A range that would be empty — a diagnostic with no end, or none at all —
+/// is widened to the token it starts in, so that an editor has something to
+/// underline.
+fn rangeOfColumns(lx: &syntax::Lexed, line: i64, col: i64, endLine: i64, endCol: i64) -> String {
+    var a = lx.offsetOf(line - 1, col)
+    var b = lx.offsetOf(endLine - 1, endCol)
+    if b <= a {
+        b = a
+        let t = lx.tokenAt(a)
+        if t >= 0 && lx.tokens.look(t).start <= a && a < lx.tokens.look(t).end {
+            b = lx.tokens.look(t).end
+        } elif a < lx.source.$length() && lx.source.$byteAt(a) != 10 && lx.source.$byteAt(a) != 13 {
+            b = a + 1
+        } elif a > 0 {
+            // The end of a line or of the file: the character before it.
+            a -= 1
+            b = a + 1
+        }
+    }
+    rangeOf(lx, a, b)
+}
+
+//===--------------------------------------------------------------------===//
+// The server
+//===--------------------------------------------------------------------===//
+
+/// One document the editor has open.
+class Document {
+    pub uri: String
+    pub path: String
+    pub version: i64
+    /// Changed in the editor since it was opened or last saved.
+    pub dirty: bool
+
+    fn init(self, uri: String, path: String, version: i64) {
+        self.uri = uri
+        self.path = path
+        self.version = version
+        self.dirty = false
+    }
+}
+
+class Server {
+    pub project: project::Project
+    pub docs: dictionary::Map<String, Document>
+    pub runec: String
+    pub rune: String
+    /// The compiler's last diagnostics for each file, as LSP JSON objects.
+    compilerDiags: dictionary::Map<String, vector::Vector<String>>
+    /// The files each compile last reported on, keyed by what was compiled,
+    /// so a fixed file's diagnostics can be cleared.
+    reported: dictionary::Map<String, vector::Vector<String>>
+    pub lintEnabled: bool
+    pub checkOnSave: bool
+    /// Check as the text changes, once typing pauses for `checkDelay` ms.
+    pub checkOnChange: bool
+    pub checkDelay: i64
+    /// The file whose check is waiting for typing to pause, or "".
+    pub pendingCompile: String
+    /// The memory model a file outside any package is checked in; a
+    /// package's own `Rune.toml` decides for its files.
+    pub memory: String
+    /// Inlay hints: inferred types, and argument labels.
+    pub hintTypes: bool
+    pub hintParameters: bool
+    /// The hints for one version of one file, and the last good answer for
+    /// each file.
+    hintCache: dictionary::Map<String, String>
+    hintLast: dictionary::Map<String, String>
+    lintAllow: vector::Vector<String>
+    lintWarn: vector::Vector<String>
+    maxLineLength: i64
+    pub shutdown: bool
+    warnedNoCompiler: bool
+    /// Where the text of a buffer is written for the compiler to read.
+    pub queryFile: String
+
+    fn init(self, stdlib: String, runec: String, rune: String) {
+        self.project = project::Project(stdlib)
+        self.docs = dictionary::Map<String, Document>()
+        self.runec = runec
+        self.rune = rune
+        self.compilerDiags = dictionary::Map<String, vector::Vector<String>>()
+        self.reported = dictionary::Map<String, vector::Vector<String>>()
+        self.lintEnabled = true
+        self.checkOnSave = true
+        self.checkOnChange = true
+        self.checkDelay = 400
+        self.pendingCompile = ""
+        self.memory = "arc"
+        self.hintTypes = true
+        self.hintParameters = true
+        self.hintCache = dictionary::Map<String, String>()
+        self.hintLast = dictionary::Map<String, String>()
+        self.lintAllow = vector::Vector<String>()
+        self.lintWarn = vector::Vector<String>()
+        self.maxLineLength = 0
+        self.shutdown = false
+        self.warnedNoCompiler = false
+        var r = random::new()
+        let name = "rune-lsp-" + r.between(100000, 999999).$str() + ".rune"
+        self.queryFile = project::join(env::temporaryDirectory(), name)
+    }
+
+    /// Reads `rune.*` settings: from `initializationOptions` or a
+    /// configuration change, whichever carries them.
+    pub fn configure(&var self, settings: &json::Value) {
+        match dig(settings, ["lint", "enable"]) {
+            Some(v) => self.lintEnabled = v.asBool() ?? true,
+            None => {},
+        }
+        match dig(settings, ["checkOnSave"]) {
+            Some(v) => self.checkOnSave = v.asBool() ?? true,
+            None => {},
+        }
+        match dig(settings, ["check", "onChange"]) {
+            Some(v) => self.checkOnChange = v.asBool() ?? true,
+            None => {},
+        }
+        let delay = intAt(settings, ["check", "delay"], -1)
+        if delay >= 0 { self.checkDelay = delay }
+        let memory = textAt(settings, ["check", "memory"])
+        if memory == "arc" || memory == "zombie" { self.memory = memory }
+        match dig(settings, ["inlayHints", "types"]) {
+            Some(v) => self.hintTypes = v.asBool() ?? true,
+            None => {},
+        }
+        match dig(settings, ["inlayHints", "parameters"]) {
+            Some(v) => self.hintParameters = v.asBool() ?? true,
+            None => {},
+        }
+        self.lintAllow = stringsAt(settings, ["lint", "allow"])
+        self.lintWarn = stringsAt(settings, ["lint", "warn"])
+        self.maxLineLength = intAt(settings, ["lint", "maxLineLength"], 0)
+        let s = textAt(settings, ["stdlib"])
+        if !s.$isEmpty() { self.project.stdlib = s }
+        let rc = textAt(settings, ["runec"])
+        if !rc.$isEmpty() { self.runec = rc }
+        let r = textAt(settings, ["rune"])
+        if !r.$isEmpty() { self.rune = r }
+    }
+
+    /// The module for an open document, or for any file, loaded along with
+    /// what it imports.
+    pub fn moduleFor(&var self, path: &String) -> i64 {
+        let m = self.project.load(path)
+        if m >= 0 { self.project.loadImports(m, 2) }
+        m
+    }
+
+    pub fn lintConfig(&var self, path: &String) -> lint::Config {
+        var cfg = lint::Config()
+        let mid = self.project.manifestFor(path)
+        if mid >= 0 { cfg.apply(self.project.manifest(mid)) }
+        for r in self.lintAllow { cfg.set(r, "allow") }
+        for r in self.lintWarn { cfg.set(r, "warn") }
+        if self.maxLineLength > 0 { cfg.maxLineLength = self.maxLineLength }
+        cfg
+    }
+
+    //=== Diagnostics ====================================================//
+
+    /// Publishes everything known about `path`: the compiler's last word
+    /// and a fresh lint, if the file is open.
+    pub fn publish(&var self, path: &String) {
+        var items = vector::Vector<String>()
+        if self.compilerDiags.peek(path) is Some(ds) { for d in ds { items.push(d.$clone()) } }
+        let uriText = pathToUri(path)
+        if self.docs.holds(uriText) && self.lintEnabled {
+            let m = self.moduleFor(path)
+            if m >= 0 {
+                let cfg = self.lintConfig(path)
+                let lx = self.project.module(m).lexed
+                for f in lint::run(self.project, m, cfg) { items.push(lintDiagnostic(lx, f)) }
+            }
+        }
+        var version = ""
+        if self.docs.peek(uriText) is Some(d) { version = ",\"version\":" + d.version.$str() }
+        notify("textDocument/publishDiagnostics",
+               "{\"uri\":" + json::quote(uriText) + version + ",\"diagnostics\":[" + joinItems(items) + "]}")
+    }
+
+    /// Runs the compiler over what `path` belongs to and records what it
+    /// said, for `path` and for every other file it reported on. Open
+    /// documents are checked as they stand in the editor, saved or not.
+    pub fn compile(&var self, path: &String) {
+        // An untitled buffer has nothing on disk for a build to find.
+        if !io::exists(path) { return }
+        if self.pendingCompile == path { self.pendingCompile = "" }
+        let mid = self.project.manifestFor(path)
+        var cmd = process::Command(self.runec.$clone())
+        var key = path.$clone()
+        if mid >= 0 {
+            // A package: `rune check` knows its dependencies and its files,
+            // and its `Rune.toml` says which memory model it is checked in.
+            key = self.project.manifest(mid).root.$clone()
+            cmd = process::Command(self.rune.$clone())
+            cmd.arg("check")
+            cmd.inDirectory(key.$clone())
+        } else {
+            cmd.arg("--check")
+            cmd.arg("--memory")
+            cmd.arg(self.memory.$clone())
+            if !self.project.stdlib.$isEmpty() {
+                cmd.arg("--stdlib")
+                cmd.arg(self.project.stdlib.$clone())
+            }
+        }
+        cmd.arg("--diagnostic-format")
+        cmd.arg("json")
+        // Every open buffer with unsaved changes stands in for its file.
+        var scratch = vector::Vector<String>()
+        for d in self.docs.valuesOf() {
+            if !d.dirty || !io::exists(d.path) { continue }
+            let file = self.queryFile.$substring(0, self.queryFile.$length() - 5) + "-" + scratch.length().$str() +
+                       ".rune"
+            match io::writeString(file.$clone(), self.project.readSource(d.path)) {
+                Ok(_u) => {
+                    cmd.arg("--source")
+                    cmd.arg(d.path + "=" + file)
+                    scratch.push(file)
+                },
+                Err(_e) => {},
+            }
+        }
+        if mid < 0 { cmd.arg(path.$clone()) }
+        let result = cmd.run()
+        for f in scratch { io::delete(f) }
+        if result.isNil() {
+            if !self.warnedNoCompiler {
+                self.warnedNoCompiler = true
+                let which = if mid >= 0 { self.rune.$clone() } else { self.runec.$clone() }
+                notify("window/showMessage", "{\"type\":2,\"message\":" +
+                       json::quote("Rune: could not run `" + which +
+                                   "`, so only lint diagnostics are shown. " +
+                                   "Set `rune.server.path` or put the toolchain on PATH.") + "}")
+            }
+            return
+        }
+        let out = result.unwrap()
+        var byFile = dictionary::Map<String, vector::Vector<String>>()
+        var order = vector::Vector<String>()
+        var other = vector::Vector<String>()
+        var reportedAny = false
+        for line in project::linesOf(out.stderr + "\n" + out.stdout) {
+            if line.$isEmpty() { continue }
+            if line.$byteAt(0) != 123 {
+                // Not a diagnostic: a build step's progress, or something
+                // that went wrong before the compiler could say where.
+                if text::startsWith(line, "○") || text::startsWith(line, "● Build failed") { continue }
+                if text::startsWith(line, "● ") { other.push(line.$substring(4, line.$length())) }
+                else { other.push(line.$clone()) }
+                continue
+            }
+            match json::parse(line.$clone()) {
+                Ok(d) => {
+                    reportedAny = true
+                    var file = textAt(d, ["file"])
+                    if file.$isEmpty() { file = path.$clone() }
+                    file = rebase(project::normalize(file), key)
+                    var m = self.moduleFor(file)
+                    var onto = file.$clone()
+                    var prefix = ""
+                    if m < 0 {
+                        // Somewhere the editor cannot show — a library's
+                        // source that is not on this machine, say: the file
+                        // that was checked carries it, saying where it is.
+                        onto = path.$clone()
+                        m = self.moduleFor(onto)
+                        if m < 0 { continue }
+                        prefix = file + ":" + intAt(d, ["line"], 0).$str() + ": "
+                    }
+                    let lx = self.project.module(m).lexed
+                    var rel = vector::Vector<Related>()
+                    match dig(d, ["related"]) {
+                        Some(rs) => {
+                            var i = 0
+                            while i < rs.length() {
+                                if rs.index(i) is Some(r) {
+                                    let rf = textAt(r, ["file"])
+                                    if !rf.$isEmpty() {
+                                        let rfile = rebase(project::normalize(rf), key)
+                                        let rm = self.moduleFor(rfile)
+                                        if rm >= 0 {
+                                            let rlx = self.project.module(rm).lexed
+                                            let rline = intAt(r, ["line"], 1)
+                                            rel.push(Related(rfile, rangeOfColumns(rlx, rline, intAt(r, ["column"], 0),
+                                                intAt(r, ["endLine"], rline), intAt(r, ["endColumn"], 0)),
+                                                textAt(r, ["message"])))
+                                        }
+                                    }
+                                }
+                                i += 1
+                            }
+                        },
+                        None => {},
+                    }
+                    let range = if prefix.$isEmpty() { diagnosticRange(lx, d) } else { rangeOfColumns(lx, 1, 0, 1, 0) }
+                    let item = compilerDiagnostic(range, d, prefix, &rel)
+                    addTo(&var byFile, &var order, onto, item)
+                    // Where the value was moved, borrowed or declared is
+                    // marked too, as a hint pointing back at the error.
+                    for r in rel {
+                        let hint = "{\"range\":" + r.range + ",\"severity\":4,\"source\":\"runec\",\"message\":" +
+                                   json::quote(r.message) + ",\"relatedInformation\":[{\"location\":{\"uri\":" +
+                                   json::quote(pathToUri(onto)) + ",\"range\":" + range + "},\"message\":" +
+                                   json::quote(textAt(d, ["message"])) + "}]}"
+                        addTo(&var byFile, &var order, r.file.$clone(), hint)
+                    }
+                },
+                Err(_e) => {},
+            }
+        }
+        if !reportedAny && !out.succeeded() && self.moduleFor(path) >= 0 {
+            // It failed and said why only in words: show them, at the top.
+            var message = ""
+            for o in other {
+                if !message.$isEmpty() { message += "\n" }
+                message += o
+            }
+            if message.$isEmpty() { message = "the check failed with status " + out.status.$str() }
+            let lx = self.project.module(self.moduleFor(path)).lexed
+            addTo(&var byFile, &var order, path.$clone(), "{\"range\":" + rangeOfColumns(lx, 1, 0, 1, 0) +
+                  ",\"severity\":1,\"source\":\"runec\",\"message\":" + json::quote(message) + "}")
+        }
+        // Clear what the last compile of the same thing reported.
+        var stale = vector::Vector<String>()
+        if self.reported.peek(key) is Some(before) { for f in before { stale.push(f.$clone()) } }
+        for f in stale {
+            if !byFile.holds(f) {
+                self.compilerDiags.remove(f)
+                self.publish(f)
+            }
+        }
+        if !byFile.holds(path) { self.compilerDiags.remove(path) }
+        for f in order {
+            self.compilerDiags.put(f.$clone(), byFile.look(f).$clone())
+            if f != path { self.publish(f) }
+        }
+        self.reported.put(key, order)
+        self.publish(path)
+    }
+}
+
+/// A place a compiler diagnostic points at besides its own.
+class Related {
+    pub file: String
+    pub range: String
+    pub message: String
+
+    fn init(self, file: String, range: String, message: String) {
+        self.file = file
+        self.range = range
+        self.message = message
+    }
+}
+
+fn addTo(byFile: &var dictionary::Map<String, vector::Vector<String>>, order: &var vector::Vector<String>,
+         file: String, item: String) {
+    if !byFile.holds(file) {
+        byFile.put(file.$clone(), vector::Vector<String>())
+        order.push(file.$clone())
+    }
+    byFile.touch(file).push(item)
+}
+
+/// `file` as the editor knows it. `rune` reports real paths, and a package
+/// reached through a symbolic link — `/var` on macOS is `/private/var` —
+/// has another name there: when `file` is not under `root`, the part after
+/// `root`'s last component is put back under `root`.
+fn rebase(file: String, root: &String) -> String {
+    if file.$find(root) == 0 || io::exists(file) && !io::isDirectory(root) { return file }
+    let last = "/" + project::fileOf(root) + "/"
+    var at = -1
+    var from = 0
+    loop {
+        let rest = file.$substring(from, file.$length())
+        let k = rest.$find(last)
+        if k < 0 { break }
+        at = from + k
+        from = at + 1
+    }
+    if at < 0 { return file }
+    let candidate = project::join(root, file.$substring(at + last.$length(), file.$length()))
+    if io::exists(candidate) { candidate } else { file }
+}
+
+fn stringsAt(v: &json::Value, path: [String]) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    match dig(v, path) {
+        Some(a) => {
+            var i = 0
+            while i < a.length() {
+                match a.index(i) {
+                    Some(x) => { if x.asText() is Some(t) { out.push(t) } },
+                    None => {},
+                }
+                i += 1
+            }
+        },
+        None => {},
+    }
+    out
+}
+
+fn joinItems(items: &vector::Vector<String>) -> String {
+    var out = io::Bytes()
+    var first = true
+    for it in items {
+        if !first { out.appendText(",") }
+        first = false
+        out.appendText(it.$clone())
+    }
+    out.toString()
+}
+
+/// The range a compiler diagnostic covers in `lx`.
+fn diagnosticRange(lx: &syntax::Lexed, d: &json::Value) -> String {
+    let line = intAt(d, ["line"], 1)
+    rangeOfColumns(lx, line, intAt(d, ["column"], 0), intAt(d, ["endLine"], line), intAt(d, ["endColumn"], 0))
+}
+
+/// A compiler diagnostic, from its JSON, as an LSP one. `prefix` goes before
+/// its message; `related` are the other places it points at.
+fn compilerDiagnostic(range: String, d: &json::Value, prefix: String, related: &vector::Vector<Related>) -> String {
+    let sev = textAt(d, ["severity"])
+    let severity = if sev == "warning" { "2" } elif sev == "note" || sev == "remark" { "3" } else { "1" }
+    var message = prefix + textAt(d, ["message"])
+    match dig(d, ["notes"]) {
+        Some(notes) => {
+            var i = 0
+            while i < notes.length() {
+                if notes.index(i) is Some(n) { message += "\nnote: " + (n.asText() ?? "") }
+                i += 1
+            }
+        },
+        None => {},
+    }
+    var s = "{\"range\":" + range + ",\"severity\":" + severity + ",\"source\":\"runec\",\"message\":" +
+            json::quote(message)
+    let code = textAt(d, ["code"])
+    if !code.$isEmpty() { s += ",\"code\":" + json::quote(code) }
+    var items = vector::Vector<String>()
+    for r in related {
+        items.push("{\"location\":{\"uri\":" + json::quote(pathToUri(r.file)) + ",\"range\":" + r.range +
+                   "},\"message\":" + json::quote(r.message) + "}")
+    }
+    if !items.isEmpty() { s += ",\"relatedInformation\":[" + joinItems(items) + "]" }
+    s + "}"
+}
+
+/// A lint finding as an LSP diagnostic.
+fn lintDiagnostic(lx: &syntax::Lexed, f: &lint::Finding) -> String {
+    let severity = if f.level == "warn" { "2" } else { "3" }
+    var s = "{\"range\":" + rangeOf(lx, f.start, f.end) + ",\"severity\":" + severity +
+            ",\"source\":\"rune-lint\",\"code\":" + json::quote(f.rule) + ",\"message\":" + json::quote(f.message)
+    if f.unnecessary { s += ",\"tags\":[1]" }
+    s + "}"
+}
+
+//===--------------------------------------------------------------------===//
+// Symbols, as the protocol numbers them
+//===--------------------------------------------------------------------===//
+
+fn completionKind(kind: &String) -> i64 {
+    match kind {
+        "function" => 3, "method" => 2, "field" => 5, "class" => 7, "struct" => 22,
+        "enum" => 13, "mark" => 8, "variant" => 20, "global" => 21, "type" => 25,
+        "associated" => 25, "macro" => 3, "module" => 9, "keyword" => 14, "snippet" => 15,
+        _ => 6,
+    }
+}
+
+fn symbolKind(kind: &String) -> i64 {
+    match kind {
+        "function" => 12, "method" => 6, "field" => 8, "class" => 5, "struct" => 23,
+        "enum" => 10, "mark" => 11, "variant" => 22, "global" => 14, "type" => 26,
+        "associated" => 26, "macro" => 12, _ => 13,
+    }
+}
+
+/// The module path of a file: `std::collections::vector`, `app::io`, or
+/// just the file's name.
+fn moduleName(p: &var project::Project, path: &String) -> String {
+    let std = project::join(p.stdlib, "std")
+    var rel = ""
+    var root = ""
+    if !p.stdlib.$isEmpty() && path.$find(std + "/") == 0 {
+        rel = path.$substring(std.$length() + 1, path.$length())
+        root = "std"
+    } else {
+        let mid = p.manifestFor(path)
+        if mid >= 0 {
+            let src = project::join(p.manifest(mid).root, "src")
+            if path.$find(src + "/") == 0 {
+                rel = path.$substring(src.$length() + 1, path.$length())
+                root = p.manifest(mid).name.$clone()
+                if rel == "lib.rune" || rel == "main.rune" { return root }
+            }
+        }
+    }
+    if rel.$isEmpty() {
+        let f = project::fileOf(path)
+        return if f.$length() > 5 { f.$substring(0, f.$length() - 5) } else { f }
+    }
+    if rel.$length() > 5 { rel = rel.$substring(0, rel.$length() - 5) }
+    root + "::" + text::replace(rel, "/", "::")
+}
+
+/// The comment at the top of a file, which is what a module says about
+/// itself: the `//` lines before the first declaration.
+fn moduleDoc(lx: &syntax::Lexed) -> String {
+    var out = ""
+    let first = if lx.count() > 0 { lx.at(0).start } else { 0 }
+    for c in lx.comments {
+        if c.start > first || c.isBlock { break }
+        var line = c.text.$substring(2, c.text.$length())
+        if line.$length() > 0 && line.$byteAt(0) == 32 { line = line.$substring(1, line.$length()) }
+        if line.$length() > 0 && line.$byteAt(0) == 61 { continue }     // //===---
+        out += line + "\n"
+    }
+    // A long header is a page, not a tooltip: keep its first paragraphs.
+    let cut = out.$find("\n\n\n")
+    if cut > 0 { out = out.$substring(0, cut) }
+    if out.$length() > 1500 { out = out.$substring(0, 1500) + "…" }
+    out
+}
+
+/// The markdown shown for a declaration.
+fn symbolMarkdown(p: &var project::Project, m: i64, sym: i64) -> String {
+    let path = p.module(m).path.$clone()
+    let s = p.module(m).symbol(sym)
+    var head = s.detail.$clone()
+    if s.isPublic && s.container.$isEmpty() { head = "pub " + head }
+    var out = "```rune\n" + head + "\n```\n"
+    let place = if s.container.$isEmpty() { moduleName(p, path) } else { moduleName(p, path) + "::" + s.container }
+    out += "*" + s.kind + " in* `" + place + "`"
+    if !s.doc.$isEmpty() { out += "\n\n---\n\n" + s.doc }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Answers
+//===--------------------------------------------------------------------===//
+
+/// Where the request's `textDocument` and `position` point: the module, and
+/// the byte offset in it. Module -1 when the document is unknown.
+struct Spot {
+    module: i64
+    offset: i64
+}
+
+fn locate(srv: &var Server, params: &json::Value) -> Spot {
+    let path = uriToPath(textAt(params, ["textDocument", "uri"]))
+    let m = srv.moduleFor(path)
+    if m < 0 { return Spot { module: -1, offset: 0 } }
+    let lx = srv.project.module(m).lexed
+    Spot { module: m, offset: offsetAt(lx, intAt(params, ["position", "line"], 0), intAt(params, ["position",
+            "character"], 0)) }
+}
+
+/// The identifier token at or just before `offset`, or -1.
+fn nameTokenAt(lx: &syntax::Lexed, offset: i64) -> i64 {
+    let t = lx.tokenAt(offset)
+    if t >= 0 && lx.at(t).start <= offset && offset <= lx.at(t).end &&
+            (lx.isIdent(t) || lx.isText(t, "self") || lx.isText(t, "Self")) { return t }
+    if t > 0 && lx.at(t).start == offset && lx.isIdent(t - 1) && lx.at(t - 1).end == offset { return t - 1 }
+    -1
+}
+
+fn hover(srv: &var Server, params: &json::Value) -> String {
+    let spot = locate(srv, params)
+    let m = spot.module
+    let offset = spot.offset
+    if m < 0 { return "null" }
+    let lx = srv.project.module(m).lexed
+    let tok = nameTokenAt(lx, offset)
+    if tok < 0 { return "null" }
+    let r = srv.project.resolveAt(m, tok)
+    var md = ""
+    if r.symbol >= 0 {
+        md = symbolMarkdown(&var srv.project, r.module, r.symbol)
+    } elif r.binding >= 0 {
+        let fnSym = srv.project.module(m).enclosingFunction(tok)
+        let bs = index::bindings(srv.project.module(m), fnSym)
+        let b = bs.look(r.binding)
+        let word = match b.kind {
+            "pattern" => "let",
+            "closure" => "param",
+            _ => b.kind.$clone(),
+        }
+        md = "```rune\n" + word + " " + b.name + (if r.typeRef.known() { ": " + r.typeRef.text } else { "" }) + "\n```"
+    } elif r.importedModule >= 0 {
+        md = "```rune\nimport " + r.importPath + "\n```"
+        let doc = moduleDoc(srv.project.module(r.importedModule).lexed)
+        if !doc.$isEmpty() { md += "\n\n---\n\n" + doc }
+    } elif !r.importPath.$isEmpty() {
+        md = "```rune\nimport " + r.importPath + "\n```"
+    } elif lx.isText(tok - 1, "$") && r.typeRef.known() {
+        md = "```rune\n" + project::intrinsicDetail("Self", lx.text(tok)) + "\n```\nBuilt into the language."
+    } elif lx.isText(tok, "self") && r.typeRef.known() {
+        md = "```rune\nself: " + r.typeRef.text + "\n```"
+    } else {
+        return "null"
+    }
+    let t = lx.at(tok)
+    "{\"contents\":{\"kind\":\"markdown\",\"value\":" + json::quote(md) + "},\"range\":" + rangeOf(lx, t.start,
+            t.end) + "}"
+}
+
+/// Where `r` was declared, as an LSP location, or "".
+fn locationOf(srv: &var Server, m: i64, tok: i64, r: &project::Resolved) -> String {
+    if r.symbol >= 0 {
+        let mod = srv.project.module(r.module)
+        let t = mod.lexed.at(mod.symbol(r.symbol).nameTok)
+        return "{\"uri\":" + json::quote(pathToUri(mod.path)) + ",\"range\":" + rangeOf(mod.lexed, t.start, t.end) + "}"
+    }
+    if r.binding >= 0 {
+        let mod = srv.project.module(m)
+        let fnSym = mod.enclosingFunction(tok)
+        let bs = index::bindings(mod, fnSym)
+        let t = mod.lexed.at(bs.look(r.binding).tok)
+        return "{\"uri\":" + json::quote(pathToUri(mod.path)) + ",\"range\":" + rangeOf(mod.lexed, t.start, t.end) + "}"
+    }
+    if r.importedModule >= 0 {
+        let mod = srv.project.module(r.importedModule)
+        return "{\"uri\":" + json::quote(pathToUri(mod.path)) + ",\"range\":" + rangeOf(mod.lexed, 0, 0) + "}"
+    }
+    ""
+}
+
+fn definition(srv: &var Server, params: &json::Value) -> String {
+    let spot = locate(srv, params)
+    let m = spot.module
+    let offset = spot.offset
+    if m < 0 { return "null" }
+    let tok = nameTokenAt(srv.project.module(m).lexed, offset)
+    if tok < 0 { return "null" }
+    let r = srv.project.resolveAt(m, tok)
+    let loc = locationOf(srv, m, tok, r)
+    if loc.$isEmpty() { "null" } else { loc }
+}
+
+/// Every use of what the name at the request's position refers to, in the
+/// open documents: (module, token) pairs flattened.
+fn occurrences(srv: &var Server, m: i64, tok: i64) -> vector::Vector<i64> {
+    var out = vector::Vector<i64>()
+    let target = srv.project.resolveAt(m, tok)
+    if !target.found() { return out }
+    let name = srv.project.module(m).lexed.text(tok)
+    // A local lives in one function; anything else may be used in any open file.
+    var modules = vector::Vector<i64>()
+    if target.binding >= 0 {
+        modules.push(m)
+    } else {
+        var uris = vector::Vector<String>()
+        for entry in srv.docs.keysOf() { uris.push(entry.$clone()) }
+        for u in uris {
+            let id = srv.moduleFor(uriToPath(u))
+            if id >= 0 { modules.push(id) }
+        }
+        var has = false
+        for id in modules { if id == m { has = true } }
+        if !has { modules.push(m) }
+        // The declaring file, too, when it is not open.
+        if target.module >= 0 {
+            var there = false
+            for id in modules { if id == target.module { there = true } }
+            if !there { modules.push(target.module) }
+        }
+    }
+    let fnSym = if target.binding >= 0 { srv.project.module(m).enclosingFunction(tok) } else { -1 }
+    for id in modules {
+        let lx = srv.project.module(id).lexed
+        var from = 0
+        var upto = lx.count() - 1
+        if fnSym >= 0 {
+            from = srv.project.module(m).symbol(fnSym).startTok
+            upto = srv.project.module(m).symbol(fnSym).bodyClose
+        }
+        var i = from
+        while i <= upto {
+            if lx.text(i) == name && (lx.isIdent(i) || lx.isText(i, "self")) {
+                let r = srv.project.resolveAt(id, i)
+                let same = (target.symbol >= 0 && r.module == target.module && r.symbol == target.symbol) ||
+                           (target.binding >= 0 && r.binding == target.binding && id == m) ||
+                           (target.importedModule >= 0 && r.importedModule == target.importedModule && id == m)
+                if same {
+                    out.push(id)
+                    out.push(i)
+                }
+            }
+            i += 1
+        }
+    }
+    out
+}
+
+fn references(srv: &var Server, params: &json::Value, highlightOnly: bool) -> String {
+    let spot = locate(srv, params)
+    let m = spot.module
+    let offset = spot.offset
+    if m < 0 { return "null" }
+    let tok = nameTokenAt(srv.project.module(m).lexed, offset)
+    if tok < 0 { return "[]" }
+    let found = occurrences(srv, m, tok)
+    var items = vector::Vector<String>()
+    var k = 0
+    while k < found.length() {
+        let id = found.get(k)
+        let t = found.get(k + 1)
+        k += 2
+        let mod = srv.project.module(id)
+        let tt = mod.lexed.at(t)
+        let range = rangeOf(mod.lexed, tt.start, tt.end)
+        if highlightOnly {
+            if id != m { continue }
+            // Written to, or read.
+            let kind = if mod.lexed.isText(t + 1, "=") || mod.lexed.isText(t + 1, "+=") || mod.lexed.isText(t + 1,
+                    "-=") { 3 } else { 2 }
+            items.push("{\"range\":" + range + ",\"kind\":" + kind.$str() + "}")
+        } else {
+            let isDecl = mod.symbols.length() > 0 && isDeclaration(mod, t)
+            let includeDecl = match dig(params, ["context",
+                                                 "includeDeclaration"]) { Some(v) => v.asBool() ?? true, None => true }
+            if isDecl && !includeDecl { continue }
+            items.push("{\"uri\":" + json::quote(pathToUri(mod.path)) + ",\"range\":" + range + "}")
+        }
+    }
+    "[" + joinItems(items) + "]"
+}
+
+fn isDeclaration(mod: &index::Index, tok: i64) -> bool {
+    for s in mod.symbols { if s.nameTok == tok { return true } }
+    false
+}
+
+fn documentSymbols(srv: &var Server, params: &json::Value) -> String {
+    let path = uriToPath(textAt(params, ["textDocument", "uri"]))
+    let m = srv.moduleFor(path)
+    if m < 0 { return "[]" }
+    let mod = srv.project.module(m)
+    let lx = mod.lexed
+    var tops = vector::Vector<String>()
+    // Types declared here take their members as children; members of types
+    // declared elsewhere (an `extend` of a String) stand on their own.
+    var here = dictionary::Map<String, i64>()
+    for s in mod.symbols { if s.isType() && s.container.$isEmpty() { here.put(s.name.$clone(), 1) } }
+    var i = 0
+    while i < mod.symbols.length() {
+        let s = mod.symbols.look(i)
+        i += 1
+        if !s.container.$isEmpty() && here.holds(s.container) { continue }
+        var children = vector::Vector<String>()
+        if s.isType() && s.container.$isEmpty() {
+            for c in mod.symbols {
+                if c.container == s.name && c.nameTok >= 0 { children.push(symbolJson(lx, c, "")) }
+            }
+        }
+        if s.nameTok < 0 { continue }
+        let name = if s.container.$isEmpty() { s.name.$clone() } else { s.container + "." + s.name }
+        tops.push(symbolJson(lx, s, if children.isEmpty() { "" } else { joinItems(children) }))
+        if name.$isEmpty() { continue }
+    }
+    "[" + joinItems(tops) + "]"
+}
+
+fn symbolJson(lx: &syntax::Lexed, s: &index::Symbol, children: String) -> String {
+    let start = lx.at(if s.startTok >= 0 { s.startTok } else { s.nameTok }).start
+    let endTok = if s.endTok >= s.nameTok { s.endTok } else { s.nameTok }
+    let end = lx.at(endTok).end
+    let name = if s.container.$isEmpty() || s.kind == "field" || s.kind == "variant" || s.kind == "method" ||
+            s.kind == "associated" { s.name.$clone() } else { s.container + "." + s.name }
+    let nt = lx.at(s.nameTok)
+    var out = "{\"name\":" + json::quote(if name.$isEmpty() { "?" } else { name }) + ",\"detail\":" +
+            json::quote(s.detail) +
+              ",\"kind\":" + symbolKind(s.kind).$str() + ",\"range\":" + rangeOf(lx, start, end) +
+              ",\"selectionRange\":" + rangeOf(lx, nt.start, nt.end)
+    if !children.$isEmpty() { out += ",\"children\":[" + children + "]" }
+    out + "}"
+}
+
+//=== Signature help ======================================================//
+
+fn signatureHelp(srv: &var Server, params: &json::Value) -> String {
+    let spot = locate(srv, params)
+    let m = spot.module
+    let offset = spot.offset
+    if m < 0 { return "null" }
+    let lx = srv.project.module(m).lexed
+    // The unmatched `(` before the cursor, and how many commas since.
+    var i = lx.tokenAt(offset - 1)
+    if i >= 0 && lx.at(i).start >= offset { i -= 1 }
+    var depth = 0
+    var commas = 0
+    while i >= 0 {
+        let t = lx.at(i)
+        if t.kind == syntax::Kind::Punct {
+            if t.text == ")" || t.text == "]" || t.text == "}" { depth += 1 }
+            elif t.text == "(" || t.text == "[" || t.text == "{" {
+                if depth == 0 {
+                    if t.text != "(" { return "null" }
+                    break
+                }
+                depth -= 1
+            } elif t.text == "," && depth == 0 { commas += 1 }
+            elif t.text == ";" && depth == 0 { return "null" }
+        }
+        i -= 1
+    }
+    if i <= 0 { return "null" }
+    var callee = i - 1
+    if lx.isText(callee, ">") {
+        var d = 0
+        while callee > 0 {
+            if lx.isText(callee, ">") { d += 1 } elif lx.isText(callee, "<") { d -= 1; if d == 0 { break } }
+            callee -= 1
+        }
+        callee -= 1
+    }
+    if !lx.isIdent(callee) { return "null" }
+    let r = srv.project.resolveAt(m, callee)
+    if r.symbol < 0 { return "null" }
+    var sm = r.module
+    var ss = r.symbol
+    // Calling a type calls its `init`.
+    if srv.project.module(sm).symbol(ss).isType() {
+        let owner = srv.project.module(sm).symbol(ss).name.$clone()
+        let init = srv.project.member(project::TypeRef(owner, sm), "init")
+        if init.module < 0 { return "null" }
+        sm = init.module
+        ss = init.symbol
+    }
+    let s = srv.project.module(sm).symbol(ss)
+    if !s.isCallable() && s.kind != "variant" { return "null" }
+    var label = s.detail.$clone()
+    if s.name == "init" && !s.container.$isEmpty() {
+        label = s.container + "(" + joinComma(s.params) + ")"
+    }
+    var ps = vector::Vector<String>()
+    for p in s.params { ps.push("{\"label\":" + json::quote(p) + "}") }
+    var sig = "{\"label\":" + json::quote(label) + ",\"parameters\":[" + joinItems(ps) + "]"
+    if !s.doc.$isEmpty() { sig += ",\"documentation\":{\"kind\":\"markdown\",\"value\":" + json::quote(s.doc) + "}" }
+    sig += "}"
+    let active = if s.params.isEmpty() { 0 } elif commas >= s.params.length() { s.params.length() - 1 } else { commas }
+    "{\"signatures\":[" + sig + "],\"activeSignature\":0,\"activeParameter\":" + active.$str() + "}"
+}
+
+fn joinComma(xs: &vector::Vector<String>) -> String {
+    var out = ""
+    for x in xs {
+        if !out.$isEmpty() { out += ", " }
+        out += x
+    }
+    out
+}
+
+//=== Code actions ========================================================//
+
+fn codeActions(srv: &var Server, params: &json::Value) -> String {
+    let uri = textAt(params, ["textDocument", "uri"])
+    let path = uriToPath(uri)
+    let m = srv.moduleFor(path)
+    if m < 0 { return "[]" }
+    let lx = srv.project.module(m).lexed
+    let a = offsetAt(lx, intAt(params, ["range", "start", "line"], 0), intAt(params, ["range", "start", "character"],
+            0))
+    let b = offsetAt(lx, intAt(params, ["range", "end", "line"], 0), intAt(params, ["range", "end", "character"], 0))
+    // Only what the client asked for, when it says.
+    var wantQuick = true
+    var wantAll = true
+    match dig(params, ["context", "only"]) {
+        Some(only) => {
+            wantQuick = false
+            wantAll = false
+            var i = 0
+            while i < only.length() {
+                let k = if only.index(i) is Some(v) { v.asText() ?? "" } else { "" }
+                if k == "quickfix" { wantQuick = true }
+                if k == "source" || k == "source.fixAll" || k == "source.fixAll.rune" { wantAll = true }
+                i += 1
+            }
+        },
+        None => {},
+    }
+    let cfg = srv.lintConfig(path)
+    let found = lint::run(srv.project, m, cfg)
+    var actions = vector::Vector<String>()
+    var all = vector::Vector<String>()
+    for f in found {
+        if f.edits.isEmpty() { continue }
+        var edits = vector::Vector<String>()
+        for e in f.edits {
+            edits.push("{\"range\":" + rangeOf(lx, e.start, e.end) + ",\"newText\":" + json::quote(e.text) + "}")
+            all.push("{\"range\":" + rangeOf(lx, e.start, e.end) + ",\"newText\":" + json::quote(e.text) + "}")
+        }
+        if wantQuick && f.start <= b && a <= f.end {
+            actions.push("{\"title\":" + json::quote(f.fixTitle) + ",\"kind\":\"quickfix\",\"isPreferred\":true" +
+                         ",\"diagnostics\":[" + lintDiagnostic(lx, f) + "]" +
+                         ",\"edit\":{\"changes\":{" + json::quote(uri) + ":[" + joinItems(edits) + "]}}}")
+        }
+    }
+    if wantAll && !all.isEmpty() {
+        // Overlapping edits would be refused by the client, so the combined
+        // action applies the fixes the way `rune lint --fix` does: all at
+        // once, as one replacement of the text they touch.
+        let fixed = lint::applyFixes(lx.source, found)
+        if fixed != lx.source {
+            actions.push("{\"title\":\"Fix all auto-fixable Rune lint problems\",\"kind\":\"source.fixAll.rune\"" +
+                         ",\"edit\":{\"changes\":{" + json::quote(uri) + ":[{\"range\":" + rangeOf(lx, 0,
+                                 lx.source.$length()) +
+                         ",\"newText\":" + json::quote(fixed) + "}]}}}")
+        }
+    }
+    "[" + joinItems(actions) + "]"
+}
+
+//=== Completion ==========================================================//
+
+/// Gathers completion items, each name once.
+class Completions {
+    pub items: vector::Vector<String>
+    seen: dictionary::Map<String, i64>
+
+    fn init(self) {
+        self.items = vector::Vector<String>()
+        self.seen = dictionary::Map<String, i64>()
+    }
+
+    pub fn add(&var self, label: &String, kind: i64, detail: &String, doc: &String, insert: &String,
+               sortGroup: &String) {
+        if label.$isEmpty() || self.seen.holds(label) { return }
+        self.seen.put(label.$clone(), 1)
+        var s = "{\"label\":" + json::quote(label) + ",\"kind\":" + kind.$str()
+        if !detail.$isEmpty() { s += ",\"detail\":" + json::quote(detail) }
+        if !doc.$isEmpty() { s += ",\"documentation\":{\"kind\":\"markdown\",\"value\":" + json::quote(doc) + "}" }
+        if !insert.$isEmpty() { s += ",\"insertText\":" + json::quote(insert) + ",\"insertTextFormat\":2" }
+        s += ",\"sortText\":" + json::quote(sortGroup + label)
+        self.items.push(s + "}")
+    }
+
+    /// A declaration, with a call snippet for anything callable.
+    pub fn symbol(&var self, s: &index::Symbol, group: &String) {
+        var insert = ""
+        if s.isCallable() && !s.isStatic || s.isCallable() {
+            insert = callSnippet(s.name, s.params, s.paramNames)
+        } elif s.kind == "variant" && !s.params.isEmpty() {
+            insert = callSnippet(s.name, s.params, s.paramTypes)
+        } elif s.kind == "macro" {
+            insert = s.name + "!($0)"
+        }
+        let label = if s.kind == "macro" { s.name + "!" } else { s.name.$clone() }
+        self.add(label, completionKind(s.kind), s.detail, s.doc, insert, group)
+    }
+}
+
+//=== Asking the compiler about a receiver ================================//
+
+/// One member, as `runec --query-members` reports it.
+class AskedMember {
+    pub name: String
+    pub kind: String
+    pub detail: String
+    pub doc: String
+    pub isStatic: bool
+    pub isPublic: bool
+    pub module: String
+
+    fn init(self) {
+        self.name = ""
+        self.kind = ""
+        self.detail = ""
+        self.doc = ""
+        self.isStatic = false
+        self.isPublic = false
+        self.module = ""
+    }
+}
+
+/// What the compiler said about a receiver: its type, the module it is in,
+/// and its members — or `ok` false when it could not say.
+class Asked {
+    pub ok: bool
+    pub typeText: String
+    pub module: String
+    pub members: vector::Vector<AskedMember>
+
+    fn init(self) {
+        self.ok = false
+        self.typeText = ""
+        self.module = ""
+        self.members = vector::Vector<AskedMember>()
+    }
+}
+
+fn isWordByte(b: i64) -> bool {
+    (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95 || b >= 128
+}
+
+/// The parameter names in a signature: `fn f(a: T, b: U) -> R` → `a`, `b`.
+fn paramsOf(detail: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    let open = detail.$find("(")
+    if open < 0 { return out }
+    var depth = 0
+    var from = open + 1
+    var i = open + 1
+    while i < detail.$length() {
+        let b = detail.$byteAt(i)
+        if b == 40 || b == 91 || b == 60 { depth += 1 }
+        elif (b == 41 || b == 93 || b == 62) && depth > 0 { depth -= 1 }
+        elif b == 41 || (b == 44 && depth == 0) {
+            let piece = syntax::collapse(detail.$substring(from, i))
+            let colon = piece.$find(":")
+            let name = if colon > 0 { syntax::collapse(piece.$substring(0, colon)) } else { piece }
+            if !name.$isEmpty() { out.push(name) }
+            if b == 41 { return out }
+            from = i + 1
+        }
+        i += 1
+    }
+    out
+}
+
+/// The compile that checks `path` the way the build would, with `flag
+/// query` asked of it and the scratch file standing in for `path`.
+fn queryCommand(srv: &var Server, path: &String, flag: String, query: String) -> process::Command {
+    project::compileCommand(&var srv.project, srv.runec, path, srv.queryFile, [flag, query])
+}
+
+/// Asks the compiler for the type and members of the expression spanning
+/// bytes `from..upto` of `text`, the editor's version of `path`.
+fn compilerMembers(srv: &var Server, path: String, text: String, from: i64, upto: i64) -> Asked {
+    var out = Asked()
+    if srv.queryFile.$isEmpty() || !io::exists(path) { return out }
+    match io::writeString(srv.queryFile, text) {
+        Ok(_n) => {},
+        Err(_e) => return out,
+    }
+    var cmd = queryCommand(srv, path, "--query-members", path + ":" + from.$str() + ":" + upto.$str())
+    let result = cmd.run()
+    if result.isNil() { return out }
+    let answer = result.unwrap()
+    for line in project::linesOf(answer.stdout) {
+        if line.$isEmpty() || line.$byteAt(0) != 123 { continue }
+        match json::parse(line.$clone()) {
+            Ok(v) => {
+                if !textAt(v, ["error"]).$isEmpty() { return out }
+                out.ok = true
+                out.typeText = textAt(v, ["type"])
+                out.module = textAt(v, ["module"])
+                match dig(v, ["members"]) {
+                    Some(list) => {
+                        var i = 0
+                        while i < list.length() {
+                            if list.index(i) is Some(mv) {
+                                var mem = AskedMember()
+                                mem.name = textAt(mv, ["name"])
+                                mem.kind = textAt(mv, ["kind"])
+                                mem.detail = textAt(mv, ["detail"])
+                                mem.doc = textAt(mv, ["doc"])
+                                mem.isStatic = match dig(mv, ["static"]) {
+                                    Some(b) => b.asBool() ?? false,
+                                    None => false,
+                                }
+                                mem.isPublic = match dig(mv, ["public"]) {
+                                    Some(b) => b.asBool() ?? false,
+                                    None => false,
+                                }
+                                mem.module = textAt(mv, ["module"])
+                                out.members.push(mem)
+                            }
+                            i += 1
+                        }
+                    },
+                    None => {},
+                }
+            },
+            Err(_e) => {},
+        }
+    }
+    out
+}
+
+/// `name(${1:a}, ${2:b})`.
+fn callSnippet(name: &String, params: &vector::Vector<String>, names: &vector::Vector<String>) -> String {
+    var out = name + "("
+    var i = 0
+    while i < params.length() {
+        if i > 0 { out += ", " }
+        var n = if i < names.length() { names.look(i).$clone() } else { "" }
+        if n.$isEmpty() { n = params.look(i).$clone() }
+        out += "${" + (i + 1).$str() + ":" + escapeSnippet(n) + "}"
+        i += 1
+    }
+    out + ")$0"
+}
+
+fn escapeSnippet(s: &String) -> String {
+    text::replace(text::replace(text::replace(s, "\\", "\\\\"), "$", "\\$"), "}", "\\}")
+}
+
+fn decoratorNames() -> vector::Vector<String> {
+    vector::from(["safe", "unsafe", "inline", "noinline", "export", "alias", "as", "resource",
+                  "intrinsic", "sync", "Doc", "type", "link", "linkpath", "Config", "macro", "auto"])
+}
+
+//===--------------------------------------------------------------------===//
+// Inlay hints
+//===--------------------------------------------------------------------===//
+
+/// What could be written out but is not: the type of each binding without
+/// an annotation, and the parameter each positional argument goes to. The
+/// editor shows them greyed out, and inserts one when it is double-clicked.
+/// The compiler works them out, over the buffer as it stands; while the
+/// buffer does not check, the last answer for it stands.
+fn inlayHints(srv: &var Server, params: &json::Value) -> String {
+    let uri = textAt(params, ["textDocument", "uri"])
+    let path = uriToPath(uri)
+    if !srv.hintTypes && !srv.hintParameters { return "[]" }
+    let m = srv.moduleFor(path)
+    if m < 0 || !io::exists(path) { return "[]" }
+    var version = -1
+    if srv.docs.peek(uri) is Some(d) { version = d.version }
+    let key = path + "#" + version.$str()
+    if srv.hintCache.peek(key) is Some(done) { return done.$clone() }
+
+    let source = srv.project.readSource(path)
+    var answer = ""
+    match io::writeString(srv.queryFile, source) {
+        Ok(_n) => {
+            var cmd = queryCommand(srv, path, "--query-hints", path.$clone())
+            if cmd.run() is Some(out) {
+                for line in project::linesOf(out.stdout) {
+                    if !line.$isEmpty() && line.$byteAt(0) == 123 { answer = line.$clone() }
+                }
+            }
+        },
+        Err(_e) => {},
+    }
+    let parsed = match json::parse(answer) { Ok(v) => v, Err(_e) => json::object() }
+    let list = match dig(parsed, ["hints"]) {
+        Some(l) => l,
+        None => {
+            // Mid-edit, most likely: keep showing what was last known.
+            if srv.hintLast.peek(path) is Some(last) { return last.$clone() }
+            return "[]"
+        },
+    }
+    let lx = srv.project.module(m).lexed
+    var items = vector::Vector<String>()
+    var i = 0
+    while i < list.length() {
+        if list.index(i) is Some(h) {
+            let kind = textAt(h, ["kind"])
+            let at = intAt(h, ["offset"], -1)
+            let label = textAt(h, ["label"])
+            let insert = textAt(h, ["insert"])
+            var wanted = if kind == "type" { srv.hintTypes } else { srv.hintParameters }
+            // `f(width)` for a parameter called `width` says it already.
+            if kind == "parameter" && wanted {
+                let name = label.$substring(0, label.$length() - 1)
+                let end = at + name.$length()
+                if end <= source.$length() && source.$substring(at, end) == name &&
+                        (end == source.$length() || !isWordByte(source.$byteAt(end))) {
+                    wanted = false
+                }
+            }
+            if wanted && at >= 0 {
+                let pos = positionOf(lx, at)
+                var s = "{\"position\":" + pos + ",\"label\":" + json::quote(label) + ",\"kind\":" +
+                        (if kind == "type" { "1" } else { "2" })
+                if kind == "parameter" { s += ",\"paddingRight\":true" }
+                if !insert.$isEmpty() {
+                    s += ",\"textEdits\":[{\"range\":{\"start\":" + pos + ",\"end\":" + pos + "},\"newText\":" +
+                         json::quote(insert) + "}]"
+                    s += ",\"tooltip\":" + json::quote("Double-click to write `" + text::trim(insert) + "` in")
+                }
+                items.push(s + "}")
+            }
+        }
+        i += 1
+    }
+    let result = "[" + joinItems(items) + "]"
+    srv.hintCache.clear()
+    srv.hintCache.put(key, result.$clone())
+    srv.hintLast.put(path.$clone(), result.$clone())
+    result
+}
+
+fn completion(srv: &var Server, params: &json::Value) -> String {
+    let spot = locate(srv, params)
+    let m = spot.module
+    let offset = spot.offset
+    if m < 0 { return "[]" }
+    var c = Completions()
+    let lx = srv.project.module(m).lexed
+    let src = lx.source.$clone()
+
+    // Nothing inside a comment or a string.
+    for cm in lx.comments { if cm.start < offset && offset <= cm.end { return "[]" } }
+    let at = lx.tokenAt(offset - 1)
+    if at >= 0 {
+        let t = lx.at(at)
+        if (t.kind == syntax::Kind::Str || t.kind == syntax::Kind::Char) && t.start < offset &&
+                offset < t.end { return "[]" }
+    }
+
+    // The word being typed, and what comes before it.
+    var wordStart = offset
+    while wordStart > 0 {
+        let b = src.$byteAt(wordStart - 1) as i64
+        if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95 ||
+                b >= 128 { wordStart -= 1 } else { break }
+    }
+    var before = wordStart - 1
+    while before >= 0 && (src.$byteAt(before) == 32 || src.$byteAt(before) == 9) { before -= 1 }
+    let prevByte = if before >= 0 { src.$byteAt(before) as i64 } else { 0 }
+    let lineStart = lx.lineStarts.get(lx.lineOf(offset))
+    let linePrefix = syntax::collapse(src.$substring(lineStart, wordStart))
+    let tokBefore = lx.tokenAt(wordStart - 1)
+    let fnSym = srv.project.module(m).enclosingFunction(if tokBefore >= 0 { tokBefore } else { 0 })
+
+    // `@` — decorators.
+    if prevByte == 64 {
+        for d in decoratorNames() { c.add(d, 14, "decorator", "", "", "0") }
+        return "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
+    }
+
+    // `import a::` — modules.
+    if linePrefix.$length() >= 6 && linePrefix.$substring(0, 6) == "import" {
+        importCompletions(srv, m, &var c, syntax::collapse(src.$substring(lineStart, wordStart)))
+        return "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
+    }
+
+    // `value.` and `value.$` — members.
+    let dollar = prevByte == 36 && before >= 1 && src.$byteAt(before - 1) == 46
+    if prevByte == 46 || dollar {
+        let dotOffset = if dollar { before - 1 } else { before }
+        // `1..` is a range, not a member.
+        if dotOffset >= 1 && src.$byteAt(dotOffset - 1) == 46 { return "[]" }
+        let dotTok = lx.tokenAt(dotOffset)
+        if dotTok <= 0 { return "[]" }
+        let start = srv.project.receiverStart(lx, dotTok - 1)
+
+        // The compiler knows the receiver's type exactly — generics, binds,
+        // marks, superclasses — so it is asked first, about the buffer with
+        // the half-written member taken out so that what is left parses.
+        var wordEnd = offset
+        while wordEnd < src.$length() && isWordByte(src.$byteAt(wordEnd) as i64) { wordEnd += 1 }
+        let receiverFrom = lx.at(start).start
+        let receiverTo = lx.at(dotTok - 1).end
+        // What follows on the line may be the next statement, written before
+        // this one was finished: `dog.|let x = 1`. A line break keeps the
+        // two apart, and changes nothing inside brackets, where it is ignored.
+        var next = wordEnd
+        while next < src.$length() && (src.$byteAt(next) == 32 || src.$byteAt(next) == 9) { next += 1 }
+        let glued = next < src.$length() && isWordByte(src.$byteAt(next) as i64)
+        let patched = src.$substring(0, dotOffset) + (if glued { "\n" } else { "" }) +
+                      src.$substring(wordEnd, src.$length())
+        let asked = compilerMembers(srv, srv.project.module(m).path.$clone(), patched, receiverFrom, receiverTo)
+        if asked.ok {
+            if dollar {
+                for name in project::intrinsicsFor(index::baseName(asked.typeText)) {
+                    let detail = project::intrinsicDetail(asked.typeText, name)
+                    let takes = detail.$find("()") < 0
+                    c.add(name, 2, detail, "Built into the language.", if takes { name + "($1)$0" } else { name + "()" }, "0")
+                }
+                return "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
+            }
+            for mem in asked.members {
+                if mem.isStatic { continue }
+                // Private members only from inside the module that declares them.
+                if !mem.isPublic && mem.module != asked.module { continue }
+                let isField = mem.kind == "field"
+                let params = paramsOf(mem.detail)
+                let insert = if isField { "" } else { callSnippet(mem.name, params, paramsOf(mem.detail)) }
+                let kind = if isField { 5 } else { 2 }
+                c.add(mem.name, kind, mem.detail, mem.doc, insert, if isField { "0" } else { "1" })
+            }
+            for name in project::intrinsicsFor(index::baseName(asked.typeText)) {
+                let detail = project::intrinsicDetail(asked.typeText, name)
+                let takes = detail.$find("()") < 0
+                c.add("$" + name, 2, detail, "Built into the language.",
+                      "\\$" + (if takes { name + "($1)$0" } else { name + "()" }), "2")
+            }
+            return "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
+        }
+
+        // The compiler could not answer — the file does not parse even
+        // without the member, say — so the index's own reading is used.
+        let bs = if fnSym >= 0 { index::bindings(srv.project.module(m), fnSym) } else { vector::Vector<index::Binding>() }
+        let t = srv.project.typeOf(m, fnSym, bs, start, dotTok - 1, 0)
+        if !t.known() { return "{\"isIncomplete\":false,\"items\":[]}" }
+        if dollar {
+            for name in project::intrinsicsFor(t.name()) {
+                let detail = project::intrinsicDetail(t.text, name)
+                let takes = detail.$find("()") < 0
+                c.add(name, 2, detail, "Built into the language.", if takes { name + "($1)$0" } else { name + "()" },
+                      "0")
+            }
+        } else {
+            for mem in srv.project.members(t) {
+                let s = srv.project.module(mem.module).symbol(mem.symbol)
+                if s.isStatic || s.kind == "variant" || s.kind == "associated" || s.name == "init" ||
+                        s.name == "deinit" { continue }
+                // Private members only from inside their own file.
+                if !s.isPublic && !s.inBind && mem.module != m { continue }
+                var detail = s.detail.$clone()
+                if s.kind == "field" { detail = s.name + ": " + mem.typeText }
+                let group = if s.kind == "field" { "0" } else { "1" }
+                var insert = ""
+                if s.isCallable() { insert = callSnippet(s.name, s.params, s.paramNames) }
+                c.add(s.name, completionKind(s.kind), detail, s.doc, insert, group)
+            }
+            // The intrinsics come after a `$`; offer the `$` forms too.
+            for name in project::intrinsicsFor(t.name()) {
+                let detail = project::intrinsicDetail(t.text, name)
+                let takes = detail.$find("()") < 0
+                c.add("$" + name, 2, detail, "Built into the language.", "\\$" + (if takes { name +
+                        "($1)$0" } else { name + "()" }), "2")
+            }
+        }
+        return "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
+    }
+
+    // `path::` — what the path holds.
+    if prevByte == 58 && before >= 1 && src.$byteAt(before - 1) == 58 {
+        let sepTok = lx.tokenAt(before - 1)
+        if sepTok <= 0 { return "[]" }
+        let _bs = if fnSym >= 0 { index::bindings(srv.project.module(m),
+                                                  fnSym) } else { vector::Vector<index::Binding>() }
+        let headTok = sepTok - 1
+        let r = srv.project.resolveAt(m, headTok)
+        if r.importedModule >= 0 {
+            let mod = srv.project.module(r.importedModule)
+            for s in mod.symbols {
+                if s.container.$isEmpty() && s.isPublic && !s.isExtern { c.symbol(s,
+                        if s.isType() { "1" } else { "0" }) }
+            }
+        } elif r.symbol >= 0 && srv.project.module(r.module).symbol(r.symbol).isType() {
+            let owner = srv.project.module(r.module).symbol(r.symbol)
+            let t = project::TypeRef(owner.name.$clone(), r.module)
+            for mem in srv.project.members(t) {
+                let s = srv.project.module(mem.module).symbol(mem.symbol)
+                if s.kind == "variant" || s.isStatic || s.kind == "associated" || s.name == "init" {
+                    if s.name == "init" { continue }
+                    c.symbol(s, if s.kind == "variant" { "0" } else { "1" })
+                }
+            }
+        } elif lx.text(headTok) == "std" && !lx.isText(headTok - 1, "::") {
+            stdModules(srv, "", &var c)
+        }
+        return "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
+    }
+
+    // Everything in scope.
+    if fnSym >= 0 {
+        let bs = index::bindings(srv.project.module(m), fnSym)
+        let here = if tokBefore >= 0 { tokBefore + 1 } else { 0 }
+        var i = bs.length() - 1
+        while i >= 0 {
+            let b = bs.look(i)
+            if b.visibleFrom <= here && here <= b.visibleTo + 1 {
+                let t = srv.project.bindingType(m, fnSym, bs, i, 0)
+                c.add(b.name, 6, if t.known() { b.name + ": " + t.text } else { b.kind.$clone() }, "", "", "0")
+            }
+            i -= 1
+        }
+        let f = srv.project.module(m).symbol(fnSym)
+        if !f.container.$isEmpty() && !f.isStatic { c.add("self", 14, "self: " + f.container, "", "", "0") }
+    }
+    let mod = srv.project.module(m)
+    for s in mod.symbols {
+        if s.container.$isEmpty() && s.nameTok >= 0 { c.symbol(s, "1") }
+    }
+    var k = 0
+    while k < mod.imports.length() {
+        let imp = mod.imports.look(k)
+        let target = srv.project.importTarget(m, k)
+        if imp.isGlob && target >= 0 {
+            for s in srv.project.module(target).symbols {
+                if s.container.$isEmpty() && s.isPublic { c.symbol(s, "2") }
+            }
+        } elif srv.project.importIsItem(m, k) && target >= 0 {
+            let s = srv.project.findIn(target, imp.segments.look(imp.segments.length() - 1))
+            if s >= 0 { c.symbol(srv.project.module(target).symbol(s), "2") }
+        } elif !imp.alias.$isEmpty() {
+            let doc = if target >= 0 { moduleDoc(srv.project.module(target).lexed) } else { "" }
+            c.add(imp.alias, 9, "import " + imp.path, doc, "", "2")
+        }
+        k += 1
+    }
+    for name in ["Some", "None", "Ok", "Err"] {
+        let found = srv.project.findTopLevel(m, name)
+        if found.module >= 0 { c.symbol(srv.project.module(found.module).symbol(found.symbol), "3") }
+    }
+    for t in syntax::builtinTypes() { c.add(t, 25, "built-in type", "", "", "4") }
+    for name in ["println", "print", "format", "vec"] {
+        c.add(name + "!", 3, "macro " + name + "!", "", name + "!($0)", "4")
+    }
+    for kw in syntax::keywords() { c.add(kw, 14, "", "", "", "5") }
+    snippets(&var c)
+    "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
+}
+
+/// Module names for `import std::…` and `std::…`: files and folders under
+/// the standard library's `std/`, below `sub`.
+fn stdModules(srv: &var Server, sub: &String, c: &var Completions) {
+    if srv.project.stdlib.$isEmpty() { return }
+    var dir = project::join(srv.project.stdlib, "std")
+    if !sub.$isEmpty() { dir = project::join(dir, sub) }
+    match io::readDirectory(dir) {
+        Ok(entries) => {
+            for e in entries {
+                let n = e.name.$clone()
+                if e.isDirectory { c.add(n, 9, "module folder", "", "", "0") }
+                elif n.$length() > 5 && n.$substring(n.$length() - 5, n.$length()) == ".rune" {
+                    let name = n.$substring(0, n.$length() - 5)
+                    let path = project::join(dir, n)
+                    let id = srv.project.load(path)
+                    let doc = if id >= 0 { moduleDoc(srv.project.module(id).lexed) } else { "" }
+                    c.add(name, 9, "module", doc, "", "0")
+                }
+            }
+        },
+        Err(_e) => {},
+    }
+}
+
+fn importCompletions(srv: &var Server, m: i64, c: &var Completions, typed: String) {
+    // `import a::b::` — the segments typed so far.
+    var body = syntax::collapse(typed.$substring(6, typed.$length()))
+    var segs = vector::Vector<String>()
+    var from = 0
+    var i = 0
+    while i + 1 < body.$length() {
+        if body.$byteAt(i) == 58 && body.$byteAt(i + 1) == 58 {
+            segs.push(syntax::collapse(body.$substring(from, i)))
+            from = i + 2
+            i += 2
+            continue
+        }
+        i += 1
+    }
+    let path = srv.project.module(m).path.$clone()
+    if segs.isEmpty() {
+        c.add("std", 9, "the standard library", "", "", "0")
+        let mid = srv.project.manifestFor(path)
+        if mid >= 0 {
+            c.add(srv.project.manifest(mid).name, 9, "this package", "", "", "0")
+            for dep in srv.project.manifest(mid).deps.keysOf() { c.add(dep, 9, "dependency", "", "", "1") }
+        }
+        return
+    }
+    if segs.get(0) == "std" {
+        var sub = ""
+        var k = 1
+        while k < segs.length() {
+            if !sub.$isEmpty() { sub += "/" }
+            sub += segs.get(k)
+            k += 1
+        }
+        stdModules(srv, sub, c)
+        return
+    }
+    // A package's own modules, or a dependency's: the files under its src/.
+    let mid = srv.project.manifestFor(path)
+    if mid < 0 { return }
+    var root = ""
+    if segs.get(0) == srv.project.manifest(mid).name { root = srv.project.manifest(mid).root.$clone() }
+    elif srv.project.manifest(mid).deps.peek(segs.get(0)) is Some(d) { root = d.$clone() }
+    if root.$isEmpty() { return }
+    var dir = project::join(root, "src")
+    var k = 1
+    while k < segs.length() { dir = project::join(dir, segs.get(k)); k += 1 }
+    match io::readDirectory(dir) {
+        Ok(entries) => {
+            for e in entries {
+                let n = e.name.$clone()
+                if e.isDirectory { c.add(n, 9, "module folder", "", "", "0") }
+                elif n.$length() > 5 && n.$substring(n.$length() - 5, n.$length()) == ".rune" && n != "main.rune" &&
+                        n != "lib.rune" {
+                    c.add(n.$substring(0, n.$length() - 5), 9, "module", "", "", "0")
+                }
+            }
+        },
+        Err(_e) => {},
+    }
+}
+
+fn snippets(c: &var Completions) {
+    c.add("fn …", 15, "function", "", "fn ${1:name}(${2}) ${3:-> ${4:i64} }{\n\t$0\n}", "6")
+    c.add("if …", 15, "if", "", "if ${1:condition} {\n\t$0\n}", "6")
+    c.add("for …", 15, "for loop", "", "for ${1:item} in ${2:items} {\n\t$0\n}", "6")
+    c.add("while …", 15, "while loop", "", "while ${1:condition} {\n\t$0\n}", "6")
+    c.add("match …", 15, "match", "", "match ${1:value} {\n\t${2:pattern} => $0,\n}", "6")
+    c.add("struct …", 15, "struct", "", "struct ${1:Name} {\n\t${2:field}: ${3:i64}\n}", "6")
+    c.add("class …", 15, "class", "",
+          "class ${1:Name} {\n\t${2:field}: ${3:i64}\n\n\tfn init(self) {\n\t\t$0\n\t}\n}", "6")
+    c.add("enum …", 15, "enum", "", "enum ${1:Name} {\n\t${2:First},\n\t${3:Second},\n}", "6")
+    c.add("main", 15, "fn main", "", "fn main() -> i64 {\n\t$0\n\t0\n}", "6")
+}
+
+//===--------------------------------------------------------------------===//
+// The loop
+//===--------------------------------------------------------------------===//
+
+fn capabilities() -> String {
+    "{\"capabilities\":{" +
+    "\"positionEncoding\":\"utf-16\"," +
+    "\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":false}}," +
+    "\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"$\",\"@\"],\"resolveProvider\":false}," +
+    "\"hoverProvider\":true," +
+    "\"definitionProvider\":true," +
+    "\"referencesProvider\":true," +
+    "\"documentHighlightProvider\":true," +
+    "\"documentSymbolProvider\":true," +
+    "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"],\"retriggerCharacters\":[\",\"]}," +
+    "\"inlayHintProvider\":true," +
+    "\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"source.fixAll.rune\"]}" +
+    "},\"serverInfo\":{\"name\":\"rune-lsp\",\"version\":\"0.1.0\"}}"
+}
+
+/// A compiler beside this program, or the one on PATH.
+fn sibling(name: &String) -> String {
+    let own = project::absolute(process::programName())
+    let beside = project::join(project::dirOf(own), name)
+    if io::exists(beside) { return beside }
+    name.$clone()
+}
+
+fn main() -> i64 {
+    var stdlibFlag = ""
+    var runec = ""
+    var rune = ""
+    let args = process::arguments()
+    var i = 0
+    // Anything unrecognised is ignored: clients add flags of their own,
+    // such as `--stdio`, which is the only transport there is here anyway.
+    while i < args.length() {
+        let a = args.get(i)
+        let value = if i + 1 < args.length() { args.get(i + 1) } else { "" }
+        if a == "--stdlib" { stdlibFlag = value; i += 1 }
+        elif a == "--runec" { runec = value; i += 1 }
+        elif a == "--rune" { rune = value; i += 1 }
+        elif a == "--version" { io::println("rune-lsp 0.1.0"); return 0 }
+        elif a == "-h" || a == "--help" {
+            io::println("rune-lsp — the Rune language server, over standard input and output")
+            io::println("")
+            io::println("    rune-lsp [--stdlib <dir>] [--runec <path>] [--rune <path>]")
+            return 0
+        }
+        i += 1
+    }
+    if runec.$isEmpty() { runec = sibling("runec") }
+    if rune.$isEmpty() { rune = sibling("rune") }
+    var srv = Server(project::findStdlib(stdlibFlag, process::programName()), runec, rune)
+    // So that whether the editor has sent more can be asked between
+    // messages: a check waits for a pause in typing, not for every key.
+    io::unbufferInput()
+
+    loop {
+        if !srv.pendingCompile.$isEmpty() && !io::inputWaiting(srv.checkDelay) {
+            let p = srv.pendingCompile.$clone()
+            srv.compile(p)
+        }
+        let body = readMessage()
+        if body.isNil() { break }
+        let message = match json::parse(body.unwrap()) {
+            Ok(v) => v,
+            Err(_e) => continue,
+        }
+        let method = textAt(message, ["method"])
+        let hasId = match message.get("id") { Some(_v) => true, None => false }
+        let id = match message.get("id") { Some(v) => json::compact(v), None => "null" }
+        let params = message.get("params") ?? json::object()
+
+        if method == "initialize" {
+            match dig(params, ["initializationOptions"]) {
+                Some(opts) => srv.configure(opts),
+                None => {},
+            }
+            respond(id, capabilities())
+        } elif method == "initialized" {
+            let stdlibAt = if srv.project.stdlib.$isEmpty() { "(not found)" } else { srv.project.stdlib.$clone() }
+            log("stdlib at " + stdlibAt)
+        } elif method == "shutdown" {
+            srv.shutdown = true
+            respond(id, "null")
+        } elif method == "exit" {
+            io::delete(srv.queryFile)
+            return if srv.shutdown { 0 } else { 1 }
+        } elif method == "textDocument/didOpen" {
+            let uri = textAt(params, ["textDocument", "uri"])
+            let path = uriToPath(uri)
+            srv.docs.put(uri.$clone(), Document(uri.$clone(), path.$clone(), intAt(params, ["textDocument",
+                    "version"], 0)))
+            srv.project.setOverlay(path.$clone(), textAt(params, ["textDocument", "text"]))
+            srv.moduleFor(path)
+            srv.publish(path)
+            if srv.checkOnSave || srv.checkOnChange { srv.compile(path) }
+        } elif method == "textDocument/didChange" {
+            let uri = textAt(params, ["textDocument", "uri"])
+            let path = uriToPath(uri)
+            // Full synchronisation: the last change is the whole text.
+            match dig(params, ["contentChanges"]) {
+                Some(changes) => {
+                    let n = changes.length()
+                    if n > 0 {
+                        if changes.index(n - 1) is Some(last) {
+                            srv.project.setOverlay(path.$clone(), textAt(last, ["text"]))
+                        }
+                    }
+                },
+                None => {},
+            }
+            if srv.docs.holds(uri) {
+                srv.docs.touch(uri).version = intAt(params, ["textDocument", "version"], 0)
+                srv.docs.touch(uri).dirty = true
+            }
+            srv.publish(path)
+            if srv.checkOnChange {
+                // A check already waiting for another file runs now rather
+                // than being forgotten.
+                if !srv.pendingCompile.$isEmpty() && srv.pendingCompile != path {
+                    let other = srv.pendingCompile.$clone()
+                    srv.compile(other)
+                }
+                srv.pendingCompile = path.$clone()
+            }
+        } elif method == "textDocument/didSave" {
+            let uri = textAt(params, ["textDocument", "uri"])
+            let path = uriToPath(uri)
+            if srv.docs.holds(uri) { srv.docs.touch(uri).dirty = false }
+            // Anything else that changed on disk may have with it.
+            srv.project.forgetManifests()
+            if srv.checkOnSave || srv.pendingCompile == path { srv.compile(path) }
+        } elif method == "textDocument/didClose" {
+            let uri = textAt(params, ["textDocument", "uri"])
+            let path = uriToPath(uri)
+            srv.docs.remove(uri)
+            srv.project.dropOverlay(path)
+            if srv.pendingCompile == path { srv.pendingCompile = "" }
+            srv.compilerDiags.remove(path)
+            notify("textDocument/publishDiagnostics", "{\"uri\":" + json::quote(uri) + ",\"diagnostics\":[]}")
+        } elif method == "workspace/didChangeConfiguration" {
+            match dig(params, ["settings", "rune"]) {
+                Some(s) => srv.configure(s),
+                None => {},
+            }
+            var uris = vector::Vector<String>()
+            for u in srv.docs.keysOf() { uris.push(u.$clone()) }
+            for u in uris { srv.publish(uriToPath(u)) }
+        } elif method == "workspace/didChangeWatchedFiles" {
+            // Something changed on disk. Open documents are the editor's
+            // business; anything else already read is read again.
+            srv.project.forgetManifests()
+            match dig(params, ["changes"]) {
+                Some(changes) => {
+                    var k = 0
+                    while k < changes.length() {
+                        if changes.index(k) is Some(ch) {
+                            let uri = textAt(ch, ["uri"])
+                            let path = uriToPath(uri)
+                            let id = srv.project.idOf(path)
+                            if id >= 0 && !srv.docs.holds(uri) { srv.project.reindex(id) }
+                        }
+                        k += 1
+                    }
+                },
+                None => {},
+            }
+        } elif method == "textDocument/completion" {
+            respond(id, completion(&var srv, params))
+        } elif method == "textDocument/hover" {
+            respond(id, hover(&var srv, params))
+        } elif method == "textDocument/definition" {
+            respond(id, definition(&var srv, params))
+        } elif method == "textDocument/references" {
+            respond(id, references(&var srv, params, false))
+        } elif method == "textDocument/documentHighlight" {
+            respond(id, references(&var srv, params, true))
+        } elif method == "textDocument/documentSymbol" {
+            respond(id, documentSymbols(&var srv, params))
+        } elif method == "textDocument/signatureHelp" {
+            respond(id, signatureHelp(&var srv, params))
+        } elif method == "textDocument/inlayHint" {
+            respond(id, inlayHints(&var srv, params))
+        } elif method == "textDocument/codeAction" {
+            respond(id, codeActions(&var srv, params))
+        } elif hasId {
+            respondError(id, -32601, "rune-lsp does not handle " + method)
+        }
+    }
+    io::delete(srv.queryFile)
+    if srv.shutdown { 0 } else { 1 }
+}

@@ -1,0 +1,13 @@
+// EXPECT-ERROR: is a mark, not a type
+//
+// A mark names a requirement, not a value: every type carrying it is a
+// different size, so there is no one value to hold. Saying so where the type
+// is written keeps the mistake from surfacing far away — as a missing
+// `$clone` somewhere inside whatever container was asked to hold it.
+import std::mem
+
+mark Node { fn display(&self) -> String }
+
+fn push(elem: Node) { }
+
+fn main() -> i64 { 0 }

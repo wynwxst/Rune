@@ -126,15 +126,26 @@ std::string Sema::canonicalOperatorName(const std::string &raw) {
   return user == OperatorAliases.end() ? raw : user->second;
 }
 
+void Sema::bindTemplateGenerics(const NominalDecl *tmpl,
+                                const std::vector<Type *> &args,
+                                std::map<std::string, Type *> &out) {
+  if (!tmpl)
+    return;
+  for (size_t i = 0; i < tmpl->Generics.size() && i < args.size(); ++i) {
+    out[tmpl->Generics[i].Name] = args[i];
+    // `extend<A> List<A>`: the methods folded in from that block call this
+    // parameter `A`, and both names have to mean the argument.
+    for (const std::string &alias : tmpl->Generics[i].Aliases)
+      out[alias] = args[i];
+  }
+}
+
 void Sema::bindOwnerGenerics(const FunctionDecl *fn,
                              std::map<std::string, Type *> &out) {
   auto *nd = fn->Parent ? dyn_cast<NominalDecl>(fn->Parent) : nullptr;
   if (!nd || !nd->GenericTemplate)
     return;
-  NominalDecl *tmpl = nd->GenericTemplate;
-  for (size_t i = 0;
-       i < tmpl->Generics.size() && i < nd->TypeArguments.size(); ++i)
-    out[tmpl->Generics[i].Name] = nd->TypeArguments[i];
+  bindTemplateGenerics(nd->GenericTemplate, nd->TypeArguments, out);
 }
 
 Type *Sema::selfTypeFor(const Param &p, Type *base) {
@@ -207,10 +218,225 @@ std::string mangleTypeName(const Type *t) {
 }
 } // namespace
 
+//===----------------------------------------------------------------------===//
+// extern "C++"
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// Answers the mangler's one question about names: is this written type an
+/// alias, and of what. Looked up in the scope the signature is being resolved
+/// in, quietly — an unknown name has already been reported by `resolveType`.
+class SemaAliasResolver : public CxxNameResolver {
+public:
+  SemaAliasResolver(std::function<Symbol *(const std::vector<std::string> &)> f)
+      : Lookup(std::move(f)) {}
+  const TypeRepr *aliasTarget(const NamedTypeRepr *n) override {
+    Symbol *sym = Lookup(n->Path);
+    if (!sym || !sym->D)
+      return nullptr;
+    if (const auto *alias = dyn_cast<TypeAliasDecl>(sym->D))
+      return alias->Aliased.get();
+    return nullptr;
+  }
+
+private:
+  std::function<Symbol *(const std::vector<std::string> &)> Lookup;
+};
+} // namespace
+
+std::string Sema::mangleCxx(const FunctionDecl *fn) {
+  if (!Cxx.Itanium) {
+    Diags.error(fn->NameRange.isValid() ? fn->NameRange : fn->Range,
+                "`extern \"C++\"` is not available for an MSVC target")
+        .note("this compiler speaks the Itanium C++ ABI, which is what "
+              "Clang and GCC use everywhere but Microsoft's own toolchain; "
+              "target `-windows-gnu` (MinGW) instead")
+        .code(520);
+    return fn->LinkName.empty() ? fn->Name : fn->LinkName;
+  }
+  SemaAliasResolver resolver([&](const std::vector<std::string> &path) {
+    return lookupPath(path, SourceRange(), /*quiet=*/true);
+  });
+  CxxMangler mangler(Cxx, resolver);
+  std::string symbol = mangler.mangleFunction(fn);
+  if (mangler.failed()) {
+    SourceRange at = mangler.problemRange().isValid()
+                         ? mangler.problemRange()
+                         : (fn->NameRange.isValid() ? fn->NameRange : fn->Range);
+    auto d = Diags.error(at, "{}", mangler.problem());
+    d.note("a C++ signature is spelled in C++'s types: scalars, `c_` names, "
+           "pointers, references, and the classes, structs and enums the "
+           "`extern \"C++\"` block declares");
+    if (!mangler.problemHint().empty())
+      d.note("{}", mangler.problemHint());
+    d.code(521);
+  }
+  return symbol;
+}
+
+std::vector<NominalDecl *> Sema::cxxBasesOf(NominalDecl *nd) {
+  std::vector<NominalDecl *> out;
+  for (NominalDecl *b = nd && nd->Cxx ? nd->Cxx->BaseDecl : nullptr;
+       b && out.size() < 64; b = b->Cxx ? b->Cxx->BaseDecl : nullptr)
+    out.push_back(b);
+  return out;
+}
+
+void Sema::resolveCxxType(NominalDecl *nd) {
+  if (!nd->Cxx)
+    return;
+  UsesCxx = true;
+  CxxDeclInfo &info = *nd->Cxx;
+  if (!info.BaseName.empty() && !info.BaseDecl) {
+    Symbol *sym = lookupPath({info.BaseName}, info.BaseRange, /*quiet=*/true);
+    auto *base = sym && sym->D ? dyn_cast<NominalDecl>(sym->D) : nullptr;
+    if (!base || !base->Cxx || !base->Cxx->IsClass) {
+      auto d = Diags.error(info.BaseRange,
+                           "'{}' is not a C++ class declared in an "
+                           "`extern \"C++\"` block",
+                           info.BaseName);
+      d.note("a base has to be a `class` from the same or another "
+             "`extern \"C++\"` block, so the compiler knows a pointer to the "
+             "derived class is also one to the base")
+          .code(522);
+      if (base)
+        noteDeclaredAt(d, base, "declared here", "this is not a C++ class");
+    } else if (base == nd) {
+      Diags.error(info.BaseRange, "'{}' cannot be its own base",
+                  static_cast<Decl *>(nd)->Name)
+          .code(522);
+    } else {
+      info.BaseDecl = base;
+    }
+  }
+  if (!info.IsClass && info.Size) {
+    Diags.error(static_cast<Decl *>(nd)->NameRange,
+                "`@size` belongs on a `class`, whose layout Rune does not "
+                "know")
+        .note("a `struct` is laid out from its fields; its size follows")
+        .code(523);
+  }
+  if (!info.IsClass && !info.BaseName.empty()) {
+    Diags.error(info.BaseRange, "only a `class` may name a base")
+        .note("a struct that begins with another struct's fields declares "
+              "them; C++ passes both the same way")
+        .code(522);
+  }
+  // A destructor takes nothing; a constructor returns nothing.
+  for (auto &m : nd->Methods) {
+    bool hasSelf = false;
+    for (const Param &p : m->Params)
+      hasSelf = hasSelf || p.IsSelf;
+    if ((isCxxConstructor(m.get()) || isCxxDestructor(m.get())) && !hasSelf) {
+      Diags.error(m->NameRange, "`{}` takes `&var self` — it runs on an "
+                                "object that already has storage",
+                  m->LinkName.empty() ? m->Name : m->LinkName)
+          .note("allocate with `cxx::alloc<T>()`, then call `init` on the "
+                "pointer; `deinit` and `cxx::free` undo the two")
+          .code(524);
+    }
+    if (isCxxConstructor(m.get()) && m->ReturnType) {
+      Diags.error(m->ReturnType->Range, "a constructor returns nothing")
+          .code(524);
+    }
+    if (isCxxDestructor(m.get())) {
+      size_t params = 0;
+      for (const Param &p : m->Params)
+        if (!p.IsSelf)
+          ++params;
+      if (params || m->ReturnType)
+        Diags.error(m->NameRange, "a destructor takes only `&var self` and "
+                                  "returns nothing")
+            .code(524);
+    }
+    if (!m->CxxOperator.empty() && !cxxOwnerOf(m.get())) {
+      Diags.error(m->NameRange, "`@operator` names a member of a C++ class")
+          .code(524);
+    }
+  }
+}
+
+bool Sema::cxxPointerConvertible(Type *from, Type *to) {
+  if (!from || !to || !from->is(TypeKind::Pointer) || !to->is(TypeKind::Pointer))
+    return false;
+  if (from->isWeakPointer() || to->isWeakPointer())
+    return false;
+  // A shared borrow or a read-only pointer cannot become a mutable one.
+  if (to->isMutablePointer() && !from->isMutablePointer())
+    return false;
+  // A borrow is checked; a raw pointer is not. Handing a borrow where C++
+  // wrote `T*` is fine — it is an address either way — and handing a raw
+  // pointer where C++ wrote `T&` is what a call from C++ would do too.
+  Type *f = from->pointee();
+  Type *t = to->pointee();
+  if (!f || !t)
+    return false;
+  f = f->canonical();
+  t = t->canonical();
+  if (f == t)
+    return true;
+  if (!f->isNominal() || !t->isNominal())
+    return false;
+  for (NominalDecl *base : cxxBasesOf(f->nominal()))
+    if (base->DeclaredType == t)
+      return true;
+  return false;
+}
+
+void Sema::rejectCxxClassByValue(Type *t, SourceRange where, const char *role) {
+  if (!t)
+    return;
+  t = t->canonical();
+  if (!t->isNominal())
+    return;
+  NominalDecl *nd = t->nominal();
+  if (!nd->Cxx || !nd->Cxx->IsClass)
+    return;
+  Diags.error(where, "a C++ class is never held by value — '{}' is one",
+              t->toString())
+      .note("Rune does not know how to copy, move or destroy a C++ object; "
+            "keep it behind a pointer — `*var {}` for {} — and let C++ do "
+            "those",
+            t->toString(), role)
+      .code(525);
+}
+
+/// A mark names a *requirement*, not a value: many types carry it, each a
+/// different size, so there is no such thing as "a Node" to hold. The two
+/// ways to hold one are `dyn Node`, which carries the type along at run
+/// time, and a type parameter bounded by it, which fixes the type at each
+/// call. Saying so where the type is written keeps the mistake from
+/// surfacing later as a missing `$clone` somewhere inside a container.
+void Sema::rejectMarkByValue(Type *t, SourceRange where, const char *role) {
+  if (!t || !t->is(TypeKind::Mark))
+    return;
+  // `Self` inside a mark *is* the mark, and there it means "whichever type
+  // carries this" — a requirement's own signature is the one place a mark
+  // legitimately stands where a value's type goes.
+  if (t == ActiveSelfType)
+    return;
+  const std::string name = t->toString();
+  auto d = Diags.error(where, "'{}' is a mark, not a type — {} cannot be one",
+                       name, role);
+  d.note(fmt("a mark says what a type can do; every type that carries it is "
+             "a different size, so there is no one value to hold")
+             .c_str());
+  d.note(fmt("write `dyn {}` to hold any of them, which carries the type "
+             "along at run time", name)
+             .c_str());
+  d.note(fmt("or make it a bound — `<T: {}>` — to fix one type per call, "
+             "with no boxing at all", name)
+             .c_str());
+  d.code(219);
+}
+
 std::string Sema::mangleFunction(const FunctionDecl *fn,
-                                 const std::vector<Type *> &typeArgs) const {
+                                 const std::vector<Type *> &typeArgs) {
   // A foreign function links against the name C exports. `@as` changed the
-  // name Rune uses; the symbol is still what was written.
+  // name Rune uses; the symbol is still what was written. C++ exports the
+  // name with its scope and parameter types folded in, so that is computed.
+  if (isCxxExtern(fn))
+    return mangleCxx(fn);
   if (fn->IsExtern)
     return fn->LinkName.empty() ? fn->Name : fn->LinkName;
   if (fn->hasAttr("export")) {
@@ -307,8 +533,34 @@ bool Sema::check() {
   findLangItems();
   for (Module *m : Modules)
     resolveImports(m);
+  // An `extend` on a generic type is folded into the type before any module's
+  // shapes are resolved. Resolving a module's shapes instantiates types, and
+  // an instance made before its template had the extend's methods never gets
+  // them: done module by module, `Vector<String>` — instantiated by a module
+  // that happens to come before `std::collections::vector` — had no `values`
+  // or `drain`, while `Vector<Point>` in the program had both.
+  for (Module *m : Modules) {
+    CurModule = m;
+    CurScope = scopeForModule(m);
+    for (auto &d : m->Decls)
+      if (auto *e = dyn_cast<ExtendDecl>(d.get()))
+        foldGenericExtend(e);
+  }
   for (Module *m : Modules)
     resolveShapes(m);
+  ShapesDone = true;
+  // A conditional bind turned down while the binds its `where` asks about
+  // were still being registered gets its answer now. Applying one may
+  // instantiate more, which queue behind it.
+  for (size_t i = 0; i < DeferredConditionalBinds.size(); ++i) {
+    DeferredConditionalBind d = DeferredConditionalBinds[i];
+    if (!bindApplies(d.M, d.B, d.Args))
+      continue;
+    registerBindFor(d.B, d.Inst->DeclaredType, static_cast<Decl *>(d.Inst),
+                    d.Args);
+    resolveSuppliedSignatures(d.Inst);
+  }
+  DeferredConditionalBinds.clear();
   // Every `bind` is registered by now, so a bound on an associated type can
   // be answered by one written after the bind that has to satisfy it.
   for (const DeferredBound &d : DeferredBounds)
@@ -801,6 +1053,11 @@ bool Sema::bindApplies(Module *bindModule, BindDecl *b,
 
 void Sema::registerBindFor(BindDecl *b, Type *target, Decl *parent,
                            const std::map<std::string, Type *> &bindArgs) {
+  // Once per type: a conditional bind turned down early and asked again may
+  // meet one another path already applied, and a second set of copies would
+  // leave one of them unchecked.
+  if (!RegisteredBinds.insert({target, b}).second)
+    return;
   auto &table = Methods[target];
   const int score = bindSpecificity(b);
   // The mark's own table for this target, so `value::Mark.name()` and
@@ -1209,6 +1466,10 @@ void Sema::resolveDeinitialisers() {
   for (NominalDecl *nd : types) {
     if (!nd->DeclaredType || !nd->Generics.empty())
       continue;
+    // A C++ type's `deinit` is its destructor, and C++ objects are destroyed
+    // when the program says so — never by Rune on the way out of a scope.
+    if (nd->Cxx)
+      continue;
     // Wherever it was written — the body, an `extend`, or a `bind` — the
     // method table is what a call would find, so it is what the compiler
     // calls too. An *inherited* one does not count: a subclass's destruction
@@ -1223,10 +1484,40 @@ void Sema::resolveDeinitialisers() {
     nd->Deinit = found;
     checkDeinitSignature(nd, found);
   }
+  // A type's own `clone`, found the way a call would find it: written in the
+  // body, added by an `extend`, or supplied by a `bind`. `$clone()` calls it
+  // rather than copying field by field.
+  for (NominalDecl *nd : types) {
+    if (!nd->DeclaredType || !nd->Generics.empty() || nd->CloneFn)
+      continue;
+    FunctionDecl *clone = lookupMethod(nd->DeclaredType, "clone");
+    if (!clone)
+      continue;
+    ensureTemplateSignature(clone);
+    bool self = false;
+    size_t others = 0;
+    for (const Param &p : clone->Params) {
+      if (p.IsSelf) self = true; else ++others;
+    }
+    // `clone(&self) -> Self` and nothing else: a `clone` that takes
+    // arguments, or hands back something other than this type, is a method
+    // that happens to share the name.
+    Type *result = clone->Ty ? clone->Ty->result() : nullptr;
+    if (!self || others != 0 || !result ||
+        TypeContext::stripUniq(result) != nd->DeclaredType)
+      continue;
+    nd->CloneFn = clone;
+  }
   for (NominalDecl *nd : types)
     if (nd->DeclaredType && nd->Generics.empty() &&
         ResourcesChecked.insert(nd).second)
       checkResourceFields(nd);
+  // `@never(M)` is read the first time somebody asks whether this type has
+  // `M`, and a program may never ask — so it is read here as well, to report
+  // one that names something which is not an automatic mark.
+  for (NominalDecl *nd : types)
+    if (static_cast<Decl *>(nd)->findAttr("never"))
+      refusedMarks(nd);
 }
 
 bool Sema::typeOwnsResources(Type *t, std::set<Type *> &seen) {
@@ -1408,8 +1699,11 @@ void Sema::collectDecl(Decl *d, Scope *scope) {
     if (nd->Generics.empty())
       nd->DeclaredType = Types.nominalOf(nd);
 
-    // Unit enum variants are also reachable by their bare name.
-    if (auto *e = dyn_cast<EnumDecl>(d)) {
+    // Unit enum variants are also reachable by their bare name. An enum with
+    // a parent has none of its numbering settled yet — the parent's variants
+    // go in front of its own — so those are registered by the splice
+    // instead, once the numbers are final.
+    if (auto *e = dyn_cast<EnumDecl>(d); e && !e->Inherits) {
       for (const auto &v : e->Variants) {
         Symbol vs;
         vs.Kind = SymbolKind::Variant;
@@ -1535,6 +1829,13 @@ void Sema::findLangItems() {
   // takes it away again.
   SendDecl = findMark("std::thread", "Send");
   SyncDecl = findMark("std::thread", "Sync");
+
+  // `[K:V]` is written as sugar for this one.
+  if (auto mit = ModulesByName.find("std::dictionary");
+      mit != ModulesByName.end())
+    if (Scope *ms = scopeForModule(mit->second))
+      if (Symbol *sym = ms->findLocal("Map"))
+        MapDecl = sym->D ? dyn_cast<NominalDecl>(sym->D) : nullptr;
 
   OptionDecl = findEnum("std::option", "Option");
   ResultDecl = findEnum("std::result", "Result");
@@ -2021,6 +2322,302 @@ Symbol *Sema::lookupPath(const std::vector<std::string> &path, SourceRange range
   return sym;
 }
 
+/// The type an array length names, when it names one. `[String:i64]` is a
+/// map; `[3:i64]` and `[SIZE:i64]` are arrays, because neither `3` nor a
+/// global constant is a type.
+//===----------------------------------------------------------------------===//
+// Inheriting a shape
+//
+// `struct Derived : Base` and `enum Derived : Base` put the parent's members
+// at the *front* of the child's, which is what makes the child readable as
+// the parent: the bytes a `Base` occupies are the first bytes of a `Derived`,
+// and a variant of `Base` keeps the number it had.
+//
+// A class does this differently — it keeps the chain and walks it — because a
+// class instance is reached through a pointer and never copied. A value has
+// no such indirection, so the members are spliced in once, here, and
+// everything downstream sees one flat type.
+//===----------------------------------------------------------------------===//
+
+void Sema::spliceInheritance(NominalDecl *nd) {
+  if (!nd || nd->InheritanceDone)
+    return;
+  nd->InheritanceDone = true;
+  if (!nd->Inherits)
+    return;
+
+  auto *named = dyn_cast<NamedTypeRepr>(nd->Inherits.get());
+  if (!named) {
+    Diags.error(nd->Inherits->Range, "a parent has to be a named type")
+        .note("`struct Derived : Base` extends one type, written by name")
+        .code(213);
+    return;
+  }
+
+  // The parent is looked up where the child was *written*, which for a type
+  // declared in another module is not the scope this pass happens to be in.
+  Scope *savedScope = CurScope;
+  Module *savedModule = CurModule;
+  auto mit = ModulesByName.find(static_cast<Decl *>(nd)->ModulePath);
+  if (mit != ModulesByName.end()) {
+    CurModule = mit->second;
+    CurScope = scopeForModule(mit->second);
+  }
+  NominalDecl *parent = lookupNominal(named->Path, named->Range, /*quiet=*/true);
+  CurScope = savedScope;
+  CurModule = savedModule;
+
+  if (!parent) {
+    Diags.error(named->Range, "cannot find '{}' in this scope",
+                named->Path.empty() ? std::string("the parent")
+                                    : named->Path.back())
+        .note("a parent is a struct or an enum declared somewhere this file "
+              "can see")
+        .code(203);
+    return;
+  }
+  if (parent == nd) {
+    Diags.error(named->Range, "'{}' cannot extend itself",
+                static_cast<Decl *>(nd)->Name)
+        .code(213);
+    return;
+  }
+  if (static_cast<Decl *>(parent)->Kind != static_cast<Decl *>(nd)->Kind) {
+    auto d = Diags.error(named->Range,
+                         "a {} cannot extend a {}",
+                         static_cast<Decl *>(nd)->Kind == NodeKind::Struct
+                             ? "struct" : "enum",
+                         static_cast<Decl *>(parent)->Kind == NodeKind::Struct
+                             ? "struct"
+                             : static_cast<Decl *>(parent)->Kind ==
+                                       NodeKind::Enum
+                                   ? "enum" : "type of another kind");
+    d.note("the two have to have the same shape for one to be read as the "
+           "other; a class extends a class with `class Derived : Base`")
+        .code(213);
+    return;
+  }
+  if (!parent->Generics.empty()) {
+    Diags.error(named->Range,
+                "'{}' is generic, so it cannot be a parent",
+                static_cast<Decl *>(parent)->Name)
+        .note("the parent's members are spliced in as they are written, and "
+              "nothing here says what its parameters would be")
+        .code(213);
+    return;
+  }
+
+  spliceInheritance(parent);   // the parent's own parent first
+  nd->InheritsDecl = parent;
+
+  if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd))) {
+    auto *pe = cast<EnumDecl>(static_cast<Decl *>(parent));
+    std::vector<std::unique_ptr<EnumVariantDecl>> merged;
+    for (const auto &v : pe->Variants) {
+      auto copy = cloneEnumVariant(v.get());
+      copy->Parent = static_cast<Decl *>(e);
+      merged.push_back(std::move(copy));
+    }
+    for (auto &v : e->Variants) {
+      for (const auto &existing : merged)
+        if (existing->Name == v->Name)
+          Diags.error(v->NameRange,
+                      "'{}' already has a variant named '{}'",
+                      static_cast<Decl *>(parent)->Name, v->Name)
+              .note("a child may add variants, not redefine the parent's")
+              .code(213);
+      merged.push_back(std::move(v));
+    }
+    e->Variants = std::move(merged);
+    for (size_t i = 0; i < e->Variants.size(); ++i)
+      e->Variants[i]->Index = static_cast<unsigned>(i);
+    e->IsSimple = e->IsSimple && pe->IsSimple;
+    // Now that the numbering is settled, the bare names go into scope.
+    auto own = ModulesByName.find(static_cast<Decl *>(e)->ModulePath);
+    if (own != ModulesByName.end()) {
+      if (Scope *scope = scopeForModule(own->second)) {
+        for (const auto &v : e->Variants) {
+          Symbol vs;
+          vs.Kind = SymbolKind::Variant;
+          vs.Name = v->Name;
+          vs.D = v.get();
+          vs.Owner = e;
+          vs.VariantIndex = static_cast<int>(v->Index);
+          vs.IsPublic = static_cast<Decl *>(e)->IsPublic;
+          scope->addVariant(vs);
+        }
+      }
+    }
+    return;
+  }
+
+  std::vector<std::unique_ptr<FieldDecl>> merged;
+  for (const auto &f : parent->Fields) {
+    auto copy = cloneFieldDecl(f.get());
+    copy->Parent = static_cast<Decl *>(nd);
+    merged.push_back(std::move(copy));
+  }
+  for (auto &f : nd->Fields) {
+    for (const auto &existing : merged)
+      if (existing->Name == f->Name)
+        Diags.error(f->NameRange, "'{}' already has a field named '{}'",
+                    static_cast<Decl *>(parent)->Name, f->Name)
+            .note("a child may add fields, not redefine the parent's")
+            .code(213);
+    merged.push_back(std::move(f));
+  }
+  nd->Fields = std::move(merged);
+  for (size_t i = 0; i < nd->Fields.size(); ++i)
+    nd->Fields[i]->Index = static_cast<unsigned>(i);
+}
+
+Type *Sema::typeWrittenAsSize(Expr *size) {
+  if (!size)
+    return nullptr;
+  auto *ref = dyn_cast<DeclRefExpr>(size);
+  if (!ref || ref->Path.empty())
+    return nullptr;
+  // A type parameter in scope — `[K:V]` inside a generic — is a type before
+  // it is anything else.
+  if (ref->Path.size() == 1) {
+    auto git = ActiveGenericParams.find(ref->Path[0]);
+    if (git != ActiveGenericParams.end())
+      return git->second;
+  }
+  // Anything else has to be looked up. A builtin (`i64`, `String`) is not a
+  // symbol in scope, so the question is put to the type resolver itself,
+  // quietly: a length that turns out not to name a type simply is not one.
+  auto named = std::make_unique<NamedTypeRepr>();
+  named->Range = ref->Range;
+  named->NameRange = ref->Range;
+  named->Path = ref->Path;
+  for (const auto &ga : ref->GenericArgs)
+    named->GenericArgs.push_back(cloneTypeRepr(ga.get()));
+  Diags.beginSpeculation();
+  Type *resolved = resolveType(named.get());
+  Diags.endSpeculation();
+  if (!resolved || resolved->isError())
+    return nullptr;
+  SpeculativeTypeReprs.push_back(std::move(named));
+  return resolved;
+}
+
+/// `Map<K, V>`, the type `[K:V]` is sugar for.
+Type *Sema::mapOf(Type *key, Type *value, SourceRange range) {
+  if (!MapDecl) {
+    Diags.error(range, "`[K:V]` needs `std::dictionary::Map`")
+        .note("a build with `--no-stdlib` has no map to name")
+        .code(212);
+    return Types.errorType();
+  }
+  if (!key || key->isError() || !value || value->isError())
+    return Types.errorType();
+  NominalDecl *inst = instantiateNominal(MapDecl, {key, value}, range);
+  return inst && inst->DeclaredType ? inst->DeclaredType : Types.errorType();
+}
+
+/// The variant of `expected` called `name`, when `expected` is an enum with
+/// one. This is what makes `.Red` work, and what settles a bare `Red` that
+/// two enums both claim — most often because one inherits from the other.
+Symbol *Sema::variantOfExpected(const std::string &name, Type *expected) {
+  if (!expected)
+    return nullptr;
+  Type *t = expected->canonical();
+  while (t && t->is(TypeKind::Pointer) && !t->isRawPointer() &&
+         !t->isWeakPointer() && t->pointee())
+    t = t->pointee();
+  if (!t || t->isError() || !t->isNominal() || !t->nominal())
+    return nullptr;
+  auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(t->nominal()));
+  if (!e)
+    return nullptr;
+  for (size_t i = 0; i < e->Variants.size(); ++i) {
+    if (e->Variants[i]->Name != name)
+      continue;
+    Symbol &sym = SyntheticSymbols.emplace_back();
+    sym.Kind = SymbolKind::Variant;
+    sym.Name = name;
+    sym.D = static_cast<Decl *>(e);
+    sym.Owner = e;
+    sym.VariantIndex = static_cast<int>(i);
+    sym.IsPublic = static_cast<Decl *>(e)->IsPublic;
+    return &sym;
+  }
+  return nullptr;
+}
+
+Symbol *Sema::resolveInferredPath(DeclRefExpr *ref, Type *expected) {
+  if (!ref || !ref->FromInferredType || ref->Path.size() != 1 || !expected)
+    return nullptr;
+  Type *t = expected->canonical();
+  // The context may want a borrow of the type, or an optional of it. A
+  // borrow reads through; an optional does not, because `.Some` and the
+  // payload's own members are different questions and `Option` answers the
+  // first one.
+  while (t && t->is(TypeKind::Pointer) && !t->isRawPointer() &&
+         !t->isWeakPointer() && t->pointee())
+    t = t->pointee();
+  if (!t || t->isError() || !t->isNominal())
+    return nullptr;
+  NominalDecl *nd = t->nominal();
+  if (!nd)
+    return nullptr;
+  const std::string &name = ref->Path[0];
+
+  // A variant of the expected enum: `.Red`, `.Circle(2.0)`.
+  if (Symbol *variant = variantOfExpected(name, t))
+    return variant;
+
+  // Anything else the type owns: `.seconds(5)`, `.zero`.
+  auto tit = nd->DeclaredType ? Methods.find(nd->DeclaredType) : Methods.end();
+  if (tit != Methods.end()) {
+    auto mit = tit->second.find(name);
+    if (mit != tit->second.end()) {
+      Symbol &sym = SyntheticSymbols.emplace_back();
+      sym.Kind = SymbolKind::Function;
+      sym.Name = name;
+      sym.D = mit->second;
+      sym.IsPublic = mit->second->IsPublic;
+      return &sym;
+    }
+  }
+  return nullptr;
+}
+
+Symbol *Sema::lookupStaticOnInstantiation(DeclRefExpr *ref) {
+  if (!ref || ref->Path.size() < 2 || ref->GenericArgs.empty())
+    return nullptr;
+  std::vector<std::string> prefix(ref->Path.begin(), ref->Path.end() - 1);
+  NominalDecl *nd = lookupNominal(prefix, ref->Range, /*quiet=*/true);
+  if (!nd)
+    return nullptr;
+  if (nd->GenericTemplate)
+    nd = nd->GenericTemplate;
+  // The arguments are the type's when they fit the type. A method with
+  // parameters of its own is written `Type::method::<T>()`, and its own
+  // count is what fits there.
+  if (nd->Generics.size() != ref->GenericArgs.size())
+    return nullptr;
+  Type *instType = typeOfNominal(nd, ref->GenericArgs, ref->Range);
+  if (!instType || instType->isError() || !instType->isNominal())
+    return nullptr;
+  const std::string &name = ref->Path.back();
+  auto tit = Methods.find(instType);
+  if (tit == Methods.end())
+    return nullptr;
+  auto mit = tit->second.find(name);
+  if (mit == tit->second.end())
+    return nullptr;
+  Symbol &methodSym = SyntheticSymbols.emplace_back();
+  methodSym.Kind = SymbolKind::Function;
+  methodSym.Name = name;
+  methodSym.D = mit->second;
+  methodSym.IsPublic = mit->second->IsPublic;
+  // Spent on the type; the method has none of its own to fill.
+  ref->GenericArgs.clear();
+  return &methodSym;
+}
+
 NominalDecl *Sema::lookupNominal(const std::vector<std::string> &path,
                                  SourceRange range, bool quiet) {
   Symbol *sym = lookupPath(path, range, quiet);
@@ -2056,8 +2653,20 @@ Type *Sema::typeOfNominal(NominalDecl *nd, const std::vector<TypeReprPtr> &args,
     return Types.errorType();
   }
   std::vector<Type *> resolved;
-  for (const auto &a : args)
-    resolved.push_back(resolveTypeOrError(a.get(), Types.errorType()));
+  for (size_t i = 0; i < args.size(); ++i) {
+    Type *arg = resolveTypeOrError(args[i].get(), Types.errorType());
+    // A type argument is a *type*, and a mark is not one: `Box<Node>` cannot
+    // be laid out, because every type carrying `Node` is a different size.
+    // Refusing it here keeps the mistake from surfacing far away, as a
+    // missing `$clone` somewhere inside the container's own source.
+    if (arg->is(TypeKind::Mark) && arg != ActiveSelfType) {
+      const std::string role =
+          fmt("a type argument of '{}'", static_cast<Decl *>(nd)->Name);
+      rejectMarkByValue(arg, args[i]->Range, role.c_str());
+      arg = Types.errorType();
+    }
+    resolved.push_back(arg);
+  }
 
   bool anyGeneric = false;
   for (Type *t : resolved)
@@ -2138,6 +2747,16 @@ Type *Sema::resolveType(TypeRepr *repr) {
           Diags.error(repr->Range, "'{}' is not a generic type", n->Path[0])
               .code(208);
         result = builtin;
+        break;
+      }
+      // `c_int`, `c_long`, `c_size_t`...: C++'s scalars, sized for the
+      // target. An alias of a Rune type everywhere but in an `extern "C++"`
+      // signature, where the name also decides how the parameter mangles.
+      if (Type *scalar = cxxScalarType(n->Path[0], Cxx, Types)) {
+        if (!n->GenericArgs.empty())
+          Diags.error(repr->Range, "'{}' is not a generic type", n->Path[0])
+              .code(208);
+        result = scalar;
         break;
       }
     }
@@ -2223,32 +2842,76 @@ Type *Sema::resolveType(TypeRepr *repr) {
       break;
     }
     if (auto *alias = dyn_cast<TypeAliasDecl>(sym->D)) {
-      if (!alias->Resolved) {
-        // What an alias stands for is written in the module the alias was
-        // declared in, and names what *that* module imported. Resolving it in
-        // whichever module happens to mention the alias first would ask the
-        // wrong scope — `pub type Value = value::Value` in a library means
-        // nothing to a package that imported the library but not the module
-        // `value` is short for.
-        Module *owner = nullptr;
-        if (!alias->ModulePath.empty()) {
-          auto mit = ModulesByName.find(alias->ModulePath);
-          if (mit != ModulesByName.end())
-            owner = mit->second;
-        }
+      // What an alias stands for is written in the module the alias was
+      // declared in, and names what *that* module imported. Resolving it in
+      // whichever module happens to mention the alias first would ask the
+      // wrong scope — `pub type Value = value::Value` in a library means
+      // nothing to a package that imported the library but not the module
+      // `value` is short for.
+      Module *owner = nullptr;
+      if (!alias->ModulePath.empty()) {
+        auto mit = ModulesByName.find(alias->ModulePath);
+        if (mit != ModulesByName.end())
+          owner = mit->second;
+      }
+      auto inOwnerScope = [&](auto &&resolve) {
         Module *wasModule = CurModule;
         Scope *wasScope = CurScope;
-        if (owner) {
+        if (owner)
           if (Scope *os = scopeForModule(owner)) {
             CurModule = owner;
             CurScope = os;
           }
-        }
-        alias->Resolved = resolveTypeOrError(alias->Aliased.get(),
-                                             Types.errorType());
+        Type *t = resolve();
         CurModule = wasModule;
         CurScope = wasScope;
+        return t;
+      };
+
+      // `type Gen<T> = [T]` stands for a different type every time it is
+      // written with different arguments, so it is resolved per use with its
+      // parameters bound — and on a *copy* of what it aliases, because the
+      // annotation itself caches what it resolved to and one answer would be
+      // handed to every other use.
+      if (!alias->Generics.empty()) {
+        if (n->GenericArgs.size() != alias->Generics.size()) {
+          auto d = Diags.error(repr->Range,
+                               "'{}' takes {} generic argument(s) — {} given",
+                               sym->Name, alias->Generics.size(),
+                               n->GenericArgs.size());
+          d.code(206);
+          noteDeclaredAt(d, alias, "declared here",
+                         "an alias is written with the same number of "
+                         "arguments it declares");
+          break;
+        }
+        std::vector<Type *> args;
+        for (const auto &ga : n->GenericArgs)
+          args.push_back(resolveTypeOrError(ga.get(), Types.errorType()));
+        auto savedGenerics = ActiveGenericParams;
+        // Only the alias's own parameters are in scope inside it: a `T` from
+        // the function that wrote `Gen<T>` is not the alias's `T`.
+        ActiveGenericParams.clear();
+        for (size_t i = 0; i < args.size(); ++i)
+          ActiveGenericParams[alias->Generics[i].Name] = args[i];
+        TypeReprPtr copy = cloneTypeRepr(alias->Aliased.get());
+        result = inOwnerScope(
+            [&] { return resolveTypeOrError(copy.get(), Types.errorType()); });
+        ActiveGenericParams = savedGenerics;
+        break;
       }
+      if (!n->GenericArgs.empty()) {
+        auto d = Diags.error(repr->Range, "'{}' takes no generic arguments",
+                             sym->Name);
+        d.code(206);
+        noteDeclaredAt(d, alias, "declared here",
+                       "this alias declares no parameters to fill in");
+        break;
+      }
+      if (!alias->Resolved)
+        alias->Resolved = inOwnerScope([&] {
+          return resolveTypeOrError(alias->Aliased.get(), Types.errorType());
+        });
       result = alias->Resolved;
       break;
     }
@@ -2287,6 +2950,16 @@ Type *Sema::resolveType(TypeRepr *repr) {
     break;
   case NodeKind::ArrayType: {
     auto *a = cast<ArrayTypeRepr>(repr);
+    // `[K:V]` where the part before the colon names a *type* is a map from
+    // keys to values, not an array of that many elements: an array's length
+    // is a number, and a number is never a type. Which one was meant is
+    // therefore decided by what the name means, not by how it is written.
+    if (Type *key = typeWrittenAsSize(a->Size.get())) {
+      result = mapOf(key, resolveTypeOrError(a->Element.get(),
+                                             Types.errorType()),
+                     repr->Range);
+      break;
+    }
     Type *elem = resolveTypeOrError(a->Element.get(), Types.errorType());
     uint64_t size = 0;
     int64_t folded = 0;
@@ -2353,6 +3026,28 @@ Type *Sema::resolveType(TypeRepr *repr) {
       Diags.error(repr->Range, "`dyn` requires a mark, but '{}' is not one",
                   inner->toString())
           .code(212);
+    break;
+  }
+  case NodeKind::TypeOfType: {
+    // The expression is checked, never emitted: `typeof` asks what a value
+    // would be, not for the value. That is what lets a macro build a
+    // signature out of the arguments it was handed.
+    auto *t = cast<TypeOfRepr>(repr);
+    Type *got = checkExpr(t->Operand.get(), nullptr);
+    if (!got || got->isError()) {
+      result = Types.errorType();
+      break;
+    }
+    if (got->isVoid() || got->isNever()) {
+      Diags.error(repr->Range, "`typeof` needs an expression with a type, "
+                               "and this one has '{}'",
+                  got->toString())
+          .note("a `()` or a `!` names nothing that can be written down")
+          .code(212);
+      result = Types.errorType();
+      break;
+    }
+    result = got;
     break;
   }
   case NodeKind::SomeType: {
@@ -2602,6 +3297,101 @@ bool Sema::evalConstInt(const Expr *e, int64_t &out) {
 // Pass 2: shapes
 //===----------------------------------------------------------------------===//
 
+namespace {
+/// A variant's declared value, when it is a constant: a number, perhaps
+/// negated. Anything else is not a value an enum can have.
+struct VariantConstant {
+  bool Ok = false;
+  bool IsFloat = false;
+  int64_t Int = 0;
+  double Float = 0;
+  std::string Suffix;
+};
+
+VariantConstant variantConstant(Expr *e) {
+  VariantConstant c;
+  bool negate = false;
+  while (e && isa<UnaryExpr>(e)) {
+    auto *u = cast<UnaryExpr>(e);
+    if (u->Op != UnaryOp::Neg)
+      return c;
+    negate = !negate;
+    e = u->Operand.get();
+  }
+  if (!e)
+    return c;
+  if (auto *i = dyn_cast<IntLitExpr>(e)) {
+    c.Ok = true;
+    c.Suffix = i->Suffix;
+    c.Int = static_cast<int64_t>(i->Value);
+    if (negate != i->IsNegated)
+      c.Int = -c.Int;
+    c.Float = static_cast<double>(c.Int);
+    c.IsFloat = c.Suffix == "f32" || c.Suffix == "f64";
+  } else if (auto *f = dyn_cast<FloatLitExpr>(e)) {
+    c.Ok = true;
+    c.IsFloat = true;
+    c.Suffix = f->Suffix;
+    c.Float = negate ? -f->Value : f->Value;
+  }
+  return c;
+}
+} // namespace
+
+void Sema::assignVariantValues(EnumDecl *e) {
+  // Every value is read first, so the kind of enum is known before any
+  // variant is given its tag: one float anywhere makes all of them floats.
+  std::vector<VariantConstant> values(e->Variants.size());
+  bool anyFloat = false;
+  bool f32 = false;
+  for (size_t i = 0; i < e->Variants.size(); ++i) {
+    EnumVariantDecl *v = e->Variants[i].get();
+    if (!v->Discriminant)
+      continue;
+    values[i] = variantConstant(v->Discriminant.get());
+    if (!values[i].Ok) {
+      Diags.error(v->Discriminant->Range,
+                  "the value of variant '{}' is not a constant number", v->Name)
+          .note("a variant's value is written as a literal: `Low = -1`, "
+                "`Ratio = 1.5`")
+          .code(400);
+      continue;
+    }
+    if (values[i].IsFloat) {
+      anyFloat = true;
+      if (values[i].Suffix == "f32")
+        f32 = true;
+    }
+  }
+
+  if (anyFloat) {
+    // A float cannot be a tag, so the tags count up from zero and each
+    // variant keeps its value beside the tag, for `as` to give back.
+    e->RawFloat = f32 ? Types.f32() : Types.f64();
+    for (size_t i = 0; i < e->Variants.size(); ++i) {
+      EnumVariantDecl *v = e->Variants[i].get();
+      v->Value = static_cast<int64_t>(i);
+      if (!v->Discriminant) {
+        Diags.error(v->Range, "variant '{}' needs a value", v->Name)
+            .note("the other variants of '{}' have float values, so there is "
+                  "no next value to give this one", e->Name)
+            .code(401);
+        continue;
+      }
+      v->FloatValue = values[i].Float;
+    }
+    return;
+  }
+
+  int64_t next = 0;
+  for (size_t i = 0; i < e->Variants.size(); ++i) {
+    EnumVariantDecl *v = e->Variants[i].get();
+    if (values[i].Ok)
+      next = values[i].Int;
+    v->Value = next++;
+  }
+}
+
 void Sema::registerMethods(NominalDecl *nd) {
   if (!nd->DeclaredType)
     return;
@@ -2712,6 +3502,124 @@ void Sema::layoutClass(ClassDecl *c) {
   }
 }
 
+/// An `extend` on a generic type, folded into that type.
+///
+/// `extend<A> List<A> { ... }` and `extend List { ... }` both mean the same
+/// thing — these methods belong to `List`, whatever its parameter is called
+/// — and the simplest way to make that true is to give the methods to the
+/// declaration itself. Every instantiation then clones them along with the
+/// ones written inside the type, and signatures, bodies, symbols, `deinit`
+/// discovery and the borrow checker all follow without knowing an `extend`
+/// was ever involved.
+///
+/// The parameters have to line up one for one: the target's arguments are the
+/// extend's own parameters, in order. Anything else would be a partial
+/// specialisation — `extend<A> List<Pair<A>>` — which this language does not
+/// have, and which is reported rather than half-applied.
+bool Sema::foldGenericExtend(ExtendDecl *e) {
+  auto *named = e->TargetType ? dyn_cast<NamedTypeRepr>(e->TargetType.get())
+                              : nullptr;
+  if (!named)
+    return false;
+  NominalDecl *tmpl = lookupNominal(named->Path, named->Range, /*quiet=*/true);
+  if (!tmpl)
+    return false;
+  // A name inside an instantiation means that instantiation; the template is
+  // what an `extend` adds to.
+  if (tmpl->GenericTemplate)
+    tmpl = tmpl->GenericTemplate;
+  if (tmpl->Generics.empty())
+    return false;                 // an ordinary type: the usual path applies
+  if (isa<MarkDecl>(static_cast<Decl *>(tmpl)))
+    return false;
+
+  const size_t arity = tmpl->Generics.size();
+  // `extend List { ... }`: the type's own parameters, under their own names,
+  // so there is nothing to map.
+  if (named->GenericArgs.empty() && e->Generics.empty()) {
+    // nothing to do
+  } else {
+    if (named->GenericArgs.size() != arity || e->Generics.size() != arity) {
+      auto d = Diags.error(named->Range,
+                           "'{}' takes {} generic argument(s) — an `extend` "
+                           "has to name them all",
+                           static_cast<Decl *>(tmpl)->Name, arity);
+      d.note("write `extend<{}> {}<{}>`, or `extend {}` to use the names the "
+             "type declares",
+             tmpl->Generics.front().Name, static_cast<Decl *>(tmpl)->Name,
+             tmpl->Generics.front().Name, static_cast<Decl *>(tmpl)->Name)
+          .code(206);
+      noteDeclaredAt(d, static_cast<Decl *>(tmpl), "declared here",
+                     "this is the parameter list to match");
+      return true;                // reported; nothing more to do with it
+    }
+    // Each argument has to be one of the extend's own parameters, and each
+    // parameter used once: that is what makes the two lists one list.
+    std::set<std::string> params;
+    for (const auto &g : e->Generics)
+      params.insert(g.Name);
+    std::set<std::string> used;
+    for (size_t i = 0; i < arity; ++i) {
+      auto *arg = dyn_cast<NamedTypeRepr>(named->GenericArgs[i].get());
+      const bool bare = arg && arg->Path.size() == 1 && arg->GenericArgs.empty();
+      if (!bare || !params.count(arg->Path[0]) ||
+          !used.insert(arg->Path[0]).second) {
+        Diags.error(named->GenericArgs[i]->Range,
+                    "an `extend` on a generic type names its parameters, one "
+                    "for each of the type's")
+            .note("`extend<{}> {}<{}>` extends every `{}`; a narrower one — "
+                  "extending only some of them — is not something this "
+                  "language has",
+                  tmpl->Generics.front().Name,
+                  static_cast<Decl *>(tmpl)->Name,
+                  tmpl->Generics.front().Name,
+                  static_cast<Decl *>(tmpl)->Name)
+            .code(206);
+        return true;
+      }
+      // The type's parameter answers to this name too, wherever these
+      // methods are resolved.
+      const std::string &alias = arg->Path[0];
+      if (alias != tmpl->Generics[i].Name) {
+        auto &aliases = tmpl->Generics[i].Aliases;
+        if (std::find(aliases.begin(), aliases.end(), alias) == aliases.end())
+          aliases.push_back(alias);
+      }
+      // A bound written on the extend's parameter is a bound on the type's.
+      for (const auto &g : e->Generics)
+        if (g.Name == alias)
+          for (const auto &b : g.Bounds)
+            tmpl->Generics[i].Bounds.push_back(cloneTypeRepr(b.get()));
+    }
+  }
+
+  for (auto &fn : e->Methods) {
+    if (fn->ModulePath.empty())
+      fn->ModulePath = e->ModulePath;
+    // A method already declared inside the type wins; two `extend` blocks
+    // adding the same name is the same clash, reported the same way.
+    bool clash = false;
+    for (const auto &have : tmpl->Methods)
+      if (have->Name == fn->Name) {
+        auto d = Diags.error(fn->NameRange.isValid() ? fn->NameRange
+                                                     : fn->Range,
+                             "'{}' already has a method named '{}'",
+                             static_cast<Decl *>(tmpl)->Name, fn->Name);
+        d.code(213);
+        noteDeclaredAt(d, have.get(), "the earlier definition",
+                       "an extension cannot replace an existing method");
+        clash = true;
+      }
+    if (clash)
+      continue;
+    auto cloned = cloneFunction(fn.get());
+    cloned->Parent = static_cast<Decl *>(tmpl);
+    tmpl->Methods.push_back(std::move(cloned));
+  }
+  e->FoldedIntoTemplate = true;
+  return true;
+}
+
 void Sema::resolveShapes(Module *m) {
   CurModule = m;
   CurScope = scopeForModule(m);
@@ -2746,8 +3654,20 @@ void Sema::resolveShapes(Module *m) {
         else if (!st->isError())
           Diags.error(sm->Range, "'{}' is not a mark", st->toString()).code(216);
       }
+      checkAutoMark(mk);
     }
+    // A C++ class's base, so a pointer to it converts before any signature
+    // that relies on that is checked.
+    if (auto *nd = dyn_cast<NominalDecl>(d.get()))
+      if (nd->Cxx)
+        resolveCxxType(nd);
   }
+
+  // `struct Derived : Base` — the parent's members come first, so they are
+  // put in before anything reads the field list or lays the type out.
+  for (auto &d : m->Decls)
+    if (auto *nd = dyn_cast<NominalDecl>(d.get()))
+      spliceInheritance(nd);
 
   // Field and variant types.
   for (auto &d : m->Decls) {
@@ -2759,13 +3679,16 @@ void Sema::resolveShapes(Module *m) {
     for (auto &f : nd->Fields) {
       f->Ty = resolveTypeOrError(f->TypeAnnotation.get(), Types.errorType());
       applyWeakField(f.get());
+      rejectCxxClassByValue(f->Ty, f->TypeAnnotation ? f->TypeAnnotation->Range
+                                                     : f->Range,
+                            "the field");
+      rejectMarkByValue(f->Ty, f->TypeAnnotation ? f->TypeAnnotation->Range
+                                                 : f->Range,
+                        "a field");
     }
     if (auto *e = dyn_cast<EnumDecl>(d.get())) {
-      int64_t next = 0;
+      assignVariantValues(e);
       for (auto &v : e->Variants) {
-        if (auto *lit = dyn_cast<IntLitExpr>(v->Discriminant.get()))
-          next = static_cast<int64_t>(lit->Value);
-        v->Value = next++;
         for (auto &tt : v->TupleTypes)
           resolveTypeOrError(tt.get(), Types.errorType());
         for (auto &f : v->Fields)
@@ -2782,11 +3705,17 @@ void Sema::resolveShapes(Module *m) {
       if (c->Generics.empty())
         layoutClass(c);
 
+  // An `extend` on a generic type has already been folded into that type,
+  // for every module at once, before any shapes were resolved — see the
+  // caller. The loop below handles the ordinary case.
+
   // `extend` and `bind` contribute methods to types declared anywhere. Their
   // own generic parameters have to be in scope while the target type is
   // resolved, so that `bind<T> Show to Wrapper<T>` can name `T`.
   for (auto &d : m->Decls) {
     if (auto *e = dyn_cast<ExtendDecl>(d.get())) {
+      if (e->FoldedIntoTemplate)
+        continue;
       auto savedGenerics = ActiveGenericParams;
       bindGenerics(e->Generics, Types, ActiveGenericParams);
       Type *t = resolveTypeOrError(e->TargetType.get(), Types.errorType());
@@ -3182,9 +4111,19 @@ void Sema::resolveSignatures(Module *m) {
         continue;
       }
       p.Ty = resolveTypeOrError(p.TypeAnnotation.get(), Types.errorType());
+      rejectCxxClassByValue(p.Ty, p.TypeAnnotation ? p.TypeAnnotation->Range
+                                                   : p.Range,
+                            "the parameter");
+      rejectMarkByValue(p.Ty, p.TypeAnnotation ? p.TypeAnnotation->Range
+                                               : p.Range,
+                        "a parameter");
       params.push_back(p.Ty);
     }
     Type *ret = resolveReturnType(fn, ActiveSelfType);
+    rejectCxxClassByValue(ret, fn->ReturnType ? fn->ReturnType->Range : fn->Range,
+                          "the result");
+    rejectMarkByValue(ret, fn->ReturnType ? fn->ReturnType->Range : fn->Range,
+                      "a result");
     fn->Ty = Types.functionOf(params, ret, fn->IsVariadic);
     if (fn->MangledName.empty())
       fn->MangledName = mangleFunction(fn, fn->TypeArguments);
@@ -3207,12 +4146,25 @@ void Sema::resolveSignatures(Module *m) {
       continue;
     }
     if (auto *e = dyn_cast<ExternDecl>(d.get())) {
+      const bool cxx = e->ABI == "C++";
+      if (cxx)
+        UsesCxx = true;
       for (auto &fn : e->Functions) {
         resolveFn(fn.get(), nullptr);
         checkForeignSignature(fn.get());
       }
-      for (auto &g : e->Globals)
+      for (auto &g : e->Globals) {
         g->Ty = resolveTypeOrError(g->TypeAnnotation.get(), Types.errorType());
+        if (cxx && !g->CxxScope.empty()) {
+          // A namespaced C++ variable has a mangled symbol too; one at the
+          // global namespace does not.
+          SemaAliasResolver resolver([&](const std::vector<std::string> &path) {
+            return lookupPath(path, SourceRange(), /*quiet=*/true);
+          });
+          CxxMangler mangler(Cxx, resolver);
+          g->LinkName = mangler.mangleVariable(g.get());
+        }
+      }
       continue;
     }
     if (auto *nd = dyn_cast<NominalDecl>(d.get())) {
@@ -3224,6 +4176,8 @@ void Sema::resolveSignatures(Module *m) {
       continue;
     }
     if (auto *ext = dyn_cast<ExtendDecl>(d.get())) {
+      if (ext->FoldedIntoTemplate)
+        continue;   // the type carries these now
       for (auto &fn : ext->Methods)
         if (fn->Generics.empty())
           resolveFn(fn.get(), ext->ResolvedTarget);
@@ -3384,6 +4338,8 @@ void Sema::checkNominalBodies(NominalDecl *nd) {
 }
 
 void Sema::checkExtend(ExtendDecl *e) {
+  if (e->FoldedIntoTemplate)
+    return;   // checked with the type, once per instantiation
   if (!e->ResolvedTarget || e->ResolvedTarget->isError())
     return;
   if (!e->Generics.empty())
@@ -3788,6 +4744,48 @@ void Sema::checkGlobal(GlobalVarDecl *g) {
   g->Ty = declared;
 }
 
+/// What an `async fn` may take. Its body runs as a task, on a stack of its
+/// own, and may still be running after the call that started it has
+/// returned — so every parameter is captured by value into the task, and a
+/// borrow of something the caller owns would point at a slot the caller may
+/// have left. A shared borrow of a heap handle — `&Counter` for a class,
+/// `&String` — is the handle itself, kept alive by the capture, and is fine;
+/// a `&var` of anything, or a `&` of a value type, is refused.
+void Sema::checkAsyncSignature(FunctionDecl *fn) {
+  for (const Param &p : fn->Params) {
+    Type *t = p.Ty;
+    if (!t || t->isError() || !t->is(TypeKind::Pointer) || t->isRawPointer())
+      continue;
+    bool sharedHandle = !t->isMutablePointer() && !t->isWeakPointer() &&
+                        t->pointee() && t->pointee()->isHeapHandle();
+    if (sharedHandle)
+      continue;
+    if (p.IsSelf) {
+      auto d = Diags.error(p.Range, "an `async` method on a '{}' cannot "
+                                    "borrow `self`",
+                           t->pointee()->toString());
+      d.note("the body runs as a task that may outlive the call, so `&self` "
+             "would point at a slot the caller has left; take `self` by "
+             "value, or make the type a class")
+          .code(284);
+      continue;
+    }
+    auto d = Diags.error(p.Range, "an `async fn` cannot take '{}' by borrow",
+                         p.Name);
+    if (t->isMutablePointer())
+      d.note("the body runs as a task that may outlive the call, and a "
+             "`&var` points at the caller's own slot; take it by value, or "
+             "share a class — a `mem::Checked<T>` for something that "
+             "has to change");
+    else
+      d.note(fmt("the body runs as a task that may outlive the call, and "
+                 "a `&{}` points at the caller's own slot; take it by value",
+                 t->pointee()->toString())
+                 .c_str());
+    d.code(284);
+  }
+}
+
 void Sema::checkFunction(FunctionDecl *fn, Type *selfType, ClassDecl *selfClass) {
   if (!fn->Body)
     return;
@@ -3847,11 +4845,17 @@ void Sema::checkFunction(FunctionDecl *fn, Type *selfType, ClassDecl *selfClass)
     }
   }
 
+  if (fn->IsAsync)
+    checkAsyncSignature(fn);
+
   Type *bodyType = checkBlock(fn->Body.get(), FnStack.back().ReturnType);
   Type *want = FnStack.back().ReturnType;
-  if (fn->Body->Tail && !want->isVoid())
+  if (fn->Body->Tail && !want->isVoid()) {
+    if (insertImplicitConversion(fn->Body->Tail, bodyType, want))
+      bodyType = fn->Body->Tail->Ty;
     requireConvertible(fn->Body->Tail.get(), bodyType, want,
                        "this function's result");
+  }
 
   // A `some` the body never fixed: nothing returned a value. Reported here
   // rather than left as an unresolved type for the callers to trip over.
@@ -4137,6 +5141,9 @@ bool Sema::isLValue(const Expr *e) const {
            (cast<MemberExpr>(e)->Base->Ty &&
             cast<MemberExpr>(e)->Base->Ty->isPointerLike());
   case NodeKind::Index:
+    // A character read out of a String is a value: there is no slot.
+    if (cast<IndexExpr>(e)->StringChar)
+      return false;
     return isLValue(cast<IndexExpr>(e)->Base.get()) ||
            (cast<IndexExpr>(e)->Base->Ty &&
             cast<IndexExpr>(e)->Base->Ty->isPointerLike());
@@ -4161,10 +5168,27 @@ bool Sema::requireMutable(Expr *e, const char *action) {
       if (m->AutoDerefs > 0 && bt && bt->is(TypeKind::Pointer) &&
           !bt->isRawPointer()) {
         if (!bt->isMutablePointer()) {
-          Diags.error(e->Range, "cannot {} through '{}'", action,
-                      bt->toString())
-              .note("borrow it mutably with `&var` to allow writes")
-              .code(231);
+          auto d = Diags.error(e->Range, "cannot {} a value behind '{}'",
+                               action, bt->toString());
+          // The borrow may be one the compiler put in to reach through a
+          // stand-in. Saying which stand-in, and that it lends for reading
+          // only, is more use than talking about a `&` nobody wrote.
+          const auto *call = dyn_cast<CallExpr>(m->Base.get());
+          if (call && call->PointeeAccess) {
+            Type *holder = nullptr;
+            if (const auto *callee = dyn_cast<MemberExpr>(call->Callee.get()))
+              holder = callee->Base ? callee->Base->Ty : nullptr;
+            d.note(fmt("'{}' lends what it holds for reading; it has no "
+                       "`touch`, so there is no way to write through it",
+                       holder ? holder->toString() : std::string("this value"))
+                       .c_str());
+            d.note("a shared value changes through a `std::mem::Checked<T>` "
+                   "kept inside it, which decides at run time that the write "
+                   "is the only one");
+          } else {
+            d.note("borrow it mutably with `&var` to allow writes");
+          }
+          d.code(231);
           return false;
         }
         return true;
@@ -4344,6 +5368,33 @@ bool Sema::checkGenericBound(Type *arg, TypeRepr *bound, SourceRange at,
                 "the bound on this parameter was not met by the call above");
     return false;
   }
+  // An automatic mark is not bound either: it is read off the type, so the
+  // answer is which part of the type does not have it.
+  if (mk->IsAuto) {
+    auto d = Diags.error(at, "'{}' does not have the mark '{}'",
+                         arg->toString(), markName(mk));
+    d.note("`{}` is automatic: a type has it when every part of it has it",
+           markName(mk));
+    std::string why = whyNotAutoMark(arg, mk);
+    if (!why.empty())
+      d.note("{}", why);
+    bool refused = false;
+    if (arg->isNominal())
+      for (MarkDecl *m : refusedMarks(arg->nominal()))
+        refused = refused || m == mk;
+    if (refused)
+      d.note("drop the `@never({})` if it should have it after all",
+             markName(mk));
+    else
+      d.note("`bind {} to {}` claims it where the structure cannot say — "
+             "which is how `String` and the rest come by theirs",
+             markName(mk), arg->toString());
+    d.code(241);
+    if (declaredAt.isValid())
+      d.related(declaredAt, fmt("'{}' is required here", owner),
+                "the bound on this parameter was not met by the call above");
+    return false;
+  }
   auto d = Diags.error(at, "'{}' is not bound to mark '{}'", arg->toString(),
                        markName(mk));
   if (arg->isOpaque() && arg->opaqueMark())
@@ -4392,6 +5443,40 @@ bool Sema::checkWhereClauses(const std::vector<WhereClause> &clauses,
       if (!checkGenericBound(subject, bound.get(), at, w.Range, owner))
         ok = false;
   }
+  return ok;
+}
+
+bool Sema::methodWhereHolds(FunctionDecl *fn, SourceRange at, bool report) {
+  if (!fn || fn->WhereClauses.empty())
+    return true;
+  auto *nd = fn->Parent ? dyn_cast<NominalDecl>(fn->Parent) : nullptr;
+  if (!nd || !nd->GenericTemplate)
+    return true; // the template itself: its parameters are still open
+  if (!report) {
+    auto it = MethodWhereAnswers.find(fn);
+    if (it != MethodWhereAnswers.end())
+      return it->second;
+  }
+  Scope *savedScope = CurScope;
+  Module *savedModule = CurModule;
+  auto savedGenerics = ActiveGenericParams;
+  auto mit = ModulesByName.find(fn->ModulePath);
+  if (mit != ModulesByName.end()) {
+    CurModule = mit->second;
+    CurScope = scopeForModule(mit->second);
+  }
+  ActiveGenericParams.clear();
+  bindOwnerGenerics(fn, ActiveGenericParams);
+  if (!report)
+    Diags.beginSpeculation();
+  bool ok = checkWhereClauses(fn->WhereClauses, at, fn->Name);
+  if (!report)
+    Diags.endSpeculation();
+  ActiveGenericParams = savedGenerics;
+  CurScope = savedScope;
+  CurModule = savedModule;
+  MethodWhereAnswers[fn] = ok;
+  fn->WhereUnmet = !ok;
   return ok;
 }
 
@@ -4560,16 +5645,34 @@ void Sema::checkAvailableUnderZombie(Decl *d, SourceRange at) {
 bool Sema::isBuiltinDecorator(const std::string &name) {
   static const std::set<std::string> kBuiltin = {
       "unsafe", "safe",  "inline", "noinline", "export",
+      // `@macro` marks a procedural macro inside a macro package. By the
+      // time anything is checked the compiler has already read it; here it
+      // only has to be a name the checker knows.
+      "macro",
       "alias",  "intrinsic", "link", "linkpath", "type",
       "Doc",    "doc",   "sync",   "as",     "resource",
+      // `extern "C++"`: the size and alignment of an opaque class, and the
+      // C++ operator a member stands for.
+      "size",   "align", "operator",
+      // Automatic marks: `@auto` on the mark, `@never` on a type that must
+      // not have one.
+      "auto",   "never",
       // The Zombie borrow checker's own: `@zombie("reason")` trusts a body,
       // `@zombie_unavailable("alternative")` marks a declaration that only
       // exists under reference counting.
       "zombie", "zombie_unavailable",
+      // Tasks: `@suspend` marks a function a cancelled task may leave from;
+      // `@sendable` asks that a closure handed to it capture only `Send`
+      // values, because it will run on another thread.
+      "suspend", "sendable",
       // Answered before checking, by `applyConfig`. A declaration still
       // carrying one here is one this build kept, so there is nothing left to
       // do but recognise the name.
       "Config", "config",
+      // The linter's: `@lint(allow(unused-variable))`. The compiler reads
+      // nothing in it — the arguments are rule names, not expressions to
+      // check — and only has to know the name.
+      "lint",
   };
   return kBuiltin.count(name) != 0;
 }
@@ -4953,6 +6056,421 @@ std::string Sema::whyNotThreadSafe(Type *t) {
   }
 }
 
+/// `@auto mark Plain { }` — a mark the compiler answers for.
+///
+/// An automatic mark says something *about* a type rather than asking
+/// anything of it, so it carries no requirements: there would be nobody to
+/// implement them. What it does carry is a rule — a type has the mark when
+/// every part of it has the mark — and two ways to override that rule where
+/// the structure cannot say: `bind Plain to Handle<T> {}` grants it, and
+/// `@never(Plain)` refuses it.
+void Sema::checkAutoMark(MarkDecl *mk) {
+  const Attribute *a = static_cast<Decl *>(mk)->findAttr("auto");
+  if (!a)
+    return;
+  mk->IsAuto = true;
+  if (!a->Args.empty())
+    Diags.error(a->Range, "`@auto` takes no arguments").code(243);
+  if (!mk->Methods.empty()) {
+    auto d = Diags.error(mk->Methods.front()->NameRange.isValid()
+                             ? mk->Methods.front()->NameRange
+                             : a->Range,
+                         "an `@auto` mark has no requirements");
+    d.note("the compiler decides which types have it, and nobody writes an "
+           "implementation — so there is nowhere for '{}' to be written",
+           mk->Methods.front()->Name);
+    d.note("drop `@auto` to make this an ordinary mark that types bind");
+    d.code(243);
+  }
+  if (!mk->AssociatedTypes.empty())
+    Diags.error(a->Range, "an `@auto` mark has no associated types")
+        .note("nothing implements it, so there is nobody to choose them")
+        .code(243);
+  if (!mk->Generics.empty())
+    Diags.error(a->Range, "an `@auto` mark takes no generic parameters")
+        .note("it is a question asked of one type at a time")
+        .code(243);
+}
+
+/// The marks `@never(...)` on `d` refuses, resolved once.
+const std::vector<MarkDecl *> &Sema::refusedMarks(NominalDecl *nd) {
+  auto it = RefusedMarks.find(nd);
+  if (it != RefusedMarks.end())
+    return it->second;
+  std::vector<MarkDecl *> marks;
+  for (const Attribute &a : static_cast<Decl *>(nd)->Attrs) {
+    if (a.Name != "never")
+      continue;
+    if (a.Args.size() != 1) {
+      Diags.error(a.Range, "`@never` names one mark — `@never(mem::Clone)`")
+          .code(244);
+      continue;
+    }
+    std::vector<std::string> path;
+    if (auto *ref = dyn_cast<DeclRefExpr>(a.Args[0].get()))
+      path = ref->Path;
+    MarkDecl *mark = nullptr;
+    if (!path.empty()) {
+      Scope *savedScope = CurScope;
+      Module *savedModule = CurModule;
+      auto mit = ModulesByName.find(static_cast<Decl *>(nd)->ModulePath);
+      if (mit != ModulesByName.end())
+        if (Scope *own = scopeForModule(mit->second)) {
+          CurScope = own;
+          CurModule = mit->second;
+        }
+      if (Symbol *sym = lookupPath(path, a.Range, /*quiet=*/true))
+        mark = sym->D ? dyn_cast<MarkDecl>(sym->D) : nullptr;
+      CurScope = savedScope;
+      CurModule = savedModule;
+    }
+    if (!mark) {
+      Diags.error(a.Range, "`@never` names a mark")
+          .note("write `@never(mem::Clone)` above the type, with a mark that "
+                "is in scope where the type is declared")
+          .code(244);
+      continue;
+    }
+    if (!mark->IsAuto) {
+      auto d = Diags.error(a.Range, "'{}' is not an `@auto` mark",
+                           static_cast<Decl *>(mark)->Name);
+      d.note("only an automatic mark has to be refused; an ordinary one is "
+             "had by binding it, and not had by not binding it");
+      d.code(244);
+      continue;
+    }
+    marks.push_back(mark);
+  }
+  return RefusedMarks[nd] = marks;
+}
+
+bool Sema::conditionalAutoBindHolds(Type *t, MarkDecl *mark,
+                                    std::set<Type *> &seen) {
+  NominalDecl *nd = t->nominal();
+  if (!nd || !nd->GenericTemplate)
+    return false;
+  auto known = TemplateBinds.find(nd->GenericTemplate);
+  if (known == TemplateBinds.end())
+    return false;
+  for (auto [m, b] : known->second) {
+    if (b->ResolvedMark != mark || !b->ResolvedTarget)
+      continue;
+    const auto &placeholders = b->ResolvedTarget->typeArguments();
+    const auto &args = t->typeArguments();
+    if (placeholders.size() != args.size())
+      continue;
+    std::map<std::string, Type *> bindArgs;
+    bool fits = true;
+    for (size_t k = 0; k < placeholders.size(); ++k)
+      if (!unifyGenericArg(placeholders[k], args[k], bindArgs))
+        fits = false;
+    if (!fits || bindArgs.size() != b->Generics.size())
+      continue;
+
+    Scope *savedScope = CurScope;
+    Module *savedModule = CurModule;
+    auto savedGenerics = ActiveGenericParams;
+    if (Scope *own = scopeForModule(m)) {
+      CurScope = own;
+      CurModule = m;
+    }
+    bindGenerics(b->Generics, Types, ActiveGenericParams);
+    auto holds = [&](const std::string &param,
+                     const std::vector<TypeReprPtr> &bounds) {
+      auto arg = bindArgs.find(param);
+      if (arg == bindArgs.end())
+        return false; // a subject this cannot read: not decided here
+      for (const auto &boundRepr : bounds) {
+        Diags.beginSpeculation();
+        Type *bt = resolveTypeOrError(boundRepr.get(), Types.errorType());
+        Diags.endSpeculation();
+        if (!bt->is(TypeKind::Mark))
+          return false;
+        auto *mk = reinterpret_cast<MarkDecl *>(bt->nominal());
+        bool ok = mk->IsAuto ? typeHasAutoMark(arg->second, mk, seen)
+                             : typeConformsTo(arg->second, mk);
+        if (!ok)
+          return false;
+      }
+      return true;
+    };
+    bool ok = true;
+    for (const auto &g : b->Generics)
+      ok = ok && (g.Bounds.empty() || holds(g.Name, g.Bounds));
+    for (const auto &w : b->WhereClauses) {
+      auto *subject = dyn_cast<NamedTypeRepr>(w.Subject.get());
+      ok = ok && subject && subject->Path.size() == 1 &&
+           holds(subject->Path[0], w.Bounds);
+    }
+    ActiveGenericParams = savedGenerics;
+    CurScope = savedScope;
+    CurModule = savedModule;
+    if (ok)
+      return true;
+  }
+  return false;
+}
+
+/// Whether `t` has the automatic mark `mark`.
+///
+/// Every part has to have it: a struct's fields, an enum's payloads, a
+/// tuple's elements, what an array or a slice holds. A type that destroys
+/// something when it goes — anything with a `deinit` — does not get one
+/// automatically: a destructor is an invariant the compiler cannot read, and
+/// an automatic claim about such a type would be a guess. Nor does anything
+/// the compiler cannot see into: a closure's captures, an `Any`, a `dyn`, a
+/// raw or `weak` pointer, a `CString`. Each of those is a `bind` away when
+/// the claim really does hold.
+bool Sema::typeHasAutoMark(Type *t, MarkDecl *mark, std::set<Type *> &seen) {
+  if (!t || t->isError() || !mark)
+    return false;
+  t = t->canonical();
+  // A type may reach itself through a field; assume the best and let the
+  // rest of the fields decide, as the layout walk does.
+  if (!seen.insert(t).second)
+    return true;
+
+  // An explicit `bind` is the answer wherever there is one, whatever the
+  // structure would have said.
+  ensureStructuralBinds(t);
+  auto conf = Conformances.find(t);
+  if (conf != Conformances.end())
+    for (MarkDecl *m : conf->second)
+      if (m == mark)
+        return true;
+
+  switch (t->kind()) {
+  case TypeKind::Void:
+  case TypeKind::Never:
+  case TypeKind::Bool:
+  case TypeKind::Int:
+  case TypeKind::Float:
+  case TypeKind::Char:
+    return true;
+  case TypeKind::Tuple:
+    for (Type *e : t->tupleElements())
+      if (!typeHasAutoMark(e, mark, seen))
+        return false;
+    return true;
+  case TypeKind::Array:
+  case TypeKind::Slice:
+    return typeHasAutoMark(t->element(), mark, seen);
+  case TypeKind::Struct:
+  case TypeKind::Enum:
+  case TypeKind::Class: {
+    NominalDecl *nd = t->nominal();
+    if (!nd)
+      return false;
+    for (MarkDecl *refused : refusedMarks(nd))
+      if (refused == mark)
+        return false;
+    // `bind<T> Clone to Vector<T> where T: Clone` claims the mark for the
+    // instantiations that meet it. Asked here rather than only read off the
+    // conformances the instantiation registered, because the question may
+    // arrive *while* that instantiation is deciding: a `Token` holding a
+    // `Vector<Token>` is `Clone` exactly when the vector is, and the answer
+    // for a cycle, as everywhere in this walk, is yes.
+    if (conditionalAutoBindHolds(t, mark, seen))
+      return true;
+    // Something with a `deinit` keeps a promise of its own; the compiler
+    // does not know what the mark would mean for it.
+    if (nd->Deinit)
+      return false;
+    for (const auto &f : nd->Fields)
+      if (!typeHasAutoMark(f->Ty, mark, seen))
+        return false;
+    if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+      for (const auto &v : e->Variants) {
+        for (const auto &tt : v->TupleTypes)
+          if (tt->Resolved && !typeHasAutoMark(tt->Resolved, mark, seen))
+            return false;
+        for (const auto &fd : v->Fields)
+          if (!typeHasAutoMark(fd->Ty, mark, seen))
+            return false;
+      }
+    if (auto *c = dyn_cast<ClassDecl>(static_cast<Decl *>(nd)))
+      for (ClassDecl *sup = c->Super; sup; sup = sup->Super) {
+        if (sup->DeclaredType && !typeHasAutoMark(sup->DeclaredType, mark, seen))
+          return false;
+      }
+    return true;
+  }
+  case TypeKind::Pointer:
+    // A borrow reaches something else; what it reaches is what matters, and
+    // a raw or `weak` one promises nothing about it.
+    if (t->isRawPointer() || t->isWeakPointer() || !t->pointee())
+      return false;
+    return typeHasAutoMark(t->pointee(), mark, seen);
+  default:
+    // `String`, `CString`, a closure, `Any`, `dyn Mark`: nothing to walk.
+    // The standard library binds the ones that do hold.
+    return false;
+  }
+}
+
+/// Why `t` does not have the automatic mark `mark`, said in terms of the
+/// part that does not have it.
+std::string Sema::whyNotAutoMark(Type *t, MarkDecl *mark) {
+  if (!t || !mark)
+    return "";
+  t = t->canonical();
+  if (t->isNominal()) {
+    NominalDecl *nd = t->nominal();
+    for (MarkDecl *refused : refusedMarks(nd))
+      if (refused == mark)
+        return "'" + t->toString() + "' refuses it: `@never(" +
+               static_cast<Decl *>(mark)->Name + ")` is written on the type";
+    if (nd->Deinit)
+      return "'" + t->toString() +
+             "' runs a `deinit` when it goes, and what that promises is not "
+             "something the compiler can read";
+    std::set<Type *> seen;
+    for (const auto &f : nd->Fields)
+      if (f->Ty && !typeHasAutoMark(f->Ty, mark, seen)) {
+        seen.clear();
+        return "its field `" + f->Name + "` is a '" + f->Ty->toString() +
+               "', which does not have it — " + whyNotAutoMark(f->Ty, mark);
+      }
+    if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+      for (const auto &v : e->Variants) {
+        for (const auto &tt : v->TupleTypes)
+          if (tt->Resolved && !typeHasAutoMark(tt->Resolved, mark, seen)) {
+            seen.clear();
+            return "its variant `" + v->Name + "` holds a '" +
+                   tt->Resolved->toString() + "', which does not have it";
+          }
+        for (const auto &fd : v->Fields)
+          if (fd->Ty && !typeHasAutoMark(fd->Ty, mark, seen)) {
+            seen.clear();
+            return "its variant `" + v->Name + "` holds a '" +
+                   fd->Ty->toString() + "', which does not have it";
+          }
+      }
+    return "";
+  }
+  std::set<Type *> seen;
+  switch (t->kind()) {
+  case TypeKind::Tuple:
+    for (Type *e : t->tupleElements())
+      if (!typeHasAutoMark(e, mark, seen))
+        return "'" + e->toString() + "' in it does not have it";
+    return "";
+  case TypeKind::Array:
+  case TypeKind::Slice:
+    return "what it holds — '" + t->element()->toString() +
+           "' — does not have it";
+  case TypeKind::Pointer:
+    if (t->isRawPointer())
+      return "a raw pointer promises nothing about what it points at";
+    if (t->isWeakPointer())
+      return "a `weak` reference may point at nothing at all";
+    return "what it points at — '" + t->pointee()->toString() +
+           "' — does not have it";
+  case TypeKind::String:
+  case TypeKind::CString:
+  case TypeKind::Function:
+  case TypeKind::DynMark:
+  case TypeKind::Any:
+    return "'" + t->toString() +
+           "' is not something the compiler can look into, so it has no "
+           "automatic mark of its own";
+  default:
+    return "";
+  }
+}
+
+/// The part of `t` whose destruction a memberwise copy would duplicate, or
+/// null when there is none.
+///
+/// A `deinit` is an obligation — close this, free that — and a copy made
+/// field by field hands the same obligation to two values.
+///
+/// The walk stops at a class. A class is a *reference*: what a copy of one
+/// means is the memory model's business — a second reference under counting,
+/// a second object under single ownership — and neither is a memberwise copy
+/// of the value in hand. A class that owns something says what copying it
+/// means by writing `clone`, exactly as `std::io::File` does.
+NominalDecl *Sema::cloneDuplicatesObligation(Type *t, std::set<Type *> &seen) {
+  if (!t || t->isError())
+    return nullptr;
+  t = t->canonical();
+  if (!seen.insert(t).second)
+    return nullptr;
+  switch (t->kind()) {
+  case TypeKind::Tuple:
+    for (Type *e : t->tupleElements())
+      if (NominalDecl *bad = cloneDuplicatesObligation(e, seen))
+        return bad;
+    return nullptr;
+  case TypeKind::Array:
+    return cloneDuplicatesObligation(t->element(), seen);
+  case TypeKind::Class:
+    return nullptr;
+  case TypeKind::Struct:
+  case TypeKind::Enum: {
+    NominalDecl *nd = t->nominal();
+    if (!nd)
+      return nullptr;
+    // A type that writes its own `clone` decides what a copy of it means,
+    // and everything below it is that method's business.
+    if (userClone(t))
+      return nullptr;
+    if (nd->Deinit)
+      return nd;
+    for (const auto &f : nd->Fields)
+      if (NominalDecl *bad = cloneDuplicatesObligation(f->Ty, seen))
+        return bad;
+    if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+      for (const auto &v : e->Variants) {
+        for (const auto &tt : v->TupleTypes)
+          if (tt->Resolved)
+            if (NominalDecl *bad = cloneDuplicatesObligation(tt->Resolved, seen))
+              return bad;
+        for (const auto &fd : v->Fields)
+          if (NominalDecl *bad = cloneDuplicatesObligation(fd->Ty, seen))
+            return bad;
+      }
+    return nullptr;
+  }
+  default:
+    // A borrow, a raw pointer, a `String`, a closure: nothing whose
+    // destruction a copy of this value takes on.
+    return nullptr;
+  }
+}
+
+/// `value.$clone()` — refused when the copy would hand one obligation to two
+/// values. The type is the one place that knows what its destructor promises,
+/// so the way out is to write `clone` there.
+void Sema::checkClonable(Type *t, SourceRange at) {
+  if (!t || t->isError() || userClone(t))
+    return;
+  // Not from inside a library. `Option<T>` clones its payload in `expect`
+  // and `filter`, and every instantiation of it is checked whether or not
+  // the program ever calls those — so a `Descriptor?` would be refused for a
+  // copy nothing makes. What the library does with a `T` it was handed is
+  // the library's business; what this program writes is checked below.
+  if (CurModule && Result.isAncillary(CurModule->Name))
+    return;
+  std::set<Type *> seen;
+  NominalDecl *bad = cloneDuplicatesObligation(t, seen);
+  if (!bad)
+    return;
+  const std::string owner = static_cast<Decl *>(bad)->Name;
+  auto d = Diags.error(at, "'{}' cannot be copied by the compiler", t->toString());
+  if (t->isNominal() && t->nominal() == bad)
+    d.note("it runs a `deinit`, so a copy of it would run that twice — "
+           "closing one descriptor twice, freeing one block twice");
+  else
+    d.note("it holds a '{}', which runs a `deinit`: a copy would run that "
+           "twice", owner);
+  d.note("write `fn clone(&self) -> Self` on '{}' to say what a copy of it "
+         "means — `std::collections::Vector` and `std::io::File` both do",
+         owner);
+  d.code(271);
+  noteDeclaredAt(d, bad, "declared here", "this is what owns something");
+}
+
 bool Sema::typeConformsTo(Type *t, MarkDecl *mark) {
   if (!t || !mark)
     return false;
@@ -4978,6 +6496,12 @@ bool Sema::typeConformsTo(Type *t, MarkDecl *mark) {
   }
   if (t->is(TypeKind::DynMark))
     return t->mark() == mark;
+  // An automatic mark is answered from the type rather than looked up: see
+  // `typeHasAutoMark`.
+  if (mark->IsAuto) {
+    std::set<Type *> seen;
+    return typeHasAutoMark(t, mark, seen);
+  }
   // A `bind<T> Show to [T]` names a shape, so there is no instantiation to
   // have applied it. The first question asked about the shape is what applies
   // it; everything after finds it done.
@@ -5056,6 +6580,38 @@ FunctionDecl *Sema::lookupMethod(Type *receiver, const std::string &name,
           return mit->second;
         }
       }
+  // `struct Derived : Base` — the parent's methods work on the child, because
+  // the child *is* the parent with more on the end: the fields the method
+  // reaches are at the same offsets.
+  if (receiver->isNominal())
+    for (NominalDecl *p = receiver->nominal()->InheritsDecl; p;
+         p = p->InheritsDecl) {
+      if (!p->DeclaredType)
+        continue;
+      auto sit = Methods.find(p->DeclaredType);
+      if (sit == Methods.end())
+        continue;
+      auto mit = sit->second.find(name);
+      if (mit != sit->second.end()) {
+        if (ownerOut) *ownerOut = p;
+        return mit->second;
+      }
+    }
+  // A C++ class reaches its bases' members the way C++ does: `this` is the
+  // same address, so the base's method is called on it unchanged.
+  if (receiver->isNominal())
+    for (NominalDecl *base : cxxBasesOf(receiver->nominal())) {
+      if (!base->DeclaredType)
+        continue;
+      auto sit = Methods.find(base->DeclaredType);
+      if (sit == Methods.end())
+        continue;
+      auto mit = sit->second.find(name);
+      if (mit != sit->second.end()) {
+        if (ownerOut) *ownerOut = base;
+        return mit->second;
+      }
+    }
   return nullptr;
 }
 
@@ -5361,6 +6917,10 @@ FunctionDecl *Sema::userClone(Type *t) {
   NominalDecl *nd = t->nominal();
   if (!nd)
     return nullptr;
+  // Whatever `resolveDeinitialisers` settled on: the method a call to
+  // `clone()` would reach, from wherever it was written.
+  if (nd->CloneFn)
+    return nd->CloneFn;
   auto isClone = [](FunctionDecl *m) {
     if (!m || m->Name != "clone")
       return false;
@@ -5509,10 +7069,22 @@ BuiltinMethod Sema::lookupBuiltinMethod(Type *receiver, const std::string &name,
   // — a `$clone()` of one of those is an error the borrow checker will
   // report where it is reached. What cannot be cloned at all is a bare
   // reference, a raw pointer, a `CString` or an unresolved type parameter.
+  // `()` clones to `()`: it has nothing in it, and a generic `T` that turns
+  // out to be `()` — a `Future<()>`, an `Option<()>` — asks all the same.
+  // A shared borrow is copied as it is: the copy looks at the same value.
+  // (One is reached only where the receiver is a borrow *as a value* —
+  // `Option<&T>` cloning its payload; an ordinary `r.$clone()` on a borrow
+  // looks through it first.)
+  if (name == "clone" && receiver->is(TypeKind::Pointer) &&
+      !receiver->isRawPointer() && !receiver->isWeakPointer() &&
+      !receiver->isMutablePointer()) {
+    result = receiver;
+    return BuiltinMethod::Clone;
+  }
   if (name == "clone" && receiver &&
       !(receiver->is(TypeKind::Pointer) || receiver->is(TypeKind::CString) ||
         receiver->isGeneric() || receiver->is(TypeKind::Mark) ||
-        receiver->isVoid() || receiver->is(TypeKind::Never))) {
+        receiver->is(TypeKind::Never))) {
     result = receiver;
     return BuiltinMethod::Clone;
   }
@@ -5630,6 +7202,8 @@ EnumDecl *Sema::instantiateVariantOwner(
 void Sema::checkDeferredMethod(FunctionDecl *fn) {
   if (!fn || !fn->Body || !DeferredMethods.erase(fn))
     return;
+  if (!methodWhereHolds(fn, SourceRange(), /*report=*/false))
+    return;
   auto *inst = fn->Parent ? dyn_cast<NominalDecl>(fn->Parent) : nullptr;
   if (!inst)
     return;
@@ -5690,9 +7264,7 @@ void Sema::checkInstantiatedBodies(NominalDecl *inst) {
     CurScope = scopeForModule(tmplModule->second);
   }
   ActiveGenericParams.clear();
-  for (size_t i = 0;
-       i < tmpl->Generics.size() && i < inst->TypeArguments.size(); ++i)
-    ActiveGenericParams[tmpl->Generics[i].Name] = inst->TypeArguments[i];
+  bindTemplateGenerics(tmpl, inst->TypeArguments, ActiveGenericParams);
   ActiveSelfType = inst->DeclaredType;
 
   pushScope(ScopeKind::TypeBody);
@@ -5723,6 +7295,11 @@ void Sema::checkInstantiatedBodies(NominalDecl *inst) {
       continue; // checked with its signature, at the call site
     if (!checked.insert(f).second)
       continue;
+    // `fn at(&self, i: i64) -> T? where T: Clone` is not there for a `T`
+    // that is not — its body would only report what the bound already says.
+    // A call to it is refused where it is made.
+    if (!methodWhereHolds(f, SourceRange(), /*report=*/false))
+      continue;
     checkFunction(f, inst->DeclaredType, cls);
     Result.Functions.push_back(f);
   }
@@ -5734,12 +7311,69 @@ void Sema::checkInstantiatedBodies(NominalDecl *inst) {
   CurModule = savedModule;
 }
 
+/// Signatures for everything a binding supplied to `inst`, not only whichever
+/// version holds the name: an overload the call site has still to choose
+/// between needs its signature and its symbol as much as the one in the table
+/// does. Run as the instantiation is built, and again for a conditional bind
+/// that only applied once every bind was registered.
+void Sema::resolveSuppliedSignatures(NominalDecl *inst) {
+  NominalDecl *tmpl = inst->GenericTemplate;
+  if (!tmpl)
+    return;
+  const std::vector<Type *> &args = inst->TypeArguments;
+  Scope *savedScope = CurScope;
+  Module *savedModule = CurModule;
+  auto savedGenerics = ActiveGenericParams;
+  Type *savedSelf = ActiveSelfType;
+  auto mit = ModulesByName.find(static_cast<Decl *>(tmpl)->ModulePath);
+  if (mit != ModulesByName.end()) {
+    CurModule = mit->second;
+    CurScope = scopeForModule(mit->second);
+  }
+  ActiveGenericParams.clear();
+  bindTemplateGenerics(tmpl, args, ActiveGenericParams);
+  ActiveSelfType = inst->DeclaredType;
+
+  std::vector<FunctionDecl *> supplied;
+  for (auto &fn : Methods[inst->DeclaredType])
+    supplied.push_back(fn.second);
+  appendOverloadsFor(inst->DeclaredType, supplied);
+  for (FunctionDecl *f : supplied) {
+    if (f->Parent != static_cast<Decl *>(inst) || !f->Body || f->Ty)
+      continue;
+    if (!f->Generics.empty())
+      continue; // its own parameters are only known at the call site
+    if (signatureWrapsSelf(f)) {
+      f->MangledName = mangleFunction(f, args);
+      DeferredMethods.insert(f);
+      continue;
+    }
+    resolveMethodSignature(f, inst->DeclaredType, args);
+  }
+
+  ActiveGenericParams = savedGenerics;
+  ActiveSelfType = savedSelf;
+  CurScope = savedScope;
+  CurModule = savedModule;
+}
+
 void Sema::drainPendingInstantiations() {
   // Checking one body may instantiate another type, which lands at the back of
   // the queue; keep going until nothing new arrives.
+  //
+  // A body checked here may instantiate a generic function, which drains
+  // again once its signature is settled. That inner drain must not start the
+  // queue over: it would check every body before it a second time — a body
+  // checked twice is resolved against the wrong locals — and then clear the
+  // queue out from under this loop. What it would have drained is at the
+  // back of the queue already, and this loop reaches it.
+  if (DrainingInstantiations)
+    return;
+  DrainingInstantiations = true;
   for (size_t i = 0; i < PendingInstantiations.size(); ++i)
     checkInstantiatedBodies(PendingInstantiations[i]);
   PendingInstantiations.clear();
+  DrainingInstantiations = false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -5829,6 +7463,86 @@ bool wrapsSelf(const TypeRepr *t) {
 
 } // namespace
 
+/// True when `t` names `owner`'s own template with an argument built *out
+/// of* one of its parameters rather than being one: `Option<&T>` on
+/// `Option<T>`, `Vector<(T, T)>` on `Vector<T>`. Resolving such a signature
+/// for every instantiation builds a tower — `Option<&T>` has a `peek` of its
+/// own, which asks for `Option<&&T>` — so it waits for a call, like a
+/// signature that wraps `Self`.
+static bool growsOwner(const TypeRepr *t, const std::string &owner,
+                       const std::set<std::string> &params) {
+  if (!t)
+    return false;
+  std::function<bool(const TypeRepr *)> mentions = [&](const TypeRepr *r) {
+    if (!r)
+      return false;
+    switch (r->Kind) {
+    case NodeKind::NamedType: {
+      const auto *n = cast<NamedTypeRepr>(r);
+      if (n->Path.size() == 1 && params.count(n->Path[0]))
+        return true;
+      for (const auto &a : n->GenericArgs)
+        if (mentions(a.get()))
+          return true;
+      return false;
+    }
+    case NodeKind::PointerType:
+      return mentions(cast<PointerTypeRepr>(r)->Pointee.get());
+    case NodeKind::ArrayType:
+      return mentions(cast<ArrayTypeRepr>(r)->Element.get());
+    case NodeKind::SliceType:
+      return mentions(cast<SliceTypeRepr>(r)->Element.get());
+    case NodeKind::OptionalType:
+      return mentions(cast<OptionalTypeRepr>(r)->Element.get());
+    case NodeKind::TupleType:
+      for (const auto &e : cast<TupleTypeRepr>(r)->Elements)
+        if (mentions(e.get()))
+          return true;
+      return false;
+    default:
+      return false;
+    }
+  };
+  auto grownArg = [&](const TypeRepr *a) {
+    const auto *n = dyn_cast<NamedTypeRepr>(a);
+    bool bare = n && n->Path.size() == 1 && n->GenericArgs.empty() &&
+                params.count(n->Path[0]);
+    return !bare && mentions(a);
+  };
+  switch (t->Kind) {
+  case NodeKind::NamedType: {
+    const auto *n = cast<NamedTypeRepr>(t);
+    if (!n->Path.empty() && n->Path.back() == owner)
+      for (const auto &a : n->GenericArgs)
+        if (grownArg(a.get()))
+          return true;
+    for (const auto &a : n->GenericArgs)
+      if (growsOwner(a.get(), owner, params))
+        return true;
+    return false;
+  }
+  case NodeKind::OptionalType: {
+    const auto *o = cast<OptionalTypeRepr>(t);
+    if (owner == "Option" && grownArg(o->Element.get()))
+      return true;
+    return growsOwner(o->Element.get(), owner, params);
+  }
+  case NodeKind::PointerType:
+    return growsOwner(cast<PointerTypeRepr>(t)->Pointee.get(), owner, params);
+  case NodeKind::ArrayType:
+    return growsOwner(cast<ArrayTypeRepr>(t)->Element.get(), owner, params);
+  case NodeKind::SliceType:
+    return growsOwner(cast<SliceTypeRepr>(t)->Element.get(), owner, params);
+  case NodeKind::TupleType:
+    for (const auto &e : cast<TupleTypeRepr>(t)->Elements)
+      if (growsOwner(e.get(), owner, params))
+        return true;
+    return false;
+  default:
+    return false;
+  }
+}
+
 bool Sema::signatureWrapsSelf(const FunctionDecl *fn) {
   if (!fn)
     return false;
@@ -5837,6 +7551,20 @@ bool Sema::signatureWrapsSelf(const FunctionDecl *fn) {
   for (const Param &p : fn->Params)
     if (wrapsSelf(p.TypeAnnotation.get()))
       return true;
+  if (auto *nd = fn->Parent ? dyn_cast<NominalDecl>(fn->Parent) : nullptr) {
+    NominalDecl *tmpl = nd->GenericTemplate ? nd->GenericTemplate : nd;
+    if (!tmpl->Generics.empty()) {
+      std::set<std::string> params;
+      for (const auto &g : tmpl->Generics)
+        params.insert(g.Name);
+      const std::string &owner = static_cast<Decl *>(tmpl)->Name;
+      if (growsOwner(fn->ReturnType.get(), owner, params))
+        return true;
+      for (const Param &p : fn->Params)
+        if (growsOwner(p.TypeAnnotation.get(), owner, params))
+          return true;
+    }
+  }
   return false;
 }
 
@@ -5940,18 +7668,14 @@ NominalDecl *Sema::instantiateNominal(NominalDecl *tmpl,
   auto savedGenerics = ActiveGenericParams;
   Type *savedSelf = ActiveSelfType;
   ActiveGenericParams.clear();
-  for (size_t i = 0; i < tmpl->Generics.size() && i < args.size(); ++i)
-    ActiveGenericParams[tmpl->Generics[i].Name] = args[i];
+  bindTemplateGenerics(tmpl, args, ActiveGenericParams);
   ActiveSelfType = inst->DeclaredType;
 
   for (auto &f : inst->Fields)
     f->Ty = resolveTypeOrError(f->TypeAnnotation.get(), Types.errorType());
   if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(inst))) {
-    int64_t next = 0;
+    assignVariantValues(e);
     for (auto &v : e->Variants) {
-      if (auto *lit = dyn_cast<IntLitExpr>(v->Discriminant.get()))
-        next = static_cast<int64_t>(lit->Value);
-      v->Value = next++;
       for (auto &tt : v->TupleTypes)
         resolveTypeOrError(tt.get(), Types.errorType());
       for (auto &f : v->Fields)
@@ -6013,6 +7737,12 @@ NominalDecl *Sema::instantiateNominal(NominalDecl *tmpl,
       if (!b->ResolvedTarget || !b->ResolvedTarget->isNominal() ||
           b->ResolvedTarget->nominal() != tmpl)
         continue;
+      {
+        auto &known = TemplateBinds[tmpl];
+        if (std::find(known.begin(), known.end(), std::make_pair(m, b)) ==
+            known.end())
+          known.push_back({m, b});
+      }
 
       // What the bind's parameters stand for, read off the target it was
       // written against: `bind<T> Show to Wrapper<T>` applied to
@@ -6041,8 +7771,16 @@ NominalDecl *Sema::instantiateNominal(NominalDecl *tmpl,
       // A `where` clause decides whether this bind applies at all, so
       // `bind<T> Show to Wrapper<T> where T: Show` leaves `Wrapper<i64>`
       // alone unless i64 is itself bound to Show.
-      if (!bindApplies(m, b, bindArgs))
+      if (!bindApplies(m, b, bindArgs)) {
+        // Asked before every module's binds are in, the answer may only be
+        // "not yet": `Vector<String>` instantiated by a module shaped ahead
+        // of the one that binds `Display` to `String`. Ask again once they
+        // are all registered.
+        if (!ShapesDone)
+          DeferredConditionalBinds.push_back(
+              {static_cast<NominalDecl *>(inst), m, b, bindArgs});
         continue;
+      }
 
       registerBindFor(b, inst->DeclaredType, static_cast<Decl *>(inst),
                       bindArgs);
@@ -6062,25 +7800,7 @@ NominalDecl *Sema::instantiateNominal(NominalDecl *tmpl,
     }
     resolveMethodSignature(fn.get(), inst->DeclaredType, args);
   }
-  // Everything a binding supplied, not only whichever version holds the name:
-  // an overload the call site has still to choose between needs its signature
-  // and its symbol as much as the one in the table does.
-  std::vector<FunctionDecl *> supplied;
-  for (auto &fn : Methods[inst->DeclaredType])
-    supplied.push_back(fn.second);
-  appendOverloadsFor(inst->DeclaredType, supplied);
-  for (FunctionDecl *f : supplied) {
-    if (f->Parent != static_cast<Decl *>(inst) || !f->Body || f->Ty)
-      continue;
-    if (!f->Generics.empty())
-      continue; // its own parameters are only known at the call site
-    if (signatureWrapsSelf(f)) {
-      f->MangledName = mangleFunction(f, args);
-      DeferredMethods.insert(f);
-      continue;
-    }
-    resolveMethodSignature(f, inst->DeclaredType, args);
-  }
+  resolveSuppliedSignatures(inst);
 
   // What this instantiation destroys, before anything that mentions it is
   // checked: a body that stores one of these into a field is only a move if
@@ -6115,6 +7835,18 @@ NominalDecl *Sema::instantiateNominal(NominalDecl *tmpl,
 FunctionDecl *Sema::instantiate(FunctionDecl *tmpl,
                                 const std::vector<Type *> &args,
                                 SourceRange range) {
+  // An argument that is already an error was reported where it arose. An
+  // instance built from it would only report it again, from inside a body
+  // the program never wrote — `std::fmt::show` saying '<error>' has no
+  // member 'display', under a name that could not be found.
+  for (Type *a : args) {
+    Type *t = a;
+    while (t && t->is(TypeKind::Pointer) && t->pointee())
+      t = t->pointee();
+    if (!t || t->isError())
+      return nullptr;
+  }
+
   std::string key = instantiationKey(tmpl, args);
   auto it = FunctionInstances.find(key);
   if (it != FunctionInstances.end())
@@ -6179,6 +7911,16 @@ FunctionDecl *Sema::instantiate(FunctionDecl *tmpl,
   if (selfType)
     ActiveSelfType = selfType;
 
+  // Resolving this signature instantiates whatever generic types it mentions
+  // — the return type usually is one — and an instantiation checks its own
+  // method bodies. One of those may call straight back here: `Box<T>` has a
+  // `duplicate` that calls `boxed<T>`, whose return type is `Box<T>`. The
+  // call would then meet this very instantiation with no signature on it yet,
+  // because this is the line that gives it one. So bodies are queued while
+  // the signature is worked out and checked immediately afterwards, by which
+  // time the call finds a signature that is finished.
+  const bool wasBodyPass = InBodyPass;
+  InBodyPass = false;
   for (Param &p : inst->Params) {
     if (p.IsSelf) {
       p.Ty = selfTypeFor(p, selfType ? selfType : Types.errorType());
@@ -6190,6 +7932,9 @@ FunctionDecl *Sema::instantiate(FunctionDecl *tmpl,
   Type *ret = resolveReturnType(inst, selfType);
   inst->Ty = Types.functionOf(params, ret, inst->IsVariadic);
   inst->MangledName = mangleFunction(tmpl, args);
+  InBodyPass = wasBodyPass;
+  if (InBodyPass)
+    drainPendingInstantiations();
 
   if (boundsSatisfied) {
     InstantiationStack.push_back({tmpl, range});
@@ -6285,11 +8030,16 @@ void Sema::checkVarStmt(VarStmtNode *v) {
   Type *declared = v->TypeAnnotation
                        ? resolveTypeOrError(v->TypeAnnotation.get(), nullptr)
                        : nullptr;
-  if (v->TypeAnnotation)
+  if (v->TypeAnnotation) {
     resolveLocalAnnotations(v->TypeAnnotation.get());
+    rejectCxxClassByValue(declared, v->TypeAnnotation->Range, "the variable");
+    rejectMarkByValue(declared, v->TypeAnnotation->Range, "a binding");
+  }
   Type *initTy = nullptr;
   if (v->Init) {
     initTy = checkExpr(v->Init.get(), declared);
+    if (declared && insertImplicitConversion(v->Init, initTy, declared))
+      initTy = v->Init->Ty;
     if (declared)
       requireConvertible(v->Init.get(), initTy, declared, "this initialiser");
     else if (initTy)
@@ -6508,8 +8258,8 @@ void Sema::checkPattern(Pattern *p, Type *scrutinee, bool declaresBindings,
     auto *b = cast<BindingPattern>(p);
     // In a match arm, a bare name that happens to be a unit variant of the
     // scrutinee's enum tests for that variant instead of binding.
-    if (!declaresBindings && scrutinee->is(TypeKind::Enum) &&
-        !scrutinee->isOpaque() && !b->Sub) {
+    if ((!declaresBindings || b->MustBeVariant) &&
+        scrutinee->is(TypeKind::Enum) && !scrutinee->isOpaque() && !b->Sub) {
       auto *e = reinterpret_cast<EnumDecl *>(scrutinee->nominal());
       for (const auto &v : e->Variants) {
         if (v->Name != b->Name || v->Shape != VariantShape::Unit)
@@ -6519,8 +8269,28 @@ void Sema::checkPattern(Pattern *p, Type *scrutinee, bool declaresBindings,
         return;
       }
     }
-    VarDecl *v = declareLocal(b->Name, scrutinee, isMutable || b->IsMutable,
-                              b->Range);
+    // Written `.Red`: it names something on the type being matched, so a
+    // type with no such variant is a mistake rather than a new binding.
+    if (b->MustBeVariant) {
+      auto d = Diags.error(b->Range, "'{}' has no variant '{}'",
+                           scrutinee->toString(), b->Name);
+      d.note("a leading `.` names a variant of the type being matched; drop "
+             "it to bind the value to a name of your own")
+          .code(204);
+      if (scrutinee->isNominal() && scrutinee->nominal())
+        noteDeclaredAt(d, static_cast<Decl *>(scrutinee->nominal()),
+                       "declared here", "no variant of that name");
+      break;
+    }
+    // `ref name` is a borrow of what matched, `ref var name` one that may
+    // write through; the binding itself is never reassigned.
+    VarDecl *v =
+        b->ByRef
+            ? declareLocal(b->Name,
+                           Types.pointerTo(scrutinee, b->IsMutable, false),
+                           /*mutable=*/false, b->Range)
+            : declareLocal(b->Name, scrutinee, isMutable || b->IsMutable,
+                           b->Range);
     b->Binding = v;
     if (b->Sub)
       checkPattern(b->Sub.get(), scrutinee, declaresBindings, isMutable);
@@ -6684,7 +8454,23 @@ void Sema::checkPattern(Pattern *p, Type *scrutinee, bool declaresBindings,
 
   case NodeKind::EnumPat: {
     auto *ep = cast<EnumPattern>(p);
-    Symbol *sym = lookupPath(ep->Path, ep->Range, false);
+    // A bare variant name is settled by what is being matched — which is
+    // always known here, and is the only thing `.Circle(r)` could mean. That
+    // matters most across a module boundary, where a variant's bare name is
+    // not in scope and `Shape::Circle` would otherwise have to be written in
+    // full.
+    Symbol *sym = nullptr;
+    if (ep->Path.size() == 1)
+      sym = variantOfExpected(ep->Path[0], scrutinee);
+    if (!sym)
+      sym = lookupPath(ep->Path, ep->Range, ep->Path.size() == 1);
+    if (!sym && ep->Path.size() == 1) {
+      auto d = Diags.error(ep->Range, "'{}' has no variant '{}'",
+                           scrutinee->toString(), ep->Path[0]);
+      d.note("a bare name in a pattern is a variant of the type being "
+             "matched; write the enum out if it belongs to another one");
+      d.code(258);
+    }
     if (!sym)
       break;
     if (sym->Kind != SymbolKind::Variant) {

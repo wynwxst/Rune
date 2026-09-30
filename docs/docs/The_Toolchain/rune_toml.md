@@ -23,12 +23,16 @@ link = ["m"]                    # -l, inherited by dependents
 link-paths = ["/usr/local/lib"] # -L
 c-sources = ["c/shim.c"]        # compiled with the build's own toolchain
 c-flags = ["-Wall"]
+cxx-sources = ["cxx/shim.cpp"]  # a C++ half, built by the matching driver
+cxx-flags = ["-Wall"]
+cxx-standard = "c++17"
 link-args = ["-Wl,-z,now"]      # passed to the linker verbatim
 target = "mingw"                # build for this target unless told otherwise
 
 [target.mingw]                  # `rune build --target mingw`
 triple = "x86_64-w64-mingw32"
 cc = "x86_64-w64-mingw32-gcc"
+cxx = "x86_64-w64-mingw32-g++"  # derived from `cc` when not given
 runner = "wine"                 # how to run one of its binaries here
 
 [dependencies]
@@ -58,10 +62,12 @@ src = "tests"                   # where `rune test` looks
 |  | `no-stdlib` | `false` |
 |  | `link`, `link-paths` | empty; inherited by dependents |
 |  | `c-sources`, `c-flags` | empty |
+|  | `cxx-sources`, `cxx-flags` | empty; a C++ half |
+|  | `cxx-standard` | `"c++17"` |
 |  | `link-args` | empty; passed to the linker verbatim |
 |  | `target` | empty, meaning the host |
 | `[target.<name>]` | `triple` | *required* |
-|  | `cc`, `ar` | the host's, which usually cannot cross |
+|  | `cc`, `cxx`, `ar` | the host's, which usually cannot cross |
 |  | `sysroot`, `runtime-dir` | empty |
 |  | `runner` | empty: its binaries cannot be run here |
 |  | `link`, `link-paths`, `link-args` | empty |

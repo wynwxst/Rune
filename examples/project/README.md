@@ -56,6 +56,7 @@ each show one thing:
 | `ffi` | A package with a C half: `[build] c-sources`, and the shims it needs. |
 | `cli` | Decorators used to register command handlers. |
 | `site` | Sockets reached directly through `extern "C"`, next to what `std::net` now wraps. |
+| `tasks` | `async fn` and `.await` over `std::task`: overlapping fetches, a checksum on another thread, a class two tasks share, and a future completed by hand. |
 | `carbon` | The smallest package there is. |
 
 The packages here depend on each other by *path*. For the same idea over a

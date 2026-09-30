@@ -1,0 +1,40 @@
+// EXPECT: Inner::clone
+// EXPECT: outer 101
+// EXPECT: Inner::clone
+// EXPECT: direct 101
+// EXPECT: 1 then 2
+//
+// A `clone` written by hand is what `$clone()` calls — wherever it was
+// written, and however deep in the value it sits. It used to be found only
+// in the type's own body, and only for the value being cloned rather than
+// for the parts of one; under reference counting it was not called at all,
+// which left two `Vector`s holding one block.
+import std::io
+import std::collections::vector
+
+struct Inner { tag: i64 }
+extend Inner {
+    /// Written in an `extend` block, and still the one that runs.
+    pub fn clone(&self) -> Self {
+        io::println("Inner::clone")
+        Inner { tag: self.tag + 100 }
+    }
+}
+
+struct Outer { inner: Inner, n: i64 }
+
+fn main() -> i64 {
+    let a = Outer { inner: Inner { tag: 1 }, n: 2 }
+    let copy = a.$clone()
+    io::println("outer " + copy.inner.tag.$str())
+    let direct = a.inner.$clone()
+    io::println("direct " + direct.tag.$str())
+
+    // A container's own `clone` copies the storage, so the two are apart.
+    var v = vector::Vector<i64>()
+    v.push(1)
+    var other = v.$clone()
+    other.push(2)
+    io::println(v.length().$str() + " then " + other.length().$str())
+    0
+}

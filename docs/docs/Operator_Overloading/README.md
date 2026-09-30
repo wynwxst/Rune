@@ -12,3 +12,4 @@
 - [One operator, several right-hand types](one_operator_several_right_hand_types.md)
 - [Extending a builtin, without overriding it](extending_a_builtin_without_overriding_it.md)
 - [What cannot be overloaded](what_cannot_be_overloaded.md)
+- [Automatic marks](automatic_marks.md)

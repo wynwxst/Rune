@@ -2,7 +2,7 @@
 
 |  | Operators | Associativity |
 | --- | --- | --- |
-| 1 | `.` `::` `()` `[]` `?` | left |
+| 1 | `.` `::` `()` `[]` `?` `.await` | left |
 | 2 | `-` `!` `~` `&` `&var` `*` (prefix) | right |
 | 3 | `as` `into` | left |
 | 4 | `*` `/` `%` | left |

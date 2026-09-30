@@ -1,6 +1,7 @@
 //===- CodeGen.cpp - Types, ARC, declarations and statements ---*- C++ -*-===//
 
 #include "rune/CodeGen.h"
+#include "rune/CxxInterop.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include <filesystem>
@@ -469,7 +470,11 @@ llvm::Type *CodeGen::lower(Type *t) {
     break;
   case TypeKind::Struct:
   case TypeKind::Enum:
-    r = layoutOf(t->nominal(), t);
+    // An opaque C++ class has no fields Rune knows; it is `@size` bytes.
+    if (t->nominal() && t->nominal()->Cxx && t->nominal()->Cxx->IsClass)
+      r = lowerCxxClass(t->nominal());
+    else
+      r = layoutOf(t->nominal(), t);
     break;
   case TypeKind::Generic:
     // Only reachable if an uninstantiated template leaked through.
@@ -487,6 +492,10 @@ llvm::Type *CodeGen::lowerReturn(Type *t) {
 }
 
 llvm::FunctionType *CodeGen::functionTypeFor(FunctionDecl *fn) {
+  // A C++ function's type is whatever the target's C++ ABI makes of its
+  // signature: see CodeGenCxx.cpp.
+  if (isCxxExtern(fn))
+    return cxxSignatureFor(fn).FT;
   std::vector<llvm::Type *> params;
   // Closures take their environment first.
   if (fn->Flavour == FunctionFlavour::Closure)
@@ -554,8 +563,13 @@ void CodeGen::emitRetain(Value *v, Type *t) {
     break;
   case TypeKind::Function: {
     Value *env = B->CreateExtractValue(v, 1, "env");
-    // A closure's environment is never shared: a closure is not `Send`.
-    B->CreateCall(runtimeFn("rune_retain", PtrTy, {PtrTy}), {env});
+    // A closure is not `Send`, but `task::offload` hands one to a worker
+    // thread once its captures have been checked — and the thread that made
+    // it may still be letting go of its own reference while the worker takes
+    // the closure up. So the environment is counted atomically, like a
+    // `String`: the one kind of object whose last two owners can be on
+    // different threads without either being told.
+    B->CreateCall(runtimeFn("rune_retain_shared", PtrTy, {PtrTy}), {env});
     break;
   }
   case TypeKind::DynMark: {
@@ -570,7 +584,7 @@ void CodeGen::emitRetain(Value *v, Type *t) {
       if (elems[i]->isRefCounted())
         emitRetain(B->CreateExtractValue(v, i), elems[i]);
       else if (elems[i]->isSharedHeapBorrow())
-        emitRetain(B->CreateExtractValue(v, i), elems[i]->pointee());
+        emitRetain(heldObject(B->CreateExtractValue(v, i), elems[i]), elems[i]->pointee());
     }
     break;
   }
@@ -582,7 +596,8 @@ void CodeGen::emitRetain(Value *v, Type *t) {
         emitRetain(B->CreateExtractValue(v, i), fields[i]->Ty);
       else if (fields[i]->Ty->isSharedHeapBorrow())
         // A stored borrow is a strong reference under counting.
-        emitRetain(B->CreateExtractValue(v, i), fields[i]->Ty->pointee());
+        emitRetain(heldObject(B->CreateExtractValue(v, i), fields[i]->Ty),
+                   fields[i]->Ty->pointee());
     }
     break;
   }
@@ -630,7 +645,8 @@ void CodeGen::emitRelease(Value *v, Type *t) {
                               {PtrTy, B->getInt1Ty()}),
                     {env, B->getInt1(Opts.Safety == SafetyLevel::Full)});
     else
-      B->CreateCall(runtimeFn("rune_release", B->getVoidTy(), {PtrTy}), {env});
+      B->CreateCall(runtimeFn("rune_release_shared", B->getVoidTy(), {PtrTy}),
+                    {env});
     break;
   }
   case TypeKind::DynMark: {
@@ -644,7 +660,7 @@ void CodeGen::emitRelease(Value *v, Type *t) {
       if (elems[i]->isRefCounted())
         emitRelease(B->CreateExtractValue(v, i), elems[i]);
       else if (!zombie() && elems[i]->isSharedHeapBorrow())
-        emitRelease(B->CreateExtractValue(v, i), elems[i]->pointee());
+        emitRelease(heldObject(B->CreateExtractValue(v, i), elems[i]), elems[i]->pointee());
     }
     break;
   }
@@ -657,7 +673,8 @@ void CodeGen::emitRelease(Value *v, Type *t) {
       else if (!zombie() && fields[i]->Ty->isSharedHeapBorrow())
         // A stored borrow held a strong reference under counting; let it go.
         // Under single ownership it is a plain borrow and is never dropped.
-        emitRelease(B->CreateExtractValue(v, i), fields[i]->Ty->pointee());
+        emitRelease(heldObject(B->CreateExtractValue(v, i), fields[i]->Ty),
+                    fields[i]->Ty->pointee());
     }
     break;
   }
@@ -1384,8 +1401,10 @@ Value *CodeGen::track(Value *v, Type *t) {
   entry.CreateStore(Constant::getNullValue(ty), slot);
   B->CreateStore(v, slot);
   fs().Temps.push_back({slot, t});
-  if (zombie())
-    fs().TempOf[v] = slot;
+  // Remembering which slot a temporary was parked in is what lets anything
+  // downstream work on *that* storage rather than on a copy of it — the
+  // `adopt` under single ownership, and the array a slice is a view of.
+  fs().TempOf[v] = slot;
   return v;
 }
 
@@ -1393,22 +1412,84 @@ Value *CodeGen::track(Value *v, Type *t) {
 // Cloning
 //===----------------------------------------------------------------------===//
 
+/// True when `t` holds, somewhere inside it, a type that writes its own
+/// `clone`. Such a part has to be cloned by calling it even under reference
+/// counting, where a clone is otherwise a share: a `Vector` shared rather
+/// than copied leaves two of them holding one block, and the second to go
+/// frees it again.
+///
+/// A class is not looked into: under counting the share *is* the clone, and
+/// under single ownership the class's own entry below handles it.
+bool CodeGen::containsUserClone(Type *t, std::set<Type *> &seen) {
+  if (!t)
+    return false;
+  t = t->canonical();
+  if (!seen.insert(t).second)
+    return false;
+  if (userCloneOf(t))
+    return true;
+  switch (t->kind()) {
+  case TypeKind::Tuple:
+    for (Type *e : t->tupleElements())
+      if (containsUserClone(e, seen))
+        return true;
+    return false;
+  case TypeKind::Array:
+  case TypeKind::Slice:
+    return containsUserClone(t->element(), seen);
+  case TypeKind::Struct:
+  case TypeKind::Enum: {
+    NominalDecl *nd = t->nominal();
+    if (!nd)
+      return false;
+    for (FieldDecl *f : allFieldsOf(nd))
+      if (containsUserClone(f->Ty, seen))
+        return true;
+    if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+      for (const auto &var : e->Variants) {
+        for (const auto &tt : var->TupleTypes)
+          if (tt->Resolved && containsUserClone(tt->Resolved, seen))
+            return true;
+        for (const auto &fd : var->Fields)
+          if (containsUserClone(fd->Ty, seen))
+            return true;
+      }
+    return false;
+  }
+  default:
+    return false;
+  }
+}
+
 Value *CodeGen::emitClone(Value *v, Type *t) {
   if (!v || !t)
     return v;
   if (t->isOpaque() && t->canonical() != t)
     return emitClone(v, t->canonical());
+  // A type that writes its own `clone` is cloned by calling it, whatever the
+  // memory model: only the type knows what a copy of it means.
+  if (FunctionDecl *user = userCloneOf(t))
+    return emitUserClone(user, v, t);
   // Under reference counting a clone is a *share*: claim a reference to every
   // heap part and hand back the same bits. That is exactly what returning a
   // value has always meant, so a container read written `slot[i].$clone()`
   // keeps the identity the plain `slot[i]` gave it — two lookups of one key
   // are still the one object. Only single ownership, which has no count to
   // share, makes `$clone` the deep, independent copy below.
+  //
+  // The exception is a value holding something that writes its own `clone`:
+  // that one has to run, so the parts are walked here too and the sharing
+  // happens at the leaves, where it is still what a clone means.
   if (!zombie()) {
-    emitRetain(v, t);
-    return v;
+    std::set<Type *> seen;
+    if (!containsUserClone(t, seen)) {
+      emitRetain(v, t);
+      return v;
+    }
   }
   switch (t->kind()) {
+  case TypeKind::Void:
+    return v;
   case TypeKind::Function:
   case TypeKind::DynMark:
   case TypeKind::Any:
@@ -1449,27 +1530,33 @@ Value *CodeGen::emitClone(Value *v, Type *t) {
     return out;
   }
   case TypeKind::Class:
-  case TypeKind::Enum: {
-    // A type that writes its own `clone` is cloned by calling it: the
-    // synthesised memberwise copy would be wrong for a container over raw
-    // storage the compiler cannot see into.
-    if (FunctionDecl *user = userCloneOf(t)) {
-      Function *f = declareFunction(user);
-      const Param *selfP = user->Params.empty() ? nullptr : &user->Params[0];
-      Value *self = v;
-      if (selfP && selfP->IsSelf && selfP->SelfByRef &&
-          !t->isPointerLike()) {
-        Value *slot = createEntryAlloca(lower(t), "clone.self");
-        B->CreateStore(v, slot);
-        self = slot;
-      }
-      return B->CreateCall(f, {self}, "clone");
+    // Under counting, a class's clone is the share above — its identity is
+    // what a second reference to it means. Only single ownership, with no
+    // count to share, copies the object.
+    if (!zombie()) {
+      emitRetain(v, t);
+      return v;
     }
     return B->CreateCall(cloneFnFor(t), {v}, "clone");
-  }
+  case TypeKind::Enum:
+    return B->CreateCall(cloneFnFor(t), {v}, "clone");
   default:
     return v; // trivially copyable
   }
+}
+
+/// Calls a type's own `clone`, giving it the receiver in the shape its
+/// `self` parameter asks for.
+Value *CodeGen::emitUserClone(FunctionDecl *user, Value *v, Type *t) {
+  Function *f = declareFunction(user);
+  const Param *selfP = user->Params.empty() ? nullptr : &user->Params[0];
+  Value *self = v;
+  if (selfP && selfP->IsSelf && selfP->SelfByRef && !t->isPointerLike()) {
+    Value *slot = createEntryAlloca(lower(t), "clone.self");
+    B->CreateStore(v, slot);
+    self = slot;
+  }
+  return B->CreateCall(f, {self}, "clone");
 }
 
 /// A type's own `clone(&self) -> Self`, or null when it has none.
@@ -1644,6 +1731,119 @@ Expr *CodeGen::movedPlaceOf(Expr *e) {
   return nullptr;
 }
 
+/// True when a place expression is rooted in storage of its own rather than
+/// in a value some call just produced.
+bool CodeGen::placeRootIsStable(Expr *e) {
+  while (e) {
+    switch (e->Kind) {
+    case NodeKind::DeclRef: {
+      auto *r = cast<DeclRefExpr>(e);
+      return r->Resolved && (isa<VarDecl>(r->Resolved) ||
+                             isa<GlobalVarDecl>(r->Resolved));
+    }
+    case NodeKind::SelfRef:
+      return true;
+    case NodeKind::Member: {
+      auto *m = cast<MemberExpr>(e);
+      if (m->FieldIndex < 0 && !m->IsTupleIndex)
+        return false;
+      e = m->Base.get();
+      continue;
+    }
+    case NodeKind::Index: {
+      auto *i = cast<IndexExpr>(e);
+      if (i->OverloadResolved || isa<RangeExpr>(i->Index.get()))
+        return false;
+      e = i->Base.get();
+      continue;
+    }
+    case NodeKind::Deref: {
+      auto *d = cast<DerefExpr>(e);
+      if (d->OverloadResolved)
+        return false;
+      // Through a pointer: the address comes from the pointer's value, and
+      // reading that again is free of consequences.
+      return true;
+    }
+    case NodeKind::Cast:
+      e = cast<CastExpr>(e)->Operand.get();
+      continue;
+    case NodeKind::Move:
+      e = cast<MoveExpr>(e)->Operand.get();
+      continue;
+    case NodeKind::UnsafeBlock: {
+      auto *u = cast<UnsafeBlockExpr>(e);
+      if (u->Body && u->Body->Stmts.empty() && u->Body->Tail) {
+        e = u->Body->Tail.get();
+        continue;
+      }
+      return false;
+    }
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
+/// True when a place lives behind a pointer or a class handle.
+///
+/// `match self.head { ... }` on a `&var List` receiver names storage the
+/// caller owns: the arms look at it where it is, and the borrow checker
+/// checked them on that basis — their bindings alias the field rather than
+/// taking it. Copying the subject here instead, and emptying the field to
+/// pay for the copy, would leave the caller's list without its head.
+bool CodeGen::placeBehindBorrow(Expr *e) {
+  while (e) {
+    switch (e->Kind) {
+    case NodeKind::Member: {
+      auto *m = cast<MemberExpr>(e);
+      if (m->FieldIndex < 0 && !m->IsTupleIndex)
+        return false;
+      Type *bt = m->Base->Ty;
+      if (bt && (bt->is(TypeKind::Pointer) || bt->is(TypeKind::Class)))
+        return true;
+      e = m->Base.get();
+      continue;
+    }
+    case NodeKind::Index: {
+      auto *i = cast<IndexExpr>(e);
+      if (i->OverloadResolved || i->StringChar ||
+          isa<RangeExpr>(i->Index.get()) || i->ThroughRawPointer)
+        return false;
+      Type *bt = i->Base->Ty;
+      if (bt && bt->is(TypeKind::Pointer))
+        return true;
+      e = i->Base.get();
+      continue;
+    }
+    case NodeKind::Deref: {
+      auto *d = cast<DerefExpr>(e);
+      return !d->OverloadResolved;
+    }
+    case NodeKind::SelfRef: {
+      auto *sr = cast<SelfExpr>(e);
+      return sr->Ty && (sr->Ty->is(TypeKind::Pointer) ||
+                        sr->Ty->is(TypeKind::Class));
+    }
+    case NodeKind::Cast:
+      e = cast<CastExpr>(e)->Operand.get();
+      continue;
+    case NodeKind::UnsafeBlock: {
+      auto *u = cast<UnsafeBlockExpr>(e);
+      if (u->Body && u->Body->Stmts.empty() && u->Body->Tail) {
+        e = u->Body->Tail.get();
+        continue;
+      }
+      return false;
+    }
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
 void CodeGen::emptyPlace(Expr *e, Type *t) {
   if (!e || !t)
     return;
@@ -1665,7 +1865,18 @@ void CodeGen::emptyPlace(Expr *e, Type *t) {
       return;
   if (!t->isRefCounted())
     return;
-  Value *addr = emitLValue(e);
+  // A field of a value a call produced — `(*handle).next`, `list.head()[0]` —
+  // is a place all the same: the temporary owns it until something takes it.
+  // Its address is the one the read just used, which is inside the very
+  // temporary the statement will destroy; working the expression out again
+  // would call whatever produced it a second time and empty a copy nothing
+  // is going to look at.
+  Value *addr = nullptr;
+  auto known = fs().PlaceAddr.find(e);
+  if (known != fs().PlaceAddr.end())
+    addr = known->second;
+  else if (placeRootIsStable(e))
+    addr = emitLValue(e);
   if (!addr)
     return;
   B->CreateStore(Constant::getNullValue(lower(t)), addr);
@@ -1725,12 +1936,32 @@ void CodeGen::takeOwnership(Expr *e, Value *v, Type *t) {
   adopt(v);
 }
 
+/// The object a stored shared borrow keeps alive under counting, read out of
+/// the borrow: the borrow itself for a one-word handle, which *is* the
+/// object, or what it points at for a closure or a mark object, whose borrow
+/// points at the pair.
+Value *CodeGen::heldObject(Value *borrow, Type *ptrTy) {
+  if (handleBorrow(ptrTy))
+    return borrow;
+  return B->CreateLoad(lower(ptrTy->pointee()), borrow, "held");
+}
+
 bool CodeGen::handleBorrow(Type *t) const {
   // In both memory models: a shared borrow of an object is the object.
   // Only a `&var` names the slot, since it may put a new object there.
-  return t && t->is(TypeKind::Pointer) && !t->isRawPointer() &&
-         !t->isMutablePointer() && !t->isWeakPointer() && t->pointee() &&
-         t->pointee()->isHeapHandle();
+  //
+  // "Is the object" only works while the object fits where the borrow does,
+  // which is one pointer. A mark object is two — an instance beside the
+  // table of methods its type supplies — so a borrow of one points *at* the
+  // pair and is read through like any other borrow.
+  if (!t || !t->is(TypeKind::Pointer) || t->isRawPointer() ||
+      t->isMutablePointer() || t->isWeakPointer() || !t->pointee())
+    return false;
+  Type *inner = t->pointee();
+  // A closure is two words as well — code beside its environment — and a
+  // borrow of one is lowered as one pointer, so it points *at* the pair.
+  return inner->isHeapHandle() && !inner->is(TypeKind::DynMark) &&
+         !inner->is(TypeKind::Function);
 }
 
 void CodeGen::emitStatementCleanup(bool consume) {
@@ -2095,6 +2326,25 @@ Value *CodeGen::coerce(Value *v, Type *from, Type *to) {
     return B->CreateZExt(v, lower(to));
   if (from->isInt() && to->isBool())
     return B->CreateICmpNE(v, Constant::getNullValue(lower(from)));
+  if (from->is(TypeKind::Enum) && to->isNumeric() && from->nominal())
+    if (auto *en = dyn_cast<EnumDecl>(static_cast<Decl *>(from->nominal())))
+      if (en->RawFloat) {
+        // The values sit in a constant table indexed by tag, which for a
+        // float-valued enum counts up from zero.
+        std::vector<double> raw;
+        for (auto &var : en->Variants)
+          raw.push_back(var->FloatValue);
+        Constant *table = ConstantDataArray::get(*Ctx, raw);
+        auto *global = new GlobalVariable(*M, table->getType(), true,
+                                          GlobalValue::PrivateLinkage, table,
+                                          "enum.values");
+        Value *tag = B->CreateSExtOrTrunc(B->CreateExtractValue(v, 0),
+                                          B->getInt64Ty());
+        Value *at = B->CreateInBoundsGEP(table->getType(), global,
+                                         {B->getInt64(0), tag});
+        Value *value = B->CreateLoad(B->getDoubleTy(), at);
+        return coerce(value, Types.f64(), to);
+      }
   if (from->is(TypeKind::Enum) && to->isInt()) {
     Value *tag = B->CreateExtractValue(v, 0);
     return B->CreateSExtOrTrunc(tag, lower(to));
@@ -2108,6 +2358,66 @@ Value *CodeGen::coerce(Value *v, Type *from, Type *to) {
   // type, the same way Sema decided the conversion was allowed at all.
   if (isResultType(to) && !isResultType(from))
     return emitResultOf(v, from, to);
+
+  // `Derived` -> `Base`: the parent's fields are the child's first fields, so
+  // the value it wants is that prefix, read out field by field. (The two
+  // lowered types differ in length, which is why this is a copy rather than
+  // a reinterpretation.)
+  if (from->is(TypeKind::Struct) && to->is(TypeKind::Struct) &&
+      from->nominal() && to->nominal()) {
+    bool inherits = false;
+    for (NominalDecl *p = from->nominal()->InheritsDecl; p && !inherits;
+         p = p->InheritsDecl)
+      inherits = p->DeclaredType == to;
+    if (inherits) {
+      auto *parentTy = cast<StructType>(lower(to));
+      const unsigned kept = parentTy->getNumElements();
+      Value *out = UndefValue::get(parentTy);
+      for (unsigned i = 0; i < kept; ++i)
+        out = B->CreateInsertValue(out, B->CreateExtractValue(v, i), i);
+      // Under single ownership the value is *moved* into the conversion, so
+      // the fields the parent does not have are this conversion's to destroy
+      // — nothing else will ever see them again. Under counting the callee
+      // retains what it keeps and the source is released whole, so the books
+      // already balance and touching them here would unbalance them.
+      if (zombie()) {
+        auto fields = allFieldsOf(from->nominal());
+        for (unsigned i = kept; i < fields.size(); ++i) {
+          Type *ft = fields[i]->Ty;
+          if (!ft || !needsDestruction(ft))
+            continue;
+          Value *fv = B->CreateExtractValue(v, i);
+          emitDestroyValue(fv, ft);
+          emitRelease(fv, ft);
+        }
+      }
+      return out;
+    }
+  }
+
+  // `Base` -> `Derived` for an enum: the child's variants start with the
+  // parent's and keep their numbers, so the tag carries over unchanged and
+  // the payload is copied into the child's — larger, or the same — storage.
+  if (from->is(TypeKind::Enum) && to->is(TypeKind::Enum) && from->nominal() &&
+      to->nominal()) {
+    bool inherits = false;
+    for (NominalDecl *p = to->nominal()->InheritsDecl; p && !inherits;
+         p = p->InheritsDecl)
+      inherits = p->DeclaredType == from;
+    if (inherits) {
+      llvm::Type *wideTy = lower(to);
+      llvm::Type *narrowTy = lower(from);
+      Value *slot = createEntryAlloca(wideTy, "widened");
+      B->CreateStore(Constant::getNullValue(wideTy), slot);
+      Value *src = createEntryAlloca(narrowTy, "narrow");
+      B->CreateStore(v, src);
+      const llvm::DataLayout &dl = M->getDataLayout();
+      uint64_t bytes = dl.getTypeStoreSize(narrowTy).getFixedValue();
+      B->CreateMemCpy(slot, llvm::MaybeAlign(), src, llvm::MaybeAlign(),
+                      ConstantInt::get(B->getInt64Ty(), bytes));
+      return B->CreateLoad(wideTy, slot);
+    }
+  }
 
   // T -> dyn Mark
   if (to->is(TypeKind::DynMark) && !from->is(TypeKind::DynMark))
@@ -2133,8 +2443,20 @@ Value *CodeGen::coerce(Value *v, Type *from, Type *to) {
 
   // [N:T] -> [T]
   if (from->is(TypeKind::Array) && to->is(TypeKind::Slice)) {
-    Value *tmp = createEntryAlloca(lower(from), "arr.tmp");
-    B->CreateStore(v, tmp);
+    // A slice is an address and a count, so the array needs one — and when
+    // the array is a temporary the statement already owns, the address to
+    // use is the slot that temporary was parked in. Viewing a *copy* of it
+    // would put the two out of step: a value taken out through the slice
+    // would be taken out of the copy, while the cleanup went on releasing
+    // the original, and both would then own it.
+    Value *tmp = nullptr;
+    auto parked = fs().TempOf.find(v);
+    if (parked != fs().TempOf.end())
+      tmp = parked->second;
+    if (!tmp) {
+      tmp = createEntryAlloca(lower(from), "arr.tmp");
+      B->CreateStore(v, tmp);
+    }
     Value *slice = UndefValue::get(lower(to));
     slice = B->CreateInsertValue(slice, tmp, 0);
     slice = B->CreateInsertValue(
@@ -2450,10 +2772,16 @@ Function *CodeGen::markThunkFor(FunctionDecl *impl, Type *concrete) {
     // The value lives just past the object header inside the box.
     auto *boxTy = StructType::get(*Ctx, {ObjectHeaderTy, lower(concrete)});
     Value *payload = B->CreateStructGEP(boxTy, object, 1);
-    // A borrowing method wants that address; a by-value method wants the value.
-    self = (selfParam && selfParam->is(TypeKind::Pointer))
-               ? payload
-               : B->CreateLoad(lower(concrete), payload);
+    // A borrowing method wants that address; a by-value method wants the
+    // value. "Borrowing" is not the same question as "is the self parameter a
+    // pointer": the concrete type may itself be one (`bind M to *var u8`), and
+    // a shared borrow of an object *is* the object. So compare the parameter
+    // with the type it is a borrow of.
+    const bool borrowsSelf =
+        selfParam && selfParam->is(TypeKind::Pointer) && selfParam->pointee() &&
+        selfParam->pointee()->canonical() == concrete->canonical() &&
+        !handleBorrow(selfParam);
+    self = borrowsSelf ? payload : B->CreateLoad(lower(concrete), payload);
   }
 
   std::vector<Value *> args{self};
@@ -2754,10 +3082,15 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     return existing;
   }
 
-  if (fn->IsExtern || fn->hasAttr("export"))
+  if ((fn->IsExtern && !isCxxExtern(fn)) || fn->hasAttr("export"))
     checkForeignABI(fn);
 
   auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, name, *M);
+  if (isCxxExtern(fn)) {
+    const CxxSignature &sig = cxxSignatureFor(fn);
+    f->setCallingConv(sig.CC);
+    applyCxxAttributes(nullptr, f, sig);
+  }
   // A traceback walks the frame-pointer chain, so a debug build has to keep
   // one in every function or the walk stops at the first omission.
   if (Opts.DebugInfo)
@@ -2809,6 +3142,44 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
   return f;
 }
 
+/// The value an immutable global is worth, when that is decided already.
+///
+/// `pub let bits: i64 = 64` is a *number*, and a program that reads it should
+/// pay nothing for the reading. Anything whose value needs the program to be
+/// running — a string, a call, an object — is left to the initialiser.
+Constant *CodeGen::constantInitialiserFor(GlobalVarDecl *g) {
+  if (!g || g->IsMutable || !g->Init || !g->Ty)
+    return nullptr;
+  Expr *e = g->Init.get();
+  // Sema folds `-1` into the literal, but a `-` may still be standing here.
+  bool negate = false;
+  if (auto *u = dyn_cast<UnaryExpr>(e))
+    if (u->Op == UnaryOp::Neg) {
+      negate = true;
+      e = u->Operand.get();
+    }
+  if (auto *lit = dyn_cast<IntLitExpr>(e)) {
+    if (!g->Ty->isInt())
+      return nullptr;
+    int64_t v = static_cast<int64_t>(lit->Value);
+    if (negate || lit->IsNegated)
+      v = -v;
+    return ConstantInt::get(lower(g->Ty), static_cast<uint64_t>(v),
+                            g->Ty->isSigned());
+  }
+  if (auto *lit = dyn_cast<FloatLitExpr>(e)) {
+    if (!g->Ty->isFloat())
+      return nullptr;
+    return ConstantFP::get(lower(g->Ty), negate ? -lit->Value : lit->Value);
+  }
+  if (auto *lit = dyn_cast<BoolLitExpr>(e)) {
+    if (!g->Ty->isBool() || negate)
+      return nullptr;
+    return ConstantInt::get(lower(g->Ty), lit->Value ? 1 : 0);
+  }
+  return nullptr;
+}
+
 GlobalVariable *CodeGen::declareGlobal(GlobalVarDecl *g) {
   auto it = Globals.find(g);
   if (it != Globals.end())
@@ -2832,13 +3203,19 @@ GlobalVariable *CodeGen::declareGlobal(GlobalVarDecl *g) {
       isForeign ? GlobalValue::ExternalLinkage
                 : (g->IsPublic ? GlobalValue::WeakODRLinkage
                                : GlobalValue::InternalLinkage);
-  auto *gv = new GlobalVariable(*M, ty, /*isConstant=*/false, linkage, nullptr,
-                                name);
+  Constant *folded = isForeign ? nullptr : constantInitialiserFor(g);
+  auto *gv = new GlobalVariable(*M, ty, /*isConstant=*/folded != nullptr,
+                                linkage, nullptr, name);
   if (!isForeign && g->IsPublic)
     isAncillary(g) ? setDiscardableLinkage(gv, name)
                    : setMergeableLinkage(gv, name);
-  // Ours start zeroed and are filled in by the generated initialiser.
-  if (!isForeign)
+  // A global that is already worth something is emitted worth it, so reading
+  // one costs a load of a constant rather than a load of whatever the
+  // initialiser got round to storing. The rest start zeroed and are filled in
+  // by the generated initialiser.
+  if (folded)
+    gv->setInitializer(folded);
+  else if (!isForeign)
     gv->setInitializer(Constant::getNullValue(ty));
   Globals[g] = gv;
   g->CodeGenGlobal = gv;
@@ -2950,7 +3327,10 @@ GlobalVariable *CodeGen::emitTypeInfo(NominalDecl *nd) {
     if (!cls->VTable.empty()) {
       std::vector<Constant *> entries;
       for (FunctionDecl *m : cls->VTable)
-        entries.push_back(declareFunction(m));
+        // A method this instantiation's arguments do not qualify for has no
+        // body, and Sema refuses every call that would reach the slot.
+        entries.push_back(m->WhereUnmet ? static_cast<Constant *>(ConstantPointerNull::get(PtrTy))
+                                        : declareFunction(m));
       auto *arrTy = ArrayType::get(PtrTy, entries.size());
       auto *vtGV = new GlobalVariable(*M, arrTy, true,
                                       GlobalValue::LinkOnceODRLinkage,
@@ -3062,6 +3442,13 @@ void CodeGen::emitFunctionBody(FunctionDecl *fn) {
         fn->Flavour != FunctionFlavour::Initialiser &&
         fn->Flavour != FunctionFlavour::Deinitialiser)
       owns = true;
+    // A class's `&self` is the handle itself, borrowed for the call. Under
+    // Zombie anything that copies it — a closure capturing `self` — takes a
+    // second handle to an object it does not own, and must not drop it.
+    // Saying the binding is an alias is what tells the capture so.
+    if (p.IsSelf && zombie() && p.SelfByRef && p.Ty &&
+        !p.Ty->is(TypeKind::Pointer))
+      p.Binding->ZombieAlias = true;
     if (owns) {
       emitRetain(arg, p.Ty);
       // A parameter owns what it was passed, so it destroys it on the way
@@ -3304,6 +3691,9 @@ void CodeGen::emitGlobalInitialisers() {
       continue;
     GlobalVariable *gv = declareGlobal(g);
     if (!g->Init)
+      continue;
+    // Already in the object file; there is nothing to run for it.
+    if (constantInitialiserFor(g))
       continue;
     emitInto(g->Init.get(), gv, g->Ty);
     emitStatementCleanup();

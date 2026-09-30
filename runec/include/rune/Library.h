@@ -10,20 +10,49 @@
 // monomorphisation needs. Non-public items are stripped on the way in, so a
 // library never leaks its internals.
 //
-// Layout (all integers little-endian):
+// Layout — every integer little-endian, every string a `u32` length followed
+// by that many bytes of UTF-8, and no alignment or padding anywhere:
 //
-//   magic      8 bytes  "RUNELIB\1"
-//   version    u32
-//   memory     u32      0 = reference counting, 1 = Zombie (single ownership)
-//   nameLen    u32      module name, UTF-8
-//   name       bytes
-//   unitCount  u32      number of interface units
-//     nameLen  u32
-//     name     bytes    module path, e.g. "geometry::shapes"
-//     unitLen  u32
-//     unit     bytes    Rune source for that module
-//   objectLen  u64
-//   object     bytes    native object file
+//   magic       8 bytes  "RUNELIB\1"
+//   version     u32      the container's own version; 3 today
+//   memory      u32      0 = reference counting, 1 = Zombie
+//   name        string   the library's module name
+//
+//   flagCount   u32      `@Config` names that were set when this was built
+//     flag      string
+//   valueCount  u32      `@Config` keys that had values
+//     key       string
+//     value     string
+//
+//   unitCount   u32      one per module compiled into the library
+//     path      string   the dotted module path, e.g. "geometry::shapes"
+//     source    string   its **public interface**, as Rune source
+//
+//   objectLen   u64
+//   object      bytes    a native object file for one target
+//
+// Three things are worth knowing about it.
+//
+// **The interface is source, not a symbol table.** An importer re-parses it,
+// so it gets the declarations exactly as they were written — including
+// generic bodies, which monomorphisation needs, and `pub macro` definitions,
+// which expansion needs. `publicInterfaceOf` strips everything not `pub` on
+// the way in, so a library never carries its internals.
+//
+// **The conditions travel with it.** The interface is source, so its
+// `@Config` conditions have to be answered again on import — and answered the
+// way they were when the object code was made, not the way the importer's own
+// build would answer them. That is what `flagCount` and `valueCount` are for.
+//
+// **A `.rul` is one target and one memory model.** The object code bakes in
+// retains and releases, or their absence and the moved-in argument
+// convention, so importing a library built the other way is refused rather
+// than linked. There is no fat `.rul`: cross-compiling means building the
+// dependency for that target too.
+//
+// The version is checked exactly, not for a range: a mismatch says "built by
+// a different compiler version" and stops. The format is small enough that
+// rebuilding is always the right answer.
 //
 //===----------------------------------------------------------------------===//
 #ifndef RUNE_LIBRARY_H
@@ -47,6 +76,13 @@ struct LibraryContents {
   /// One entry per module compiled into the library: its dotted module path
   /// and the Rune source that declares it.
   std::vector<std::pair<std::string, std::string>> Interfaces;
+  /// The `@Config` answers this library was built with: the names that were
+  /// set, and the keys that had values. An importer reads the interface as
+  /// source, so its conditions have to be answered the way they were when
+  /// the object code was produced — not the way the importer's own build
+  /// would answer them.
+  std::vector<std::string> ConfigFlags;
+  std::vector<std::pair<std::string, std::string>> ConfigValues;
   std::string ObjectCode;
 };
 
@@ -54,7 +90,8 @@ struct LibraryContents {
 bool writeLibrary(const std::string &path, const std::string &objectPath,
                   const std::string &moduleName,
                   const std::vector<std::pair<std::string, std::string>> &units,
-                  MemoryMode memory, DiagnosticEngine &diags);
+                  MemoryMode memory, const CompilerOptions &opts,
+                  DiagnosticEngine &diags);
 
 /// Reads a `.rul`. Returns false and reports if the file is missing or
 /// malformed.

@@ -1,0 +1,41 @@
+// Many types, one mark, one list — and dynamic dispatch over it.
+//
+//     runec --memory arc -o cat_dog src/cat_dog.rune && ./cat_dog
+//
+// A `dyn Speaker` is already a reference: an instance beside the table of
+// methods its type supplies. So a vector of them needs no box around each
+// one, and the annotation on `animals` is what tells the compiler that each
+// element is to be *seen* as a `Speaker` rather than as the `Dog` or `Cat`
+// it happens to be.
+
+import std::io
+import std::collections::vector
+
+// 1. Define the mark.
+mark Speaker {
+    fn speak(&self) -> String
+}
+
+// 2. Give it to each type.
+struct Dog {}
+bind Speaker to Dog {
+    fn speak(&self) -> String { "Woof!" }
+}
+
+struct Cat {}
+bind Speaker to Cat {
+    fn speak(&self) -> String { "Meow!" }
+}
+
+fn main() -> i64 {
+    // 3. One list of them. The annotation decides what the elements are:
+    //    without it each `Dog {}` would type as a `Dog`, and a list cannot
+    //    hold two different types.
+    let animals: vector::Vector<dyn Speaker> = vec![Dog {}, Cat {}]
+
+    // 4. Each call goes through the table the element carries.
+    for animal in animals {
+        io::println(animal.speak())
+    }
+    0
+}

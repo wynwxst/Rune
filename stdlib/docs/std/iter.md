@@ -43,15 +43,15 @@ fn main() -> i64 {
     for (i, name) in names.as_iter().enumerate() {
         io::println(i.$str() + ": " + name)
     }
-    let long = names.filter(||(n: String) -> bool { n.$length() > 3 })
-                    .map(||(n: String) -> i64 { n.$length() })
+    let long = names.filter(||(n: &String) -> bool { n.$length() > 3 })
+                    .map(||(n: &String) -> i64 { n.$length() })
                     .collect()
     io::println(long.length())
     io::println(iter::counting(1).take(4).fold(0, ||(a: i64, b: i64) -> i64 { a + b }))
     io::println(iter::counting(0).step_by(5).take_while(||(n: i64) -> bool { n < 12 }).count())
     for (a, b) in vec!(1, 2).zip(vec!("x", "y").as_iter()) { io::println(a.$str() + b) }
-    io::println(names.as_iter().find(||(n: String) -> bool { n == "grace" }) ?? "none")
-    io::println(names.as_iter().position(||(n: String) -> bool { n == "linus" }) ?? -1)
+    io::println(names.as_iter().find(||(n: &String) -> bool { n == "grace" }) ?? "none")
+    io::println(names.as_iter().position(||(n: &String) -> bool { n == "linus" }) ?? -1)
     0
 }
 ```
@@ -72,7 +72,7 @@ fn evens(limit: i64) -> some iter::Iterator {
 
 fn main() -> i64 {
     let rows = vec!(vec!(1, 2), vec!(3))
-    let flat = rows.flatMap(||(r: vector::Vector<i64>) -> vector::VectorIter<i64> { r.as_iter() })
+    let flat = rows.flatMap(||(r: &vector::Vector<i64>) -> vector::VectorIter<i64> { r.as_iter() })
     io::println(flat.count())
     for n in evens(3) { io::print(n.$str() + " ") }
     io::newline()

@@ -95,8 +95,3 @@ fn main() -> i64 {
     b.v
 }
 ```
-
-> [!NOTE]
-> **No import needed**
->
-> `As` is in scope everywhere — the prelude puts it there alongside `Option` and `Result`, so a binding never needs an import. It is declared in `std::convert`.

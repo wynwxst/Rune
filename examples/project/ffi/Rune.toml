@@ -9,6 +9,11 @@ safety = "full"
 # so this package cross-compiles like any other.
 c-sources = ["c/shim.c"]
 c-flags = ["-Wall", "-Wextra"]
+# The C++ half is compiled the same way, by the C++ driver that goes with
+# `cc`. A package with one links the C++ runtime automatically.
+cxx-sources = ["cxx/shim.cpp"]
+cxx-flags = ["-Wall", "-Wextra", "-fno-exceptions", "-fno-rtti"]
+cxx-standard = "c++17"
 # libm is a system library, so it is asked for by name rather than built.
 link = ["m"]
 
@@ -17,5 +22,6 @@ link = ["m"]
 [target.mingw]
 triple = "x86_64-w64-mingw32"
 cc = "x86_64-w64-mingw32-gcc"
+cxx = "x86_64-w64-mingw32-g++"
 runner = "wine"
 link = ["ws2_32"]

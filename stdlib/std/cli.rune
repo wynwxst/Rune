@@ -195,8 +195,8 @@ pub class Parser {
             if !spec.isFlag && !spec.many && !spec.fallback.$isEmpty() &&
                 !args.values.holds(spec.name) {
                 var one = vector::Vector<String>()
-                one.push(spec.fallback)
-                args.values.put(spec.name, one)
+                one.push(spec.fallback.$clone())
+                args.values.put(spec.name.$clone(), one)
             }
         }
 
@@ -238,14 +238,14 @@ pub class Parser {
 
     fn findLong(&self, name: &String) -> Result<Spec, Error> {
         for spec in self.options {
-            if spec.name == name { return Ok(spec) }
+            if spec.name == name { return Ok(spec.$clone()) }
         }
         Err(Error::UnknownOption("--" + name))
     }
 
     fn findShort(&self, letter: &String) -> Result<Spec, Error> {
         for spec in self.options {
-            if spec.short == letter { return Ok(spec) }
+            if spec.short == letter { return Ok(spec.$clone()) }
         }
         Err(Error::UnknownOption("-" + letter))
     }
@@ -298,7 +298,7 @@ pub class Parser {
             out += "\noptions:\n"
             var k = 0
             for spec in self.options {
-                var help = spec.help
+                var help = spec.help.$clone()
                 if !spec.isFlag && !spec.fallback.$isEmpty() {
                     help += " (default: " + spec.fallback + ")"
                 }

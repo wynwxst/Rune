@@ -12,6 +12,10 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 #if defined(__APPLE__) || defined(__GLIBC__)
 #include <execinfo.h>
 #endif
@@ -111,6 +115,59 @@ static void weak_unregister(void **slot) {
 
 
 
+
+/*===--------------------------------------------------------------------===*
+ * Tearing a long structure down without a long stack
+ *
+ * Destroying a list destroys the node it holds, whose destruction destroys
+ * the node *it* holds, and so on: written as calls, a hundred thousand links
+ * want a hundred thousand stack frames, and a program that builds such a list
+ * dies giving it back rather than using it.
+ *
+ * So only the outermost destruction runs on the stack. Anything reached while
+ * it is running goes on a queue, and that outermost call drains the queue in
+ * a loop afterwards — the same objects destroyed in the same order, with the
+ * depth kept at one. The queue is threaded through the doomed objects' own
+ * headers, reusing a count nothing will read again, so giving memory back
+ * never has to ask for more.
+ *
+ * One queue per thread: two threads may be destroying their own structures at
+ * the same time, and neither has anything to say to the other.
+ *===--------------------------------------------------------------------===*/
+#if defined(_MSC_VER)
+#define RUNE_THREAD_LOCAL __declspec(thread)
+#else
+#define RUNE_THREAD_LOCAL __thread
+#endif
+
+static RUNE_THREAD_LOCAL void *g_teardown_pending = NULL;
+static RUNE_THREAD_LOCAL int g_teardown_running = 0;
+
+/* 1 when the caller should destroy `obj` now, 0 when it has been queued for
+ * the teardown already in progress on this thread. */
+int rune_teardown_enter(void *obj) {
+  if (g_teardown_running) {
+    RuneObject *o = (RuneObject *)obj;
+    o->refcount = (int64_t)(intptr_t)g_teardown_pending;
+    g_teardown_pending = obj;
+    return 0;
+  }
+  g_teardown_running = 1;
+  return 1;
+}
+
+/* The next queued object, or NULL. Its header is put back in order first. */
+void *rune_teardown_next(void) {
+  void *obj = g_teardown_pending;
+  if (!obj)
+    return NULL;
+  RuneObject *o = (RuneObject *)obj;
+  g_teardown_pending = (void *)(intptr_t)o->refcount;
+  o->refcount = 0;
+  return obj;
+}
+
+void rune_teardown_leave(void) { g_teardown_running = 0; }
 
 /* Called from rune_release just before the object is torn down. */
 static void weak_zero_all(void *target) {
@@ -584,6 +641,40 @@ uint32_t rune_string_char_at(const RuneString *s, int64_t i, int64_t *next,
   return cp;
 }
 
+/* The character whose first byte is at byte offset `at`, and in `*next` the
+   offset of the one after it. What a loop over a string's characters walks
+   with: one decode per character, rather than a walk from the start each
+   time. Past the end it hands back 0 and leaves `*next` where it was. */
+uint32_t rune_string_char_after(const RuneString *s, int64_t at, int64_t *next) {
+  int64_t len = s ? s->length : 0;
+  if (at < 0 || at >= len) {
+    if (next)
+      *next = at;
+    return 0;
+  }
+  unsigned char lead = (unsigned char)s->data[at];
+  int extra = lead < 0x80 ? 0 : lead < 0xE0 ? 1 : lead < 0xF0 ? 2 : 3;
+  if (at + extra >= len)
+    extra = 0;
+  uint32_t cp;
+  switch (extra) {
+  case 0: cp = lead; break;
+  case 1: cp = ((lead & 0x1Fu) << 6) | ((unsigned char)s->data[at + 1] & 0x3Fu); break;
+  case 2:
+    cp = ((lead & 0x0Fu) << 12) | (((unsigned char)s->data[at + 1] & 0x3Fu) << 6) |
+         ((unsigned char)s->data[at + 2] & 0x3Fu);
+    break;
+  default:
+    cp = ((lead & 0x07u) << 18) | (((unsigned char)s->data[at + 1] & 0x3Fu) << 12) |
+         (((unsigned char)s->data[at + 2] & 0x3Fu) << 6) |
+         ((unsigned char)s->data[at + 3] & 0x3Fu);
+    break;
+  }
+  if (next)
+    *next = at + extra + 1;
+  return cp;
+}
+
 int64_t rune_string_find(const RuneString *hay, const RuneString *needle) {
   if (!hay || !needle || needle->length == 0)
     return 0;
@@ -785,6 +876,72 @@ RuneString *rune_read_line(void) {
   int8_t more = 0;
   return rune_read_line_checked(&more);
 }
+
+RuneString *rune_read_stdin_exact(int64_t count, int8_t *ok) {
+#ifdef _WIN32
+  /* A program counting bytes is speaking a byte protocol, and text mode
+     would turn every "\r\n" into "\n" on the way in and back on the way
+     out — so the counts would stop matching in both directions. */
+  static int binary = 0;
+  if (!binary) {
+    binary = 1;
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+  }
+#endif
+  if (count < 0)
+    count = 0;
+  char *buf = (char *)rune_raw_alloc((size_t)count + 1);
+  size_t got = 0;
+  while (got < (size_t)count) {
+    size_t n = fread(buf + got, 1, (size_t)count - got, stdin);
+    if (n == 0)
+      break;
+    got += n;
+  }
+  if (ok)
+    *ok = (int8_t)(got == (size_t)count);
+  RuneString *s = rune_string_from_bytes(buf, (int64_t)got);
+  rune_raw_free(buf);
+  return s;
+}
+
+void rune_flush_stdout(void) { fflush(stdout); }
+
+/* Unbuffered, so that whether input is waiting can be asked of the
+   operating system: a stdio buffer holding a whole message would otherwise
+   be invisible to the question. Only takes effect before the first read. */
+void rune_stdin_unbuffer(void) { setvbuf(stdin, NULL, _IONBF, 0); }
+
+#ifdef _WIN32
+#include <windows.h>
+int8_t rune_stdin_waiting(int64_t millis) {
+  HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+  if (GetFileType(in) != FILE_TYPE_PIPE)
+    return 0;
+  for (int64_t waited = 0;; waited += 10) {
+    DWORD avail = 0;
+    if (!PeekNamedPipe(in, NULL, 0, NULL, &avail, NULL))
+      return 1; /* broken: let the reader find out */
+    if (avail > 0)
+      return 1;
+    if (waited >= millis)
+      return 0;
+    Sleep(10);
+  }
+}
+#else
+#include <poll.h>
+int8_t rune_stdin_waiting(int64_t millis) {
+  struct pollfd p = {0, POLLIN, 0};
+  int r;
+  do {
+    r = poll(&p, 1, millis < 0 ? -1 : (int)millis);
+  } while (r < 0 && errno == EINTR);
+  /* An error or a hang-up is something for the reader to see, too. */
+  return (int8_t)(r != 0);
+}
+#endif
 
 /*===--------------------------------------------------------------------===*\
 |* Process
@@ -1011,6 +1168,292 @@ int64_t rune_path_is_dir(const char *path) {
 #endif
 
 /*==========================================================================*
+ * Child processes
+ *
+ * A command is built up one argument at a time and then run to completion,
+ * with both of its output streams collected. They are read together, as the
+ * bytes arrive: a child that fills its stderr pipe while the parent is
+ * blocked reading stdout would otherwise wait for ever.
+ *==========================================================================*/
+
+typedef struct {
+  char *data;
+  size_t length, capacity;
+} RuneByteBuf;
+
+static void rune_bytebuf_add(RuneByteBuf *b, const char *p, size_t n) {
+  if (b->length + n + 1 > b->capacity) {
+    size_t cap = b->capacity ? b->capacity : 256;
+    while (b->length + n + 1 > cap)
+      cap *= 2;
+    b->data = (char *)realloc(b->data, cap);
+    b->capacity = cap;
+  }
+  memcpy(b->data + b->length, p, n);
+  b->length += n;
+  b->data[b->length] = '\0';
+}
+
+typedef struct {
+  char **argv;       /* argv[0] is the program; NULL-terminated */
+  size_t argc, cap;
+  char *directory;   /* NULL: the parent's own */
+  RuneByteBuf out, err;
+} RuneCommand;
+
+static char *rune_dup_string(const RuneString *s) {
+  size_t n = s ? (size_t)s->length : 0;
+  char *p = (char *)malloc(n + 1);
+  if (n) memcpy(p, s->data, n);
+  p[n] = '\0';
+  return p;
+}
+
+void *rune_command_new(const RuneString *program) {
+  RuneCommand *c = (RuneCommand *)calloc(1, sizeof(RuneCommand));
+  c->cap = 8;
+  c->argv = (char **)calloc(c->cap, sizeof(char *));
+  c->argv[c->argc++] = rune_dup_string(program);
+  return c;
+}
+
+void rune_command_arg(void *cmd, const RuneString *arg) {
+  RuneCommand *c = (RuneCommand *)cmd;
+  if (!c) return;
+  if (c->argc + 2 > c->cap) {
+    c->cap *= 2;
+    c->argv = (char **)realloc(c->argv, c->cap * sizeof(char *));
+  }
+  c->argv[c->argc++] = rune_dup_string(arg);
+  c->argv[c->argc] = NULL;
+}
+
+void rune_command_directory(void *cmd, const RuneString *dir) {
+  RuneCommand *c = (RuneCommand *)cmd;
+  if (!c) return;
+  free(c->directory);
+  c->directory = rune_dup_string(dir);
+}
+
+RuneString *rune_command_output(void *cmd, int64_t which) {
+  RuneCommand *c = (RuneCommand *)cmd;
+  if (!c) return rune_string_new();
+  RuneByteBuf *b = which == 2 ? &c->err : &c->out;
+  return rune_string_from_bytes(b->data ? b->data : "", (int64_t)b->length);
+}
+
+void rune_command_free(void *cmd) {
+  RuneCommand *c = (RuneCommand *)cmd;
+  if (!c) return;
+  for (size_t i = 0; i < c->argc; ++i)
+    free(c->argv[i]);
+  free(c->argv);
+  free(c->directory);
+  free(c->out.data);
+  free(c->err.data);
+  free(c);
+}
+
+#ifdef _WIN32
+
+/* One argument, quoted the way the C runtime's command-line parser undoes:
+   backslashes are literal except before a quote, where they are doubled. */
+static void rune_quote_arg(RuneByteBuf *line, const char *arg) {
+  if (*arg && !strpbrk(arg, " \t\n\v\"")) {
+    rune_bytebuf_add(line, arg, strlen(arg));
+    return;
+  }
+  rune_bytebuf_add(line, "\"", 1);
+  for (const char *p = arg;; ++p) {
+    size_t slashes = 0;
+    while (*p == '\\') { ++p; ++slashes; }
+    if (!*p) {
+      for (size_t i = 0; i < slashes * 2; ++i) rune_bytebuf_add(line, "\\", 1);
+      break;
+    }
+    if (*p == '"') {
+      for (size_t i = 0; i < slashes * 2 + 1; ++i) rune_bytebuf_add(line, "\\", 1);
+    } else {
+      for (size_t i = 0; i < slashes; ++i) rune_bytebuf_add(line, "\\", 1);
+    }
+    rune_bytebuf_add(line, p, 1);
+  }
+  rune_bytebuf_add(line, "\"", 1);
+}
+
+/* Moves whatever is waiting in `pipe` into `into`; 0 once it is closed. */
+static int rune_drain_pipe(HANDLE pipe, RuneByteBuf *into, int *sawData) {
+  DWORD avail = 0;
+  if (!PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL))
+    return 0;
+  while (avail > 0) {
+    char chunk[4096];
+    DWORD want = avail < sizeof chunk ? avail : (DWORD)sizeof chunk, got = 0;
+    if (!ReadFile(pipe, chunk, want, &got, NULL) || got == 0)
+      return 0;
+    rune_bytebuf_add(into, chunk, got);
+    avail -= got;
+    *sawData = 1;
+  }
+  return 1;
+}
+
+int64_t rune_command_run(void *cmd) {
+  RuneCommand *c = (RuneCommand *)cmd;
+  if (!c) return -1;
+  RuneByteBuf line = {0};
+  for (size_t i = 0; i < c->argc; ++i) {
+    if (i) rune_bytebuf_add(&line, " ", 1);
+    rune_quote_arg(&line, c->argv[i]);
+  }
+
+  SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
+  HANDLE outRead, outWrite, errRead, errWrite;
+  if (!CreatePipe(&outRead, &outWrite, &sa, 0)) { free(line.data); return -1; }
+  if (!CreatePipe(&errRead, &errWrite, &sa, 0)) {
+    CloseHandle(outRead); CloseHandle(outWrite); free(line.data); return -1;
+  }
+  SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof si);
+  memset(&pi, 0, sizeof pi);
+  si.cb = sizeof si;
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  si.hStdOutput = outWrite;
+  si.hStdError = errWrite;
+  BOOL started = CreateProcessA(NULL, line.data, NULL, NULL, TRUE,
+                                CREATE_NO_WINDOW, NULL, c->directory, &si, &pi);
+  free(line.data);
+  CloseHandle(outWrite);
+  CloseHandle(errWrite);
+  if (!started) {
+    CloseHandle(outRead);
+    CloseHandle(errRead);
+    return -1;
+  }
+
+  int outOpen = 1, errOpen = 1;
+  while (outOpen || errOpen) {
+    int saw = 0;
+    if (outOpen) outOpen = rune_drain_pipe(outRead, &c->out, &saw);
+    if (errOpen) errOpen = rune_drain_pipe(errRead, &c->err, &saw);
+    if (!saw && (outOpen || errOpen))
+      Sleep(1);
+  }
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 0;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  CloseHandle(outRead);
+  CloseHandle(errRead);
+  return (int64_t)code;
+}
+
+#elif defined(__unix__) || defined(__APPLE__)
+
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int64_t rune_command_run(void *cmd) {
+  RuneCommand *c = (RuneCommand *)cmd;
+  if (!c) return -1;
+  c->argv[c->argc] = NULL;
+  int outPipe[2], errPipe[2], failPipe[2];
+  if (pipe(outPipe) != 0) return -1;
+  if (pipe(errPipe) != 0) {
+    close(outPipe[0]); close(outPipe[1]);
+    return -1;
+  }
+  /* Tells the parent the exec failed, as opposed to the program running and
+     exiting 127: close-on-exec, so it reads end-of-file when exec works. */
+  if (pipe(failPipe) != 0) {
+    close(outPipe[0]); close(outPipe[1]);
+    close(errPipe[0]); close(errPipe[1]);
+    return -1;
+  }
+  fcntl(failPipe[1], F_SETFD, FD_CLOEXEC);
+  fflush(stdout);
+  fflush(stderr);
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(outPipe[0]); close(outPipe[1]);
+    close(errPipe[0]); close(errPipe[1]);
+    close(failPipe[0]); close(failPipe[1]);
+    return -1;
+  }
+  if (pid == 0) {
+    dup2(outPipe[1], 1);
+    dup2(errPipe[1], 2);
+    close(outPipe[0]); close(outPipe[1]);
+    close(errPipe[0]); close(errPipe[1]);
+    close(failPipe[0]);
+    if (c->directory && chdir(c->directory) != 0) {
+      char one = 1;
+      (void)!write(failPipe[1], &one, 1);
+      _exit(127);
+    }
+    execvp(c->argv[0], c->argv);
+    char one = 1;
+    (void)!write(failPipe[1], &one, 1);
+    _exit(127);
+  }
+  close(outPipe[1]);
+  close(errPipe[1]);
+  close(failPipe[1]);
+
+  struct pollfd fds[2] = {{outPipe[0], POLLIN, 0}, {errPipe[0], POLLIN, 0}};
+  RuneByteBuf *sinks[2] = {&c->out, &c->err};
+  int open = 2;
+  while (open > 0) {
+    if (poll(fds, 2, -1) < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    for (int i = 0; i < 2; ++i) {
+      if (fds[i].fd < 0 || !(fds[i].revents & (POLLIN | POLLHUP | POLLERR)))
+        continue;
+      char chunk[4096];
+      ssize_t n = read(fds[i].fd, chunk, sizeof chunk);
+      if (n > 0) {
+        rune_bytebuf_add(sinks[i], chunk, (size_t)n);
+      } else if (n == 0 || errno != EINTR) {
+        close(fds[i].fd);
+        fds[i].fd = -1;
+        --open;
+      }
+    }
+  }
+  for (int i = 0; i < 2; ++i)
+    if (fds[i].fd >= 0) close(fds[i].fd);
+
+  char failed = 0;
+  ssize_t f;
+  do { f = read(failPipe[0], &failed, 1); } while (f < 0 && errno == EINTR);
+  close(failPipe[0]);
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  if (f == 1) return -1;
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return -1;
+}
+
+#else
+
+int64_t rune_command_run(void *cmd) { (void)cmd; return -1; }
+
+#endif
+
+/*==========================================================================*
  * Threads
  *
  * The thinnest possible layer over whatever the platform calls a thread.
@@ -1137,6 +1580,15 @@ void rune_cond_wait(void *c, void *m) {
   if (c && m)
     SleepConditionVariableCS((CONDITION_VARIABLE *)c, (CRITICAL_SECTION *)m,
                              INFINITE);
+}
+
+/* The same, giving up after `nanos` if nothing has signalled by then. */
+void rune_cond_wait_ns(void *c, void *m, int64_t nanos) {
+  if (!c || !m) return;
+  if (nanos <= 0) return;
+  DWORD ms = (DWORD)((nanos + 999999) / 1000000);
+  SleepConditionVariableCS((CONDITION_VARIABLE *)c, (CRITICAL_SECTION *)m,
+                           ms ? ms : 1);
 }
 
 void rune_cond_signal(void *c) {
@@ -1288,6 +1740,21 @@ void *rune_cond_new(void) {
 void rune_cond_wait(void *c, void *m) {
   if (c && m)
     pthread_cond_wait((pthread_cond_t *)c, (pthread_mutex_t *)m);
+}
+
+/* The same, giving up after `nanos` if nothing has signalled by then. */
+void rune_cond_wait_ns(void *c, void *m, int64_t nanos) {
+  if (!c || !m) return;
+  if (nanos <= 0) return;
+  struct timespec until;
+  clock_gettime(CLOCK_REALTIME, &until);
+  until.tv_sec += (time_t)(nanos / 1000000000);
+  until.tv_nsec += (long)(nanos % 1000000000);
+  if (until.tv_nsec >= 1000000000) {
+    until.tv_sec += 1;
+    until.tv_nsec -= 1000000000;
+  }
+  pthread_cond_timedwait((pthread_cond_t *)c, (pthread_mutex_t *)m, &until);
 }
 
 void rune_cond_signal(void *c) {
@@ -1604,6 +2071,57 @@ int32_t rune_net_close(int64_t fd) {
     rune_net_remember();
     return -1;
   }
+  return 0;
+}
+
+/* A second descriptor for the same socket. Each is closed on its own; the
+ * connection lives until the last one is. What a `clone` of a stream means
+ * under single ownership, where two bindings cannot share one descriptor. */
+int64_t rune_net_dup(int64_t fd) {
+#ifdef _WIN32
+  WSAPROTOCOL_INFOW info;
+  if (WSADuplicateSocketW((rune_socket)fd, GetCurrentProcessId(), &info) != 0) {
+    rune_net_remember();
+    return -1;
+  }
+  rune_socket s = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+                             FROM_PROTOCOL_INFO, &info, 0, WSA_FLAG_OVERLAPPED);
+  if (s == RUNE_BAD_SOCKET) {
+    rune_net_remember();
+    return -1;
+  }
+  return (int64_t)s;
+#else
+  int s = dup((rune_socket)fd);
+  if (s < 0) {
+    rune_net_remember();
+    return -1;
+  }
+  return (int64_t)s;
+#endif
+}
+
+/* Whether calls on the socket return at once with "would block" rather than
+ * waiting — what a task needs, so it can park on readiness instead. */
+int32_t rune_net_set_nonblocking(int64_t fd, int32_t on) {
+#ifdef _WIN32
+  u_long value = on ? 1 : 0;
+  if (ioctlsocket((rune_socket)fd, FIONBIO, &value) != 0) {
+    rune_net_remember();
+    return -1;
+  }
+#else
+  int flags = fcntl((rune_socket)fd, F_GETFL, 0);
+  if (flags < 0) {
+    rune_net_remember();
+    return -1;
+  }
+  flags = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+  if (fcntl((rune_socket)fd, F_SETFL, flags) != 0) {
+    rune_net_remember();
+    return -1;
+  }
+#endif
   return 0;
 }
 

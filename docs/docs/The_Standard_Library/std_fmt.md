@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | `show` | `<T: Display>(value: T) -> String` | what `{}` does |
 | `fixed` | `(value: f64, places: i64) -> String` | `{:.N}` — that many places, rounded |
-| `radix` | `(value: i64, base: i64, upper: bool, prefix: bool) -> String` | `{:x}`, `{:b}`, `{:o}` |
+| `radix` | `<T>(value: T, base: i64, upper: bool, prefix: bool) -> String` | `{:x}`, `{:b}`, `{:o}` |
 | `plus` | `(text: String) -> String` | `{:+}` — a leading `+` where there is no sign |
 | `pad` | `(text: String, width: i64, align: Character, fill: Character) -> String` | `{:>8}` — widen to `width`, counting characters |
 

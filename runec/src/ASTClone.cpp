@@ -76,6 +76,24 @@ std::unique_ptr<FieldDecl> cloneField(const FieldDecl *f) {
 
 } // namespace
 
+std::unique_ptr<FieldDecl> cloneFieldDecl(const FieldDecl *f) {
+  return cloneField(f);
+}
+
+std::unique_ptr<EnumVariantDecl> cloneEnumVariant(const EnumVariantDecl *v) {
+  auto c = alloc<EnumVariantDecl>(v);
+  c->Name = v->Name;
+  c->NameRange = v->NameRange;
+  c->Shape = v->Shape;
+  c->Index = v->Index;
+  c->Value = v->Value;
+  c->TupleTypes = cloneTypeList(v->TupleTypes);
+  for (const auto &f : v->Fields)
+    c->Fields.push_back(cloneField(f.get()));
+  c->Discriminant = cloneExpr(v->Discriminant.get());
+  return c;
+}
+
 Attribute cloneAttribute(const Attribute &a) {
   Attribute c;
   c.Name = a.Name;
@@ -196,6 +214,11 @@ TypeReprPtr cloneTypeReprNoOrigin(const TypeRepr *t) {
     c->MarkType = cloneTypeRepr(cast<DynTypeRepr>(t)->MarkType.get());
     return c;
   }
+  case NodeKind::TypeOfType: {
+    auto c = alloc<TypeOfRepr>(t);
+    c->Operand = cloneExpr(cast<TypeOfRepr>(t)->Operand.get());
+    return c;
+  }
   case NodeKind::SelfType:
     return alloc<SelfTypeRepr>(t);
   case NodeKind::InferType:
@@ -216,6 +239,7 @@ PatternPtr clonePattern(const Pattern *p) {
     c->Name = b->Name;
     c->IsMutable = b->IsMutable;
     c->ByRef = b->ByRef;
+    c->MustBeVariant = b->MustBeVariant;
     c->Sub = clonePattern(b->Sub.get());
     return c;
   }
@@ -375,6 +399,7 @@ ExprPtr cloneExpr(const Expr *e) {
     auto c = alloc<DeclRefExpr>(e);
     c->Path = r->Path;
     c->GenericArgs = cloneTypeList(r->GenericArgs);
+    c->FromInferredType = r->FromInferredType;
     return c;
   }
   case NodeKind::Unary: {
@@ -409,6 +434,8 @@ ExprPtr cloneExpr(const Expr *e) {
     c->Callee = cloneExpr(k->Callee.get());
     c->ParenRange = k->ParenRange;
     c->IsMethodCall = k->IsMethodCall;
+    c->BuilderSeed = k->BuilderSeed;
+    c->PointeeAccess = k->PointeeAccess;
     for (const auto &a : k->Args) {
       Argument ca;
       ca.Label = a.Label;
@@ -429,12 +456,14 @@ ExprPtr cloneExpr(const Expr *e) {
     c->GenericArgs = cloneTypeList(m->GenericArgs);
     c->QualifiedMark = m->QualifiedMark;
     c->IsIntrinsic = m->IsIntrinsic;
+    c->IsAwait = m->IsAwait;
     return c;
   }
   case NodeKind::Index: {
     const auto *i = cast<IndexExpr>(e);
     auto c = alloc<IndexExpr>(e);
     c->ThroughRawPointer = i->ThroughRawPointer;
+    c->StringChar = i->StringChar;
     c->Base = cloneExpr(i->Base.get());
     c->Index = cloneExpr(i->Index.get());
     c->BracketRange = i->BracketRange;
@@ -470,6 +499,8 @@ ExprPtr cloneExpr(const Expr *e) {
       c->Params.push_back(cloneParam(p));
     c->ReturnType = cloneTypeRepr(k->ReturnType.get());
     c->Body = cloneBlock(k->Body.get());
+    c->IsMove = k->IsMove;
+    c->IsAsyncBody = k->IsAsyncBody;
     return c;
   }
   case NodeKind::Block:
@@ -640,6 +671,8 @@ std::unique_ptr<FunctionDecl> cloneFunction(const FunctionDecl *f) {
   c->LinkName = f->LinkName;
   c->IsExtern = f->IsExtern;
   c->ExternABI = f->ExternABI;
+  c->CxxScope = f->CxxScope;
+  c->CxxOperator = f->CxxOperator;
   c->IsVariadic = f->IsVariadic;
   c->IsVirtual = f->IsVirtual;
   c->IsOverride = f->IsOverride;
@@ -647,6 +680,8 @@ std::unique_ptr<FunctionDecl> cloneFunction(const FunctionDecl *f) {
   c->IsOperatorImpl = f->IsOperatorImpl;
   c->FromMark = f->FromMark;
   c->Bind = f->Bind;
+  c->IsAsync = f->IsAsync;
+  c->AsyncResult = cloneTypeRepr(f->AsyncResult.get());
   return c;
 }
 
@@ -666,6 +701,16 @@ DeclPtr cloneDecl(const Decl *d) {
     c->Attrs = cloneAttrs(s->Attrs);
     c->Generics = cloneGenerics(s->Generics);
     c->WhereClauses = cloneWheres(s->WhereClauses);
+    // The parent's members have already been spliced into `Fields`, so the
+    // clone carries them; the link is kept for the conversions that rest on
+    // it.
+    c->Inherits = cloneTypeRepr(s->Inherits.get());
+    c->InheritsDecl = s->InheritsDecl;
+    c->InheritanceDone = s->InheritanceDone;
+    // An instantiation of a C++ template struct is still C++'s: same scope,
+    // same base, mangled as a specialisation of the same template.
+    if (s->Cxx)
+      c->Cxx = std::make_unique<CxxDeclInfo>(*s->Cxx);
     for (const auto &f : s->Fields) {
       auto cf = cloneField(f.get());
       cf->Parent = c.get();
@@ -719,6 +764,11 @@ DeclPtr cloneDecl(const Decl *d) {
     c->Attrs = cloneAttrs(e->Attrs);
     c->Generics = cloneGenerics(e->Generics);
     c->IsSimple = e->IsSimple;
+    c->Inherits = cloneTypeRepr(e->Inherits.get());
+    c->InheritsDecl = e->InheritsDecl;
+    c->InheritanceDone = e->InheritanceDone;
+    if (e->Cxx)
+      c->Cxx = std::make_unique<CxxDeclInfo>(*e->Cxx);
     for (const auto &v : e->Variants) {
       auto cv = alloc<EnumVariantDecl>(v.get());
       cv->Name = v->Name;

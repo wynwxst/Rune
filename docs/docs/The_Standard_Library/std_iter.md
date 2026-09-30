@@ -60,7 +60,7 @@ fn main() -> i64 {
 
     // `reduce` seeds itself from the first value, so an empty chain has an
     // answer — `nil` — rather than needing one invented.
-    io::println((scores.as_iter().reduce(||(a: i64, b: i64) -> i64 {
+    io::println((scores.values().reduce(||(a: i64, b: i64) -> i64 {
         if a > b { a } else { b }
     }) ?? -1).$str())
 

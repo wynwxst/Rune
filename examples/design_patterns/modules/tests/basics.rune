@@ -1,0 +1,9 @@
+// A test file is an ordinary program: it makes checks and hands the
+// tally back from `main`. `rune test` builds and runs each one.
+import std::testing
+import modules
+
+fn main() -> i64 {
+    modules::authenticate(modules::structures::Credentials {username: "Bob", password: "Jin"})
+    testing::summary()
+}

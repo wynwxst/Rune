@@ -27,6 +27,12 @@ extern "C" {
     fn rune_arg_at(index: i64) -> String
     fn rune_panic(message: CString, location: CString) -> Never
     fn rune_live_object_count() -> i64
+    fn rune_command_new(program: &String) -> *var u8
+    fn rune_command_arg(command: *var u8, value: &String)
+    fn rune_command_directory(command: *var u8, path: &String)
+    fn rune_command_run(command: *var u8) -> i64
+    fn rune_command_output(command: *var u8, which: i64) -> String
+    fn rune_command_free(command: *var u8)
 }
 
 //=== What the program was invoked with ===================================//
@@ -153,4 +159,81 @@ pub fn assert<M: io::Display>(condition: bool, message: M) {
 @safe("reads a counter the runtime maintains")
 pub fn liveObjectCount() -> i64 {
     rune_live_object_count()
+}
+
+//=== Running another program =============================================//
+
+/// What a program that ran to completion left behind.
+pub struct Output {
+    /// The exit status. Zero is success by convention; `128 + n` means
+    /// signal `n` ended it.
+    pub status: i64
+    /// Everything it wrote to standard output.
+    pub stdout: String
+    /// Everything it wrote to standard error.
+    pub stderr: String
+}
+
+extend Output {
+    /// True when it exited with status zero.
+    pub fn succeeded(&self) -> bool { self.status == 0 }
+}
+
+/// A program to run, and what to run it with.
+///
+/// The arguments are handed over one by one, never through a shell, so a
+/// space or a quote in one is only ever part of that argument:
+///
+///     var c = process::Command("runec")
+///     c.arg("--check")
+///     c.arg(path)
+///     match c.run() {
+///         Some(out) => io::print(out.stderr),
+///         None => io::eprintln("runec is not on PATH"),
+///     }
+///
+/// A program named without a directory separator is looked for on `PATH`.
+/// Both of its output streams are collected in full, and its standard input
+/// is this program's own.
+pub class Command {
+    program: String
+    arguments: vector::Vector<String>
+    directory: String
+
+    fn init(self, program: String) {
+        self.program = program
+        self.arguments = vector::Vector<String>()
+        self.directory = ""
+    }
+
+    /// Adds one argument.
+    pub fn arg(&var self, value: String) { self.arguments.push(value) }
+
+    /// Starts the program in `path` rather than in this one's directory.
+    pub fn inDirectory(&var self, path: String) { self.directory = path }
+
+    /// Runs it to completion. `nil` when it could not be started at all —
+    /// not found, not executable, or the directory is missing — which is a
+    /// different thing from starting and then failing.
+    @safe("the command handle is made, used and freed within this call")
+    pub fn run(&self) -> Output? {
+        let handle = rune_command_new(self.program)
+        for a in self.arguments { rune_command_arg(handle, a) }
+        if !self.directory.$isEmpty() { rune_command_directory(handle, self.directory) }
+        let status = rune_command_run(handle)
+        let out = rune_command_output(handle, 1)
+        let err = rune_command_output(handle, 2)
+        rune_command_free(handle)
+        if status < 0 { return nil }
+        Output { status: status, stdout: out, stderr: err }
+    }
+}
+
+/// Runs `program` with `args` and waits for it, in one call.
+///
+///     let out = process::run("git", vector::from(["status", "--short"]))
+pub fn run(program: String, args: vector::Vector<String>) -> Output? {
+    var c = Command(program)
+    for a in args { c.arg(a.$clone()) }
+    c.run()
 }

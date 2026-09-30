@@ -14,9 +14,16 @@ Widening that cannot lose information is implicit. Everything else needs `as`.
 | `T` | `dyn Mark` | when `T` is bound to that mark |
 | `some Mark` | `dyn Mark` | the hidden type is bound, so it boxes |
 | `T` | `Any` | anything with a run-time representation |
+| `bool` | any integer | `false` is 0 and `true` is 1 |
+| `T` | `U` | where the destination is written down and `bind T into U` says how |
 | `Never` | anything | the expression never produced a value |
 
 *Implicit conversions*
+
+> [!NOTE]
+> **Booleans go one way**
+>
+> A boolean converts to a number because it is one of two values and every integer type has room for both — which is what lets a foreign `BOOL` parameter take `false` rather than a hand-written `NO: i8 = 0`. The reverse is not a conversion: which integers count as true is a question with no one answer, so `n != 0` is how the program says which one it means.
 
 **Widening in argument position**
 

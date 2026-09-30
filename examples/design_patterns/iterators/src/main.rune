@@ -1,0 +1,34 @@
+import std::io
+
+fn main() -> i64 {
+    let stuff = vec![
+    "Socks", "Coal", "Diamond", "Emerald", "Diamond", "Gold", "Ruby"
+    ]
+    // regular for-each iterator
+    for item in stuff {
+      print!("{}",item)
+    }
+    print!("\n")
+    colors = stuff.as_iter().map::<String>(||(item){
+      match item {
+        "Diamond" => "Clear",
+        "Emerald" => "Green",
+        "Gold" => "Gold",
+        "Ruby" => "Red",
+        _ => "Unknown"
+      }
+    })
+    .filter(||(item){item != "Unknown"})
+    .collect()
+    for item in colors {
+      print!("{} ",item)
+    }
+    print!("\n")
+    map = ["Hello":"World"]
+    for (k, _) in map {
+      print!("{}",k)
+    }
+    print!("\n")
+    io::println("Hello from iterators!")
+    0
+}

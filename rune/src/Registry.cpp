@@ -888,7 +888,7 @@ int serveDirectory(const fs::path &root, int port, bool verbose) {
   std::error_code ec;
   if (!fs::exists(root / "index.toml", ec)) {
     failLine("'" + root.string() + "' is not a package registry");
-    note("there is no index.toml; run `rune pkg init` there first");
+    note("there is no index.toml; run `rune registry init` there first");
     return 1;
   }
   rune_socket server = socket(AF_INET, SOCK_STREAM, 0);
@@ -1220,7 +1220,7 @@ bool loadMergedIndex(Index &out, bool refresh, std::string &error) {
 //===----------------------------------------------------------------------===//
 
 fs::path installDir(const std::string &name, const Version &v) {
-  return runeHome() / "pkg" / name / v.str();
+  return runeHome() / "registry" / name / v.str();
 }
 
 std::vector<std::string> referencesOf(const fs::path &dir) {
@@ -1276,18 +1276,18 @@ void dropReference(const fs::path &dir, const std::string &project) {
 
 std::vector<Installed> listInstalled() {
   std::vector<Installed> out;
-  fs::path root = runeHome() / "pkg";
+  fs::path root = runeHome() / "registry";
   std::error_code ec;
   if (!fs::is_directory(root, ec))
     return out;
-  for (const auto &pkg : fs::directory_iterator(root, ec)) {
-    if (!pkg.is_directory())
+  for (const auto &registry : fs::directory_iterator(root, ec)) {
+    if (!registry.is_directory())
       continue;
-    for (const auto &ver : fs::directory_iterator(pkg.path(), ec)) {
+    for (const auto &ver : fs::directory_iterator(registry.path(), ec)) {
       if (!ver.is_directory())
         continue;
       Installed i;
-      i.Name = pkg.path().filename().string();
+      i.Name = registry.path().filename().string();
       if (!Version::parse(ver.path().filename().string(), i.V))
         continue;
       i.Dir = ver.path();
@@ -1904,12 +1904,12 @@ void warnUnreferenced() {
 } // namespace
 
 //===----------------------------------------------------------------------===//
-// rune pkg: the server side
+// rune registry: the server side
 //===----------------------------------------------------------------------===//
 
 namespace {
 
-int pkgInit(const fs::path &dir, const std::string &name) {
+int registryInit(const fs::path &dir, const std::string &name) {
   std::error_code ec;
   if (fs::exists(dir / "index.toml", ec)) {
     failLine("'" + dir.string() + "' is already a package registry");
@@ -1920,7 +1920,7 @@ int pkgInit(const fs::path &dir, const std::string &name) {
   index.Name = name;
   index.Updated = nowIso();
   if (!writeFile(dir / "registry.toml",
-                 "# A Rune package registry: static files, served by `rune pkg "
+                 "# A Rune package registry: static files, served by `rune registry "
                  "server --serve`\n# or by any web server, or read straight off "
                  "a disk.\n\n[registry]\nname = " + tomlString(name) +
                      "\ncreated = " + tomlString(nowIso()) + "\n") ||
@@ -1934,12 +1934,12 @@ int pkgInit(const fs::path &dir, const std::string &name) {
   return 0;
 }
 
-int pkgAddPackage(const fs::path &dir, const fs::path &project, bool force,
+int registryAddPackage(const fs::path &dir, const fs::path &project, bool force,
                   bool verbose) {
   std::error_code ec;
   if (!fs::exists(dir / "index.toml", ec)) {
     failLine("'" + dir.string() + "' is not a package registry");
-    note("run `rune pkg init` there first, or say which with `--dir`");
+    note("run `rune registry init` there first, or say which with `--dir`");
     return 1;
   }
   Manifest m;
@@ -2011,7 +2011,7 @@ int pkgAddPackage(const fs::path &dir, const fs::path &project, bool force,
   return 0;
 }
 
-int pkgAddSource(const std::string &url, const std::string &alias) {
+int registryAddSource(const std::string &url, const std::string &alias) {
   std::vector<RegistrySource> list = loadRegistries();
   for (const RegistrySource &r : list)
     if (r.Url == url) {
@@ -2030,7 +2030,7 @@ int pkgAddSource(const std::string &url, const std::string &alias) {
   std::string text, error;
   if (!fetch(joinUrl(url, "index.toml"), text, error)) {
     failLine("cannot reach a registry at '" + url + "': " + error);
-    note("a registry has an index.toml at its root; `rune pkg init` makes one");
+    note("a registry has an index.toml at its root; `rune registry init` makes one");
     return 1;
   }
   Index index;
@@ -2041,7 +2041,7 @@ int pkgAddSource(const std::string &url, const std::string &alias) {
   if (!isRegistryName(index.Name)) {
     failLine("the registry at '" + url + "' does not say what it is called");
     note("a registry must provide a name: `name = \"...\"` under `[registry]` "
-         "in its index.toml, which `rune pkg init` writes");
+         "in its index.toml, which `rune registry init` writes");
     return 1;
   }
   RegistrySource r;
@@ -2072,7 +2072,7 @@ int pkgAddSource(const std::string &url, const std::string &alias) {
   return 0;
 }
 
-int pkgListSources(bool verbose) {
+int registryListSources(bool verbose) {
   std::vector<RegistrySource> list = loadRegistries();
   if (list.empty()) {
     okLine("no registries are configured");
@@ -2103,7 +2103,7 @@ int pkgListSources(bool verbose) {
   return 0;
 }
 
-int pkgRemoveSource(const std::string &nameOrUrl) {
+int registryRemoveSource(const std::string &nameOrUrl) {
   std::vector<RegistrySource> list = loadRegistries();
   const RegistrySource *found = findRegistry(list, nameOrUrl);
   if (!found) {
@@ -2141,13 +2141,13 @@ int pkgRemoveSource(const std::string &nameOrUrl) {
 
 int commandRegistry(const std::vector<std::string> &args, bool verbose) {
   auto usage = [&]() {
-    plain("usage: rune registry init [dir] [--name N]       make a registry here, or in dir\n"
-          "       rune registry new <dir> [--name N]        make a registry in a new dir\n"
+    plain("usage: rune registry init [dir] [--name N]   make a registry here, or in dir\n"
+          "       rune registry new <dir> [--name N]    make a registry in a new dir\n"
           "       rune registry --serve [--port N] [--dir D]\n"
           "       rune registry --addPackage <project> [--dir D] [--force]\n"
-          "       rune registry add <url> [--name N] use a registry from this machine\n"
-          "       rune registry list                 the registries this machine uses\n"
-          "       rune registry remove <name>        stop using one");
+          "       rune registry add <url> [--name N]    use a registry from this machine\n"
+          "       rune registry list                    the registries this machine uses\n"
+          "       rune registry remove <name>           stop using one");
     return 2;
   };
   if (args.empty())
@@ -2164,7 +2164,7 @@ int commandRegistry(const std::vector<std::string> &args, bool verbose) {
       else { failLine("unexpected argument '" + a + "'"); return usage(); }
     }
     if (sub == "new" && dir.empty()) {
-      failLine("`rune pkg new` needs a directory");
+      failLine("`rune registry new` needs a directory");
       return 2;
     }
     if (dir.empty())
@@ -2183,48 +2183,49 @@ int commandRegistry(const std::vector<std::string> &args, bool verbose) {
            "of `::package`");
       return 2;
     }
-    return pkgInit(dir, name);
+    return registryInit(dir, name);
   }
 
-    bool serve = false, force = false, list = false;
-    int port = 7878;
-    fs::path dir = ".";
-    std::string addPackage, addUrl, removeName, name;
-    for (size_t i = 1; i < args.size(); ++i) {
-      const std::string &a = args[i];
-      if (a == "--serve") serve = true;
-      else if (a == "--force") force = true;
-      else if (a == "list" || a == "--list") list = true;
-      else if ((a == "--port" || a == "-p") && i + 1 < args.size()) port = std::atoi(args[++i].c_str());
-      else if ((a == "--dir" || a == "-d") && i + 1 < args.size()) dir = args[++i];
-      else if (a == "--addPackage" || a == "--add-package" || a == "add-package") {
-        if (i + 1 >= args.size()) { failLine("--addPackage needs a project directory"); return 2; }
-        addPackage = args[++i];
-      } else if ((a == "--name" || a == "-n") && i + 1 < args.size()) name = args[++i];
-      else if (a == "add") {
-        if (i + 1 >= args.size()) { failLine("`rune registry add` needs a URL"); return 2; }
-        addUrl = args[++i];
-      } else if (a == "remove" || a == "--remove") {
-        if (i + 1 >= args.size()) { failLine("`rune registry remove` needs a registry's name"); return 2; }
-        removeName = args[++i];
-      } else {
-        failLine("unknown argument '" + a + "'");
-        return usage();
-      }
-    
-    if (!addUrl.empty())
-      return pkgAddSource(addUrl, name);
-    if (list)
-      return pkgListSources(verbose);
-    if (!removeName.empty())
-      return pkgRemoveSource(removeName);
-    if (!addPackage.empty())
-      return pkgAddPackage(dir, addPackage, force, verbose);
-    if (serve)
-      return serveDirectory(dir, port, verbose);
-    return usage();
+  // Everything else is one action, named by a word (`add`, `list`,
+  // `remove`) or a flag (`--serve`, `--addPackage`), with its options
+  // anywhere after it. All of the arguments are read before anything is
+  // done, so `--name` and `--dir` count wherever they are written.
+  bool serve = false, force = false, list = false;
+  int port = 7878;
+  fs::path dir = ".";
+  std::string addPackage, addUrl, removeName, name;
+  for (size_t i = 0; i < args.size(); ++i) {
+    const std::string &a = args[i];
+    if (a == "--serve" || a == "serve") serve = true;
+    else if (a == "--force") force = true;
+    else if (a == "list" || a == "--list") list = true;
+    else if ((a == "--port" || a == "-p") && i + 1 < args.size()) port = std::atoi(args[++i].c_str());
+    else if ((a == "--dir" || a == "-d") && i + 1 < args.size()) dir = args[++i];
+    else if (a == "--addPackage" || a == "--add-package" || a == "add-package") {
+      if (i + 1 >= args.size()) { failLine("--addPackage needs a project directory"); return 2; }
+      addPackage = args[++i];
+    } else if ((a == "--name" || a == "-n") && i + 1 < args.size()) name = args[++i];
+    else if (a == "add") {
+      if (i + 1 >= args.size()) { failLine("`rune registry add` needs a URL"); return 2; }
+      addUrl = args[++i];
+    } else if (a == "remove" || a == "--remove") {
+      if (i + 1 >= args.size()) { failLine("`rune registry remove` needs a registry's name"); return 2; }
+      removeName = args[++i];
+    } else {
+      failLine("unknown `rune registry` argument '" + a + "'");
+      return usage();
+    }
   }
-  failLine("unknown `rune pkg` command '" + sub + "'");
+  if (!addUrl.empty())
+    return registryAddSource(addUrl, name);
+  if (list)
+    return registryListSources(verbose);
+  if (!removeName.empty())
+    return registryRemoveSource(removeName);
+  if (!addPackage.empty())
+    return registryAddPackage(dir, addPackage, force, verbose);
+  if (serve)
+    return serveDirectory(dir, port, verbose);
   return usage();
 }
 
@@ -2447,7 +2448,7 @@ int commandInstalled(const std::vector<std::string> &args, bool verbose) {
       all.push_back(std::move(i));
   if (all.empty()) {
     if (registry.empty())
-      okLine("nothing is installed under " + (runeHome() / "pkg").string());
+      okLine("nothing is installed under " + (runeHome() / "registry").string());
     else
       okLine("nothing from registry '" + registry + "' is installed");
     return 0;
@@ -2485,12 +2486,55 @@ int commandInstalled(const std::vector<std::string> &args, bool verbose) {
 // rune add / remove / update / deps
 //===----------------------------------------------------------------------===//
 
+/// A `--config` value as TOML: a number or a boolean as written, anything
+/// else quoted. `@Config` compares the text either way; this keeps the
+/// manifest reading the way somebody would have typed it.
+std::string tomlConfigValue(const std::string &v) {
+  if (v == "true" || v == "false")
+    return v;
+  bool numeric = !v.empty();
+  for (size_t i = 0; i < v.size(); ++i) {
+    const char c = v[i];
+    if (c == '-' && i == 0 && v.size() > 1)
+      continue;
+    if (c < '0' || c > '9')
+      numeric = false;
+  }
+  return numeric ? v : tomlString(v);
+}
+
 int commandAdd(const std::string &projectDir, const std::vector<std::string> &args,
                bool verbose) {
   std::string flag;
-  std::vector<std::string> specs;
-  if (!takeRegistryFlag(args, flag, specs))
+  std::vector<std::string> rest;
+  if (!takeRegistryFlag(args, flag, rest))
     return 2;
+  // `--config key=value`: what this project chooses for the package's own
+  // `[config]` keys. Written into the dependency's entry, so every build of
+  // this project makes the same choice.
+  std::vector<std::pair<std::string, std::string>> chosen;
+  std::vector<std::string> specs;
+  for (size_t i = 0; i < rest.size(); ++i) {
+    std::string a = rest[i];
+    if ((a == "--config" || a == "-c") && i + 1 < rest.size())
+      a = "--config=" + rest[++i];
+    if (a.rfind("--config=", 0) != 0) {
+      specs.push_back(rest[i]);
+      continue;
+    }
+    std::string pair = a.substr(9);
+    size_t eq = pair.find('=');
+    if (eq == std::string::npos || eq == 0) {
+      failLine("`--config` takes `key=value`, as in `--config backend=vulkan`");
+      return 2;
+    }
+    chosen.push_back({pair.substr(0, eq), pair.substr(eq + 1)});
+  }
+  if (!chosen.empty() && specs.size() != 1) {
+    failLine("`--config` applies to one package at a time");
+    note("run `rune add` once per package when each needs its own choices");
+    return 2;
+  }
   if (specs.empty()) {
     failLine("`rune add` needs a package name, optionally with a version: "
              "`rune add geometry@0.2`, or `rune add work::geometry` from one registry");
@@ -2560,11 +2604,21 @@ int commandAdd(const std::string &projectDir, const std::vector<std::string> &ar
   for (const Want &a : added) {
     // `name = "req"`, or the table form when the registry is part of the
     // ask: a build elsewhere has to make the same choice.
-    std::string line =
-        a.Registry.empty()
-            ? a.Name + " = " + tomlString(a.Req)
-            : a.Name + " = { version = " + tomlString(a.Req) + ", registry = " +
-                  tomlString(a.Registry) + " }";
+    std::string configText;
+    for (const auto &kv : chosen)
+      configText += (configText.empty() ? "" : ", ") + kv.first + " = " +
+                    tomlConfigValue(kv.second);
+    std::string line;
+    if (a.Registry.empty() && configText.empty()) {
+      line = a.Name + " = " + tomlString(a.Req);
+    } else {
+      line = a.Name + " = { version = " + tomlString(a.Req);
+      if (!a.Registry.empty())
+        line += ", registry = " + tomlString(a.Registry);
+      if (!configText.empty())
+        line += ", config = { " + configText + " }";
+      line += " }";
+    }
     if (!editDependencies(manifestPath, a.Name, line, false, error)) {
       failLine(error);
       return 1;

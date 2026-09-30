@@ -5,6 +5,7 @@
 #include <fstream>
 
 #include "rune/AST.h"
+#include "rune/ASTWalk.h"
 #include "rune/CodeGen.h"
 #include "rune/Config.h"
 #include "rune/Diagnostics.h"
@@ -30,6 +31,9 @@
 #include <chrono>
 #include <iomanip>
 #include <map>
+#include <optional>
+#include <set>
+#include <sstream>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -209,6 +213,14 @@ std::string defaultOutputName(const CompilerOptions &opts) {
   case OutputKind::LLVMIR: return stem + ".ll";
   case OutputKind::Assembly: return stem + ".s";
   case OutputKind::Library: return stem + ".rul";
+  case OutputKind::Shared: {
+    const llvm::Triple triple = targetTripleOf(opts);
+    if (triple.isOSWindows())
+      return stem + ".dll";
+    if (triple.isOSDarwin())
+      return "lib" + stem + ".dylib";
+    return "lib" + stem + ".so";
+  }
   case OutputKind::Docs: return stem + ".rdoc";
   // A PE image is only executable with the suffix, and a cross build is
   // usually copied to the machine it runs on rather than run in place.
@@ -319,10 +331,15 @@ std::string spellCommand(const std::vector<std::string> &argv) {
 
 /// Links the object file into an executable using the system C toolchain,
 /// which already knows how to find libc and the platform's startup files.
+/// Links the object into a program, or — with `shared` — into a native
+/// shared library the system's loader can open: a `.dylib`, a `.so` or a
+/// `.dll`. The command is the same one either way, which is the point: the
+/// C toolchain already knows what its platform's shared libraries look like,
+/// and there is nothing here to teach it.
 bool linkExecutable(const std::string &objPath,
                     const std::vector<std::string> &extraObjects,
                     const std::string &outPath, const CompilerOptions &opts,
-                    DiagnosticEngine &diags) {
+                    DiagnosticEngine &diags, bool shared = false) {
   // A cross build names its own toolchain driver; that driver already knows
   // its target's libc, startup files and linker, so nothing else has to be
   // taught the platform. Falling back: $RUNE_CC, then the host's `cc`.
@@ -357,6 +374,19 @@ bool linkExecutable(const std::string &objPath,
   const llvm::Triple triple = targetTripleOf(opts);
   const bool isWindows = triple.isOSWindows();
 
+  if (shared) {
+    argv.push_back("-shared");
+    // Apple wants the library to know the name it will be found under, so a
+    // program linked against it records that rather than the build path.
+    if (triple.isOSDarwin()) {
+      argv.push_back("-Wl,-install_name,@rpath/" +
+                     std::filesystem::path(outPath).filename().string());
+    } else if (!isWindows) {
+      argv.push_back("-Wl,-soname," +
+                     std::filesystem::path(outPath).filename().string());
+    }
+  }
+
   // A debug build exports its symbols so a traceback can name the frames it
   // walks; without this the dynamic linker can only resolve the exported ones.
   // A PE image exports through a different mechanism and has no such flag.
@@ -372,6 +402,29 @@ bool linkExecutable(const std::string &objPath,
     argv.push_back("-l" + lib);
     if (lib == "m")
       wantsMath = true;
+  }
+  // A program that calls C++ needs the C++ runtime — `operator new`, the
+  // standard library's own objects, static initialisers. The driver is a C
+  // one, so it is asked for by name: libc++ where Apple ships it, libstdc++
+  // everywhere GCC does. A MinGW build links it statically so the executable
+  // does not go looking for `libstdc++-6.dll`.
+  if (opts.LinkCxx) {
+    if (triple.isOSDarwin() || triple.isOSFreeBSD()) {
+      argv.push_back("-lc++");
+    } else if (isWindows) {
+      // `-static-libstdc++` is a `g++`-driver spelling and this is `gcc`, so
+      // the linker is told directly. `-lgcc_eh` is what libstdc++'s unwinder
+      // hooks resolve against once it is static; `-lgcc` and the C runtime
+      // are what the driver adds after these anyway.
+      argv.push_back("-Wl,-Bstatic");
+      argv.push_back("-lstdc++");
+      argv.push_back("-lgcc_eh");
+      argv.push_back("-lgcc");
+      argv.push_back("-lwinpthread"); // libstdc++'s threads, static too
+      argv.push_back("-Wl,-Bdynamic");
+    } else {
+      argv.push_back("-lstdc++");
+    }
   }
   // The standard library calls into libm; only add it if nobody else did, and
   // only where there is one. Windows keeps the math functions in the C
@@ -391,6 +444,626 @@ bool linkExecutable(const std::string &objPath,
   return true;
 }
 
+/// Builds the `@type(Macros)` files into a program, and records what it
+/// answers to.
+///
+/// It is an ordinary Rune compilation — the same function, called again —
+/// with three differences: it is built for the machine doing the compiling
+/// rather than for the target, the compiler writes it a `main`, and its
+/// `@type(Macros)` files are treated as the package rather than skipped
+/// again.
+template <typename UnitT>
+bool buildMacroPackageImpl(const SourceManager &sm, DiagnosticEngine &diags,
+                           const CompilerOptions &opts,
+                           const std::vector<UnitT> &units,
+                           const std::vector<std::vector<Token>> &tokens,
+                           const std::vector<size_t> &macroFiles,
+                           MacroPackage &out) {
+  // What the package answers to, read off the files themselves.
+  std::vector<std::string> modules;
+  for (size_t i : macroFiles) {
+    std::string moduleName = "rune_macros";
+    const std::string stem = stemOf(sm.file(units[i].FileID).Path);
+    if (stem != "main")
+      moduleName += "::" + stem;
+    modules.push_back(moduleName);
+    collectProcMacros(tokens[i], diags, out.Macros, moduleName);
+  }
+  if (diags.hadError())
+    return false;
+  if (out.Macros.empty()) {
+    for (size_t i : macroFiles)
+      diags.warn(SourceRange(), "'{}' says it is a macro package but declares "
+                                "no macros",
+                 sm.file(units[i].FileID).Name)
+          .note("a macro is a `pub fn` marked `@macro`");
+    return true;
+  }
+
+  // Somewhere to put the package, keyed by what went into it so two builds
+  // of one project do not fight over the same file.
+  std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "rune-macros";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+
+  // FNV-1a over everything the package is built from: its own sources, the
+  // standard library it is compiled with, and the compiler compiling it.
+  // Keyed on the sources alone, a package built before a fix to either of
+  // the others went on being run after it — with the bug the fix removed.
+  uint64_t stamp = 1469598103934665603ull;
+  auto mix = [&stamp](const std::string &s) {
+    for (unsigned char c : s) {
+      stamp ^= c;
+      stamp *= 1099511628211ull;
+    }
+  };
+  for (size_t i : macroFiles)
+    mix(sm.file(units[i].FileID).Buffer);
+  // The library and the compiler by size and time rather than by content:
+  // a few dozen `stat`s, not reading a megabyte on every build.
+  auto mixFile = [&](const std::filesystem::path &p) {
+    std::error_code fec;
+    auto size = std::filesystem::file_size(p, fec);
+    auto when = std::filesystem::last_write_time(p, fec);
+    mix(p.string() + ":" +
+        std::to_string(fec ? 0ull : static_cast<unsigned long long>(size)) + ":" +
+        std::to_string(static_cast<long long>(when.time_since_epoch().count())));
+  };
+  if (!opts.StdlibDir.empty()) {
+    std::error_code wec;
+    std::vector<std::filesystem::path> lib;
+    for (std::filesystem::recursive_directory_iterator
+             it(opts.StdlibDir, wec), end;
+         it != end; it.increment(wec)) {
+      if (wec)
+        break;
+      if (it->path().extension() == ".rune")
+        lib.push_back(it->path());
+    }
+    std::sort(lib.begin(), lib.end());
+    for (const auto &p : lib)
+      mixFile(p);
+  }
+  static int anchor = 0;
+  std::string self = llvm::sys::fs::getMainExecutable(nullptr, &anchor);
+  if (!self.empty())
+    mixFile(self);
+  char stampText[32];
+  std::snprintf(stampText, sizeof stampText, "%016llx",
+                static_cast<unsigned long long>(stamp));
+  std::filesystem::path program = dir / ("macros-" + std::string(stampText));
+#if defined(_WIN32)
+  program += ".exe";
+#endif
+
+  // Already built from exactly these sources.
+  if (std::filesystem::exists(program)) {
+    out.Program = program.string();
+    return true;
+  }
+
+  const std::filesystem::path mainPath = dir / ("main-" + std::string(stampText) + ".rune");
+  {
+    std::ofstream f(mainPath, std::ios::binary);
+    if (!f) {
+      diags.fatal("cannot write the macro package's entry point to '{}'",
+                  mainPath.string());
+      return false;
+    }
+    f << macroDispatcherSource(out.Macros, modules);
+  }
+
+  CompilerOptions nested;
+  nested.MacroPackage = true;
+  nested.ModuleName = "rune_macros";
+  nested.Output = OutputKind::Executable;
+  nested.OutputKindFromFlag = true;
+  nested.OutputPath = program.string();
+  nested.StdlibDir = opts.StdlibDir;
+  nested.RuntimeLibDir = opts.RuntimeLibDir;
+  nested.ImportPaths = opts.ImportPaths;
+  nested.NoColor = opts.NoColor;
+  nested.ForceColor = opts.ForceColor;
+  nested.JsonDiagnostics = opts.JsonDiagnostics;
+  nested.ShortDiagnostics = opts.ShortDiagnostics;
+  nested.Verbose = opts.Verbose;
+  // Built to run here, now, whatever the program is being built for — and
+  // with counting rather than single ownership, because a macro is a short
+  // program whose speed nobody measures and whose borrows nobody wants to
+  // argue with.
+  nested.Memory = MemoryMode::Arc;
+  nested.Safety = SafetyLevel::Minimal;
+  nested.OptLevel = 0;
+  nested.Inputs.push_back(mainPath.string());
+  for (size_t i : macroFiles)
+    nested.Inputs.push_back(sm.file(units[i].FileID).Path);
+
+  if (opts.Verbose)
+    diags.status("building the macro package at " + program.string());
+  const int rc = compileWithOptions(nested);
+  std::filesystem::remove(mainPath, ec);
+  if (rc != 0) {
+    diags.fatal("the macro package did not build")
+        .note("its macros cannot run, so nothing that uses one can be "
+              "expanded");
+    return false;
+  }
+  out.Program = program.string();
+  return true;
+}
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
+// `--query-members`: what an editor completes after a `.`
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+std::string queryJson(const std::string &s) {
+  std::string out = "\"";
+  for (unsigned char c : s) {
+    switch (c) {
+    case '"': out += "\\\""; break;
+    case '\\': out += "\\\\"; break;
+    case '\n': out += "\\n"; break;
+    case '\r': out += "\\r"; break;
+    case '\t': out += "\\t"; break;
+    default:
+      if (c < 0x20) {
+        static const char *hex = "0123456789abcdef";
+        out += "\\u00";
+        out += hex[c >> 4];
+        out += hex[c & 15];
+      } else {
+        out += static_cast<char>(c);
+      }
+    }
+  }
+  return out + "\"";
+}
+
+/// `fn name(a: T, b: U) -> R`, with the types as this instantiation has them.
+std::string methodSignature(const FunctionDecl *fn) {
+  std::vector<const Param *> shown;
+  for (const Param &p : fn->Params)
+    if (!p.IsSelf)
+      shown.push_back(&p);
+  std::vector<Type *> types;
+  Type *result = nullptr;
+  if (fn->Ty && fn->Ty->is(TypeKind::Function)) {
+    types = fn->Ty->params();
+    result = fn->Ty->result();
+  }
+  // The function type may or may not count `self`; line the rest up from
+  // the end, where the written parameters are.
+  size_t skip = types.size() > shown.size() ? types.size() - shown.size() : 0;
+  std::string out = "fn " + fn->Name + "(";
+  for (size_t i = 0; i < shown.size(); ++i) {
+    if (i) out += ", ";
+    out += shown[i]->Name;
+    if (skip + i < types.size() && types[skip + i])
+      out += ": " + types[skip + i]->toString();
+  }
+  out += ")";
+  if (result && !result->isVoid() && result->toString() != "()")
+    out += " -> " + result->toString();
+  return out;
+}
+
+/// The expression in `root` spanning [start, end): the outermost one that
+/// ends exactly at `end` and begins no earlier than `start`.
+const Expr *exprSpanning(const Node *root, SourceLoc start, SourceLoc end) {
+  const Expr *best = nullptr;
+  NodeVisitor visit;
+  visit = [&](const Node *n) {
+    if (!n)
+      return;
+    if (n->Range.isValid() && (n->Range.end() < start || end < n->Range.begin()))
+      return;   // entirely elsewhere
+    // Expressions are the first run of node kinds, up to `Error`.
+    if (n->Kind <= NodeKind::Error) {
+      auto *e = static_cast<const Expr *>(n);
+      if (e->Ty && n->Range.end() == end && start <= n->Range.begin() &&
+          (!best || n->Range.begin() < best->Range.begin()))
+        best = e;
+    }
+    forEachChild(n, visit);
+  };
+  visit(root);
+  return best;
+}
+
+int answerMemberQuery(const SourceManager &sm, const SemaResult &result,
+                      const CompilerOptions &opts) {
+  // The file, by the path it was given as.
+  const SourceFile *file = nullptr;
+  for (unsigned i = 0; i < sm.fileCount(); ++i)
+    if (sm.file(i).Path == opts.QueryFile)
+      file = &sm.file(i);
+  if (!file) {
+    std::cout << "{\"error\":" << queryJson("no such input: " + opts.QueryFile) << "}\n";
+    return 1;
+  }
+  SourceLoc start = sm.locForFileOffset(file->ID, opts.QueryStart);
+  SourceLoc end = sm.locForFileOffset(file->ID, opts.QueryEnd);
+
+  // Every checked body: instantiations of generic code are clones that keep
+  // their template's ranges, so this finds a receiver inside those too.
+  const Expr *found = nullptr;
+  std::string where;      // the module the expression is in
+  for (const FunctionDecl *fn : result.Functions) {
+    if (!fn->Body || !fn->Body->Range.isValid())
+      continue;
+    if (fn->Body->Range.end() < start || end < fn->Body->Range.begin())
+      continue;
+    if ((found = exprSpanning(fn->Body.get(), start, end))) {
+      where = fn->ModulePath;
+      break;
+    }
+  }
+  if (!found)
+    for (const GlobalVarDecl *g : result.Globals)
+      if (g->Init && (found = exprSpanning(g->Init.get(), start, end)))
+        break;
+  if (!found || !found->Ty || found->Ty->isError()) {
+    std::cout << "{\"error\":\"no typed expression there\"}\n";
+    return 1;
+  }
+
+  // Members belong to what a borrow points at.
+  Type *t = found->Ty;
+  while (t->is(TypeKind::Pointer) && !t->isRawPointer() && t->pointee())
+    t = t->pointee();
+  if (t->isOpaque() && t->opaqueUnderlying())
+    t = t->opaqueUnderlying();
+
+  std::string members;
+  std::set<std::string> seen;
+  auto add = [&](const std::string &name, const char *kind, const std::string &detail,
+                 const std::string &doc, bool isStatic, bool isPublic,
+                 const std::string &module) {
+    if (name.empty() || !seen.insert(name).second)
+      return;
+    if (!members.empty())
+      members += ",";
+    members += "{\"name\":" + queryJson(name) + ",\"kind\":\"" + kind + "\"" +
+               ",\"detail\":" + queryJson(detail) + ",\"doc\":" + queryJson(doc) +
+               ",\"static\":" + (isStatic ? "true" : "false") +
+               ",\"public\":" + (isPublic ? "true" : "false") +
+               ",\"module\":" + queryJson(module) + "}";
+  };
+
+  // Fields: the type's own, then each superclass's.
+  if (NominalDecl *nd = t->nominal()) {
+    std::vector<NominalDecl *> chain{nd};
+    if (auto *c = dyn_cast<ClassDecl>(static_cast<Decl *>(nd)))
+      for (ClassDecl *sc = c->Super; sc; sc = sc->Super)
+        chain.push_back(sc);
+    for (NominalDecl *n : chain)
+      for (const auto &f : n->Fields)
+        add(f->Name, "field", f->Name + ": " + (f->Ty ? f->Ty->toString() : std::string("?")),
+            f->Doc, false, f->IsPublic, static_cast<Decl *>(n)->ModulePath);
+  }
+
+  // Methods: whatever the type's table holds — its own, every `extend`, and
+  // every `bind` that applies to this instantiation.
+  auto emitTable = [&](Type *key) {
+    auto it = result.MethodTables.find(key);
+    if (it == result.MethodTables.end())
+      return;
+    for (const auto &entry : it->second) {
+      const FunctionDecl *fn = entry.second;
+      if (!fn || fn->WhereUnmet)
+        continue;
+      if (fn->Flavour == FunctionFlavour::Initialiser ||
+          fn->Flavour == FunctionFlavour::Deinitialiser)
+        continue;
+      bool isStatic = fn->IsStatic || fn->Flavour == FunctionFlavour::Free;
+      bool isPublic = fn->IsPublic || fn->Bind || fn->FromMark;
+      add(fn->Name, "method", methodSignature(fn), fn->Doc, isStatic, isPublic,
+          fn->ModulePath);
+    }
+  };
+  emitTable(t);
+  if (auto *c = t->nominal() ? dyn_cast<ClassDecl>(static_cast<Decl *>(t->nominal())) : nullptr)
+    for (ClassDecl *sc = c->Super; sc; sc = sc->Super)
+      emitTable(sc->DeclaredType);
+  // A `dyn Mark`: what the mark requires.
+  if (auto *mk = t->nominal() ? dyn_cast<MarkDecl>(static_cast<Decl *>(t->nominal())) : nullptr)
+    for (const auto &fn : mk->Methods)
+      add(fn->Name, "method", methodSignature(fn.get()), fn->Doc, false, true,
+          static_cast<Decl *>(mk)->ModulePath);
+
+  std::cout << "{\"type\":" << queryJson(found->Ty->toString())
+            << ",\"module\":" << queryJson(where)
+            << ",\"members\":[" << members << "]}\n";
+  return 0;
+}
+
+
+//===--- --query-hints ---------------------------------------------------===//
+
+/// Spells `t` as the file whose module is `mod` can write it: a type from
+/// another module goes through the name that module is imported under. Sets
+/// `ok` false when there is no way to write it there — a module that is not
+/// imported, a `some`, a type nested in another.
+std::string spellType(const Type *t, const Module &mod, bool &ok) {
+  if (!t) { ok = false; return "?"; }
+  if (t->isOpaque()) { ok = false; return t->toString(); }
+  auto list = [&](const std::vector<Type *> &ts) {
+    std::string out;
+    for (size_t i = 0; i < ts.size(); ++i) {
+      if (i) out += ", ";
+      out += spellType(ts[i], mod, ok);
+    }
+    return out;
+  };
+  switch (t->kind()) {
+  case TypeKind::Error:
+  case TypeKind::Opaque:
+    ok = false;
+    return t->toString();
+  case TypeKind::Pointer: {
+    if (t->isWeakPointer()) ok = false;
+    std::string s = t->isRawPointer() ? "*" : "&";
+    if (t->isMutablePointer()) s += "var ";
+    return s + spellType(t->pointee(), mod, ok);
+  }
+  case TypeKind::Array:
+    return "[" + std::to_string(t->arraySize()) + ":" + spellType(t->element(), mod, ok) + "]";
+  case TypeKind::Slice:
+    return "[" + spellType(t->element(), mod, ok) + "]";
+  case TypeKind::Tuple:
+    return "(" + list(t->params()) + ")";
+  case TypeKind::Function:
+  case TypeKind::CFunction: {
+    std::string s = t->is(TypeKind::CFunction) ? "@cfunction(" : "@function(";
+    s += list(t->params()) + ")";
+    if (t->result() && !t->result()->isVoid())
+      s += " -> " + spellType(t->result(), mod, ok);
+    return s;
+  }
+  case TypeKind::Struct:
+  case TypeKind::Enum:
+  case TypeKind::Class:
+  case TypeKind::Mark:
+  case TypeKind::DynMark: {
+    const auto *d = static_cast<const Decl *>(t->nominal());
+    if (!d) { ok = false; return t->toString(); }
+    if (d->Parent) ok = false;
+    std::string name = d->Name;
+    bool reachable = d->ModulePath.empty() || d->ModulePath == mod.Name;
+    // The prelude's types need no import.
+    if (!reachable && (name == "Option" || name == "Result") &&
+        d->ModulePath.rfind("std", 0) == 0)
+      reachable = true;
+    std::string prefix;
+    for (const DeclPtr &dp : mod.Decls) {
+      if (reachable || dp->Kind != NodeKind::Import)
+        continue;
+      const auto *im = static_cast<const ImportDecl *>(dp.get());
+      std::string path;
+      for (size_t k = 0; k < im->Path.size(); ++k)
+        path += (k ? "::" : "") + im->Path[k];
+      bool same = path == d->ModulePath ||
+                  (im->ResolvedModule && im->ResolvedModule->Name == d->ModulePath);
+      if (!same)
+        continue;
+      if (im->IsGlob) {
+        reachable = true;
+      } else if (!im->Names.empty()) {
+        for (const std::string &n : im->Names)
+          if (n == name)
+            reachable = true;
+      } else {
+        prefix = (im->Alias.empty() ? im->Path.back() : im->Alias) + "::";
+        reachable = true;
+      }
+    }
+    if (!reachable) ok = false;
+    std::string s = prefix + name;
+    if (t->is(TypeKind::DynMark))
+      return "dyn " + s;
+    if (!t->params().empty())
+      s += "<" + list(t->params()) + ">";
+    if (t->isUniq()) ok = false;
+    return s;
+  }
+  default:
+    return t->toString();
+  }
+}
+
+struct Hint {
+  uint32_t Offset;
+  std::string Kind;    // "type" or "parameter"
+  std::string Label;
+  std::string Insert;  // empty when it cannot be written there
+};
+
+/// Every hint in `root`'s subtree that falls in `file`.
+void collectHints(const Node *root, const SourceFile &file, const Module &mod,
+                  const std::vector<SourceRange> &generic,
+                  std::map<uint32_t, Hint> &out) {
+  auto offsetOf = [&](SourceLoc l) -> int64_t {
+    if (!l.isValid() || l.raw() < file.StartOffset ||
+        l.raw() > file.StartOffset + file.Buffer.size())
+      return -1;
+    return static_cast<int64_t>(l.raw() - file.StartOffset);
+  };
+  auto inGeneric = [&](SourceLoc l) {
+    for (const SourceRange &r : generic)
+      if (r.begin() <= l && l < r.end())
+        return true;
+    return false;
+  };
+  auto typeHint = [&](SourceLoc at, const Type *ty, bool insertable) {
+    int64_t off = offsetOf(at);
+    if (off < 0 || !ty || ty->isError() || ty->isVoid() || ty->isNever() ||
+        inGeneric(at))
+      return;
+    bool ok = true;
+    std::string spelled = spellType(ty, mod, ok);
+    Hint h{static_cast<uint32_t>(off), "type", ": " + spelled,
+           ok && insertable ? ": " + spelled : ""};
+    out.emplace(h.Offset, h);
+  };
+  NodeVisitor visit;
+  visit = [&](const Node *n) {
+    if (!n)
+      return;
+    switch (n->Kind) {
+    case NodeKind::VarStmt: {
+      auto *v = static_cast<const VarStmtNode *>(n);
+      if (!v->TypeAnnotation && v->Init && v->DeclaresNew && !v->IsGlobal &&
+          v->Binding && v->Binding->Kind == NodeKind::BindingPat) {
+        auto *b = static_cast<const BindingPattern *>(v->Binding.get());
+        if (!b->Sub && b->Binding)
+          typeHint(b->Range.end(), b->Binding->Ty, true);
+      }
+      break;
+    }
+    case NodeKind::For: {
+      auto *f = static_cast<const ForExpr *>(n);
+      if (f->Binding && f->Binding->Kind == NodeKind::BindingPat) {
+        auto *b = static_cast<const BindingPattern *>(f->Binding.get());
+        if (!b->Sub && b->Binding)
+          typeHint(b->Range.end(), b->Binding->Ty, false);   // no syntax for it
+      }
+      break;
+    }
+    case NodeKind::Closure: {
+      auto *c = static_cast<const ClosureExpr *>(n);
+      if (c->Ty && c->Ty->is(TypeKind::Function)) {
+        const auto &ps = c->Ty->params();
+        for (size_t i = 0; i < c->Params.size() && i < ps.size(); ++i) {
+          const Param &p = c->Params[i];
+          if (p.TypeAnnotation || p.IsSelf || !p.Range.isValid())
+            continue;
+          typeHint(p.Range.begin().offsetBy(static_cast<int32_t>(p.Name.size())), ps[i], true);
+        }
+      }
+      break;
+    }
+    case NodeKind::Call: {
+      auto *c = static_cast<const CallExpr *>(n);
+      for (size_t i = 0; i < c->Args.size() && i < c->ParamLabels.size(); ++i) {
+        const Argument &a = c->Args[i];
+        const std::string &name = c->ParamLabels[i];
+        if (name.empty() || !a.Label.empty() || !a.Value)
+          continue;
+        const Expr *v = a.Value.get();
+        // An argument that already says it — `f(width)` for `width` — needs
+        // no label to be read, though a formatter may still write one.
+        int64_t off = offsetOf(v->Range.begin());
+        if (off < 0)
+          continue;
+        Hint h{static_cast<uint32_t>(off), "parameter", name + ":", name + ": "};
+        out.emplace(h.Offset, h);
+      }
+      break;
+    }
+    default:
+      break;
+    }
+    forEachChild(n, visit);
+  };
+  visit(root);
+}
+
+/// The ranges of generic declarations in `mod`: their bodies are checked
+/// once per instantiation, with concrete types no source could write there.
+void genericRanges(const std::vector<DeclPtr> &decls, std::vector<SourceRange> &out) {
+  auto fns = [&](const std::vector<std::unique_ptr<FunctionDecl>> &ms) {
+    for (const auto &m : ms)
+      if (!m->Generics.empty())
+        out.push_back(m->Range);
+  };
+  for (const DeclPtr &d : decls) {
+    switch (d->Kind) {
+    case NodeKind::Function:
+      if (!static_cast<const FunctionDecl *>(d.get())->Generics.empty())
+        out.push_back(d->Range);
+      break;
+    case NodeKind::Struct:
+    case NodeKind::Enum:
+    case NodeKind::Class: {
+      auto *nd = static_cast<const NominalDecl *>(d.get());
+      if (!nd->Generics.empty()) out.push_back(d->Range);
+      else fns(nd->Methods);
+      break;
+    }
+    case NodeKind::Bind: {
+      auto *b = static_cast<const BindDecl *>(d.get());
+      if (!b->Generics.empty()) out.push_back(d->Range);
+      else fns(b->Methods);
+      break;
+    }
+    case NodeKind::Extend: {
+      auto *e = static_cast<const ExtendDecl *>(d.get());
+      if (!e->Generics.empty() || e->FoldedIntoTemplate) out.push_back(d->Range);
+      else fns(e->Methods);
+      break;
+    }
+    default:
+      break;
+    }
+  }
+}
+
+int answerHintQuery(const SourceManager &sm, const SemaResult &result,
+                    const std::vector<std::unique_ptr<Module>> &modules,
+                    const DiagnosticEngine &diags, const CompilerOptions &opts) {
+  const SourceFile *file = nullptr;
+  for (unsigned i = 0; i < sm.fileCount(); ++i)
+    if (sm.file(i).Path == opts.QueryFile)
+      file = &sm.file(i);
+  const Module *mod = nullptr;
+  for (const auto &m : modules)
+    if (file && m->FileID == file->ID)
+      mod = m.get();
+  if (!file || !mod) {
+    std::cout << "{\"error\":" << queryJson("no such input: " + opts.QueryFile) << "}\n";
+    return 1;
+  }
+  // Inside a generic declaration, the types are an instantiation's; inside
+  // a macro invocation, the code is the macro's. Neither is written in.
+  std::vector<SourceRange> generic;
+  genericRanges(mod->Decls, generic);
+  std::vector<SourceRange> expanded = diags.expansionRanges();
+  SourceLoc first = sm.locForFileOffset(file->ID, 0);
+  SourceLoc last = sm.locForFileOffset(file->ID, static_cast<uint32_t>(file->Buffer.size()));
+  std::map<uint32_t, Hint> hints;
+  for (const FunctionDecl *fn : result.Functions) {
+    if (!fn->Body || !fn->Body->Range.isValid() || fn->Body->Range.end() < first ||
+        last < fn->Body->Range.begin())
+      continue;
+    collectHints(fn->Body.get(), *file, *mod, generic, hints);
+  }
+  for (const GlobalVarDecl *g : result.Globals)
+    if (g->Init)
+      collectHints(g->Init.get(), *file, *mod, generic, hints);
+  std::cout << "{\"hints\":[";
+  bool firstOut = true;
+  for (const auto &[off, h] : hints) {
+    SourceLoc at = sm.locForFileOffset(file->ID, off);
+    bool inMacro = false;
+    for (const SourceRange &r : expanded)
+      if (r.isValid() && r.begin() <= at && at < r.end())
+        inMacro = true;
+    if (inMacro)
+      continue;
+    std::cout << (firstOut ? "" : ",") << "{\"offset\":" << off
+              << ",\"kind\":\"" << h.Kind << "\",\"label\":" << queryJson(h.Label)
+              << ",\"insert\":" << queryJson(h.Insert) << "}";
+    firstOut = false;
+  }
+  std::cout << "]}\n";
+  return 0;
+}
+
 } // namespace
 
 int compileWithOptions(const CompilerOptions &opts) {
@@ -400,13 +1073,40 @@ int compileWithOptions(const CompilerOptions &opts) {
   diags.detectColor();
   if (opts.ForceColor) diags.setColorEnabled(true);
   if (opts.NoColor) diags.setColorEnabled(false);
+  diags.setJsonOutput(opts.JsonDiagnostics);
+  diags.setShortOutput(opts.ShortDiagnostics);
   diags.setWarningsAsErrors(opts.WarningsAsErrors);
   diags.setQuietWarnings(opts.NoWarnings);
   diags.setErrorLimit(opts.ErrorLimit);
 
   std::vector<unsigned> fileIDs;
   for (const std::string &path : opts.Inputs) {
-    auto id = sm.loadFile(path);
+    std::optional<unsigned> id;
+    // The same file may be spelt two ways — relative, or through a symbolic
+    // link such as macOS's `/var` — by an editor and by a build tool.
+    auto over = opts.SourceOverrides.find(path);
+    if (over == opts.SourceOverrides.end() && !opts.SourceOverrides.empty()) {
+      std::error_code ec;
+      auto canon = std::filesystem::weakly_canonical(path, ec);
+      for (auto it = opts.SourceOverrides.begin();
+           !ec && it != opts.SourceOverrides.end(); ++it) {
+        std::error_code ec2;
+        if (std::filesystem::weakly_canonical(it->first, ec2) == canon && !ec2) {
+          over = it;
+          break;
+        }
+      }
+    }
+    if (over != opts.SourceOverrides.end()) {
+      std::ifstream in(over->second, std::ios::binary);
+      if (in) {
+        std::ostringstream text;
+        text << in.rdbuf();
+        id = sm.addBuffer(path, text.str());
+      }
+    } else {
+      id = sm.loadFile(path);
+    }
     if (!id) {
       diags.fatal("cannot open input file '{}'", path)
           .note("check the path and that the file is readable");
@@ -439,6 +1139,11 @@ int compileWithOptions(const CompilerOptions &opts) {
   // expand like anywhere else, and a `pub macro` in it belongs to everyone who
   // imports the library.
   std::vector<std::pair<unsigned, std::string>> libraryUnits;
+  /// One entry per library unit: the conditions that library was built with.
+  /// A `.rul` carries its own source, so its `@Config`s are answered again
+  /// here — and they have to be answered the way they were when its object
+  /// code was made, or the interface would describe code that is not in it.
+  std::vector<ConfigSet> libraryConfigs;
   bool libraryError = false;
   timer.phase("read", [&] {
   for (const std::string &dir : opts.ImportPaths) {
@@ -469,10 +1174,22 @@ int compileWithOptions(const CompilerOptions &opts) {
         libraryError = true;
         return;
       }
+      ConfigSet libCfg = ConfigSet::forOptions(opts);
+      libCfg.Flags.clear();
+      for (const auto &kv : opts.ConfigValues)
+        libCfg.Values.erase(kv.first);
+      if (opts.DebugInfo)
+        libCfg.Flags.insert("debug");
+      for (const std::string &flag : lib.ConfigFlags)
+        libCfg.Flags.insert(flag);
+      for (const auto &kv : lib.ConfigValues)
+        if (!libCfg.Builtin.count(kv.first))
+          libCfg.Values[kv.first] = kv.second;
       for (const auto &unit : lib.Interfaces) {
         unsigned id = sm.addBuffer(libPath.string() + " (" + unit.first + ")",
                                    unit.second);
         libraryUnits.push_back({id, unit.first});
+        libraryConfigs.push_back(libCfg);
       }
       // A name no other compile can be using. Builds run several compilers
       // at once, and more than one of them may import this same library; a
@@ -599,8 +1316,51 @@ int compileWithOptions(const CompilerOptions &opts) {
   // The definitions are taken out of the stream as they are read, which is
   // what the parser would otherwise have to do again for itself; what it gets
   // handed below is already free of them.
+  // A `@type(Macros)` file is a package of its own: it is built ahead of this
+  // compilation, for the machine doing the compiling, and run to expand each
+  // invocation. None of its names reach here, which is the point — what a
+  // macro imports and declares is its own business.
+  MacroPackage macroPackage;
+  if (!opts.MacroPackage) {
+    std::vector<size_t> macroFiles;
+    for (size_t i = firstUserModule; i < units.size(); ++i)
+      if (declaresMacroPackage(tokens[i]))
+        macroFiles.push_back(i);
+    if (!macroFiles.empty()) {
+      bool built = false;
+      timer.phase("macro package", [&] {
+        built = buildMacroPackageImpl(sm, diags, opts, units, tokens,
+                                      macroFiles, macroPackage);
+      });
+      if (!built) {
+        diags.statusFail("Build failed.");
+        return 1;
+      }
+      // Take them out of this compilation, innermost first so the indices
+      // that follow stay put.
+      for (auto it = macroFiles.rbegin(); it != macroFiles.rend(); ++it) {
+        units.erase(units.begin() + static_cast<long>(*it));
+        tokens.erase(tokens.begin() + static_cast<long>(*it));
+      }
+      macroOrder.clear();
+      for (size_t i = 0; i < units.size(); ++i)
+        if (units[i].IsStdlib)
+          macroOrder.push_back(i);
+      for (size_t i = 0; i < units.size(); ++i)
+        if (units[i].FromLibrary)
+          macroOrder.push_back(i);
+      for (size_t i = firstUserModule; i < units.size(); ++i)
+        macroOrder.push_back(i);
+    }
+  }
+
   MacroTable macros;
   timer.phase("macros", [&] {
+    // A `@macro fn` in a file that is part of the program is a mistake: it
+    // belongs in a macro package. Inside one, it is the whole point.
+    if (!opts.MacroPackage)
+      for (size_t i = firstUserModule; i < units.size(); ++i)
+        rejectProcMacros(tokens[i], diags);
     for (size_t i : macroOrder)
       collectMacros(tokens[i], diags, macros, /*record=*/true,
                     units[i].ModuleName);
@@ -613,7 +1373,8 @@ int compileWithOptions(const CompilerOptions &opts) {
   timer.phase("parse", [&] {
     parallelFor(units.size(), [&](size_t i) {
       Parser parser(sm, diags, units[i].FileID, units[i].ModuleName,
-                    std::move(tokens[i]), &macros);
+                    std::move(tokens[i]), &macros,
+                    macroPackage.usable() ? &macroPackage : nullptr);
       parsed[i] = parser.parseModule();
       parsed[i]->FromLibrary = units[i].FromLibrary;
       parsed[i]->IsStdlib = units[i].IsStdlib;
@@ -627,8 +1388,9 @@ int compileWithOptions(const CompilerOptions &opts) {
   {
     const ConfigSet cfg = ConfigSet::forOptions(opts);
     timer.phase("config", [&] {
-      for (auto &m : parsed)
-        applyConfig(*m, cfg, diags);
+      for (size_t i = 0; i < parsed.size(); ++i)
+        applyConfig(*parsed[i],
+                    i < libraryConfigs.size() ? libraryConfigs[i] : cfg, diags);
     });
   }
 
@@ -653,9 +1415,15 @@ int compileWithOptions(const CompilerOptions &opts) {
   TypeContext typeCtx(targetPointerBits(opts));
   Sema sema(sm, diags, typeCtx, opts.Safety, opts.Memory, opts.Dump,
             opts.ZombieStdlib);
+  // `extern "C++"` declarations are mangled and sized for the machine being
+  // built for: `long` is 32 bits on Windows, `int64_t` is `long` on Linux.
+  sema.setCxxTarget(
+      cxxTargetFor(targetTripleOf(opts).str(), typeCtx.pointerBits()));
   for (const auto &m : modules)
     sema.addModule(m.get());
   timer.phase("check", [&] { sema.check(); });
+  if (sema.usesCxx())
+    const_cast<CompilerOptions &>(opts).LinkCxx = true;
   if (opts.Memory == MemoryMode::Zombie) {
     timer.within("zombie", sema.zombieMillis());
     const zombie::Stats &zs = zombie::lastStats();
@@ -672,6 +1440,13 @@ int compileWithOptions(const CompilerOptions &opts) {
     sema.dumpSymbols(std::cout);
     return diags.hadError() ? 1 : 0;
   }
+
+  // Answered whatever else went wrong: an editor asks in the middle of an
+  // edit, and one mistake elsewhere in the file should not cost it the
+  // answer about this expression.
+  if (!opts.QueryFile.empty())
+    return opts.QueryHints ? answerHintQuery(sm, sema.result(), modules, diags, opts)
+                           : answerMemberQuery(sm, sema.result(), opts);
 
   if (diags.hadError()) {
     diags.statusFail("Build failed.");
@@ -692,17 +1467,27 @@ int compileWithOptions(const CompilerOptions &opts) {
           {"Exec", OutputKind::Executable},
           {"Library", OutputKind::Library},
           {"Lib", OutputKind::Library},
+          {"Shared", OutputKind::Shared},
+          {"Dylib", OutputKind::Shared},
           {"Object", OutputKind::Object},
           {"Obj", OutputKind::Object},
           {"Assembly", OutputKind::Assembly},
           {"Asm", OutputKind::Assembly},
           {"LLVM", OutputKind::LLVMIR},
       };
+      // `@type(Macros)` says the file is a macro package, which the compiler
+      // has already acted on: those files were built and run before this
+      // compilation began, and the package's own build treats them as
+      // ordinary source. Either way there is nothing left to decide here.
+      if (m->DeclaredOutput == "Macros")
+        continue;
       auto it = kinds.find(m->DeclaredOutput);
       if (it == kinds.end()) {
         diags.error(m->DeclaredOutputRange, "unknown output type '{}'",
                     m->DeclaredOutput)
-            .note("one of Executable, Library, Object, Assembly or LLVM — or the short forms Exec, Lib, Obj, Asm")
+            .note("one of Executable, Library, Shared, Object, Assembly, "
+                  "LLVM or Macros — or the short forms Exec, Lib, Dylib, "
+                  "Obj, Asm")
             .code(109);
         continue;
       }
@@ -773,7 +1558,9 @@ int compileWithOptions(const CompilerOptions &opts) {
     // A signature as it would be written, not as the type system spells it:
     // `fn english(&self) -> String` rather than `@function() -> String`.
     auto signature = [](const FunctionDecl *f) {
-      std::string sig = "fn " + f->Name;
+      // An `async fn` is documented as it was written: the result the body
+      // produces, not the `Future` the compiler wrapped around it.
+      std::string sig = (f->IsAsync ? "async fn " : "fn ") + f->Name;
       if (!f->Generics.empty()) {
         sig += "<";
         for (size_t g = 0; g < f->Generics.size(); ++g) {
@@ -798,6 +1585,9 @@ int compileWithOptions(const CompilerOptions &opts) {
       }
       sig += ")";
       Type *ret = f->Ty ? f->Ty->result() : nullptr;
+      if (f->IsAsync && ret && ret->isNominal() &&
+          ret->typeArguments().size() == 1)
+        ret = ret->typeArguments()[0];
       if (ret && !ret->isVoid())
         sig += " -> " + ret->toString();
       return sig;
@@ -1142,11 +1932,13 @@ int compileWithOptions(const CompilerOptions &opts) {
     return ok ? 0 : 1;
   }
 
-  // Executable and library both need an object file first.
+  // Everything else needs an object file first.
   std::filesystem::path objPath =
       std::filesystem::path(outPath).replace_extension(".o");
   if (opts.Output == OutputKind::Library)
     objPath = std::filesystem::path(outPath).replace_extension(".rul.o");
+  if (opts.Output == OutputKind::Shared)
+    objPath = std::filesystem::path(outPath).string() + ".o";
   if (!emitMachineCode(objPath.string(), false)) {
     diags.statusFail("Build failed.");
     return 1;
@@ -1161,7 +1953,7 @@ int compileWithOptions(const CompilerOptions &opts) {
     bool ok = false;
     timer.phase("archive", [&] {
       ok = writeLibrary(outPath, objPath.string(), opts.ModuleName, units,
-                        opts.Memory, diags);
+                        opts.Memory, opts, diags);
     });
     if (!ok)
       return 1;
@@ -1172,9 +1964,10 @@ int compileWithOptions(const CompilerOptions &opts) {
   }
 
   bool linked = false;
+  const bool shared = opts.Output == OutputKind::Shared;
   timer.phase("link", [&] {
     linked = linkExecutable(objPath.string(), libraryObjects, outPath, opts,
-                            diags);
+                            diags, shared);
   });
   if (!linked) {
     diags.statusFail("Build failed.");

@@ -22,6 +22,8 @@ Param cloneParam(const Param &p);
 Attribute cloneAttribute(const Attribute &a);
 
 std::unique_ptr<FunctionDecl> cloneFunction(const FunctionDecl *f);
+std::unique_ptr<FieldDecl> cloneFieldDecl(const FieldDecl *f);
+std::unique_ptr<EnumVariantDecl> cloneEnumVariant(const EnumVariantDecl *v);
 std::unique_ptr<BlockExpr> cloneBlock(const BlockExpr *b);
 
 } // namespace rune

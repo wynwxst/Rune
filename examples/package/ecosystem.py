@@ -63,9 +63,9 @@ def run(rune, args, cwd, env, check=True):
 
 def build_one(rune, env, name, packages, into):
     shutil.rmtree(into, ignore_errors=True)
-    run(rune, ["pkg", "init", into, "--name", name], HERE, env)
+    run(rune, ["registry", "init", into, "--name", name], HERE, env)
     for pkg, version, path in releases(packages):
-        out = run(rune, ["pkg", "server", "--addPackage", path, "--dir", into], HERE, env)
+        out = run(rune, ["registry", "--addPackage", path, "--dir", into], HERE, env)
         print(out.strip().split("\n")[-1])
     print(f"registry '{name}' written to {into}")
 
@@ -83,10 +83,10 @@ def serve(rune, env, port):
             build_one(rune, env, name, packages, into)
     main_name, _, main_dir = REGISTRIES[0]
     lab_name, _, lab_dir = REGISTRIES[1]
-    lab = subprocess.Popen([rune, "pkg", "server", "--serve", "--dir", lab_dir, "--port", str(port + 1)])
+    lab = subprocess.Popen([rune, "registry", "--serve", "--dir", lab_dir, "--port", str(port + 1)])
     print(f"'{lab_name}' on port {port + 1}: rune pkg server add http://localhost:{port + 1}")
     try:
-        subprocess.run([rune, "pkg", "server", "--serve", "--dir", main_dir, "--port", str(port)])
+        subprocess.run([rune, "registry", "--serve", "--dir", main_dir, "--port", str(port)])
     finally:
         lab.terminate()
 
@@ -100,8 +100,8 @@ def check(rune):
         print("\n== adding them to a fresh client")
         for name, _, into in REGISTRIES:
             url = "file://" + os.path.join(tmp, os.path.basename(into))
-            print(run(rune, ["pkg", "server", "add", url], HERE, env).strip())
-        print(run(rune, ["pkg", "server", "list"], HERE, env).strip())
+            print(run(rune, ["registry", "add", url], HERE, env).strip())
+        print(run(rune, ["registry", "list"], HERE, env).strip())
         print(run(rune, ["search", "."], HERE, env).strip())
         print(run(rune, ["desc", "logger"], HERE, env).strip())
 

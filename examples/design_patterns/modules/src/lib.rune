@@ -1,0 +1,18 @@
+// modules — library root.
+//
+// Only `pub` items are visible to packages that import this one.
+import modules::database
+import modules::structures
+
+
+
+pub fn authenticate(creds: structures::Credentials) {
+  match database::connectToDatabase() {
+    .Connected => {
+      database::login(creds)
+    },
+    _ => {
+      std::process::panic("Failed to authenticate")
+    }
+  }
+}

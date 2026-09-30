@@ -1,0 +1,33 @@
+// EXPECT: built 300000
+// EXPECT: walked 300000
+// EXPECT: gone
+//
+// Giving a long structure back costs no stack. Destroying a list destroys
+// the node it holds, whose destruction destroys the next — written as nested
+// calls that is one frame per link, and three hundred thousand links do not
+// fit. The runtime queues what a destruction reaches and drains the queue in
+// a loop, so the depth stays at one however long the chain is.
+import std::mem::{Handle}
+import std::{mem, io}
+
+enum Link { Empty, More(Handle<Node>) }
+struct Node { elem: i64, next: Link }
+
+fn main() -> i64 {
+    var head = Link::Empty
+    var i = 0
+    while i < 300000 {
+        head = Link::More(Handle<Node>(Node { elem: i, next: mem::replace(&var head, Link::Empty) }))
+        i += 1
+    }
+    io::println("built " + 300000.$str())
+
+    var n = 0
+    var cur = &head
+    while cur is Link::More(node) { n += 1; cur = &node.look().next }
+    io::println("walked " + n.$str())
+
+    head = Link::Empty      // the whole chain, destroyed here
+    io::println("gone")
+    0
+}

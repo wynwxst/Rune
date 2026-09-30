@@ -7,6 +7,7 @@
 | `--emit-llvm` | emit textual LLVM IR |
 | `--emit-asm` | emit target assembly |
 | `--emit-lib` | emit a `.rul` library |
+| `--shared` | emit a native shared library (`.dylib` / `.so` / `.dll`) |
 | `--check` | type-check only, produce nothing |
 | `-O0` … `-O3` | optimisation level, default `-O0` |
 | `-g` | emit debug information |
@@ -15,8 +16,10 @@
 | `--sysroot <dir>` | the target's headers and libraries |
 | `--runtime-dir <dir>` | where `libruneruntime.a` is |
 | `--link-arg <arg>` | appended to the link command verbatim |
+| `--link-cxx` | link the C++ runtime (implied by `extern "C++"`) |
 | `--safety <level>` | `none`, `minimal` or `full` (default) |
 | `--memory <mode>` | `arc` (default) or `zombie`; see **Single ownership without a count** |
+| `--no-zombie-stdlib` | silence Zombie findings inside the standard library (reported by default) |
 | `-I <dir>` | add a module search path |
 | `-L <dir>` / `-l <name>` | native library path / library |
 | `--module <name>` | set the module name |

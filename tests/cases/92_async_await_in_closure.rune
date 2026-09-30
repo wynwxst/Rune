@@ -1,0 +1,11 @@
+// A plain closure inside an async function is a function of its own, called
+// from wherever it ends up; awaiting inside it needs it to be `async ||`.
+// EXPECT-ERROR: `.await` is only allowed inside an `async` function, closure or block
+import std::task
+
+async fn answer() -> i64 { 42 }
+
+async fn main() -> i64 {
+    let get = ||() -> i64 { answer().await }
+    get() - 42
+}

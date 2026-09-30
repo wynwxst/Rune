@@ -28,3 +28,17 @@ $ cc host.c stats.o -lruneruntime -lm -o host
 > **Exported names are unique**
 >
 > `@export` gives a symbol strong linkage, so two of the same name collide rather than silently merging — which is what you want from something whose whole purpose is to answer to one exact name.
+
+`--shared` produces a loadable library instead of an object: a `.dylib`, a `.so` or a `.dll`, with the runtime already inside it. That is the form anything which loads code at run time wants — `dlopen`, Python's `ctypes`, a plugin host — and it needs no link line of its own.
+
+```sh
+$ runec --shared -o libstats.dylib src/lib.rune
+$ python3 -c 'import ctypes; print(ctypes.CDLL("./libstats.dylib").stats_scale)'
+```
+
+What the library answers to is exactly what `@export` named. Everything else keeps its module-qualified symbol, which is the point: a shared library's surface is the list of `@export`s, written down in one place.
+
+> [!NOTE]
+> **Or say it in the file**
+>
+> `@type(Shared)` says the same thing inside the file, for a source tree where the answer belongs with the code rather than in a build script. A flag on the command line still wins.

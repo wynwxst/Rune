@@ -41,3 +41,32 @@ fn main() -> i64 {
     process::succeed()
 }
 ```
+
+## Running another program
+
+`Command` runs a program to completion and collects both of its output
+streams. Arguments are handed over one at a time and never pass through a
+shell, so a space or a quote inside one stays part of it. `run` gives `nil`
+only when the program could not be started; one that starts and then fails
+comes back with a non-zero `status`.
+
+```rune
+import std::io
+import std::process
+
+fn main() -> i64 {
+    var c = process::Command("sh")
+    c.arg("-c")
+    c.arg("echo it said this; exit 3")
+    match c.run() {
+        Some(out) => {
+            io::print(out.stdout)                 // it said this
+            io::println(out.status)               // 3
+            io::println(out.succeeded())          // false
+        },
+        None => io::println("sh is not on PATH"),
+    }
+    io::println(process::Command("no-such-program-anywhere").run().isNil())   // true
+    0
+}
+```

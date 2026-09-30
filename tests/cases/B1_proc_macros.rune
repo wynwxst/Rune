@@ -1,0 +1,53 @@
+// WITH: macros/pack.rune
+// EXPECT: twice 6
+// EXPECT: twice 40
+// EXPECT: getters 3 4
+// EXPECT: total 6
+// EXPECT: kinds keyword name punctuation number
+// EXPECT: quoted a + b
+// EXPECT: shout hello!
+// EXPECT: enter work
+// EXPECT: doing the work
+// EXPECT: block block of 4
+// EXPECT: reflect Point i64
+// EXPECT: lookup 1 -1
+//
+// A procedural macro is a Rune function marked `@macro`, in a file that says
+// `@type(Macros)`. The compiler builds that file into a program of its own —
+// for the machine doing the compiling — and runs it to expand each
+// invocation.
+//
+// So a macro is ordinary compiled Rune, with the whole language and the whole
+// standard library behind it; and nothing it imports or declares reaches the
+// program, which sees only the tokens it hands back.
+import std::io
+
+struct Point { x: i64, y: i64 }
+
+getters!(x, y)
+lookup!(red, green, blue)
+
+fn main() -> i64 {
+    println!("twice {}", twice!(3).$str())
+    println!("twice {}", twice!(4 * 5).$str())
+
+    let p = Point { x: 3, y: 4 }
+    println!("getters {} {}", p.getx().$str(), p.gety().$str())
+
+    println!("total {}", total!(1 + 2 + 3).$str())
+    println!("kinds {}", kinds!(let x = 1))
+    println!("quoted {}", quoted!(a + b))
+    println!("shout {}", shout!(hello))
+
+    // A block goes in as one token and comes back as written.
+    traced!(work, {
+        io::println("doing the work")
+    })
+    println!("block {}", describeBlock!({ let x = 1 }))
+
+    // What the expansion says is compiled in *this* program, so reflection
+    // answers about its types.
+    println!("reflect {} {}", nameOf!(Point), nameOf!(i64))
+    println!("lookup {} {}", indexOf("green").$str(), indexOf("nope").$str())
+    0
+}

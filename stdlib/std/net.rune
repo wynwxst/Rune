@@ -168,6 +168,17 @@ extend TcpStream {
         }
     }
 
+    /// A second stream on the same connection, with a descriptor of its own.
+    /// This is what `$clone()` does to a stream — the compiler's memberwise
+    /// copy would give two bindings one descriptor, and the second to go
+    /// would close it again. Both see the same bytes; the connection stays
+    /// open until the last of them closes.
+    @safe("the runtime duplicates the descriptor, or hands back a closed stream")
+    pub fn clone(&self) -> Self {
+        let fd = if self.descriptor >= 0 { unsafe { rune_net_dup(self.descriptor) } } else { -1 }
+        TcpStream { descriptor: fd, peer: self.peer.$clone(), peerPort: self.peerPort }
+    }
+
     /// True until the connection is closed.
     pub fn isOpen(&self) -> bool { self.descriptor >= 0 }
 
@@ -330,6 +341,15 @@ extend TcpListener {
         }
     }
 
+    /// A second listener on the same socket, with a descriptor of its own;
+    /// what `$clone()` does. Either may accept; the socket stays open until
+    /// the last of them closes.
+    @safe("the runtime duplicates the descriptor, or hands back a closed listener")
+    pub fn clone(&self) -> Self {
+        let fd = if self.descriptor >= 0 { unsafe { rune_net_dup(self.descriptor) } } else { -1 }
+        TcpListener { descriptor: fd, address: self.address.$clone(), boundPort: self.boundPort }
+    }
+
     /// True until the listener is closed.
     pub fn isOpen(&self) -> bool { self.descriptor >= 0 }
 
@@ -423,3 +443,190 @@ pub fn connect(host: String, port: i32) -> Result<TcpStream, NetError> {
     if fd < 0 { return Err(lastError()) }
     Ok(adoptFrom(fd, host, port))
 }
+
+//===--------------------------------------------------------------------===//
+// Sockets driven by tasks
+//===--------------------------------------------------------------------===//
+//
+// A `TcpStream` blocks: a `read` holds the thread until bytes arrive. Inside
+// a task that would hold every other task with it. `AsyncStream` and
+// `AsyncListener` are the same sockets set not to wait: each `read`, `write`
+// and `accept` tries at once and, if nothing is ready, parks the task on the
+// socket — `task::readable`, `task::writable` — until it is, while the other
+// tasks run. Nothing about the bytes changes; only who waits, and how.
+//
+//     async fn serve(listener: net::AsyncListener) {
+//         while listener.accept().await is Ok(conn) {
+//             handle(conn)                  // a task per connection
+//         }
+//     }
+//
+// Both are classes, so a task may keep one and another may share it. The
+// stream they wrap is theirs alone: `wrap` takes it, and `release` hands
+// the descriptor back.
+
+import std::task
+
+extern "C" {
+    fn rune_net_set_nonblocking(fd: i64, on: i32) -> i32
+    fn rune_net_dup(fd: i64) -> i64
+}
+
+/// A connection whose reads and writes park the task instead of the thread.
+pub class AsyncStream {
+    var stream: TcpStream
+
+    fn init(self, stream: TcpStream) {
+        unsafe { rune_net_set_nonblocking(stream.descriptorValue(), 1) }
+        self.stream = stream
+    }
+
+    /// Up to `most` bytes, once there are any. Zero bytes means the other
+    /// end has finished sending.
+    pub async fn read(&var self, most: i64) -> Result<io::Bytes, io::StreamError> {
+        var sink = io::Bytes()
+        loop {
+            match self.stream.read(&var sink, most) {
+                Ok(n) => return Ok(sink),
+                Err(io::StreamError::WouldBlock) => {
+                    task::readable(self.stream.descriptorValue()).await
+                },
+                Err(io::StreamError::Interrupted) => {},
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Every byte of `data`, however many turns that takes.
+    pub async fn write(&var self, data: io::Bytes) -> Result<i64, io::StreamError> {
+        var sent = 0
+        let total = data.length()
+        while sent < total {
+            // A fresh slice each turn: `write` takes what it is given.
+            let rest = data.slice(sent, total)
+            match self.stream.write(rest) {
+                Ok(n) => {
+                    if n <= 0 { return Err(io::StreamError::Closed) }
+                    sent += n
+                },
+                Err(io::StreamError::WouldBlock) => {
+                    task::writable(self.stream.descriptorValue()).await
+                },
+                Err(io::StreamError::Interrupted) => {},
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(sent)
+    }
+
+    /// `text`'s bytes, all of them.
+    pub async fn writeText(&var self, text: String) -> Result<i64, io::StreamError> {
+        self.write(io::bytes(text)).await
+    }
+
+    /// Everything the other end sends until it finishes, as text.
+    pub async fn readAll(&var self) -> Result<String, io::StreamError> {
+        var whole = io::Bytes()
+        loop {
+            let part = self.read(4096).await?
+            if part.length() == 0 { return Ok(whole.toString()) }
+            whole.append(part)
+        }
+    }
+
+    /// The other end's address, and its port.
+    pub fn peerAddress(&self) -> String { self.stream.peerAddress() }
+    pub fn port(&self) -> i32 { self.stream.port() }
+
+    /// Half-closes, so the other end sees the end of what was sent.
+    pub fn shutdown(&var self, how: Shutdown) -> NetError? { self.stream.shutdown(how) }
+
+    /// Closes the connection now, rather than when the last reference goes.
+    pub fn close(&var self) { self.stream.close() }
+
+    /// Hands the descriptor back, blocking again, and stops owning it.
+    @safe("the descriptor is the caller's from here; nothing here reaches it again")
+    pub fn release(&var self) -> i64 {
+        let fd = self.stream.descriptorValue()
+        if fd >= 0 { unsafe { rune_net_set_nonblocking(fd, 0) } }
+        self.stream.release()
+    }
+
+    /// A second handle on the same connection, with a descriptor of its
+    /// own; what `$clone()` does under single ownership, where a class
+    /// cannot simply be shared.
+    pub fn clone(&self) -> Self { AsyncStream(self.stream.clone()) }
+}
+
+/// A listener whose `accept` parks the task until someone connects.
+pub class AsyncListener {
+    var listener: TcpListener
+
+    fn init(self, listener: TcpListener) {
+        unsafe { rune_net_set_nonblocking(listener.descriptorValue(), 1) }
+        self.listener = listener
+    }
+
+    /// The next connection, once there is one.
+    pub async fn accept(&var self) -> Result<AsyncStream, NetError> {
+        loop {
+            match self.listener.accept() {
+                Ok(stream) => return Ok(AsyncStream(stream)),
+                Err(NetError::WouldBlock) => {
+                    task::readable(self.listener.descriptorValue()).await
+                },
+                Err(NetError::Interrupted) => {},
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn address(&self) -> String { self.listener.address() }
+    pub fn port(&self) -> i32 { self.listener.port() }
+    pub fn close(&var self) { self.listener.close() }
+
+    /// A second handle on the same socket; what `$clone()` does.
+    pub fn clone(&self) -> Self { AsyncListener(self.listener.clone()) }
+}
+
+/// A `TcpStream`, driven by tasks from here on.
+pub fn wrap(stream: TcpStream) -> AsyncStream { AsyncStream(stream) }
+
+/// Listens on `address`:`port`, for tasks.
+///
+///     let server = net::listenAsync("127.0.0.1", 0).await.unwrap()
+///     io::println(server.port())
+pub fn listenAsync(address: String, port: i32) -> Result<AsyncListener, NetError> {
+    Ok(AsyncListener(listen(address, port)?))
+}
+
+/// Connects to `host`:`port` without holding the thread: resolving a name
+/// and connecting both wait on the network, so they run on a worker thread
+/// while this task parks.
+///
+///     let conn = net::connectAsync("localhost", 8080).await?
+pub async fn connectAsync(host: String, port: i32) -> Result<AsyncStream, NetError> {
+    // The worker gets a copy of the name; this task keeps its own for the
+    // stream it builds afterwards.
+    let target = host.$clone()
+    let result = task::offload(||() -> Result<i64, NetError> {
+        match connect(target, port) {
+            Ok(stream) => {
+                var owned = stream
+                Ok(owned.release())
+            },
+            Err(e) => Err(e),
+        }
+    }).await
+    match result {
+        Ok(fd) => Ok(AsyncStream(adoptFrom(fd, host, port))),
+        Err(e) => Err(e),
+    }
+}
+
+/// Each of these duplicates its descriptor in `clone`, so a copy of one is a
+/// socket of its own rather than a second owner of the same one.
+bind mem::Clone to TcpStream {}
+bind mem::Clone to TcpListener {}
+bind mem::Clone to AsyncStream {}
+bind mem::Clone to AsyncListener {}

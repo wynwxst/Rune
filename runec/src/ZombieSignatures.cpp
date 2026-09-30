@@ -18,6 +18,8 @@
 #include "rune/ZombieIR.h"
 #include "rune/ZombieInternal.h"
 
+#include <set>
+
 namespace rune {
 namespace zombie {
 
@@ -58,6 +60,74 @@ void collectClauses(const TypeRepr *t, std::vector<const OriginClause *> &out) {
     break;
   }
 }
+
+/// Whether a type, as written, says it holds a borrow: a `&`, a slice, a
+/// `from` clause. `T?` does not, whatever `T` turns out to be.
+bool writtenWithBorrow(const TypeRepr *t) {
+  if (!t)
+    return false;
+  if (t->Origin)
+    return true;
+  switch (t->Kind) {
+  case NodeKind::PointerType:
+    return !cast<PointerTypeRepr>(t)->IsRaw;
+  case NodeKind::SliceType:
+    return true;
+  case NodeKind::ArrayType:
+    return writtenWithBorrow(cast<ArrayTypeRepr>(t)->Element.get());
+  case NodeKind::OptionalType:
+    return writtenWithBorrow(cast<OptionalTypeRepr>(t)->Element.get());
+  case NodeKind::UniqType:
+    return writtenWithBorrow(cast<UniqTypeRepr>(t)->Element.get());
+  case NodeKind::TupleType:
+    for (auto &e : cast<TupleTypeRepr>(t)->Elements)
+      if (writtenWithBorrow(e.get()))
+        return true;
+    return false;
+  case NodeKind::NamedType:
+    for (auto &a : cast<NamedTypeRepr>(t)->GenericArgs)
+      if (writtenWithBorrow(a.get()))
+        return true;
+    return false;
+  default:
+    return false;
+  }
+}
+
+} // namespace
+
+/// A result whose type, as written, holds no borrow — `T?`, `Self::Item` —
+/// but which this instantiation makes one. Generic code cannot have made a
+/// borrow of its own locals and called it `T`: whatever borrow the result
+/// holds came in with the arguments. So it borrows what they carry, and
+/// nothing of the places they sit in.
+bool resultCarriedOnly(const FunctionDecl *fn) {
+  if (!fn || !fn->Ty || !fn->ReturnType)
+    return false;
+  Type *ret = fn->Ty->result();
+  return ret && carriesReference(ret) &&
+         !writtenWithBorrow(fn->ReturnType.get());
+}
+
+std::vector<FromEntry> carriedFrom(const FunctionDecl *fn) {
+  std::vector<FromEntry> out;
+  for (size_t i = 0; i < fn->Params.size(); ++i) {
+    const Param &p = fn->Params[i];
+    Type *t = p.Ty;
+    if (!t)
+      continue;
+    Type *inner = t->is(TypeKind::Pointer) ? t->pointee() : t;
+    if (!carriesReference(t) && !(inner && carriesReference(inner)))
+      continue;
+    FromEntry e;
+    e.Param = static_cast<unsigned>(i);
+    e.Carried = true;
+    out.push_back(e);
+  }
+  return out;
+}
+
+namespace {
 
 bool isRefParam(const Param &p) {
   if (p.IsSelf)
@@ -133,6 +203,8 @@ FnSummary declaredSummary(const FunctionDecl *fn) {
           continue;
         s.ResultFrom.push_back(e);
       }
+  } else if (!s.ResultOwned && resultCarriedOnly(fn)) {
+    s.ResultFrom = carriedFrom(fn);
   } else if (!s.ResultOwned) {
     // The defaults when nothing can be inferred: `self`, or the one
     // reference parameter there is.
@@ -396,6 +468,62 @@ void applySummaries(Body &body, const SummaryTable &table,
         PlaceId arg = s.Args[pi];
         if (arg == kNone)
           continue;
+        if (e.Carried) {
+          // What the argument carries: the origin of the value itself — for
+          // a borrowed argument, of the place it was borrowed from.
+          PlaceId holder = covered[pi].empty() ? arg : covered[pi].front().Place;
+          OriginId ho = originOf(holder);
+          if (ho != kNone && ho != into)
+            s.Subsets.push_back({ho, into});
+          if (covered[pi].empty()) {
+            // A named reference handed on: what it points at carries too.
+            Type *at = placeType(body, arg);
+            if (at && at->is(TypeKind::Pointer)) {
+              OriginId po = originOf(
+                  body.Places.project(arg, Projection{Projection::Deref, 0}));
+              if (po != kNone && po != into && po != ho)
+                s.Subsets.push_back({po, into});
+            }
+          }
+          continue;
+        }
+        // `-> &T from self.source`, where `source` is itself a shared borrow:
+        // the result looks at what `source` looks at, not at the value
+        // holding it. So it borrows nothing of the argument — only what the
+        // argument already borrowed, which is the origin of the place the
+        // argument was taken from. This is what lets an iterator hand out
+        // `&T`s into its container while `next` borrows the iterator `&var`:
+        // the items outlive the call, and the next call does not conflict.
+        {
+          PlaceId pointee = arg;
+          Type *at = placeType(body, arg);
+          if (at && at->is(TypeKind::Pointer))
+            pointee = body.Places.project(pointee,
+                                          Projection{Projection::Deref, 0});
+          Type *pt = placeType(body, pointee);
+          if (pt && pt->is(TypeKind::Class))
+            pointee = body.Places.project(pointee,
+                                          Projection{Projection::Deref, 0});
+          bool throughShared = false;
+          PlaceId walk = pointee;
+          for (unsigned f : e.Path) {
+            walk = body.Places.project(walk, Projection{Projection::Field, f});
+            Type *ft = placeType(body, walk);
+            if (ft && ft->is(TypeKind::Pointer) && !ft->isRawPointer() &&
+                !ft->isWeakPointer() && !ft->isMutablePointer()) {
+              throughShared = true;
+              break;
+            }
+          }
+          if (throughShared) {
+            PlaceId holder =
+                covered[pi].empty() ? pointee : covered[pi].front().Place;
+            OriginId ho = originOf(holder);
+            if (ho != kNone && ho != into)
+              s.Subsets.push_back({ho, into});
+            continue;
+          }
+        }
         OriginId o = originOf(arg);
         if (o != kNone && o != into)
           s.Subsets.push_back({o, into});
@@ -521,7 +649,16 @@ FnSummary inferSummary(Body &body, const LoanResults &loans,
     } else {
       out.ResultFrom = loans.ResultFrom;
       out.ResultUntracked = loans.ResultUntracked;
-      if (loans.ResultUntracked && !(fn && fn->IsZombieTrusted)) {
+      // `fn pop(&var self) -> T?` on a `Vector<&Row>`: the result is a borrow
+      // only because the type argument is one, and it was read out of storage
+      // the checker cannot see into. What it borrows is what the arguments
+      // were already carrying — the rows the vector's elements point at — so
+      // that is the answer, the way a lifetime parameter on `T` would say.
+      if (fn && resultCarriedOnly(fn)) {
+        out.ResultFrom = carriedFrom(fn);
+        out.ResultUntracked = false;
+      }
+      if (out.ResultUntracked && !(fn && fn->IsZombieTrusted)) {
         auto d = diags.error(fn->ReturnType ? fn->ReturnType->Range
                                             : fn->NameRange,
                              "'{}' returns a borrow but does not say from "

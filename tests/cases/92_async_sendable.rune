@@ -1,0 +1,13 @@
+// A closure handed to `offload` runs on another thread, so what it captures
+// crosses with it: every capture has to be `Send`.
+// EXPECT-ERROR: this closure captures 'c', a 'Counter', which is not `Send`
+import std::task
+
+class Counter { var n: i64
+    fn init(self) { self.n = 0 } }
+
+fn main() -> i64 {
+    let c = Counter()
+    let f = task::offload(||() -> i64 { c.n + 1 })
+    f.wait()
+}

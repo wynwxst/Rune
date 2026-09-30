@@ -4,6 +4,7 @@
 #include "rune/Lexer.h"
 #include "rune/Source.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
@@ -23,6 +24,7 @@ OUTPUT
     --emit-llvm          Emit textual LLVM IR (.ll)
     --emit-asm           Emit target assembly (.s)
     --emit-lib           Emit a Rune library (.rul)
+    --shared             Emit a native shared library (.dylib/.so/.dll)
     --emit-docs          Emit a documentation sidecar (.rdoc)
     --docs-stdlib        With --emit-docs: cover the standard library's modules
     --check              Type-check only; produce no output
@@ -45,6 +47,7 @@ MODULES AND LINKING
     -l <name>            Link against native library <name>
     --module <name>      Set the module name (default: first input's stem)
     --cfg <name>         Set <name> for `@Config(...)` conditions
+    --cfg <key>=<value>  Give <key> a value, compared with `@Config(k == v)`
     --no-stdlib          Do not implicitly import the standard library
     --stdlib <dir>       Override the standard library location
 
@@ -52,10 +55,25 @@ CROSS COMPILATION
     --cc <program>       C toolchain driver used to link (default: cc)
     --sysroot <dir>      Pass --sysroot=<dir> to the link driver
     --link-arg <arg>     Append <arg> to the link command verbatim
+    --link-cxx           Link the C++ runtime (implied by `extern "C++"`)
     --runtime-dir <dir>  Where this target's libruneruntime.a lives
 
 DIAGNOSTICS
     --color / --no-color Force colour on or off
+    --source <path>=<file>
+                         Compile <path> as the text in <file> (an editor's
+                         unsaved buffer), reporting it as <path>
+    --query-members <file>:<start>:<end>
+                         After checking, print the type and members of the
+                         expression at those byte offsets, as JSON
+    --query-hints <file>
+                         After checking, print as JSON what could be written
+                         out in the file: each unannotated binding's type and
+                         each positional argument's parameter name
+    --diagnostic-format <fmt>
+                         human | json | short   (default human): json writes
+                         one object per line on stderr, for editors and
+                         tools; short one `file:line:col: error: message`
     -Werror              Treat warnings as errors
     -w                   Suppress warnings
     --error-limit <n>    Stop after <n> errors (default 20, 0 = unlimited)
@@ -132,6 +150,8 @@ int runCompilerMain(int argc, char **argv) {
                       opts.OutputKindFromFlag = true; continue; }
     if (a == "--emit-lib") { opts.Output = OutputKind::Library;
                       opts.OutputKindFromFlag = true; continue; }
+    if (a == "--shared") { opts.Output = OutputKind::Shared;
+                      opts.OutputKindFromFlag = true; continue; }
     if (a == "--emit-docs") { opts.Output = OutputKind::Docs;
                       opts.OutputKindFromFlag = true; continue; }
     if (a == "--check") { opts.Output = OutputKind::None;
@@ -148,6 +168,7 @@ int runCompilerMain(int argc, char **argv) {
       opts.LinkArgs.push_back(needsValue(i, "--link-arg"));
       continue;
     }
+    if (a == "--link-cxx") { opts.LinkCxx = true; continue; }
     if (a == "--safety") {
       std::string v = needsValue(i, "--safety");
       if (!parseSafety(v, opts.Safety)) {
@@ -177,7 +198,16 @@ int runCompilerMain(int argc, char **argv) {
     if (a.rfind("-L", 0) == 0 && a.size() > 2) { opts.LinkPaths.push_back(a.substr(2)); continue; }
     if (a.rfind("-l", 0) == 0 && a.size() > 2) { opts.LinkLibraries.push_back(a.substr(2)); continue; }
     if (a == "--module") { opts.ModuleName = needsValue(i, "--module"); continue; }
-    if (a == "--cfg") { opts.ConfigFlags.push_back(needsValue(i, "--cfg")); continue; }
+    if (a == "--cfg") {
+      std::string v = needsValue(i, "--cfg");
+      // `--cfg name` sets a name; `--cfg key=value` gives a key a value.
+      size_t eq = v.find('=');
+      if (eq == std::string::npos)
+        opts.ConfigFlags.push_back(v);
+      else
+        opts.ConfigValues.push_back({v.substr(0, eq), v.substr(eq + 1)});
+      continue;
+    }
     if (a == "--no-stdlib") { opts.NoStdlib = true; continue; }
     if (a == "--stdlib") { opts.StdlibDir = needsValue(i, "--stdlib"); continue; }
     if (a == "--runtime-dir") {
@@ -186,6 +216,50 @@ int runCompilerMain(int argc, char **argv) {
     }
     if (a == "--color") { opts.ForceColor = true; continue; }
     if (a == "--no-color") { opts.NoColor = true; continue; }
+    if (a == "--source") {
+      std::string v = needsValue(i, "--source");
+      size_t eq = v.find('=');
+      if (eq == std::string::npos || eq == 0 || eq + 1 == v.size()) {
+        std::cerr << "runec: --source takes <path>=<file>\n";
+        return 2;
+      }
+      opts.SourceOverrides[v.substr(0, eq)] = v.substr(eq + 1);
+      continue;
+    }
+    if (a == "--query-members") {
+      // <file>:<start>:<end>, split from the right: a path may hold a `:`.
+      std::string v = needsValue(i, "--query-members");
+      size_t b = v.rfind(':');
+      size_t a2 = b == std::string::npos ? b : v.rfind(':', b - 1);
+      if (a2 == std::string::npos || a2 == 0) {
+        std::cerr << "runec: --query-members takes <file>:<start>:<end>\n";
+        return 2;
+      }
+      opts.QueryFile = v.substr(0, a2);
+      opts.QueryStart = static_cast<uint32_t>(std::strtoul(v.c_str() + a2 + 1, nullptr, 10));
+      opts.QueryEnd = static_cast<uint32_t>(std::strtoul(v.c_str() + b + 1, nullptr, 10));
+      opts.Output = OutputKind::None;
+      opts.OutputKindFromFlag = true;
+      continue;
+    }
+    if (a == "--query-hints") {
+      opts.QueryFile = needsValue(i, "--query-hints");
+      opts.QueryHints = true;
+      opts.Output = OutputKind::None;
+      opts.OutputKindFromFlag = true;
+      continue;
+    }
+    if (a == "--diagnostic-format") {
+      std::string v = needsValue(i, "--diagnostic-format");
+      opts.JsonDiagnostics = v == "json";
+      opts.ShortDiagnostics = v == "short";
+      if (v != "json" && v != "human" && v != "short") {
+        std::cerr << "runec: --diagnostic-format takes 'human', 'json' or 'short', not '"
+                  << v << "'\n";
+        return 2;
+      }
+      continue;
+    }
     if (a == "-Werror") { opts.WarningsAsErrors = true; continue; }
     if (a == "-w") { opts.NoWarnings = true; continue; }
     if (a == "--error-limit") { opts.ErrorLimit = static_cast<unsigned>(atoi(needsValue(i, "--error-limit"))); continue; }

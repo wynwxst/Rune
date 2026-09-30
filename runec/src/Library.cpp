@@ -9,7 +9,7 @@ namespace rune {
 namespace {
 
 constexpr char kMagic[8] = {'R', 'U', 'N', 'E', 'L', 'I', 'B', '\1'};
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 
 void putU32(std::ostream &os, uint32_t v) {
   char b[4] = {static_cast<char>(v & 0xFF), static_cast<char>((v >> 8) & 0xFF),
@@ -62,7 +62,8 @@ std::string publicInterfaceOf(const std::string &source) {
 bool writeLibrary(const std::string &path, const std::string &objectPath,
                   const std::string &moduleName,
                   const std::vector<std::pair<std::string, std::string>> &units,
-                  MemoryMode memory, DiagnosticEngine &diags) {
+                  MemoryMode memory, const CompilerOptions &opts,
+                  DiagnosticEngine &diags) {
   std::ifstream obj(objectPath, std::ios::binary);
   if (!obj) {
     diags.fatal("cannot read the object file '{}'", objectPath);
@@ -82,6 +83,20 @@ bool writeLibrary(const std::string &path, const std::string &objectPath,
   putU32(out, memory == MemoryMode::Zombie ? 1u : 0u);
   putU32(out, static_cast<uint32_t>(moduleName.size()));
   out.write(moduleName.data(), static_cast<std::streamsize>(moduleName.size()));
+  // The conditions this library was built under, so an importer reading its
+  // interface answers them the same way.
+  putU32(out, static_cast<uint32_t>(opts.ConfigFlags.size()));
+  for (const std::string &flag : opts.ConfigFlags) {
+    putU32(out, static_cast<uint32_t>(flag.size()));
+    out.write(flag.data(), static_cast<std::streamsize>(flag.size()));
+  }
+  putU32(out, static_cast<uint32_t>(opts.ConfigValues.size()));
+  for (const auto &kv : opts.ConfigValues) {
+    putU32(out, static_cast<uint32_t>(kv.first.size()));
+    out.write(kv.first.data(), static_cast<std::streamsize>(kv.first.size()));
+    putU32(out, static_cast<uint32_t>(kv.second.size()));
+    out.write(kv.second.data(), static_cast<std::streamsize>(kv.second.size()));
+  }
   putU32(out, static_cast<uint32_t>(units.size()));
   for (const auto &unit : units) {
     putU32(out, static_cast<uint32_t>(unit.first.size()));
@@ -126,6 +141,37 @@ bool readLibrary(const std::string &path, LibraryContents &out,
   if (!getU32(in, nameLen) || !getBytes(in, nameLen, out.ModuleName)) {
     diags.fatal("'{}' is truncated", path);
     return false;
+  }
+  uint32_t flagCount = 0;
+  if (!getU32(in, flagCount)) {
+    diags.fatal("'{}' is truncated", path);
+    return false;
+  }
+  out.ConfigFlags.clear();
+  for (uint32_t i = 0; i < flagCount; ++i) {
+    uint32_t len = 0;
+    std::string flag;
+    if (!getU32(in, len) || !getBytes(in, len, flag)) {
+      diags.fatal("'{}' is truncated", path);
+      return false;
+    }
+    out.ConfigFlags.push_back(std::move(flag));
+  }
+  uint32_t valueCount = 0;
+  if (!getU32(in, valueCount)) {
+    diags.fatal("'{}' is truncated", path);
+    return false;
+  }
+  out.ConfigValues.clear();
+  for (uint32_t i = 0; i < valueCount; ++i) {
+    uint32_t keyLen = 0, valueLen = 0;
+    std::string key, value;
+    if (!getU32(in, keyLen) || !getBytes(in, keyLen, key) ||
+        !getU32(in, valueLen) || !getBytes(in, valueLen, value)) {
+      diags.fatal("'{}' is truncated", path);
+      return false;
+    }
+    out.ConfigValues.push_back({std::move(key), std::move(value)});
   }
   uint32_t units = 0;
   if (!getU32(in, units)) {

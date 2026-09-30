@@ -1,0 +1,53 @@
+// FLAGS: --cfg backend=metal --cfg api_level=3 --cfg fast=true --cfg tracing
+// EXPECT: backend metal
+// EXPECT: level three
+// EXPECT: mode fast
+// EXPECT: tracing on
+// EXPECT: target known
+//
+// `@Config` compares a key against a value. The keys are the ones the build
+// knows — `os`, `arch`, `memory` and the rest — plus whatever a package
+// declares in `[config]` and its dependents choose, which arrive as
+// `--cfg key=value`. A name with no value is still written on its own.
+//
+// The value may be a string, a number, a boolean or a bare word, and `=`
+// reads as the comparison it can only be.
+import std::io
+
+@Config(backend == metal)
+fn backendName() -> String { "metal" }
+
+@Config(backend != metal)
+fn backendName() -> String { "other" }
+
+@Config(api_level == 3)
+fn level() -> String { "three" }
+
+@Config(api_level != 3)
+fn level() -> String { "other" }
+
+@Config(fast = true)
+fn mode() -> String { "fast" }
+
+@Config(fast = false)
+fn mode() -> String { "slow" }
+
+@Config(tracing)
+fn tracing() -> String { "on" }
+
+@Config(!tracing)
+fn tracing() -> String { "off" }
+
+/// The builtin keys still answer for themselves, and a `[config]` entry
+/// cannot tell them otherwise.
+@Config(os == "windows" || os == "macos" || os == "linux" || family == "unix")
+fn target() -> String { "known" }
+
+fn main() -> i64 {
+    io::println("backend " + backendName())
+    io::println("level " + level())
+    io::println("mode " + mode())
+    io::println("tracing " + tracing())
+    io::println("target " + target())
+    0
+}

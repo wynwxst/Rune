@@ -1,0 +1,20 @@
+@type(Macros)
+import std::{io, Macro}
+
+@macro
+pub fn my_macro(tokens: Macro::Tokens) -> Macro::Tokens {
+    /*for token in tokens { 
+        println!("{}: {}",token.kind(), token.text())
+    } implement this later , add expect as well*/
+
+    for i in 0..tokens.length() {
+        token = tokens.at(i)
+        println!("{}: {}",token.kind(), token.text())
+    }
+
+    iterator = tokens.at(tokens.length()-1)
+    
+    Macro::parse(format!("""
+    {}
+    """, iterator.text()))
+}

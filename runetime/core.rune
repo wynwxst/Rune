@@ -27,6 +27,11 @@ extern "C" {
     // The weak table is the one piece of runtime state every thread shares.
     fn rune_weak_lock()
     fn rune_weak_unlock()
+    // The teardown queue, which is what keeps destroying a long structure
+    // from needing a stack frame per link. Thread-local, so it lives in C.
+    fn rune_teardown_enter(obj: *var u8) -> i32
+    fn rune_teardown_next() -> *var u8
+    fn rune_teardown_leave()
 }
 
 //===--------------------------------------------------------------------===//
@@ -244,9 +249,29 @@ pub fn releaseShared(obj: *var u8) {
 @safe("reached only by the release that took the count to zero")
 fn teardown(obj: *var u8, o: *var Object) {
 
-    // Empty every weak reference aimed at this object before the memory goes.
+    // Empty every weak reference aimed at this object before the memory goes
+    // — and before it is queued, so nothing can find it in between.
     weakClearTarget(obj)
 
+    // A destruction reached from inside another one is queued rather than
+    // nested: the outermost call drains the queue below. That is what lets a
+    // hundred-thousand-link list be given back on an ordinary stack.
+    if unsafe { rune_teardown_enter(obj) } == 0 { return }
+
+    destroyOne(obj)
+    loop {
+        let next = unsafe { rune_teardown_next() }
+        if isNull(next) { break }
+        destroyOne(next)
+    }
+    unsafe { rune_teardown_leave() }
+}
+
+/// One object: its `deinit`, then its memory. Whatever the `deinit` lets go
+/// of is queued by the `teardown` above rather than destroyed here.
+@safe("the object's count is zero, so this is its one destruction")
+fn destroyOne(obj: *var u8) {
+    let o = unsafe { obj as *var Object }
     // The class's own teardown: user `deinit`, then field releases, then the
     // superclass's. The compiler generated it; this just calls it.
     let info = unsafe { o[0].typeinfo }

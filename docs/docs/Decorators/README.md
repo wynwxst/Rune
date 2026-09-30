@@ -37,3 +37,4 @@ argument   ::= expression | identifier ":" expression
 - [`@type`: what a file produces](type_what_a_file_produces.md)
 - [`@link` and `@linkpath`: what a file needs](link_and_linkpath_what_a_file_needs.md)
 - [Exporting to C](exporting_to_c.md)
+- [Spelling and placement](spelling_and_placement.md)

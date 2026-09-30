@@ -121,6 +121,14 @@ void Sema::checkReflectionCall(CallExpr *c, FunctionDecl *fn) {
     Type *m = fn->TypeArguments.size() > 1 ? fn->TypeArguments[1] : nullptr;
     if (!m || m->isError())
       return;
+    // The answer is worked out here, where conformance is known — a `bind`,
+    // a structural one, an automatic mark — rather than in the code
+    // generator, which can only see the bindings written on the type.
+    if ((m->is(TypeKind::Mark) || m->is(TypeKind::DynMark)) &&
+        !fn->TypeArguments.empty() && fn->TypeArguments[0] &&
+        !fn->TypeArguments[0]->isError())
+      if (auto *mk = dyn_cast<MarkDecl>(static_cast<Decl *>(m->nominal())))
+        c->ReflectAnswer = typeConformsTo(fn->TypeArguments[0], mk) ? 1 : 0;
     if (!m->is(TypeKind::Mark) && !m->is(TypeKind::DynMark))
       Diags.error(c->Range,
                   "the second type argument of `conforms` has to be a mark")
@@ -409,6 +417,16 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
   case NodeKind::TypeTest: {
     auto *tt = cast<TypeTestExpr>(e);
     Type *ot = checkExpr(tt->Operand.get(), nullptr);
+    // A borrowed object is tested as the object: `item is i64` on an item a
+    // container lends.
+    while (ot->is(TypeKind::Pointer) && !ot->isRawPointer() &&
+           !ot->isWeakPointer() && ot->pointee()) {
+      auto d = std::make_unique<DerefExpr>();
+      d->Range = tt->Operand->Range;
+      d->Operand = std::move(tt->Operand);
+      tt->Operand = std::move(d);
+      ot = checkExpr(tt->Operand.get(), nullptr);
+    }
     Type *target = resolveTypeOrError(tt->TargetType.get(), Types.errorType());
     if (!ot->isError() && !target->isError()) {
       bool bothClasses = ot->is(TypeKind::Class) && target->is(TypeKind::Class);
@@ -437,7 +455,10 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
   case NodeKind::Borrow: {
     auto *b = cast<BorrowExpr>(e);
     Type *inner = checkExpr(b->Operand.get(), nullptr);
-    if (!isLValue(b->Operand.get())) {
+    // A string literal is interned once and never freed, so `&"text"` is a
+    // borrow of something that outlives everything — as safe as it reads.
+    bool literal = isa<StringLitExpr>(b->Operand.get()) && !b->IsMutable;
+    if (!isLValue(b->Operand.get()) && !literal) {
       Diags.error(b->Operand->Range, "cannot borrow a temporary value")
           .note("bind it to a name first, then borrow that")
           .code(304);
@@ -525,6 +546,8 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
     Type *want = f ? f->ReturnType : Types.voidType();
     if (r->Value) {
       Type *got = checkExpr(r->Value.get(), want);
+      if (insertImplicitConversion(r->Value, got, want))
+        got = r->Value->Ty;
       requireConvertible(r->Value.get(), got, want, "this `return`");
     } else if (want && !want->isVoid() && !want->isError()) {
       auto d = Diags.error(e->Range, "expected '{}' — got '()'",
@@ -711,8 +734,44 @@ Type *Sema::checkBlock(BlockExpr *b, Type *expected) {
 // Names
 //===----------------------------------------------------------------------===//
 
+/// `.name` where the context says nothing, or says a type with no such
+/// member. Both are worth different words.
+Type *Sema::reportInferredPathFailure(DeclRefExpr *r, Type *expected) {
+  const std::string &name = r->Path.empty() ? std::string() : r->Path[0];
+  if (!expected || expected->isError()) {
+    auto d = Diags.error(r->Range,
+                         "nothing here says which type '.{}' belongs to",
+                         name);
+    d.note("a leading `.` names something on the type the context expects, "
+           "and this place expects nothing in particular");
+    d.note(fmt("write the type out: `Type::{}`", name).c_str());
+    d.code(204);
+    return Types.errorType();
+  }
+  auto d = Diags.error(r->Range, "'{}' has no '{}'", expected->toString(),
+                       name);
+  d.note(fmt("`.{}` names something on '{}', which is the type wanted here",
+             name, expected->toString())
+             .c_str());
+  d.code(204);
+  if (expected->isNominal() && expected->nominal())
+    noteDeclaredAt(d, static_cast<Decl *>(expected->nominal()),
+                   "declared here", "no member of that name");
+  return Types.errorType();
+}
+
 Type *Sema::checkDeclRef(DeclRefExpr *r, Type *expected) {
-  Symbol *sym = lookupPath(r->Path, r->Range, /*quiet=*/false);
+  Symbol *sym = resolveInferredPath(r, expected);
+  if (!sym && r->FromInferredType)
+    return reportInferredPathFailure(r, expected);
+  if (!sym)
+    sym = lookupPath(r->Path, r->Range, /*quiet=*/true);
+  // A bare name two enums both claim is settled by what the context wants,
+  // which is the usual case once one enum inherits from another.
+  if (!sym && r->Path.size() == 1)
+    sym = variantOfExpected(r->Path[0], expected);
+  if (!sym)
+    sym = lookupPath(r->Path, r->Range, /*quiet=*/false);
   if (!sym)
     return Types.errorType();
 
@@ -905,6 +964,19 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
       return lt;
     }
     Type *elem = optionPayload(lt);
+    // `v.peek(i) ?? -1`: a lent number defaults to a number. The borrow is
+    // read through, as `let n: i64 = r` would, when the default is plain
+    // data of the type it points at.
+    if (elem && elem->is(TypeKind::Pointer) && !elem->isRawPointer() &&
+        !elem->isMutablePointer() && elem->pointee() &&
+        isImplicitlyConvertible(elem, elem->pointee())) {
+      Diags.beginSpeculation();
+      Type *probe = checkExpr(b->RHS.get(), elem->pointee());
+      Diags.endSpeculation();
+      if (!probe->isError() && !isImplicitlyConvertible(probe, elem) &&
+          isImplicitlyConvertible(probe, elem->pointee()))
+        elem = elem->pointee();
+    }
     Type *rt = checkExpr(b->RHS.get(), elem);
     requireConvertible(b->RHS.get(), rt, elem, "the default of `??`");
     return elem;
@@ -927,10 +999,32 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
   // and the rest as the value it points at: `*` is read for the program,
   // since nothing else could be meant. (An overloaded operator on a `&T`
   // is looked for first — below — so this only applies to the builtins.)
-  auto autoDeref = [&](ExprPtr &side, Type *&t) {
+  // A borrow of a borrow — an item of a borrowing iterator handed to a
+  // predicate, `&&i64` — reads through as many as there are.
+  std::function<void(ExprPtr &, Type *&)> autoDeref = [&](ExprPtr &side,
+                                                         Type *&t) {
     if (!t->is(TypeKind::Pointer) || t->isRawPointer() || t->isWeakPointer())
       return;
     Type *inner = t->pointee();
+    if (inner && inner->is(TypeKind::Pointer) && !inner->isRawPointer() &&
+        !inner->isWeakPointer()) {
+      Type *base = inner;
+      while (base->is(TypeKind::Pointer) && !base->isRawPointer() &&
+             !base->isWeakPointer() && base->pointee())
+        base = base->pointee();
+      if (!(base->isNumeric() || base->isBool() || base->is(TypeKind::Char) ||
+            base->is(TypeKind::String)))
+        return;
+      auto d = std::make_unique<DerefExpr>();
+      d->Range = side->Range;
+      d->Ty = inner;
+      d->Category = ValueCategory::LValue;
+      d->Operand = std::move(side);
+      side = std::move(d);
+      t = inner;
+      autoDeref(side, t);
+      return;
+    }
     if (!inner || !(inner->isNumeric() || inner->isBool() ||
                     inner->is(TypeKind::Char) || inner->is(TypeKind::String)))
       return;
@@ -967,6 +1061,19 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
   }
 
   if (comparison) {
+    // A class instance compares by identity — two names for one object — but
+    // a class that says what comparing it means gets the last word. The
+    // overload is looked for before the reference comparison below, so
+    // `bind operator::eq to Handle<T>` is what `h == g` runs.
+    if (lt->is(TypeKind::Class) || rt->is(TypeKind::Class)) {
+      if (const char *m = binaryOpMarkMethod(b->Op)) {
+        if (FunctionDecl *impl = lookupOperator(lt, m, rt)) {
+          b->OverloadResolved = impl;
+          ensureTemplateSignature(impl);
+          return Types.boolType();
+        }
+      }
+    }
     bool comparable = (lt->isNumeric() && rt->isNumeric()) ||
                       (lt->isBool() && rt->isBool()) ||
                       (lt->is(TypeKind::Char) && rt->is(TypeKind::Char)) ||
@@ -1067,15 +1174,40 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
 }
 
 Type *Sema::checkAssign(AssignExpr *a) {
+  // Anything on the way down to the place being written may have to be
+  // borrowed mutably rather than read: a `Box` in the middle of the chain
+  // lends with `touch` rather than `look`. `onWriteSpine` is how the member
+  // check asks whether it is on that path.
+  struct SpineGuard {
+    const Expr *&Slot;
+    const Expr *Saved;
+    ~SpineGuard() { Slot = Saved; }
+  } spine{WriteSpine, WriteSpine};
+  WriteSpine = a->LHS.get();
+
   // Assigning to a local that was moved out of gives it something to hold
-  // again, so the name goes back into service. The check happens before the
-  // left side is looked at, since looking at it is what would complain.
+  // again, so the name goes back into service. This happens before the left
+  // side is looked at, since looking at it is what would complain — and
+  // again *after* the whole assignment, because the right-hand side may be
+  // what moved out of it: `running = combine(running, value)` hands the old
+  // value on and puts a new one back, and the name holds that one.
+  VarDecl *restored = nullptr;
   if (a->Op == AssignOp::Assign)
     if (auto *ref = dyn_cast<DeclRefExpr>(a->LHS.get()))
       if (ref->Path.size() == 1)
         if (Symbol *sym = lookupPath(ref->Path, ref->Range, /*quiet=*/true))
-          if (auto *v = sym->D ? dyn_cast<VarDecl>(sym->D) : nullptr)
+          if (auto *v = sym->D ? dyn_cast<VarDecl>(sym->D) : nullptr) {
             MovedFrom.erase(v);
+            restored = v;
+          }
+  struct RestoreGuard {
+    std::map<VarDecl *, Expr *> &Moved;
+    VarDecl *V;
+    ~RestoreGuard() {
+      if (V)
+        Moved.erase(V);
+    }
+  } restoreGuard{MovedFrom, restored};
 
   // `x = value` introduces `x` when nothing of that name is in scope.
   if (a->Op == AssignOp::Assign) {
@@ -1192,6 +1324,12 @@ Type *Sema::checkAssign(AssignExpr *a) {
         if (++seen == 2)
           want = p.Ty;
       }
+      // A container whose `index` lends the element — `-> &T from self` —
+      // and whose `indexSet` takes one by value agrees on the element: the
+      // read is a borrow of what the write replaces.
+      if (want && lt && lt->is(TypeKind::Pointer) && !lt->isRawPointer() &&
+          !lt->isMutablePointer() && lt->pointee() == want)
+        lt = want;
       if (want && lt && want != lt && !want->isError() && !lt->isError()) {
         auto d = Diags.error(a->Range, "`[]` reads '{}' here but writes '{}'",
                              lt->toString(), want->toString());
@@ -1206,10 +1344,19 @@ Type *Sema::checkAssign(AssignExpr *a) {
   }
 
   if (!a->DerefSetImpl && !a->IndexSetImpl && !isLValue(a->LHS.get())) {
-    Diags.error(a->LHS->Range, "cannot assign to this expression")
-        .note("the left side of an assignment must be a variable, field, "
-              "element or dereference")
-        .code(330);
+    auto *ix = dyn_cast<IndexExpr>(a->LHS.get());
+    if (ix && ix->StringChar) {
+      Diags.error(a->LHS->Range, "cannot assign into a String")
+          .note("`text[i]` reads a character out of the UTF-8; the "
+                "characters are not slots. Build a new String instead, "
+                "walking the old one with `for c in text`")
+          .code(330);
+    } else {
+      Diags.error(a->LHS->Range, "cannot assign to this expression")
+          .note("the left side of an assignment must be a variable, field, "
+                "element or dereference")
+          .code(330);
+    }
     checkExpr(a->RHS.get(), lt);
     return Types.voidType();
   }
@@ -1227,13 +1374,20 @@ Type *Sema::checkAssign(AssignExpr *a) {
         for (const Capture &cap : fc->Closure->Captures)
           if (cap.Var == v)
             captured = true;
-        if (captured) {
+        // An `async fn`'s parameters are captured into its task, and the
+        // task is the only place they are ever read: assigning to one is
+        // the ordinary thing, not a copy going astray.
+        bool asyncParam = fc->Closure->IsAsyncBody && v->IsParam;
+        if (captured && !asyncParam) {
+          bool task = fc->Closure->IsAsyncBody;
           auto w = Diags.warn(a->Range,
-                              "assigning to '{}' only changes the closure's "
+                              "assigning to '{}' only changes the {}'s "
                               "own copy",
-                              v->Name);
-          w.note("captures are copied when the closure is made, so the "
-                 "enclosing scope will not see this")
+                              v->Name, task ? "task" : "closure");
+          w.note(task ? "captures are copied when the task is started, so "
+                        "the enclosing scope will not see this"
+                      : "captures are copied when the closure is made, so "
+                        "the enclosing scope will not see this")
               .note("to share one value, capture a class — "
                     "`let total = mem::of(0)` then `*total += v`")
               .code(234);
@@ -1246,6 +1400,8 @@ Type *Sema::checkAssign(AssignExpr *a) {
 
   if (a->Op == AssignOp::Assign) {
     Type *rt = checkExpr(a->RHS.get(), lt);
+    if (insertImplicitConversion(a->RHS, rt, lt))
+      rt = a->RHS->Ty;
     requireConvertible(a->RHS.get(), rt, lt, "this assignment");
     return Types.voidType();
   }
@@ -1307,6 +1463,136 @@ Type *Sema::checkAssign(AssignExpr *a) {
 //===----------------------------------------------------------------------===//
 // Member access and indexing
 //===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// Reaching through a stand-in
+//
+// A `Handle`, a `Box`, an `Rc` — anything that holds a value and lends it —
+// answers `.` with the value's own members. What makes a type one of these is
+// that it lends: a `look(&self) -> &T from self` to read the value where it
+// lies, and a `touch(&var self) -> &var T from self` to write it. Those two
+// names are the standard library's own convention, and this is where the
+// language takes them at their word.
+//
+// It can never hide anything. The reach-through only runs once the member has
+// *not* been found on the stand-in itself, so a `Box` with a `length` of its
+// own keeps it, and only a name it does not have goes through to the value.
+//===----------------------------------------------------------------------===//
+
+FunctionDecl *Sema::pointeeAccessor(Type *receiver, bool wantMutable) {
+  if (!receiver || !receiver->isNominal())
+    return nullptr;
+  FunctionDecl *fn = lookupMethod(receiver, wantMutable ? "touch" : "look");
+  if (!fn || !fn->Body)
+    return nullptr;
+  ensureTemplateSignature(fn);
+  if (!fn->Ty)
+    return nullptr;
+  // No arguments, a `self` to lend from, and a borrow of something else as
+  // the result. A `look` that takes an index or hands back a value is some
+  // other method that happens to share the name.
+  bool hasSelf = false;
+  for (const Param &p : fn->Params) {
+    if (p.IsSelf) {
+      hasSelf = true;
+      continue;
+    }
+    if (!p.DefaultValue)
+      return nullptr;
+  }
+  if (!hasSelf)
+    return nullptr;
+  Type *result = fn->Ty->result();
+  if (!result || !result->is(TypeKind::Pointer) || result->isRawPointer() ||
+      result->isWeakPointer())
+    return nullptr;
+  if (result->isMutablePointer() != wantMutable)
+    return nullptr;
+  Type *target = result->pointee();
+  if (!target || target->isError() || target == receiver)
+    return nullptr;
+  return fn;
+}
+
+bool Sema::onWriteSpine(const Expr *e) const {
+  const Expr *cur = WriteSpine;
+  for (unsigned steps = 0; cur && steps < 64; ++steps) {
+    if (cur == e)
+      return true;
+    if (const auto *mem = dyn_cast<MemberExpr>(cur)) {
+      cur = mem->Base.get();
+      continue;
+    }
+    if (const auto *idx = dyn_cast<IndexExpr>(cur)) {
+      cur = idx->Base.get();
+      continue;
+    }
+    if (const auto *deref = dyn_cast<DerefExpr>(cur)) {
+      cur = deref->Operand.get();
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+Type *Sema::reachThroughPointee(MemberExpr *m, Type *expected, bool forCall) {
+  if (PointeeDepth > 8 || !m->Base || !m->Base->Ty)
+    return nullptr;
+  Type *recv = m->Base->Ty;
+  while (recv && recv->is(TypeKind::Pointer) && !recv->isRawPointer() &&
+         recv->pointee())
+    recv = recv->pointee();
+
+  // Reading is the default; writing is asked for by the two things that
+  // actually write — an assignment whose left-hand side runs through here,
+  // and a method that takes `&var self`.
+  bool wantMutable = onWriteSpine(m);
+  FunctionDecl *acc = pointeeAccessor(recv, /*wantMutable=*/false);
+  if (!acc)
+    return nullptr;
+  if (!wantMutable) {
+    Type *target = acc->Ty->result()->pointee();
+    if (FunctionDecl *cand = lookupMethod(target, m->Name)) {
+      ensureTemplateSignature(cand);
+      for (const Param &p : cand->Params) {
+        if (!p.IsSelf)
+          continue;
+        // `&var self` is a mutable borrow however it is represented: a
+        // pointer for a value type, and for a class the written form is what
+        // says so, since a class reference is already a pointer.
+        if (p.SelfMutable ||
+            (p.Ty && p.Ty->is(TypeKind::Pointer) && p.Ty->isMutablePointer()))
+          wantMutable = true;
+      }
+    }
+  }
+  if (wantMutable) {
+    if (FunctionDecl *mut = pointeeAccessor(recv, /*wantMutable=*/true))
+      acc = mut;
+    else
+      wantMutable = false;
+  }
+
+  // `base` becomes `base.look()` (or `base.touch()`), and the member is
+  // looked for again on what that lends.
+  auto through = std::make_unique<MemberExpr>();
+  through->Range = m->Base->Range;
+  through->NameRange = m->Base->Range;
+  through->Name = wantMutable ? "touch" : "look";
+  through->Base = std::move(m->Base);
+  auto call = std::make_unique<CallExpr>();
+  call->Range = through->Range;
+  call->ParenRange = through->Range;
+  call->Callee = std::move(through);
+  call->PointeeAccess = true;
+  m->Base = std::move(call);
+
+  ++PointeeDepth;
+  Type *result = checkMember(m, expected, forCall);
+  --PointeeDepth;
+  return result;
+}
 
 Type *Sema::checkMember(MemberExpr *m, Type *expected, bool forCall) {
   const bool isSuper = isa<SuperExpr>(m->Base.get());
@@ -1405,9 +1691,28 @@ Type *Sema::checkMember(MemberExpr *m, Type *expected, bool forCall) {
     return Types.errorType();
   }
 
+  // `$clone()` copies a value of the type it is written against. Inside an
+  // instantiation that type may itself be a borrow — `Option<&T>` cloning its
+  // payload, a `T` that is `&Box<i64>` — and then the copy is of the borrow,
+  // not of what it points at. So the receiver is looked through only as far
+  // as the borrow it arrived in: a value whose type is exactly what a type
+  // parameter stands for is not looked through at all, and a borrow of a
+  // shared borrow is looked through once.
+  auto sharedBorrow = [](Type *t) {
+    return t->is(TypeKind::Pointer) && !t->isRawPointer() &&
+           !t->isWeakPointer() && !t->isMutablePointer();
+  };
+  bool cloneOfBorrow = false;
+  if (m->IsIntrinsic && m->Name == "clone" && sharedBorrow(base))
+    for (const auto &bound : ActiveGenericParams)
+      cloneOfBorrow = cloneOfBorrow || bound.second == base;
+
   // Look through borrows so `(&point).x` and `point.x` behave the same.
   Type *recv = base;
-  while (recv->is(TypeKind::Pointer)) {
+  while (recv->is(TypeKind::Pointer) && !cloneOfBorrow) {
+    if (m->IsIntrinsic && m->Name == "clone" && recv != base &&
+        sharedBorrow(recv))
+      break;
     if (recv->isRawPointer())
       reportUnsafe(m->Range, "field access through a raw pointer",
                    "wrap it in `unsafe { ... }`, or mark the function @unsafe");
@@ -1551,6 +1856,12 @@ Type *Sema::checkMember(MemberExpr *m, Type *expected, bool forCall) {
       noteDeclaredAt(d, method, "declared here", "methods are not values yet");
       return Types.errorType();
     }
+    // A method with a `where` of its own exists only for the instantiations
+    // that meet it; the bound that is not met is the error.
+    if (!methodWhereHolds(method, m->NameRange, /*report=*/false)) {
+      methodWhereHolds(method, m->NameRange, /*report=*/true);
+      return Types.errorType();
+    }
     // A method taking `&self` needs the receiver's address.
     for (const Param &p : method->Params)
       if (p.IsSelf && p.SelfByRef && !recv->isPointerLike() &&
@@ -1558,6 +1869,26 @@ Type *Sema::checkMember(MemberExpr *m, Type *expected, bool forCall) {
         m->NeedsAddressOfBase = true;
     return method->Ty ? method->Ty : Types.errorType();
   }
+
+  // `value.await` on something that is not a future. The `await` method is
+  // `Future`'s alone, so this is the one way to reach here with the flag.
+  if (m->IsAwait) {
+    auto d = Diags.error(m->NameRange, "`.await` needs a `Future`, and this "
+                                       "is a '{}'",
+                         recv->toString());
+    d.note("only calling an `async fn`, `task::spawn`, `task::sleep`, "
+           "`task::blocking` or `task::pending` makes one");
+    if (recv->is(TypeKind::Function) || recv->is(TypeKind::CFunction))
+      d.note("this is a function, not the result of calling it — write "
+             "`f().await`, not `f.await`");
+    d.code(285);
+    return Types.errorType();
+  }
+
+  // Nothing of that name on this type — but the type may be standing in for
+  // another, in which case the member belongs to what it holds.
+  if (Type *through = reachThroughPointee(m, expected, forCall))
+    return through;
 
   // A field holding a function can be called too.
   auto d = Diags.error(m->NameRange, "'{}' has no member named '{}'",
@@ -1655,12 +1986,26 @@ Type *Sema::checkIndex(IndexExpr *i, Type *expected) {
   }
 
   if (recv->is(TypeKind::String)) {
-    checkExpr(i->Index.get(), Types.i64());
-    Diags.error(i->Range, "String cannot be indexed directly")
-        .note("UTF-8 is variable width; use `.at(i)` for a Character or "
-              "`.byteAt(i)` for a raw byte")
-        .code(351);
-    return Types.errorType();
+    // `text[i]` is the i-th *character*, however wide the ones before it
+    // were — the read `text.$at(i)` makes, spelled as a subscript. It is a
+    // value: a String's characters are not slots, so there is nothing to
+    // assign into, and `text[i] = c` is refused where assignments are.
+    if (isa<RangeExpr>(i->Index.get())) {
+      checkExpr(i->Index.get(), nullptr);
+      Diags.error(i->Range, "a String cannot be sliced with `[a..b]`")
+          .note("use `text.$substring(a, b)`, which copies the characters "
+                "between the two")
+          .code(351);
+      return Types.errorType();
+    }
+    Type *idx = checkExpr(i->Index.get(), Types.i64());
+    if (!idx->isInt() && !idx->isError())
+      Diags.error(i->Index->Range, "expected an integer index — got '{}'",
+                  idx->toString())
+          .code(350);
+    i->StringChar = true;
+    i->Category = ValueCategory::RValue;
+    return Types.charType();
   }
 
   std::vector<FunctionDecl *> indexers = operatorOverloads(recv, "index");
@@ -1687,7 +2032,7 @@ Type *Sema::checkIndex(IndexExpr *i, Type *expected) {
     Type *idx = checkExpr(i->Index.get(), want);
     if (want)
       requireConvertible(i->Index.get(), idx, want, "this index");
-    return impl->Ty ? impl->Ty->result() : Types.errorType();
+    return indexResult(i, impl);
   }
 
   if (FunctionDecl *impl = lookupOperator(recv, "index")) {
@@ -1700,7 +2045,7 @@ Type *Sema::checkIndex(IndexExpr *i, Type *expected) {
     Type *idx = checkExpr(i->Index.get(), want);
     if (want)
       requireConvertible(i->Index.get(), idx, want, "this index");
-    return impl->Ty ? impl->Ty->result() : Types.errorType();
+    return indexResult(i, impl);
   }
 
   checkExpr(i->Index.get(), nullptr);
@@ -1719,6 +2064,38 @@ Type *Sema::checkIndex(IndexExpr *i, Type *expected) {
 // Calls
 //===----------------------------------------------------------------------===//
 
+/// A closure handed to a `@sendable` function runs on another thread, so
+/// what it captured crosses with it. A closure's *type* says nothing about
+/// its captures — two closures of one type may capture different things —
+/// so the check is made here, on the closure as written, and only a closure
+/// written at the call can be checked.
+void Sema::checkSendableClosure(Expr *arg, const std::string &calleeName) {
+  auto *closure = dyn_cast<ClosureExpr>(arg);
+  if (!closure) {
+    Diags.error(arg->Range,
+                "'{}' runs its closure on another thread, so the closure "
+                "has to be written here",
+                calleeName)
+        .note("what a closure captures is only known where it is written; "
+              "write `||(...) { ... }` in the call so its captures can be "
+              "checked for `Send`")
+        .code(295);
+    return;
+  }
+  for (const Capture &cap : closure->Captures) {
+    if (!cap.Ty || cap.Ty->isError() || typeIsThreadSafe(cap.Ty, false))
+      continue;
+    auto d = Diags.error(closure->Range,
+                         "this closure captures '{}', a '{}', which is not "
+                         "`Send` — and it will run on another thread",
+                         cap.Name, cap.Ty->toString());
+    d.note("{}", whyNotThreadSafe(cap.Ty)).code(295);
+    if (cap.Var)
+      d.related(cap.Var->NameRange, fmt("'{}' is captured from here", cap.Name),
+                "give the closure a value it may take with it instead");
+  }
+}
+
 bool Sema::matchCallArguments(CallExpr *c, const std::vector<Param> &params,
                               const std::vector<Type *> &paramTypes,
                               bool variadic, const std::string &calleeName,
@@ -1735,6 +2112,7 @@ bool Sema::matchCallArguments(CallExpr *c, const std::vector<Param> &params,
   std::vector<Expr *> slots(formalCount, nullptr);
   std::vector<Expr *> extras; // variadic tail
   c->ArgOrder.assign(formalCount, static_cast<unsigned>(-1));
+  c->ParamLabels.assign(c->Args.size(), std::string());
   // A place handed to a `&T` parameter is borrowed for the call without an
   // `&` at the call site — the same courtesy a method receiver gets. The
   // argument is rewritten into the borrow it means, so nothing downstream
@@ -1815,6 +2193,8 @@ bool Sema::matchCallArguments(CallExpr *c, const std::vector<Param> &params,
     if (positional < formalCount) {
       slots[positional] = a.Value.get();
       c->ArgOrder[positional] = static_cast<unsigned>(ai);
+      if (positional < formals.size())
+        c->ParamLabels[ai] = formals[positional]->Name;
       ++positional;
     } else if (variadic) {
       extras.push_back(a.Value.get());
@@ -1837,12 +2217,33 @@ bool Sema::matchCallArguments(CallExpr *c, const std::vector<Param> &params,
     if (slots[fi]) {
       Type *got = checkExpr(slots[fi], want);
       got = autoBorrow(fi, got, want);
+      // The parameter says what it wants, so a type that knows how to become
+      // it may do so here without the call site spelling `into`.
+      if (!isImplicitlyConvertible(got, want)) {
+        unsigned ai = fi < c->ArgOrder.size() ? c->ArgOrder[fi]
+                                              : static_cast<unsigned>(-1);
+        if (ai != static_cast<unsigned>(-1) && ai < c->Args.size() &&
+            c->Args[ai].Value.get() == slots[fi] &&
+            insertImplicitConversion(c->Args[ai].Value, got, want)) {
+          slots[fi] = c->Args[ai].Value.get();
+          got = slots[fi]->Ty;
+        }
+      }
+      // C++ wrote `T&` or `Base*`; Rune holds a `*var T` or a `*var Derived`.
+      // Both are the one address C++ expects, so the pointer goes as it is.
+      const auto *calleeFn =
+          calleeDecl ? dyn_cast<FunctionDecl>(calleeDecl) : nullptr;
+      if (isCxxExtern(calleeFn) && cxxPointerConvertible(got, want))
+        continue;
       requireConvertible(slots[fi], got, want,
                          fmt("argument '{}' of '{}'",
                                 fi < formals.size() ? formals[fi]->Name
                                                     : std::to_string(fi),
                                 calleeName)
                              .c_str());
+      if (calleeDecl && calleeDecl->hasAttr("sendable") && want &&
+          want->is(TypeKind::Function))
+        checkSendableClosure(slots[fi], calleeName);
       continue;
     }
     if (fi < formals.size() && formals[fi]->DefaultValue) {
@@ -1867,7 +2268,110 @@ bool Sema::matchCallArguments(CallExpr *c, const std::vector<Param> &params,
   return ok;
 }
 
+namespace {
+/// The expected type for an argument whose formal is written in terms of the
+/// parameters being inferred: what is known of it so far, or nothing.
+///
+/// Inference reads left to right, so by the time a later argument is checked
+/// an earlier one may already have said what a parameter is —
+/// `mem::replace(&var self.head, Link::Empty)` cannot type its second
+/// argument until the first has pinned `T` down to `Link<Item>`. Handing that
+/// type down is what lets a bare variant, an empty collection or an untyped
+/// literal be written there.
+Type *expectedForArgument(TypeContext &types, Type *formal,
+                          const std::map<std::string, Type *> &bindings) {
+  if (!formal)
+    return nullptr;
+  Type *want = types.substitute(formal, bindings);
+  if (!want)
+    return nullptr;
+  if (!want->containsGenericParam())
+    return want;
+  // A function parameter is worth handing down even when its *result* is
+  // still being worked out: `map`'s `@function(Item) -> B` says what the
+  // closure is handed, which is what lets it be written `||(x) { ... }`.
+  // Whoever reads this has to leave the result alone — `checkClosure` does.
+  if (want->is(TypeKind::Function) || want->is(TypeKind::CFunction)) {
+    bool argumentsKnown = !want->params().empty();
+    for (Type *p : want->params())
+      if (!p || p->containsGenericParam())
+        argumentsKnown = false;
+    if (argumentsKnown)
+      return want;
+  }
+  return nullptr;
+}
+} // namespace
+
+/// True when a set of type-parameter bindings makes a call work: every
+/// parameter is answered, every argument converts to what its formal becomes,
+/// and the result converts to where it is going. This is what decides whether
+/// the destination's answer may stand or the arguments' has to.
+bool Sema::fitsCall(FunctionDecl *f, const std::vector<Type *> &formals,
+                    const std::vector<Type *> &argTypes,
+                    const std::map<std::string, Type *> &bindings,
+                    Type *expected) {
+  if (!f || !f->Ty)
+    return false;
+  for (const auto &g : f->Generics)
+    if (!bindings.count(g.Name))
+      return false;
+  for (size_t i = 0; i < formals.size() && i < argTypes.size(); ++i) {
+    if (!argTypes[i] || argTypes[i]->isError())
+      continue;
+    Type *want = Types.substitute(formals[i], bindings);
+    if (want && !want->isError() && !want->containsGenericParam() &&
+        isImplicitlyConvertible(argTypes[i], want))
+      continue;
+    // Substituting into a *named* type rebuilds it, and the rebuilt one is
+    // not the same object as the instantiation the program will use, so a
+    // pointer comparison says no where the shapes agree. Structural
+    // agreement is the honest question, and unification is how it is asked.
+    std::map<std::string, Type *> probe = bindings;
+    if (Types.unify(formals[i], argTypes[i], probe))
+      continue;
+    return false;
+  }
+  if (expected && !expected->isError() && !expected->containsGenericParam()) {
+    // The same question about the result: does what the function says it
+    // hands back agree with where it is going, under these bindings?
+    std::map<std::string, Type *> probe = bindings;
+    if (!Types.unify(f->Ty->result(), expected, probe))
+      return false;
+  }
+  return true;
+}
+
 Type *Sema::checkCall(CallExpr *c, Type *expected) {
+  // A builder block — `Body { Text("hi"); Button {} }` — stands for an
+  // `empty()` and one `add` per item. When the type is not a builder there is
+  // no `empty` to find, and the message should say what was actually written
+  // rather than name a method nobody meant to call.
+  if (c->BuilderSeed) {
+    if (auto *ref = dyn_cast<DeclRefExpr>(c->Callee.get())) {
+      if (!lookupPath(ref->Path, ref->Range, /*quiet=*/true)) {
+        std::string name = ref->Path.size() > 1
+                               ? ref->Path[ref->Path.size() - 2]
+                               : std::string("this");
+        auto d = Diags.error(c->Range,
+                             "'{}' is not a builder, so it cannot be written "
+                             "as a block of values",
+                             name);
+        d.note("a block of values stands for `empty()` and one `add` per "
+               "item, which is what `std::builder::Builder` asks for");
+        d.note(fmt("bind it: `bind builder::Builder to {} {{ type Child = "
+                   "...; fn empty() -> Self {{ ... }} fn add(&var self, "
+                   "child: ...) {{ ... }} }}`",
+                   name)
+                   .c_str());
+        d.note("or, for a struct literal, give each field a name: "
+               "`Name { field: value }`");
+        d.code(367);
+        return Types.errorType();
+      }
+    }
+  }
+
   // --- Method call -------------------------------------------------------
   if (auto *member = dyn_cast<MemberExpr>(c->Callee.get())) {
     Type *ft = checkMember(member, nullptr, /*forCall=*/true);
@@ -1877,6 +2381,12 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
 
     if (member->Builtin != BuiltinMethod::None) {
       c->Builtin = member->Builtin;
+      // A copy the compiler makes itself is only sound when nothing in the
+      // value owns something a second owner would destroy again.
+      if (c->Builtin == BuiltinMethod::Clone)
+        checkClonable(ft->result(),
+                      member->NameRange.isValid() ? member->NameRange
+                                                  : c->Range);
       std::vector<Param> none;
       matchCallArguments(c, none, ft->params(), false, member->Name, c->Range,
                          nullptr);
@@ -1957,17 +2467,37 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
         for (const auto &ga : member->GenericArgs)
           targs.push_back(resolveTypeOrError(ga.get(), Types.errorType()));
       } else {
+        // Same as a free call: where the result is going seeds the
+        // bindings, the arguments are checked against that, and the
+        // arguments win if the two cannot be reconciled.
         std::map<std::string, Type *> bindings;
         std::vector<Type *> formalTypes = method->Ty->params();
+        if (expected && !expected->isError() &&
+            !expected->containsGenericParam())
+          Types.unify(method->Ty->result(), expected, bindings);
+        std::vector<Type *> argTypes(formalTypes.size(), nullptr);
         for (size_t i = 0; i < c->Args.size() && i < formalTypes.size(); ++i) {
-          Type *at = checkExpr(c->Args[i].Value.get(), nullptr);
+          Type *at = checkExpr(
+              c->Args[i].Value.get(),
+              expectedForArgument(Types, formalTypes[i], bindings));
+          argTypes[i] = at;
           Types.unify(formalTypes[i], at, bindings);
+        }
+        if (!fitsCall(method, formalTypes, argTypes, bindings, expected)) {
+          std::map<std::string, Type *> fromArgs;
+          for (size_t i = 0; i < formalTypes.size() && i < argTypes.size(); ++i)
+            if (argTypes[i])
+              Types.unify(formalTypes[i], argTypes[i], fromArgs);
+          if (expected && !expected->isError() && method->Ty)
+            Types.unify(method->Ty->result(), expected, fromArgs);
+          bindings = std::move(fromArgs);
         }
         for (const auto &g : method->Generics) {
           auto it = bindings.find(g.Name);
           if (it == bindings.end()) {
-            // Nothing in the arguments mentions this parameter, so there is
-            // nothing to read it off. The call site has to say.
+            // Nothing in the arguments mentions this parameter, and nothing
+            // about where the result goes settles it either. The call site
+            // has to say.
             Diags.error(c->Range,
                         "cannot infer type argument '{}' for '{}'", g.Name,
                         member->Name)
@@ -2009,12 +2539,59 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
 
   // --- Named callee ------------------------------------------------------
   if (auto *ref = dyn_cast<DeclRefExpr>(c->Callee.get())) {
-    Symbol *sym = lookupPath(ref->Path, ref->Range, /*quiet=*/false);
+    // `Queue<String>::new(...)` names a method of an instantiation, which
+    // has to exist before it can be looked up.
+    Symbol *sym = resolveInferredPath(ref, expected);
+    if (!sym && ref->FromInferredType)
+      return reportInferredPathFailure(ref, expected);
+    if (!sym)
+      sym = lookupStaticOnInstantiation(ref);
+    if (!sym)
+      sym = lookupPath(ref->Path, ref->Range, /*quiet=*/true);
+    if (!sym && ref->Path.size() == 1)
+      sym = variantOfExpected(ref->Path[0], expected);
+    if (!sym)
+      sym = lookupPath(ref->Path, ref->Range, /*quiet=*/false);
     if (!sym)
       return Types.errorType();
 
     // Class construction: `Dog("rex")`
     if (sym->Kind == SymbolKind::TypeName && sym->D) {
+      // Through an alias: `type Table<T> = Vector<T>` then `Table<i64>()`
+      // builds the `Vector<i64>` the alias stands for. The alias is resolved
+      // the way it would be in a type position — arguments and all — and the
+      // construction goes on with what it named.
+      if (isa<TypeAliasDecl>(sym->D)) {
+        NamedTypeRepr named;
+        named.Range = ref->Range;
+        named.NameRange = ref->Range;
+        named.Path = ref->Path;
+        for (const auto &ga : ref->GenericArgs)
+          named.GenericArgs.push_back(cloneTypeRepr(ga.get()));
+        Type *behind = resolveTypeOrError(&named, Types.errorType());
+        named.GenericArgs.clear();   // the clones are owned by this scope
+        if (behind->isError())
+          return behind;
+        if (!behind->isNominal()) {
+          auto d = Diags.error(c->Range, "'{}' is not something to construct",
+                               sym->Name);
+          d.note("it stands for '{}', which has no initialiser",
+                 behind->toString())
+              .code(314);
+          return Types.errorType();
+        }
+        NominalDecl *nd = behind->nominal();
+        Symbol through;
+        through.Kind = SymbolKind::TypeName;
+        through.Name = static_cast<Decl *>(nd)->Name;
+        through.D = static_cast<Decl *>(nd);
+        through.IsPublic = static_cast<Decl *>(nd)->IsPublic;
+        SyntheticSymbols.push_back(through);
+        sym = &SyntheticSymbols.back();
+        // An instantiation is what the alias named; its arguments are
+        // already fixed, so nothing here should look for more.
+        ref->GenericArgs.clear();
+      }
       if (auto *cls = dyn_cast<ClassDecl>(sym->D)) {
         // `Handle<i64>(...)` constructs an instantiation, not the template.
         // The arguments may be written out, read off the expected type, or
@@ -2049,7 +2626,9 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
                 Type *formal = p.TypeAnnotation
                                    ? resolveType(p.TypeAnnotation.get())
                                    : nullptr;
-                Type *actual = checkExpr(c->Args[argIndex].Value.get(), nullptr);
+                Type *actual = checkExpr(
+                    c->Args[argIndex].Value.get(),
+                    expectedForArgument(Types, formal, bindings));
                 if (formal && actual)
                   Types.unify(formal, actual, bindings);
                 ++argIndex;
@@ -2233,9 +2812,20 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
             return Types.errorType();
           }
         } else {
-          // Infer from the argument types.
+          // Where the result is going is part of the answer, and it comes
+          // first. `boxed(Dog {})` going into a `Box<dyn Speaker>` is meant
+          // to box a `dyn Speaker`; read off the argument alone it would box
+          // a `Dog`, and the annotation would then be wrong about its own
+          // value. So the destination seeds the bindings, the arguments are
+          // checked against what that says, and if the two cannot be
+          // reconciled the arguments have the last word — so nothing that
+          // used to infer stops doing so.
           std::map<std::string, Type *> bindings;
           const std::vector<Type *> &formals = f->Ty->params();
+          if (expected && !expected->isError() &&
+              !expected->containsGenericParam())
+            Types.unify(f->Ty->result(), expected, bindings);
+          std::vector<Type *> argTypes(formals.size(), nullptr);
           size_t positional = 0;
           for (Argument &a : c->Args) {
             size_t idx = positional;
@@ -2252,8 +2842,20 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
             }
             if (idx >= formals.size())
               continue;
-            Type *at = checkExpr(a.Value.get(), nullptr);
+            Type *at = checkExpr(
+                a.Value.get(),
+                expectedForArgument(Types, formals[idx], bindings));
+            argTypes[idx] = at;
             Types.unify(formals[idx], at, bindings);
+          }
+          if (!fitsCall(f, formals, argTypes, bindings, expected)) {
+            std::map<std::string, Type *> fromArgs;
+            for (size_t i = 0; i < formals.size() && i < argTypes.size(); ++i)
+              if (argTypes[i])
+                Types.unify(formals[i], argTypes[i], fromArgs);
+            if (expected && !expected->isError() && f->Ty)
+              Types.unify(f->Ty->result(), expected, fromArgs);
+            bindings = std::move(fromArgs);
           }
           bool complete = true;
           for (const auto &g : f->Generics) {
@@ -2309,6 +2911,20 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
   Type *ft = checkExpr(c->Callee.get(), nullptr);
   if (ft->isError())
     return ft;
+  // A function value reached through a borrow — `handlers[0]()`, where the
+  // container lends its element — is called through it: `(*f)()`.
+  while (ft->is(TypeKind::Pointer) && !ft->isRawPointer() &&
+         !ft->isWeakPointer() && ft->pointee() &&
+         (ft->pointee()->is(TypeKind::Function) ||
+          ft->pointee()->is(TypeKind::Pointer))) {
+    auto d = std::make_unique<DerefExpr>();
+    d->Range = c->Callee->Range;
+    d->Operand = std::move(c->Callee);
+    c->Callee = std::move(d);
+    ft = checkExpr(c->Callee.get(), nullptr);
+    if (ft->isError())
+      return ft;
+  }
   if (ft->is(TypeKind::CFunction)) {
     // A bare pointer: the compiler cannot know it points at anything, so
     // calling one is an unsafe operation.
@@ -2368,6 +2984,35 @@ Type *Sema::checkStructLit(StructLitExpr *s, Type *expected) {
     for (auto &f : variant->Fields)
       fields.push_back(f.get());
     resultType = e->DeclaredType;
+  } else if (auto *aliasDecl = sym->D ? dyn_cast<TypeAliasDecl>(sym->D)
+                                      : nullptr) {
+    // Through an alias: `type Spot<T> = Point<T>` then `Spot<i64> { ... }`
+    // builds the `Point<i64>` it stands for. Resolved exactly as it would be
+    // in a type position, arguments and all.
+    NamedTypeRepr named;
+    named.Range = s->PathRange.isValid() ? s->PathRange : s->Range;
+    named.NameRange = named.Range;
+    named.Path = s->Path;
+    for (const auto &ga : s->GenericArgs)
+      named.GenericArgs.push_back(cloneTypeRepr(ga.get()));
+    Type *behind = resolveTypeOrError(&named, Types.errorType());
+    named.GenericArgs.clear();
+    if (behind->isError())
+      return behind;
+    NominalDecl *nd = behind->isNominal() ? behind->nominal() : nullptr;
+    if (!nd || !isa<StructDecl>(static_cast<Decl *>(nd))) {
+      auto d = Diags.error(s->Range, "'{}' cannot be built with braces",
+                           sym->Name);
+      d.note("it stands for '{}'", behind->toString())
+          .note("only structs and struct-shaped enum variants use this form")
+          .code(373);
+      noteDeclaredAt(d, aliasDecl, "declared here", "this is what it names");
+      return Types.errorType();
+    }
+    s->ResolvedDecl = static_cast<Decl *>(nd);
+    for (auto &f : nd->Fields)
+      fields.push_back(f.get());
+    resultType = nd->DeclaredType;
   } else if (auto *nd = sym->D ? dyn_cast<NominalDecl>(sym->D) : nullptr) {
     // As in a type position: explicit arguments mean the template, even when
     // the bare name currently refers to an instantiation of it.
@@ -2379,6 +3024,17 @@ Type *Sema::checkStructLit(StructLitExpr *s, Type *expected) {
                            static_cast<Decl *>(nd)->Name);
       d.note(fmt("write `{}(...)` so its `init` runs", sym->Name).c_str())
           .code(372);
+      return Types.errorType();
+    }
+    if (nd->Cxx && nd->Cxx->IsClass) {
+      auto d = Diags.error(s->Range,
+                           "'{}' is a C++ class; Rune cannot build one",
+                           static_cast<Decl *>(nd)->Name);
+      d.note(fmt("allocate it with `cxx::alloc<{}>()` and construct it with "
+                 "`init`, or take one from a function that makes it",
+                 sym->Name)
+                 .c_str())
+          .code(525);
       return Types.errorType();
     }
     // Resolve generic arguments, inferring them from the field values when
@@ -2475,6 +3131,8 @@ Type *Sema::checkStructLit(StructLitExpr *s, Type *expected) {
       lf.Value = std::move(ref);
     }
     Type *got = checkExpr(lf.Value.get(), want);
+    if (insertImplicitConversion(lf.Value, got, want))
+      got = lf.Value->Ty;
     requireConvertible(lf.Value.get(), got, want,
                        fmt("field '{}'", lf.Name).c_str());
   }
@@ -2929,6 +3587,43 @@ Type *Sema::checkFor(ForExpr *f) {
     elem = resolveIteration(f, seq);
   }
 
+  // `for (key, value) in map` where each item is a borrow of a pair: the
+  // pattern takes the pair apart where it lies, as a `match` on the borrow
+  // would. So that is what the loop becomes — one name for the item, and a
+  // `match` on it around the body — which every later pass already treats
+  // as matching through a reference: aliases under single ownership, in
+  // place under counting.
+  if (f->Binding && elem && elem->is(TypeKind::Pointer) &&
+      !elem->isRawPointer() && !elem->isWeakPointer() &&
+      f->Binding->Kind != NodeKind::BindingPat &&
+      f->Binding->Kind != NodeKind::WildcardPat &&
+      f->Binding->Kind != NodeKind::RefPat && f->Body) {
+    std::string name = fmt("item${}", ForItemCounter++);
+    SourceRange at = f->Binding->Range;
+    auto item = std::make_unique<BindingPattern>();
+    item->Name = name;
+    item->Range = at;
+    auto scrut = std::make_unique<DeclRefExpr>();
+    scrut->Path = {name};
+    scrut->Range = at;
+    auto m = std::make_unique<MatchExpr>();
+    m->Range = f->Body->Range;
+    m->Scrutinee = std::move(scrut);
+    MatchArm arm;
+    arm.Pat = std::move(f->Binding);
+    arm.Range = at;
+    arm.Body = std::move(f->Body);
+    m->Arms.push_back(std::move(arm));
+    auto body = std::make_unique<BlockExpr>();
+    body->Range = m->Range;
+    auto stmt = std::make_unique<ExprStmt>();
+    stmt->Range = m->Range;
+    stmt->Value = std::move(m);
+    body->Stmts.push_back(std::move(stmt));
+    f->Body = std::move(body);
+    f->Binding = std::move(item);
+  }
+
   pushScope(ScopeKind::Block);
   checkPattern(f->Binding.get(), elem, /*declaresBindings=*/true,
                /*isMutable=*/false);
@@ -2959,13 +3654,45 @@ Type *Sema::checkFor(ForExpr *f) {
 // Closures
 //===----------------------------------------------------------------------===//
 
+/// What `v[i]` is, given the `index` it calls. A lent element that is plain
+/// data is read out — the conversion `let n: i64 = r` would make anyway — so
+/// `let n = v[i]` is a number and `v[i] + 1` needs nothing; one that owns
+/// something stays a borrow, which is all that can be had without a copy.
+Type *Sema::indexResult(IndexExpr *i, FunctionDecl *impl) {
+  Type *r = impl->Ty ? impl->Ty->result() : Types.errorType();
+  if (r->is(TypeKind::Pointer) && !r->isRawPointer() &&
+      !r->isMutablePointer() && !r->isWeakPointer() && r->pointee() &&
+      !r->pointee()->is(TypeKind::Pointer) &&
+      isImplicitlyConvertible(r, r->pointee())) {
+    i->ReadsThrough = true;
+    return r->pointee();
+  }
+  i->ReadsThrough = false;
+  return r;
+}
+
 Type *Sema::checkClosure(ClosureExpr *c, Type *expected) {
+  // What the place this closure is going says about it. The parameters and
+  // the result are taken separately, because a call being inferred often
+  // knows the first and not the second: `map`'s `@function(Item) -> B` says
+  // exactly what the closure is handed while `B` is the very thing the call
+  // is working out.
   const std::vector<Type *> *paramHint = nullptr;
   Type *returnHint = nullptr;
-  if (expected && expected->is(TypeKind::Function)) {
-    if (expected->params().size() == c->Params.size())
-      paramHint = &expected->params();
+  if (expected &&
+      (expected->is(TypeKind::Function) || expected->is(TypeKind::CFunction))) {
+    if (expected->params().size() == c->Params.size()) {
+      bool known = true;
+      for (Type *p : expected->params())
+        if (!p || p->isError() || p->containsGenericParam())
+          known = false;
+      if (known)
+        paramHint = &expected->params();
+    }
     returnHint = expected->result();
+    if (returnHint &&
+        (returnHint->isError() || returnHint->containsGenericParam()))
+      returnHint = nullptr;
   }
 
   std::vector<Type *> paramTypes;
@@ -2979,8 +3706,84 @@ Type *Sema::checkClosure(ClosureExpr *c, Type *expected) {
     if (!t) {
       auto d = Diags.error(p.Range, "cannot infer the type of parameter '{}'",
                            p.Name);
+      d.note("a parameter may be left bare where the closure is going "
+             "somewhere that says what it takes — an argument, an annotated "
+             "binding — and this place says nothing");
       d.note("annotate it, e.g. `||(value: i64) -> i64 { ... }`").code(394);
       t = Types.errorType();
+    }
+    // `||(n: i64) { n + 1 }` handed to something that gives it `&i64` — what
+    // a borrowing iterator's `map` does — reads the number out on the way
+    // in, as `let n: i64 = r` would. Only where that conversion is one the
+    // language already makes: plain data, never an owning value, which the
+    // closure would otherwise be copying without saying so. The parameter
+    // takes the borrow under a name of its own, and the body starts by
+    // binding the written name to what it points at.
+    if (paramHint && p.TypeAnnotation && c->Body && !t->isError()) {
+      Type *hint = (*paramHint)[i];
+      // How many shared borrows stand between what is handed over and what
+      // was written: `filter` on a vector of numbers gives `&&i64`.
+      auto sharedBorrow = [](Type *x) {
+        return x && x->is(TypeKind::Pointer) && !x->isRawPointer() &&
+               !x->isMutablePointer() && !x->isWeakPointer();
+      };
+      unsigned levels = 0;
+      Type *under = hint;
+      while (sharedBorrow(under) && under != t) {
+        under = under->pointee();
+        ++levels;
+      }
+      // The last step is the one the language already makes on its own —
+      // `&i64` to `i64`, `&&Row` to `&Row`; the ones before it read through
+      // borrows, which copy nothing.
+      Type *lastStep = levels ? Types.pointerTo(t, false, false) : nullptr;
+      if (levels && under == t &&
+          (sharedBorrow(t) || isImplicitlyConvertible(lastStep, t))) {
+        std::string written = p.Name;
+        p.Name = written + "$ref";
+        auto binding = std::make_unique<BindingPattern>();
+        binding->Name = written;
+        binding->Range = p.Range;
+        auto ref = std::make_unique<DeclRefExpr>();
+        ref->Path = {p.Name};
+        ref->Range = p.Range;
+        ExprPtr read = std::move(ref);
+        for (unsigned k = 0; k + 1 < levels; ++k) {
+          auto d = std::make_unique<DerefExpr>();
+          d->Operand = std::move(read);
+          d->Range = p.Range;
+          read = std::move(d);
+        }
+        if (sharedBorrow(t)) {
+          // Handing a borrow on as a borrow: one more read through.
+          auto d = std::make_unique<DerefExpr>();
+          d->Operand = std::move(read);
+          d->Range = p.Range;
+          read = std::move(d);
+        }
+        auto decl = std::make_unique<VarStmtNode>();
+        decl->Binding = std::move(binding);
+        decl->TypeAnnotation = cloneTypeRepr(p.TypeAnnotation.get());
+        decl->Init = std::move(read);
+        decl->Range = p.Range;
+        c->Body->Stmts.insert(c->Body->Stmts.begin(), std::move(decl));
+        p.TypeAnnotation = nullptr;
+        t = hint;
+      } else if (levels && under == t) {
+        // What is handed over is lent, and what was written would be a copy
+        // of something that owns what it holds. Say what to write instead of
+        // leaving it to the mismatch the call reports.
+        auto d = Diags.error(p.Range,
+                             "'{}' is lent a '{}' here, not given a '{}'",
+                             p.Name, hint->toString(), t->toString());
+        d.note(fmt("write `{}: {}`, and `.$clone()` what the closure keeps",
+                   p.Name, Types.pointerTo(t, false, false)->toString())
+                   .c_str());
+        d.note("the items of a container are borrowed as they are walked: "
+               "copying each would copy what it owns, so it is asked for");
+        d.code(384);
+        t = hint;
+      }
     }
     p.Ty = t;
     paramTypes.push_back(t);
@@ -2994,7 +3797,22 @@ Type *Sema::checkClosure(ClosureExpr *c, Type *expected) {
   // parameter holding the captures.
   Synthesised.push_back(std::make_unique<FunctionDecl>());
   auto *lifted = static_cast<FunctionDecl *>(Synthesised.back().get());
-  lifted->Name = fmt("closure#{}", Result.Functions.size());
+  // Numbered by a counter of its own rather than by how many functions have
+  // been collected so far: a closure nested directly inside another is
+  // checked before the outer one is added, and the two would share a name.
+  lifted->Name = fmt("closure#{}", ClosureCounter++);
+  // The body of an `async fn` is named after the function, so a traceback
+  // through a task reads `fetch#task` rather than `closure#12`. A generic
+  // one keeps the number: its instantiations would otherwise share a name.
+  if (c->IsAsyncBody) {
+    FunctionContext *outer = fn();
+    if (outer && outer->Fn && outer->Fn->IsAsync && !outer->Closure &&
+        outer->Fn->Generics.empty() && !outer->Fn->GenericTemplate) {
+      std::string owner =
+          outer->Fn->OwnerType ? outer->Fn->OwnerType->toString() + "::" : "";
+      lifted->Name = owner + outer->Fn->Name + "#task";
+    }
+  }
   lifted->Range = c->Range;
   lifted->NameRange = c->Range;
   lifted->Flavour = FunctionFlavour::Closure;
@@ -3031,7 +3849,8 @@ Type *Sema::checkClosure(ClosureExpr *c, Type *expected) {
     finalReturn = c->Body->Tail ? bodyTy : Types.voidType();
   else if (c->Body->Tail && !finalReturn->isVoid())
     requireConvertible(c->Body->Tail.get(), bodyTy, finalReturn,
-                       "this closure's result");
+                       c->IsAsyncBody ? "this async function's result"
+                                      : "this closure's result");
 
   popScope();
   FnStack.pop_back();
@@ -3154,6 +3973,36 @@ Type *Sema::checkMove(MoveExpr *m) {
   return t;
 }
 
+bool Sema::insertImplicitConversion(ExprPtr &slot, Type *from, Type *to) {
+  if (!slot || !from || !to || !AsDecl)
+    return false;
+  if (from->isError() || to->isError() || from == to)
+    return false;
+  if (isImplicitlyConvertible(from, to))
+    return false;
+  // A `some Mark` keeps its veil: converting along the type behind it would
+  // give that type away.
+  if (from->isOpaque() || to->isOpaque())
+    return false;
+  NominalDecl *wanted = instantiateNominal(AsDecl, {to}, slot->Range);
+  auto *mark =
+      wanted ? dyn_cast<MarkDecl>(static_cast<Decl *>(wanted)) : nullptr;
+  FunctionDecl *impl = mark ? lookupMarkMethod(from, mark, "convert") : nullptr;
+  if (!impl)
+    return false;
+  ensureTemplateSignature(impl);
+  if (!impl->Ty)
+    return false;
+  auto conv = std::make_unique<IntoExpr>();
+  conv->Range = slot->Range;
+  conv->Conversion = impl;
+  conv->Ty = impl->Ty->result();
+  conv->Category = ValueCategory::RValue;
+  conv->Operand = std::move(slot);
+  slot = std::move(conv);
+  return true;
+}
+
 Type *Sema::checkInto(IntoExpr *e) {
   Type *from = checkExpr(e->Operand.get(), nullptr);
   Type *to = resolveTypeOrError(e->TargetType.get(), Types.errorType());
@@ -3196,7 +4045,14 @@ Type *Sema::checkInto(IntoExpr *e) {
 
 bool Sema::rewriteAnyTypeTest(ExprPtr &cond, PatternPtr &pat,
                               Type *condType) {
-  if (!pat || !cond || !condType || !condType->isAny())
+  if (!pat || !cond || !condType)
+    return false;
+  // Through a borrow: a lent `Any` answers the same question.
+  Type *seen = condType;
+  while (seen->is(TypeKind::Pointer) && !seen->isRawPointer() &&
+         !seen->isWeakPointer() && seen->pointee())
+    seen = seen->pointee();
+  if (!seen->isAny())
     return false;
 
   std::vector<std::string> path;
@@ -3261,6 +4117,14 @@ Type *Sema::checkCast(CastExpr *c) {
         .code(395);
     return to;
   }
+
+  // A float-valued enum's `as` gives the value each variant was declared
+  // with, so any number will do as the target.
+  if (from->is(TypeKind::Enum) && to->isNumeric())
+    if (NominalDecl *nd = from->nominal())
+      if (auto *en = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+        if (en->RawFloat)
+          return to;
 
   if (!isExplicitlyCastable(from, to)) {
     auto d = Diags.error(c->Range, "cannot cast '{}' to '{}'", from->toString(),

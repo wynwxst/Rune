@@ -1,0 +1,1324 @@
+// What a file declares, and what each function binds.
+//
+// This is not a parser. It reads the token stream for the shapes the tools
+// need — a declaration's name, signature, documentation and extent; an
+// import's path; the names a function body binds and where each is visible
+// — and skips everything else. That is what lets it work on a file that is
+// half-typed: nothing here stops at the first thing it does not understand.
+
+import std::collections::vector
+import std::dictionary
+import runetools::syntax
+
+//===--------------------------------------------------------------------===//
+// What is recorded
+//===--------------------------------------------------------------------===//
+
+/// One declaration.
+///
+/// `kind` is one of `function`, `method`, `class`, `struct`, `enum`, `mark`,
+/// `variant`, `field`, `global`, `type`, `macro` or `associated`.
+pub class Symbol {
+    pub name: String
+    pub kind: String
+    /// The declaration as one line: `fn add(a: i64, b: i64) -> i64`.
+    pub detail: String
+    pub doc: String
+    /// A field's, global's or alias's type; a function's return type.
+    pub typeText: String
+    /// The type a member belongs to, by its short name; "" at the top level.
+    pub container: String
+    /// A class's superclass, when it names one.
+    pub base: String
+    /// A type's generic parameters, by name: `T` for `Vector<T>`.
+    pub generics: vector::Vector<String>
+    /// Parameters, `self` left out: each as written, and its name and type.
+    pub params: vector::Vector<String>
+    pub paramNames: vector::Vector<String>
+    pub paramTypes: vector::Vector<String>
+    pub isPublic: bool
+    /// A method with no `self`, called on the type: `Point::origin()`.
+    pub isStatic: bool
+    /// Declared inside `extern "C" { ... }`.
+    pub isExtern: bool
+    /// Declared inside a `bind ... { ... }`, so its name is the mark's.
+    pub inBind: bool
+    pub decorators: vector::Vector<String>
+    /// The name token, and where the declaration begins and ends.
+    pub nameTok: i64
+    pub startTok: i64
+    pub endTok: i64
+    /// A body's braces, or -1 when it has none.
+    pub bodyOpen: i64
+    pub bodyClose: i64
+
+    fn init(self) {
+        self.name = ""
+        self.kind = ""
+        self.detail = ""
+        self.doc = ""
+        self.typeText = ""
+        self.container = ""
+        self.base = ""
+        self.generics = vector::Vector<String>()
+        self.params = vector::Vector<String>()
+        self.paramNames = vector::Vector<String>()
+        self.paramTypes = vector::Vector<String>()
+        self.isPublic = false
+        self.isStatic = false
+        self.isExtern = false
+        self.inBind = false
+        self.decorators = vector::Vector<String>()
+        self.nameTok = -1
+        self.startTok = -1
+        self.endTok = -1
+        self.bodyOpen = -1
+        self.bodyClose = -1
+    }
+
+    pub fn isType(&self) -> bool {
+        self.kind == "class" || self.kind == "struct" || self.kind == "enum" ||
+            self.kind == "mark" || self.kind == "type"
+    }
+
+    pub fn isCallable(&self) -> bool { self.kind == "function" || self.kind == "method" }
+
+    pub fn hasDecorator(&self, name: &String) -> bool {
+        for d in self.decorators { if d == name { return true } }
+        false
+    }
+}
+
+/// One `import`.
+pub class Import {
+    /// `std::collections::vector`
+    pub path: String
+    pub segments: vector::Vector<String>
+    /// The name it binds: the last segment, or what follows `as`.
+    pub alias: String
+    /// The `import` keyword, the last token of the statement, and the token
+    /// naming the bound name.
+    pub startTok: i64
+    pub endTok: i64
+    pub aliasTok: i64
+    /// This member's own tokens: inside the braces for a group, the whole
+    /// statement otherwise.
+    pub memberFrom: i64
+    pub memberTo: i64
+    /// One member of `import a::{b, c}`.
+    pub inGroup: bool
+    /// `import a::*`: everything public in `a`, by its own name.
+    pub isGlob: bool
+
+    fn init(self) {
+        self.path = ""
+        self.segments = vector::Vector<String>()
+        self.alias = ""
+        self.startTok = -1
+        self.endTok = -1
+        self.aliasTok = -1
+        self.memberFrom = -1
+        self.memberTo = -1
+        self.inGroup = false
+        self.isGlob = false
+    }
+}
+
+/// `a::b::c` from its segments.
+fn joinPath(segments: &vector::Vector<String>) -> String {
+    var out = ""
+    for s in segments {
+        if !out.$isEmpty() { out += "::" }
+        out += s
+    }
+    out
+}
+
+/// A name a function body binds: a parameter, a `let`, a loop variable, a
+/// pattern in a `match` arm or an `is` test, or a closure parameter.
+pub class Binding {
+    pub name: String
+    /// `param`, `self`, `let`, `var`, `for`, `pattern` or `closure`.
+    pub kind: String
+    pub typeText: String
+    /// The expression it was initialised from, as a token range; -1 when
+    /// there is none. For a `for`, the thing iterated over.
+    pub initFrom: i64
+    pub initTo: i64
+    pub tok: i64
+    /// Visible from this token through `visibleTo`, inclusive.
+    pub visibleFrom: i64
+    pub visibleTo: i64
+    pub mutable: bool
+
+    fn init(self) {
+        self.name = ""
+        self.kind = ""
+        self.typeText = ""
+        self.initFrom = -1
+        self.initTo = -1
+        self.tok = -1
+        self.visibleFrom = -1
+        self.visibleTo = -1
+        self.mutable = false
+    }
+}
+
+/// A file's declarations and imports.
+pub class Index {
+    pub path: String
+    pub lexed: syntax::Lexed
+    pub symbols: vector::Vector<Symbol>
+    pub imports: vector::Vector<Import>
+    /// True when the file has `extend` or `bind` blocks, which reach
+    /// whoever imports it without its name being written anywhere.
+    pub hasBindings: bool
+    /// `@type(...)`, when the file says what it produces.
+    pub fileType: String
+
+    fn init(self, path: String, lexed: syntax::Lexed) {
+        self.path = path
+        self.lexed = lexed
+        self.symbols = vector::Vector<Symbol>()
+        self.imports = vector::Vector<Import>()
+        self.hasBindings = false
+        self.fileType = ""
+    }
+
+    /// The symbol at `i`.
+    pub fn symbol(&self, i: i64) -> &Symbol from self { self.symbols.look(i) }
+
+    /// Top-level symbols named `name` and members of `container` named
+    /// `name`, as indexes. `container` "" asks for top-level ones only.
+    pub fn find(&self, name: &String, container: &String) -> vector::Vector<i64> {
+        var out = vector::Vector<i64>()
+        var i = 0
+        while i < self.symbols.length() {
+            let s = self.symbols.look(i)
+            if s.name == name && s.container == container { out.push(i) }
+            i += 1
+        }
+        out
+    }
+
+    /// The first top-level type named `name`, or -1.
+    pub fn findType(&self, name: &String) -> i64 {
+        var i = 0
+        while i < self.symbols.length() {
+            let s = self.symbols.look(i)
+            if s.name == name && s.container.$isEmpty() && s.isType() { return i }
+            i += 1
+        }
+        -1
+    }
+
+    /// The innermost function or method whose body holds token `tok`, or -1.
+    pub fn enclosingFunction(&self, tok: i64) -> i64 {
+        var best = -1
+        var bestSize = 0
+        var i = 0
+        while i < self.symbols.length() {
+            let s = self.symbols.look(i)
+            if s.isCallable() && s.bodyOpen >= 0 && s.bodyOpen < tok && tok <= s.bodyClose {
+                let size = s.bodyClose - s.bodyOpen
+                if best < 0 || size < bestSize {
+                    best = i
+                    bestSize = size
+                }
+            }
+            i += 1
+        }
+        best
+    }
+
+    /// The import binding `alias`, or -1. The last one wins, as in the
+    /// compiler.
+    pub fn importNamed(&self, alias: &String) -> i64 {
+        var found = -1
+        var i = 0
+        while i < self.imports.length() {
+            if self.imports.look(i).alias == alias && !self.imports.look(i).isGlob { found = i }
+            i += 1
+        }
+        found
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Reading declarations
+//===--------------------------------------------------------------------===//
+
+/// The `///` lines directly above token `tok`'s line, joined; or the text of
+/// a trailing `///<` comment on the line itself.
+fn docAbove(lx: &syntax::Lexed, docs: &dictionary::Map<i64, String>, tok: i64) -> String {
+    let line = lx.at(tok).line
+    var lines = vector::Vector<String>()
+    var l = line - 1
+    while l >= 0 && docs.holds(l) {
+        lines.push(docs.look(l).$clone())
+        l -= 1
+    }
+    var out = ""
+    var i = lines.length() - 1
+    while i >= 0 {
+        if !out.$isEmpty() { out += "\n" }
+        out += lines.look(i)
+        i -= 1
+    }
+    out
+}
+
+/// The text of a string literal token, quotes and escapes resolved, and a
+/// `"""` block's common indentation removed.
+pub fn stringValue(text: &String) -> String {
+    let n = text.$length()
+    if n >= 6 && text.$substring(0, 3) == "\"\"\"" {
+        let inner = text.$substring(3, n - 3)
+        return dedent(inner)
+    }
+    if n >= 2 && text.$byteAt(0) == 114 {
+        var a = 1
+        while a < n && text.$byteAt(a) == 35 { a += 1 }
+        let hashes = a - 1
+        if n - hashes - 1 > a { return text.$substring(a + 1, n - hashes - 1) }
+        return ""
+    }
+    if n < 2 { return "" }
+    var out = ""
+    var i = 1
+    var from = 1
+    while i < n - 1 {
+        if text.$byteAt(i) == 92 && i + 1 < n - 1 {
+            out += text.$substring(from, i)
+            let e = text.$byteAt(i + 1)
+            if e == 110 { out += "\n" }
+            elif e == 116 { out += "\t" }
+            else { out += text.$substring(i + 1, i + 2) }
+            i += 2
+            from = i
+            continue
+        }
+        i += 1
+    }
+    out += text.$substring(from, n - 1)
+    out
+}
+
+/// `text` with its common leading indentation, and any blank first and last
+/// lines, removed — what a `"""` block means.
+pub fn dedent(text: &String) -> String {
+    var lines = vector::Vector<String>()
+    var from = 0
+    var i = 0
+    let n = text.$length()
+    while i <= n {
+        if i == n || text.$byteAt(i) == 10 {
+            lines.push(text.$substring(from, i))
+            from = i + 1
+        }
+        i += 1
+    }
+    var indent = -1
+    for l in lines {
+        var k = 0
+        while k < l.$length() && (l.$byteAt(k) == 32 || l.$byteAt(k) == 9) { k += 1 }
+        if k < l.$length() && (indent < 0 || k < indent) { indent = k }
+    }
+    if indent < 0 { indent = 0 }
+    var out = ""
+    var first = 0
+    var last = lines.length() - 1
+    while first <= last && isBlank(lines.look(first)) { first += 1 }
+    while last >= first && isBlank(lines.look(last)) { last -= 1 }
+    var j = first
+    while j <= last {
+        let l = lines.look(j)
+        if j > first { out += "\n" }
+        if l.$length() >= indent { out += l.$substring(indent, l.$length()) } else { out += syntax::collapse(l) }
+        j += 1
+    }
+    out
+}
+
+fn isBlank(s: &String) -> bool { syntax::collapse(s).$isEmpty() }
+
+/// Splits tokens `from..to` (inclusive) at commas that are not inside any
+/// bracket, into a flat list of `[start, end, start, end, ...]`.
+pub fn splitTop(lx: &syntax::Lexed, from: i64, upto: i64) -> vector::Vector<i64> {
+    var out = vector::Vector<i64>()
+    var depth = 0
+    var angle = 0
+    var start = from
+    var i = from
+    while i <= upto {
+        let t = lx.at(i)
+        if t.kind == syntax::Kind::Punct {
+            let x = t.text.$clone()
+            if x == "(" || x == "[" || x == "{" { depth += 1 }
+            elif x == ")" || x == "]" || x == "}" { depth -= 1 }
+            elif x == "<" { angle += 1 }
+            elif x == ">" && angle > 0 { angle -= 1 }
+            elif x == ">>" && angle > 0 { angle -= 2 }
+            elif x == "," && depth == 0 && angle <= 0 {
+                if i > start { out.push(start); out.push(i - 1) }
+                start = i + 1
+                angle = 0
+            }
+        }
+        i += 1
+    }
+    if upto >= start { out.push(start); out.push(upto) }
+    out
+}
+
+/// Skips newlines and `;` from `i`, giving the next token that is neither.
+fn skipBlank(lx: &syntax::Lexed, i: i64) -> i64 {
+    var j = i
+    while !lx.isEnd(j) && (lx.isNewline(j) || lx.isText(j, ";")) { j += 1 }
+    j
+}
+
+/// True when token `j` starts a new line straight after a generic's closing
+/// `>`. The compiler emits no newline there — `>` cannot end an expression —
+/// and relies on knowing that a type is over; this is the same knowledge.
+///
+/// It is also true for a line break after anything that can end a
+/// statement. Inside brackets the compiler emits no newline tokens at all —
+/// not even in the body of a closure passed as an argument — and its parser
+/// falls back on where lines start; so does this.
+fn lineEndsStatement(lx: &syntax::Lexed, j: i64) -> bool {
+    if j <= 0 { return false }
+    let prev = lx.at(j - 1)
+    let cur = lx.at(j)
+    if cur.line <= prev.line { return false }
+    if prev.kind == syntax::Kind::Punct && (prev.text == ">" || prev.text == ">>") { return true }
+    syntax::canEnd(prev.kind, prev.text) && !(cur.kind == syntax::Kind::Punct && cur.text == ".")
+}
+
+/// The last token of the statement starting at `i`: the one before the next
+/// newline or `;` that is outside every bracket, or before a `}` closing
+/// the block the statement is in.
+pub fn statementEnd(lx: &syntax::Lexed, i: i64) -> i64 {
+    var depth = 0
+    var j = i
+    while !lx.isEnd(j) {
+        if depth == 0 && j > i && lineEndsStatement(lx, j) { return j - 1 }
+        let t = lx.at(j)
+        if t.kind == syntax::Kind::Punct {
+            let x = t.text.$clone()
+            if x == "(" || x == "[" || x == "{" { depth += 1 }
+            elif x == ")" || x == "]" || x == "}" {
+                if depth == 0 { return j - 1 }
+                depth -= 1
+            } elif x == ";" && depth == 0 { return j - 1 }
+        } elif t.kind == syntax::Kind::Newline && depth == 0 {
+            return j - 1
+        }
+        j += 1
+    }
+    j - 1
+}
+
+/// Tokens `from..to` as written, whitespace collapsed.
+fn textOf(lx: &syntax::Lexed, from: i64, upto: i64) -> String {
+    syntax::collapse(lx.span(from, upto))
+}
+
+/// The short name of a type as written: `&var vector::Vector<T>` → `Vector`.
+pub fn baseName(typeText: &String) -> String {
+    var t = syntax::collapse(typeText)
+    var changed = true
+    while changed {
+        changed = false
+        for p in ["&var ", "&mut ", "&", "var ", "weak ", "uniq ", "dyn ", "some ", "move "] {
+            if t.$length() > p.$length() && t.$substring(0, p.$length()) == p {
+                t = t.$substring(p.$length(), t.$length())
+                changed = true
+            }
+        }
+    }
+    // `(&T from self)?` and friends: what matters is inside.
+    let fromAt = t.$find(" from ")
+    if fromAt > 0 && !t.$isEmpty() && t.$byteAt(0) == 40 {
+        let close = t.$find(")")
+        if close > fromAt {
+            let inner = t.$substring(1, fromAt)
+            let rest = t.$substring(close + 1, t.$length())
+            t = inner + rest
+            t = syntax::collapse(t)
+            while t.$length() > 0 && t.$byteAt(0) == 38 { t = t.$substring(1, t.$length()) }
+        }
+    } elif fromAt > 0 {
+        t = t.$substring(0, fromAt)
+    }
+    if t.$isEmpty() { return "" }
+    if t.$byteAt(t.$length() - 1) == 63 { return "Option" }
+    if t.$byteAt(0) == 91 { return "[]" }
+    if t.$byteAt(0) == 40 { return "()" }
+    if t.$byteAt(0) == 64 { return "@function" }
+    let lt = t.$find("<")
+    if lt > 0 { t = t.$substring(0, lt) }
+    // The last path segment.
+    var i = t.$length() - 1
+    while i > 0 {
+        if t.$byteAt(i) == 58 && t.$byteAt(i - 1) == 58 { return t.$substring(i + 1, t.$length()) }
+        i -= 1
+    }
+    syntax::collapse(t)
+}
+
+/// A type's arguments as written: `Map<String, i64>` → `String`, `i64`;
+/// `T?` → `T`; `[T]` → `T`.
+pub fn typeArgs(typeText: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var t = syntax::collapse(typeText)
+    while t.$length() > 0 && t.$byteAt(0) == 38 { t = syntax::collapse(t.$substring(1, t.$length())) }
+    if t.$length() > 4 && t.$substring(0, 4) == "var " { t = t.$substring(4, t.$length()) }
+    let n = t.$length()
+    if n == 0 { return out }
+    if t.$byteAt(n - 1) == 63 {
+        var inner = t.$substring(0, n - 1)
+        if inner.$length() > 2 && inner.$byteAt(0) == 40 && inner.$byteAt(inner.$length() - 1) == 41 {
+            inner = inner.$substring(1, inner.$length() - 1)
+            let fromAt = inner.$find(" from ")
+            if fromAt > 0 { inner = inner.$substring(0, fromAt) }
+        }
+        out.push(syntax::collapse(inner))
+        return out
+    }
+    if t.$byteAt(0) == 91 && t.$byteAt(n - 1) == 93 {
+        var inner = t.$substring(1, n - 1)
+        let colon = inner.$find(":")
+        if colon >= 0 { inner = inner.$substring(colon + 1, inner.$length()) }
+        out.push(syntax::collapse(inner))
+        return out
+    }
+    let lt = t.$find("<")
+    if lt < 0 || t.$byteAt(n - 1) != 62 { return out }
+    let inner = t.$substring(lt + 1, n - 1)
+    var depth = 0
+    var from = 0
+    var i = 0
+    while i < inner.$length() {
+        let b = inner.$byteAt(i)
+        if b == 60 || b == 40 || b == 91 { depth += 1 }
+        elif b == 62 || b == 41 || b == 93 { depth -= 1 }
+        elif b == 44 && depth == 0 {
+            out.push(syntax::collapse(inner.$substring(from, i)))
+            from = i + 1
+        }
+        i += 1
+    }
+    out.push(syntax::collapse(inner.$substring(from, inner.$length())))
+    out
+}
+
+/// Reads the declarations in a lexed file.
+pub fn build(path: String, lexed: syntax::Lexed) -> Index {
+    var ix = Index(path, lexed)
+    var docs = dictionary::Map<i64, String>()
+    var trailing = dictionary::Map<i64, String>()
+    for c in ix.lexed.comments {
+        if !c.isDoc { continue }
+        let body = syntax::docLine(c.text)
+        if body.$length() > 0 && body.$byteAt(0) == 60 {
+            trailing.put(c.line, syntax::collapse(body.$substring(1, body.$length())))
+        } elif syntax::collapse(ix.lexed.lineText(c.line).$substring(0, c.col)).$isEmpty() {
+            docs.put(c.line, body)
+        }
+    }
+    let n = ix.lexed.count()
+    scanItems(&var ix, docs, trailing, 0, n - 1, "", "", false)
+    ix
+}
+
+/// Reads declarations in tokens `from..to`. `container` is the type they
+/// belong to and `containerKind` what it is ("" at the top level).
+fn scanItems(ix: &var Index, docs: &dictionary::Map<i64, String>,
+             trailing: &dictionary::Map<i64, String>, from: i64, upto: i64,
+             container: String, containerKind: String, inExtern: bool) {
+    let lx = ix.lexed
+    var i = from
+    // An enum's variants are whatever names begin its entries.
+    let inEnum = containerKind == "enum"
+    while i <= upto && !lx.isEnd(i) {
+        i = skipBlank(lx, i)
+        if i > upto || lx.isEnd(i) { break }
+        let itemStart = i
+        var decorators = vector::Vector<String>()
+        var docDecorator = ""
+        while lx.isText(i, "@") {
+            let name = lx.text(i + 1)
+            decorators.push(name.$clone())
+            i += 2
+            if lx.isText(i, "(") {
+                let close = lx.closing(i)
+                if name == "Doc" && lx.at(i + 1).kind == syntax::Kind::Str {
+                    docDecorator = stringValue(lx.at(i + 1).text)
+                }
+                if name == "type" && container.$isEmpty() { ix.fileType = textOf(lx, i + 1, close - 1) }
+                i = close + 1
+            }
+            i = skipBlank(lx, i)
+        }
+        var isPublic = false
+        if lx.isText(i, "pub") { isPublic = true; i += 1 }
+        if lx.isText(i, "async") || (lx.isText(i, "unsafe") && lx.isText(i + 1, "fn")) { i += 1 }
+        var doc = docAbove(lx, docs, itemStart)
+        if !docDecorator.$isEmpty() { doc = if doc.$isEmpty() { docDecorator } else { doc + "\n\n" + docDecorator } }
+
+        let word = lx.text(i)
+        let isWord = lx.at(i).kind == syntax::Kind::Keyword
+
+        if isWord && word == "import" && container.$isEmpty() {
+            // `import a::b [as c]`, `import a::{b, c as d}`, `import a::*`.
+            var prefix = vector::Vector<String>()
+            var j = i + 1
+            var last = -1
+            while (lx.isIdent(j) || lx.at(j).kind == syntax::Kind::Keyword) && !lx.isText(j, "as") {
+                prefix.push(lx.text(j))
+                last = j
+                j += 1
+                if lx.isText(j, "::") { j += 1 } else { break }
+            }
+            let end = statementEnd(lx, i)
+            if lx.isText(j, "{") {
+                // A group: one import per member, all sharing the statement.
+                let close = lx.closing(j)
+                let parts = splitTop(lx, j + 1, close - 1)
+                var p = 0
+                while p < parts.length() {
+                    let a = parts.get(p)
+                    let b = parts.get(p + 1)
+                    p += 2
+                    var imp = Import()
+                    imp.startTok = i
+                    imp.endTok = end
+                    imp.memberFrom = a
+                    imp.memberTo = b
+                    imp.inGroup = true
+                    for seg in prefix { imp.segments.push(seg.$clone()) }
+                    var k = a
+                    while k <= b && !lx.isText(k, "as") {
+                        if lx.isIdent(k) || lx.at(k).kind == syntax::Kind::Keyword {
+                            imp.segments.push(lx.text(k))
+                            imp.aliasTok = k
+                        }
+                        k += 1
+                    }
+                    if lx.isText(k, "as") && lx.isIdent(k + 1) { imp.aliasTok = k + 1 }
+                    if imp.aliasTok >= 0 { imp.alias = lx.text(imp.aliasTok) }
+                    imp.path = joinPath(imp.segments)
+                    if !imp.alias.$isEmpty() { ix.imports.push(imp) }
+                }
+            } else {
+                var imp = Import()
+                imp.startTok = i
+                imp.endTok = end
+                imp.memberFrom = i
+                imp.memberTo = end
+                imp.segments = prefix
+                imp.path = joinPath(imp.segments)
+                if lx.isText(j, "*") {
+                    imp.isGlob = true
+                    imp.aliasTok = j
+                } elif last >= 0 {
+                    imp.alias = lx.text(last)
+                    imp.aliasTok = last
+                    if lx.isText(j, "as") && lx.isIdent(j + 1) {
+                        imp.alias = lx.text(j + 1)
+                        imp.aliasTok = j + 1
+                    }
+                }
+                if !imp.path.$isEmpty() { ix.imports.push(imp) }
+            }
+            i = end + 1
+            continue
+        }
+
+        if isWord && word == "fn" {
+            i = readFunction(ix, i, itemStart, isPublic, decorators, doc, container, containerKind, inExtern)
+            continue
+        }
+
+        if isWord && (word == "class" || word == "struct" || word == "enum" || word == "mark") && lx.isIdent(i + 1) {
+            var s = Symbol()
+            s.kind = word.$clone()
+            s.name = lx.text(i + 1)
+            s.nameTok = i + 1
+            s.startTok = itemStart
+            s.isPublic = isPublic
+            s.doc = doc
+            s.decorators = decorators
+            s.container = container.$clone()
+            s.isExtern = inExtern
+            var j = i + 2
+            if lx.isText(j, "<") {
+                let close = lx.closingAngle(j)
+                let parts = splitTop(lx, j + 1, close - 1)
+                var p = 0
+                while p < parts.length() {
+                    s.generics.push(lx.text(parts.get(p)))
+                    p += 2
+                }
+                j = close + 1
+            }
+            if lx.isText(j, ":") && lx.isIdent(j + 1) {
+                var k = j + 1
+                while lx.isIdent(k + 2) && lx.isText(k + 1, "::") { k += 2 }
+                s.base = lx.text(k)
+            }
+            while !lx.isEnd(j) && !lx.isText(j, "{") && !lx.isNewline(j) { j += 1 }
+            s.detail = textOf(lx, i, j - 1)
+            if lx.isText(j, "{") {
+                let close = lx.closing(j)
+                s.bodyOpen = j
+                s.bodyClose = close
+                s.endTok = close
+                let name = s.name.$clone()
+                let kind = s.kind.$clone()
+                ix.symbols.push(s)
+                scanItems(ix, docs, trailing, j + 1, close - 1, name, kind, inExtern)
+                i = close + 1
+            } else {
+                s.endTok = j - 1
+                ix.symbols.push(s)
+                i = j
+            }
+            continue
+        }
+
+        if isWord && (word == "extend" || word == "bind") {
+            // `extend Type {`, `bind Mark to Type {`, `bind A into B {`.
+            var j = i + 1
+            if word == "bind" && lx.isText(j, "<") { j = lx.closingAngle(j) + 1 }
+            let headStart = j
+            var toAt = -1
+            while !lx.isEnd(j) && !lx.isText(j, "{") {
+                if lx.isText(j, "to") || lx.isText(j, "into") { toAt = j }
+                if lx.isText(j, "where") { break }
+                j += 1
+            }
+            var typeFrom = headStart
+            if word == "bind" && toAt >= 0 {
+                typeFrom = if lx.isText(toAt, "into") { headStart } else { toAt + 1 }
+            }
+            var typeTo = j - 1
+            if word == "bind" && toAt >= 0 && lx.isText(toAt, "into") { typeTo = toAt - 1 }
+            var k = typeTo
+            // Up to `where` or `{`: the type is what comes before.
+            var w = typeFrom
+            while w <= typeTo { if lx.isText(w, "where") { k = w - 1 } ; w += 1 }
+            let target = baseName(textOf(lx, typeFrom, k))
+            while !lx.isEnd(j) && !lx.isText(j, "{") { j += 1 }
+            ix.hasBindings = true
+            if lx.isText(j, "{") {
+                let close = lx.closing(j)
+                let before = ix.symbols.length()
+                scanItems(ix, docs, trailing, j + 1, close - 1, target, word.$clone(), inExtern)
+                if word == "bind" {
+                    var m = before
+                    while m < ix.symbols.length() {
+                        ix.symbols.touch(m).inBind = true
+                        m += 1
+                    }
+                }
+                i = close + 1
+            } else {
+                i = j
+            }
+            continue
+        }
+
+        if isWord && word == "extern" {
+            var j = i + 1
+            while !lx.isEnd(j) && !lx.isText(j, "{") && !lx.isNewline(j) { j += 1 }
+            if lx.isText(j, "{") {
+                let close = lx.closing(j)
+                scanItems(ix, docs, trailing, j + 1, close - 1, container.$clone(), containerKind.$clone(), true)
+                i = close + 1
+            } else {
+                i = j
+            }
+            continue
+        }
+
+        // `global var x`, and `let`/`var` at the top level, are globals too.
+        var nameAt = i + 1
+        if isWord && word == "global" && (lx.isText(i + 1, "var") || lx.isText(i + 1, "let")) { nameAt = i + 2 }
+        let moduleVar = isWord && (word == "let" || word == "var") && container.$isEmpty()
+        if (isWord && (word == "global" || word == "type") || moduleVar) && lx.isIdent(nameAt) {
+            var s = Symbol()
+            s.kind = if word == "global" ||
+                    moduleVar { "global" } elif container.$isEmpty() { "type" } else { "associated" }
+            s.name = lx.text(nameAt)
+            s.nameTok = nameAt
+            s.startTok = itemStart
+            s.isPublic = isPublic
+            s.doc = doc
+            s.decorators = decorators
+            s.container = container.$clone()
+            let end = statementEnd(lx, i)
+            s.endTok = end
+            var j = nameAt + 1
+            if lx.isText(j, "<") {
+                let close = lx.closingAngle(j)
+                let parts = splitTop(lx, j + 1, close - 1)
+                var p = 0
+                while p < parts.length() { s.generics.push(lx.text(parts.get(p))); p += 2 }
+                j = close + 1
+            }
+            if lx.isText(j, ":") {
+                var e = j + 1
+                while e <= end && !lx.isText(e, "=") { e += 1 }
+                s.typeText = textOf(lx, j + 1, e - 1)
+            } elif lx.isText(j, "=") {
+                s.typeText = textOf(lx, j + 1, end)
+            }
+            s.detail = textOf(lx, i, end)
+            if word == "global" || moduleVar {
+                var e = i
+                while e <= end && !lx.isText(e, "=") { e += 1 }
+                s.detail = textOf(lx, i, e - 1)
+            }
+            ix.symbols.push(s)
+            i = end + 1
+            continue
+        }
+
+        if isWord && word == "macro" && lx.isIdent(i + 1) {
+            var s = Symbol()
+            s.kind = "macro"
+            s.name = lx.text(i + 1)
+            s.nameTok = i + 1
+            s.startTok = itemStart
+            s.isPublic = isPublic
+            s.doc = doc
+            s.detail = "macro " + s.name + "!"
+            s.container = container.$clone()
+            var j = i + 2
+            while !lx.isEnd(j) && !lx.isText(j, "{") { j += 1 }
+            let close = lx.closing(j)
+            s.bodyOpen = j
+            s.bodyClose = close
+            s.endTok = close
+            ix.symbols.push(s)
+            i = close + 1
+            continue
+        }
+
+        // Inside a struct, class or enum: a field or a variant.
+        if !container.$isEmpty() && (containerKind == "class" || containerKind == "struct" || inEnum) {
+            var j = i
+            var mods = ""
+            while lx.isText(j, "weak") || lx.isText(j, "var") || lx.isText(j, "uniq") {
+                mods += lx.text(j) + " "
+                j += 1
+            }
+            if lx.isIdent(j) {
+                let end = fieldEnd(lx, j, upto)
+                var s = Symbol()
+                s.name = lx.text(j)
+                s.nameTok = j
+                s.startTok = itemStart
+                s.endTok = end
+                s.isPublic = isPublic
+                s.decorators = decorators
+                s.container = container.$clone()
+                s.doc = doc
+                let tail = lx.at(end).line
+                if s.doc.$isEmpty() && trailing.holds(tail) { s.doc = trailing.look(tail).$clone() }
+                if inEnum && !lx.isText(j + 1, ":") {
+                    s.kind = "variant"
+                    s.typeText = container.$clone()
+                    var e = end
+                    if lx.isText(j + 1, "(") { e = lx.closing(j + 1) }
+                    elif lx.isText(j + 1, "{") { e = lx.closing(j + 1) }
+                    else { e = j }
+                    s.detail = container + "::" + textOf(lx, j, e)
+                    if lx.isText(j + 1, "(") {
+                        let parts = splitTop(lx, j + 2, e - 1)
+                        var p = 0
+                        while p < parts.length() {
+                            let ty = textOf(lx, parts.get(p), parts.get(p + 1))
+                            s.params.push(ty.$clone())
+                            s.paramNames.push("")
+                            s.paramTypes.push(ty)
+                            p += 2
+                        }
+                    }
+                } else {
+                    s.kind = "field"
+                    if lx.isText(j + 1, ":") {
+                        var e = j + 2
+                        while e <= end && !lx.isText(e, "=") { e += 1 }
+                        s.typeText = textOf(lx, j + 2, e - 1)
+                    }
+                    s.detail = mods + s.name + ": " + s.typeText
+                }
+                ix.symbols.push(s)
+                i = end + 1
+                if lx.isText(i, ",") { i += 1 }
+                continue
+            }
+        }
+
+        // Anything else is a statement or an expression; step over it.
+        let end = statementEnd(lx, i)
+        i = if end >= i { end + 1 } else { i + 1 }
+    }
+}
+
+/// The last token of a field or variant starting at `i`: up to a newline or
+/// a `,` outside brackets, or the end of the container.
+fn fieldEnd(lx: &syntax::Lexed, i: i64, upto: i64) -> i64 {
+    var depth = 0
+    var angle = 0
+    var j = i
+    while j <= upto && !lx.isEnd(j) {
+        if depth == 0 && j > i && lineEndsStatement(lx, j) { return j - 1 }
+        let t = lx.at(j)
+        if t.kind == syntax::Kind::Punct {
+            let x = t.text.$clone()
+            if x == "(" || x == "[" || x == "{" { depth += 1 }
+            elif x == ")" || x == "]" || x == "}" { depth -= 1 }
+            elif x == "<" { angle += 1 }
+            elif x == ">" { angle -= 1 }
+            elif x == ">>" { angle -= 2 }
+            elif x == "," && depth == 0 && angle <= 0 { return j - 1 }
+        } elif t.kind == syntax::Kind::Newline && depth == 0 {
+            return j - 1
+        }
+        j += 1
+    }
+    upto
+}
+
+/// Reads the function whose `fn` is token `i`. Returns the token after it.
+fn readFunction(ix: &var Index, i: i64, itemStart: i64, isPublic: bool,
+                decorators: vector::Vector<String>, doc: String, container: String,
+                containerKind: String, inExtern: bool) -> i64 {
+    let lx = ix.lexed
+    var s = Symbol()
+    s.kind = if container.$isEmpty() { "function" } else { "method" }
+    s.container = container.$clone()
+    s.isPublic = isPublic
+    s.isExtern = inExtern
+    s.doc = doc
+    s.decorators = decorators
+    s.startTok = itemStart
+    var j = i + 1
+    if lx.isIdent(j) || lx.at(j).kind == syntax::Kind::Keyword {
+        s.name = lx.text(j)
+        s.nameTok = j
+        j += 1
+    }
+    if lx.isText(j, "<") { j = lx.closingAngle(j) + 1 }
+    var sawSelf = false
+    if lx.isText(j, "(") {
+        let close = lx.closing(j)
+        let parts = splitTop(lx, j + 1, close - 1)
+        var p = 0
+        while p < parts.length() {
+            let a = parts.get(p)
+            let b = parts.get(p + 1)
+            p += 2
+            // `self`, `&self`, `&var self`
+            var k = a
+            while k <= b && (lx.isText(k, "&") || lx.isText(k, "var") || lx.isText(k, "mut")) { k += 1 }
+            if lx.isText(k, "self") && k == b {
+                sawSelf = true
+                continue
+            }
+            if lx.isText(a, "...") { continue }
+            s.params.push(textOf(lx, a, b))
+            // The name is the identifier right before the first `:`.
+            var colon = a
+            while colon <= b && !lx.isText(colon, ":") { colon += 1 }
+            if colon <= b && colon > a {
+                s.paramNames.push(lx.text(colon - 1))
+                var e = colon + 1
+                var depth = 0
+                while e <= b {
+                    if lx.isText(e, "(") || lx.isText(e, "[") { depth += 1 }
+                    if lx.isText(e, ")") || lx.isText(e, "]") { depth -= 1 }
+                    if lx.isText(e, "=") && depth == 0 { break }
+                    e += 1
+                }
+                s.paramTypes.push(textOf(lx, colon + 1, e - 1))
+            } else {
+                s.paramNames.push(lx.text(a))
+                s.paramTypes.push("")
+            }
+        }
+        j = close + 1
+    }
+    s.isStatic = !container.$isEmpty() && !sawSelf
+    var retFrom = -1
+    var retTo = -1
+    if lx.isText(j, "->") {
+        retFrom = j + 1
+        var k = j + 1
+        var depth = 0
+        while !lx.isEnd(k) {
+            if depth == 0 && (lx.isText(k, "{") || lx.isText(k, "where") || lx.isNewline(k) || lx.isText(k,
+                    ";")) { break }
+            if lx.isText(k, "(") || lx.isText(k, "[") { depth += 1 }
+            if lx.isText(k, ")") || lx.isText(k, "]") { depth -= 1 }
+            k += 1
+        }
+        retTo = k - 1
+        j = k
+    }
+    if retFrom >= 0 { s.typeText = textOf(lx, retFrom, retTo) } else { s.typeText = "()" }
+    // `where` clauses run up to the body.
+    var headEnd = j - 1
+    if lx.isText(j, "where") {
+        while !lx.isEnd(j) && !lx.isText(j, "{") && !lx.isNewline(j) { j += 1 }
+        headEnd = j - 1
+    }
+    s.detail = textOf(lx, i, headEnd)
+    if lx.isText(j, "{") {
+        let close = lx.closing(j)
+        s.bodyOpen = j
+        s.bodyClose = close
+        s.endTok = close
+        ix.symbols.push(s)
+        return close + 1
+    }
+    s.endTok = headEnd
+    ix.symbols.push(s)
+    j
+}
+
+//===--------------------------------------------------------------------===//
+// What a function binds
+//===--------------------------------------------------------------------===//
+
+/// Whether identifier token `i` in a pattern binds a name. It does unless it
+/// is a path segment, a call, a variant or type, or a field label.
+fn bindsInPattern(lx: &syntax::Lexed, i: i64) -> bool {
+    if !lx.isIdent(i) { return false }
+    let name = lx.text(i)
+    if name == "_" || !syntax::startsLower(name) && name.$byteAt(0) != 95 { return false }
+    // `ref` and `ref var` are how a pattern borrows, not names.
+    if name == "ref" && (lx.isIdent(i + 1) || lx.isText(i + 1, "var")) { return false }
+    if lx.isText(i - 1, "::") || lx.isText(i - 1, ".") { return false }
+    if lx.isText(i + 1, "::") || lx.isText(i + 1, "(") || lx.isText(i + 1, ".") { return false }
+    if lx.isText(i + 1, ":") { return false }
+    true
+}
+
+/// Adds a binding for every name the pattern in tokens `from..to` binds.
+fn bindPattern(out: &var vector::Vector<Binding>, lx: &syntax::Lexed, from: i64, upto: i64,
+               kind: String, visibleFrom: i64, visibleTo: i64, typeText: String,
+               initFrom: i64, initTo: i64, mutable: bool) {
+    var i = from
+    // A lone name always binds, whatever its case: `let Total = 0` is odd
+    // style, but it is a variable, not a variant.
+    let lone = from == upto && lx.isIdent(from) && lx.text(from) != "_" && kind != "pattern"
+    while i <= upto {
+        if lone || bindsInPattern(lx, i) {
+            var b = Binding()
+            b.name = lx.text(i)
+            b.kind = kind.$clone()
+            b.tok = i
+            b.visibleFrom = visibleFrom
+            b.visibleTo = visibleTo
+            b.initFrom = initFrom
+            b.initTo = initTo
+            b.mutable = mutable || lx.isText(i - 1, "var")
+            // Only a lone name takes the whole type; a destructured one
+            // would need the pattern's shape to know its part.
+            if from == upto || (lx.isText(from, "ref") || lx.isText(from, "var")) &&
+                    i == upto { b.typeText = typeText.$clone() }
+            out.push(b)
+        }
+        i += 1
+    }
+}
+
+/// The token closing the innermost `{` block around token `i`, within
+/// `from..to`.
+fn blockEndAround(lx: &syntax::Lexed, i: i64, from: i64, upto: i64) -> i64 {
+    var depth = 0
+    var j = i
+    while j <= upto {
+        if lx.isText(j, "{") { depth += 1 }
+        elif lx.isText(j, "}") {
+            if depth == 0 { return j }
+            depth -= 1
+        }
+        j += 1
+    }
+    upto
+}
+
+/// Where the condition that starts at `i` (after `if`, `elif`, `while`)
+/// ends: the token before the `{` that opens its body.
+fn conditionEnd(lx: &syntax::Lexed, i: i64) -> i64 {
+    var depth = 0
+    var j = i
+    while !lx.isEnd(j) {
+        if lx.isText(j, "(") || lx.isText(j, "[") { depth += 1 }
+        elif lx.isText(j, ")") || lx.isText(j, "]") { depth -= 1 }
+        elif lx.isText(j, "{") && depth == 0 {
+            // A `{` right after `Name` in a condition would be a struct
+            // literal, which conditions do not allow, so this is the body.
+            return j - 1
+        }
+        j += 1
+    }
+    j - 1
+}
+
+/// Every name bound in the function `fnSym` of `ix`: its parameters first,
+/// then everything its body binds, in order.
+pub fn bindings(ix: &Index, fnSym: i64) -> vector::Vector<Binding> {
+    var out = vector::Vector<Binding>()
+    let lx = ix.lexed
+    let s = ix.symbols.look(fnSym)
+    if s.bodyOpen < 0 { return out }
+    let open = s.bodyOpen
+    let close = s.bodyClose
+
+    // Parameters, found again in the tokens so each has a position.
+    var j = s.nameTok + 1
+    if lx.isText(j, "<") { j = lx.closingAngle(j) + 1 }
+    if lx.isText(j, "(") {
+        let pclose = lx.closing(j)
+        let parts = splitTop(lx, j + 1, pclose - 1)
+        var p = 0
+        while p < parts.length() {
+            let a = parts.get(p)
+            let b = parts.get(p + 1)
+            p += 2
+            var colon = a
+            while colon <= b && !lx.isText(colon, ":") { colon += 1 }
+            if colon <= b && colon > a && lx.isIdent(colon - 1) {
+                var bd = Binding()
+                bd.name = lx.text(colon - 1)
+                bd.kind = "param"
+                bd.tok = colon - 1
+                bd.visibleFrom = open
+                bd.visibleTo = close
+                var e = colon + 1
+                while e <= b && !lx.isText(e, "=") { e += 1 }
+                bd.typeText = textOf(lx, colon + 1, e - 1)
+                bd.mutable = lx.isText(colon + 1, "&") && lx.isText(colon + 2, "var")
+                out.push(bd)
+            }
+        }
+    }
+
+    var i = open + 1
+    while i < close {
+        let t = lx.at(i)
+        if t.kind == syntax::Kind::Keyword {
+            let w = t.text.$clone()
+            // A declaration begins a statement; `var` anywhere else is part
+            // of a type or a borrow: `*var u8`, `&var x`.
+            // (Inside a closure passed as an argument there are no newline
+            // tokens, so a line start after a finished statement counts too.)
+            let atStart = lx.isNewline(i - 1) || lx.isText(i - 1, "{") || lx.isText(i - 1, ";") ||
+                          lx.isText(i - 1, "}") || lx.isText(i - 1, "=>") || lineEndsStatement(lx, i)
+            if (w == "let" || w == "var" || w == "mut") && atStart {
+                // `let PATTERN [: T] = EXPR`
+                let end = statementEnd(lx, i)
+                var eq = i + 1
+                var depth = 0
+                while eq <= end {
+                    if lx.isText(eq, "(") || lx.isText(eq, "[") { depth += 1 }
+                    if lx.isText(eq, ")") || lx.isText(eq, "]") { depth -= 1 }
+                    if depth == 0 && lx.isText(eq, "=") { break }
+                    eq += 1
+                }
+                var patEnd = eq - 1
+                var typeText = ""
+                var c = i + 1
+                depth = 0
+                while c < eq {
+                    if lx.isText(c, "(") { depth += 1 }
+                    if lx.isText(c, ")") { depth -= 1 }
+                    if depth == 0 && lx.isText(c, ":") {
+                        patEnd = c - 1
+                        typeText = textOf(lx, c + 1, eq - 1)
+                        break
+                    }
+                    c += 1
+                }
+                let scopeEnd = blockEndAround(lx, i, i, close)
+                let initFrom = if eq <= end { eq + 1 } else { -1 }
+                let initTo = if eq <= end { end } else { -1 }
+                bindPattern(&var out, lx, i + 1, patEnd, w, end + 1, scopeEnd, typeText,
+                            initFrom, initTo, w != "let")
+                i += 1
+                continue
+            }
+            // A `for` loop is a statement too. One anywhere else is part of
+            // something a macro reads — `comprehend!(x for x in xs)` — and
+            // binds nothing here.
+            if w == "for" && atStart {
+                // `for PATTERN in EXPR { body }`
+                var inAt = i + 1
+                while inAt < close && !lx.isText(inAt, "in") && !lx.isText(inAt, "{") { inAt += 1 }
+                if lx.isText(inAt, "in") {
+                    let condEnd = conditionEnd(lx, inAt + 1)
+                    let bodyOpen = condEnd + 1
+                    let bodyClose = lx.closing(bodyOpen)
+                    bindPattern(&var out, lx, i + 1, inAt - 1, "for", bodyOpen, bodyClose, "",
+                                inAt + 1, condEnd, false)
+                }
+                i += 1
+                continue
+            }
+            if w == "is" {
+                // `EXPR is PATTERN` inside an `if`, `elif` or `while`: the
+                // names are visible in the body that follows.
+                var patEnd = i + 1
+                var depth = 0
+                while patEnd < close {
+                    if lx.isText(patEnd, "(") || lx.isText(patEnd, "[") { depth += 1 }
+                    elif lx.isText(patEnd, ")") || lx.isText(patEnd, "]") {
+                        if depth == 0 { break }
+                        depth -= 1
+                    }
+                    elif depth == 0 && (lx.isText(patEnd, "{") || lx.isText(patEnd, "&&") ||
+                                        lx.isText(patEnd, "||") || lx.isNewline(patEnd)) { break }
+                    patEnd += 1
+                }
+                var bodyOpen = patEnd
+                while bodyOpen < close && !lx.isText(bodyOpen, "{") { bodyOpen += 1 }
+                let bodyClose = lx.closing(bodyOpen)
+                bindPattern(&var out, lx, i + 1, patEnd - 1, "pattern", i + 1, bodyClose, "",
+                            -1, -1, false)
+                i += 1
+                continue
+            }
+            if w == "match" {
+                let armsOpen = conditionEnd(lx, i + 1) + 1
+                if lx.isText(armsOpen, "{") {
+                    let armsClose = lx.closing(armsOpen)
+                    readArms(&var out, lx, armsOpen, armsClose)
+                }
+                i += 1
+                continue
+            }
+        }
+        // A closure: `||(a: i64, b) -> T { ... }`
+        if t.kind == syntax::Kind::Punct && t.text == "||" && lx.isText(i + 1, "(") &&
+                (lx.isText(i - 1, "(") || lx.isText(i - 1, ",") || lx.isText(i - 1, "=") ||
+                 lx.isText(i - 1, "move") || lx.isNewline(i - 1) || lx.isText(i - 1, "{") ||
+                 lx.isText(i - 1, "return") || lx.isText(i - 1, ":")) {
+            let pclose = lx.closing(i + 1)
+            var bodyOpen = pclose + 1
+            while bodyOpen < close && !lx.isText(bodyOpen, "{") { bodyOpen += 1 }
+            let bodyClose = lx.closing(bodyOpen)
+            let parts = splitTop(lx, i + 2, pclose - 1)
+            var p = 0
+            while p < parts.length() {
+                let a = parts.get(p)
+                let b = parts.get(p + 1)
+                p += 2
+                if lx.isIdent(a) {
+                    var bd = Binding()
+                    bd.name = lx.text(a)
+                    bd.kind = "closure"
+                    bd.tok = a
+                    bd.visibleFrom = bodyOpen
+                    bd.visibleTo = bodyClose
+                    if lx.isText(a + 1, ":") { bd.typeText = textOf(lx, a + 2, b) }
+                    out.push(bd)
+                }
+            }
+            i = pclose + 1
+            continue
+        }
+        // A bare `name = value` at the start of a statement declares `name`
+        // when nothing in scope is called that yet.
+        if t.kind == syntax::Kind::Ident && lx.isText(i + 1, "=") &&
+                (lx.isNewline(i - 1) || lx.isText(i - 1, "{") || lx.isText(i - 1, ";")) &&
+                !isBound(out, t.text, i) && ix.find(t.text, "").isEmpty() {
+            let end = statementEnd(lx, i)
+            var bd = Binding()
+            bd.name = t.text.$clone()
+            bd.kind = "var"
+            bd.tok = i
+            bd.visibleFrom = end + 1
+            bd.visibleTo = blockEndAround(lx, i, i, close)
+            bd.initFrom = i + 2
+            bd.initTo = end
+            bd.mutable = true
+            out.push(bd)
+        }
+        i += 1
+    }
+    out
+}
+
+/// Match arms between `open` and `close`: each `PATTERN [if guard] => ...`,
+/// with the pattern's names visible through the end of the arm.
+fn readArms(out: &var vector::Vector<Binding>, lx: &syntax::Lexed, open: i64, close: i64) {
+    var i = skipBlank(lx, open + 1)
+    while i < close {
+        // The pattern runs to `=>` at this depth.
+        var arrow = i
+        var depth = 0
+        while arrow < close {
+            if lx.isText(arrow, "(") || lx.isText(arrow, "[") || lx.isText(arrow, "{") { depth += 1 }
+            elif lx.isText(arrow, ")") || lx.isText(arrow, "]") || lx.isText(arrow, "}") { depth -= 1 }
+            elif depth == 0 && lx.isText(arrow, "=>") { break }
+            arrow += 1
+        }
+        if arrow >= close { return }
+        var patEnd = arrow - 1
+        var g = i
+        depth = 0
+        while g < arrow {
+            if lx.isText(g, "(") || lx.isText(g, "[") || lx.isText(g, "{") { depth += 1 }
+            elif lx.isText(g, ")") || lx.isText(g, "]") || lx.isText(g, "}") { depth -= 1 }
+            elif depth == 0 && lx.isText(g, "if") { patEnd = g - 1; break }
+            g += 1
+        }
+        // The arm's body: a block, or an expression up to `,` or a newline.
+        var end = arrow + 1
+        if lx.isText(end, "{") {
+            end = lx.closing(end)
+        } else {
+            depth = 0
+            while end < close {
+                if lx.isText(end, "(") || lx.isText(end, "[") || lx.isText(end, "{") { depth += 1 }
+                elif lx.isText(end, ")") || lx.isText(end, "]") || lx.isText(end, "}") { depth -= 1 }
+                elif depth == 0 && (lx.isText(end, ",") || lx.isNewline(end)) { break }
+                end += 1
+            }
+            end -= 1
+        }
+        bindPattern(out, lx, i, patEnd, "pattern", patEnd + 1, end, "", -1, -1, false)
+        i = end + 1
+        while i < close && (lx.isText(i, ",") || lx.isNewline(i) || lx.isText(i, ";")) { i += 1 }
+    }
+}
+
+/// True when a binding named `name` is visible at token `at`.
+fn isBound(bs: &vector::Vector<Binding>, name: &String, at: i64) -> bool {
+    for b in bs {
+        if b.name == name && b.visibleFrom <= at && at <= b.visibleTo { return true }
+    }
+    false
+}
+
+/// The binding identifier token `use` refers to, as an index into `bs`, or
+/// -1. The innermost visible one wins: the latest declared.
+pub fn resolveLocal(bs: &vector::Vector<Binding>, name: &String, use: i64) -> i64 {
+    var best = -1
+    var i = 0
+    while i < bs.length() {
+        let b = bs.look(i)
+        if b.name == name && (b.tok == use || (b.visibleFrom <= use && use <= b.visibleTo)) {
+            if best < 0 || bs.look(best).tok < b.tok { best = i }
+        }
+        i += 1
+    }
+    best
+}

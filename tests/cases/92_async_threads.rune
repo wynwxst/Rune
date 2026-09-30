@@ -1,0 +1,59 @@
+// Work on other threads: `blocking` runs a `fn` on a worker from a pool,
+// `offload` a closure whose captures are `Send`, and `offloadAsync` an
+// `async` closure — its task runs on the worker's own executor. Each worker
+// thread has an executor, so tasks run on several threads at once; futures
+// still belong to the thread that made them, and only results cross back.
+// EXPECT: squares 313
+// EXPECT: workers at least two: true
+// EXPECT: offload 101
+// EXPECT: offloadAsync 6
+// EXPECT: on a worker: false
+// EXPECT: sum 4950
+import std::io
+import std::task
+import std::time
+import std::collections::vector
+
+fn slowSquare(n: i64) -> i64 {
+    var i = 0
+    var noise = 0
+    while i < 100000 { noise += (n * n) % 7; i += 1 }
+    n * n
+}
+
+async fn compute(n: i64) -> i64 {
+    task::sleep(time::milliseconds(1)).await
+    n * 2
+}
+
+fn main() -> i64 {
+    let a = task::blocking(slowSquare, 12)
+    let b = task::blocking(slowSquare, 13)
+    io::println("squares " + (a.wait() + b.wait()).$str())
+    io::println("workers at least two: " + (task::workers() >= 2).$str())
+
+    let base = 100
+    io::println("offload " + task::offload(||() -> i64 { base + 1 }).wait().$str())
+
+    // The async closure's tasks run on the worker thread's executor.
+    let total = task::offloadAsync(async ||() -> i64 {
+        let x = compute(1)
+        let y = compute(2)
+        x.await + y.await
+    })
+    io::println("offloadAsync " + total.wait().$str())
+    io::println("on a worker: " + task::offload(||() -> bool { task::inTask() }).wait().$str())
+
+    // Many jobs over a bounded pool.
+    var jobs = vector::Vector<task::Future<i64>>()
+    var i = 0
+    while i < 100 {
+        let n = i
+        jobs.push(task::offload(||() -> i64 { n }))
+        i += 1
+    }
+    var sum = 0
+    for j in jobs { sum += j.wait() }
+    io::println("sum " + sum.$str())
+    0
+}

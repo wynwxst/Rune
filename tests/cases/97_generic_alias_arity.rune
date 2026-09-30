@@ -1,0 +1,8 @@
+// EXPECT-ERROR: takes 1 generic argument
+//
+// An alias is written with the arguments it declares.
+type Gen<T> = [T]
+
+fn f(x: Gen<i64, String>) -> i64 { 0 }
+
+fn main() -> i64 { 0 }

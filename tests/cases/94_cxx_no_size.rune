@@ -1,0 +1,21 @@
+// EXPECT-ERROR: has no `@size`
+//
+// Allocating storage for a C++ object needs its size, and only the C++ side
+// knows it. Without `@size`, instances can still be taken from a function
+// that makes them — they just cannot be made here.
+import std::cxx
+
+extern "C++" {
+    namespace demo {
+        class Counter {
+            fn peek(&self) -> c_int
+        }
+    }
+}
+
+@safe("nothing is dereferenced; the allocation itself is what is refused")
+fn main() -> i64 {
+    let c = cxx::alloc<Counter>()
+    cxx::free(c)
+    0
+}

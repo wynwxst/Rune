@@ -1,0 +1,19 @@
+// A line ending in `.await` is a finished statement, the way one ending in
+// `?` is — so a following line that begins with `(` after macro expansion
+// (`println!` becomes a parenthesised call) is a new statement, not a call
+// on the awaited value.
+// EXPECT: 21 : hello
+// EXPECT: 42
+import std::io
+import std::task
+
+async fn answer() -> i64 { 21 }
+
+async fn main() -> i64 {
+    a = answer().await
+
+    println!("{} : {}", a, "hello")
+    let b = answer().await
+    println!("{}", b * 2)
+    0
+}

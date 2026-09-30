@@ -1,0 +1,26 @@
+@type(Macros)
+// A list comprehension, as a procedural macro:
+//
+//     comprehend!(x * 2 for x in xs if x > 0)      // a Vector of the doubles
+//     comprehend!(name.$length() for name in names)
+//
+// The macro takes its input apart with a pattern rather than by counting
+// tokens, and writes the expansion as a template with the pieces' names in
+// it — so what it accepts and what it produces can each be read in one line.
+import std::Macro
+
+/// `<value> for <item> in <source> [if <condition>]`, collected into a Vector.
+///
+/// The condition is tested before the value is computed, as it reads: only
+/// the items it lets through are mapped.
+@macro
+pub fn comprehend(input: Macro::Tokens) -> Macro::Tokens {
+    let c = input.capture("$value for $item in $source [if $condition]")
+    if !c.matched() {
+        return Macro::fail("comprehend! " + c.why())
+    }
+    if c.has("condition") {
+        return Macro::quote("$source.values().filter(||($item) { $condition }).map(||($item) { $value }).collect()", c)
+    }
+    Macro::quote("$source.values().map(||($item) { $value }).collect()", c)
+}

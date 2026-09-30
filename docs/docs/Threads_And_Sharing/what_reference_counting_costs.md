@@ -6,7 +6,7 @@ So the compiler picks from the static type instead. `String`, `Arc` and anything
 
 | Counted with | Which types |
 | --- | --- |
-| an ordinary add | classes, closures, `Any`, `dyn Mark` — none of which is `Send` |
-| an atomic add | `String`, `Arc<T>`, `Mutex<T>`, and any `@sync` type |
+| an ordinary add | classes, `Any`, `dyn Mark` — none of which is `Send` |
+| an atomic add | `String`, `Arc<T>`, `Mutex<T>`, any `@sync` type — and closures, because `task::offload` hands one to a worker thread while the thread that made it may still be letting go of its own reference |
 
 The weak-reference table is the one piece of runtime state every thread shares, and it has a lock of its own. Everything else the runtime keeps is per-object.

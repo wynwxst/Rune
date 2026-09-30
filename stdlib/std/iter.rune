@@ -83,21 +83,21 @@ pub mark Iterator {
     /// Every value with `f` applied to it.
     ///
     ///     for line in rows.map(||(r: Row) -> String { r.title }) { ... }
-    fn map<B>(self, f: @function(Self::Item) -> B) -> Map<Self, B> {
+    pub fn map<B>(self, f: @function(Self::Item) -> B) -> Map<Self, B> {
         Map<Self, B> { source: self, f: f }
     }
 
     /// Only the values `keep` says yes to.
     ///
     ///     for n in numbers.filter(||(n: i64) -> bool { n > 0 }) { ... }
-    fn filter(self, keep: @function(Self::Item) -> bool) -> Filter<Self> {
+    pub fn filter(self, keep: @function(&Self::Item) -> bool) -> Filter<Self> {
         Filter<Self> { source: self, keep: keep }
     }
 
     /// Pairs from both, stopping as soon as either does.
     ///
     ///     for (n, name) in counts.zip(names) { ... }
-    fn zip<J: Iterator>(self, other: J) -> Zip<Self, J> {
+    pub fn zip<J: Iterator>(self, other: J) -> Zip<Self, J> {
         Zip<Self, J> { left: self, right: other }
     }
 
@@ -107,34 +107,34 @@ pub mark Iterator {
     /// never again — so this is what ends an endless iterator.
     ///
     ///     for n in counting(1).take_while(||(n: i64) -> bool { n * n < 100 }) { ... }
-    fn take_while(self, keep: @function(Self::Item) -> bool) -> TakeWhile<Self> {
+    pub fn take_while(self, keep: @function(&Self::Item) -> bool) -> TakeWhile<Self> {
         TakeWhile<Self> { source: self, keep: keep }
     }
 
     /// Everything from the first value `drop` says no to onwards.
-    fn skip_while(self, drop: @function(Self::Item) -> bool) -> SkipWhile<Self> {
+    pub fn skip_while(self, drop: @function(&Self::Item) -> bool) -> SkipWhile<Self> {
         SkipWhile<Self> { source: self, drop: drop }
     }
 
     /// At most `count` values.
-    fn take(self, count: i64) -> Take<Self> {
+    pub fn take(self, count: i64) -> Take<Self> {
         Take<Self> { source: self, remaining: count }
     }
 
     /// Everything after the first `count` values.
-    fn skip(self, count: i64) -> Skip<Self> {
+    pub fn skip(self, count: i64) -> Skip<Self> {
         Skip<Self> { source: self, remaining: count }
     }
 
     /// Each value paired with its position, counting from zero.
     ///
     ///     for (i, name) in names.iterate().enumerate() { ... }
-    fn enumerate(self) -> Enumerate<Self> {
+    pub fn enumerate(self) -> Enumerate<Self> {
         Enumerate<Self> { source: self }
     }
 
     /// This iterator's values, then `other`'s.
-    fn chain<J: Iterator>(self, other: J) -> Chain<Self, J> {
+    pub fn chain<J: Iterator>(self, other: J) -> Chain<Self, J> {
         Chain<Self, J> { left: self, right: other }
     }
 
@@ -144,7 +144,7 @@ pub mark Iterator {
     /// stride of zero would never move.
     ///
     ///     for n in counting(0).step_by(5).take(4) { ... }   // 0 5 10 15
-    fn step_by(self, stride: i64) -> StepBy<Self> {
+    pub fn step_by(self, stride: i64) -> StepBy<Self> {
         StepBy<Self> { source: self, stride: stride }
     }
 
@@ -154,7 +154,7 @@ pub mark Iterator {
     /// at halfway to see what is in it, so this is how you look.
     ///
     ///     rows.inspect(||(r: Row) -> () { io::println(r.title) }).count()
-    fn inspect(self, look: @function(Self::Item) -> ()) -> Inspect<Self> {
+    pub fn inspect(self, look: @function(&Self::Item) -> ()) -> Inspect<Self> {
         Inspect<Self> { source: self, look: look }
     }
 
@@ -163,7 +163,7 @@ pub mark Iterator {
     /// the next is asked for.
     ///
     ///     for word in lines.map(words).flatten() { ... }
-    fn flatten(self) -> Flatten<Self> where Self::Item: Iterator {
+    pub fn flatten(self) -> Flatten<Self> where Self::Item: Iterator {
         Flatten<Self> { source: self }
     }
 
@@ -171,7 +171,7 @@ pub mark Iterator {
     /// and the results are laid out end to end.
     ///
     ///     for c in names.as_iter().flatMap(||(n: String) -> text::Chars { text::chars(n) }) { ... }
-    fn flatMap<J: Iterator>(self, f: @function(Self::Item) -> J) -> Flatten<Map<Self, J>> {
+    pub fn flatMap<J: Iterator>(self, f: @function(Self::Item) -> J) -> Flatten<Map<Self, J>> {
         Flatten<Map<Self, J>> { source: Map<Self, J> { source: self, f: f } }
     }
 
@@ -181,12 +181,12 @@ pub mark Iterator {
     /// above compute nothing until something asks them to.
     ///
     ///     let evens = numbers.filter(||(n: i64) -> bool { n % 2 == 0 }).collect()
-    fn collect(self) -> vector::Vector<Self::Item> {
+    pub fn collect(self) -> vector::Vector<Self::Item> {
         vector::collect(self)
     }
 
     /// How many values are left. Walks the iterator to its end.
-    fn count(self) -> i64 {
+    pub fn count(self) -> i64 {
         var it = self
         var n = 0
         loop {
@@ -201,33 +201,33 @@ pub mark Iterator {
     /// The first value `keep` says yes to, or `nil` if there is none.
     ///
     /// Stops as soon as it finds one: the source is not walked to its end.
-    fn find(self, keep: @function(Self::Item) -> bool) -> Self::Item? {
+    pub fn find(self, keep: @function(&Self::Item) -> bool) -> Self::Item? {
         var it = self
         loop {
             match it.next() {
-                Option::Some(value) => if keep(value.$clone()) { return value },
+                Option::Some(value) => if keep(&value) { return value },
                 Option::None => return nil,
             }
         }
     }
 
     /// True when `keep` says yes to at least one value. Stops at the first.
-    fn any(self, keep: @function(Self::Item) -> bool) -> bool {
+    pub fn any(self, keep: @function(&Self::Item) -> bool) -> bool {
         var it = self
         loop {
             match it.next() {
-                Option::Some(value) => if keep(value) { return true },
+                Option::Some(value) => if keep(&value) { return true },
                 Option::None => return false,
             }
         }
     }
 
     /// True when `keep` says yes to every value. Stops at the first `false`.
-    fn all(self, keep: @function(Self::Item) -> bool) -> bool {
+    pub fn all(self, keep: @function(&Self::Item) -> bool) -> bool {
         var it = self
         loop {
             match it.next() {
-                Option::Some(value) => if !keep(value) { return false },
+                Option::Some(value) => if !keep(&value) { return false },
                 Option::None => return true,
             }
         }
@@ -239,7 +239,7 @@ pub mark Iterator {
     /// of a chain, where breaking out to a loop would mean naming the chain.
     ///
     ///     rows.filter(isVisible).forEach(||(r: Row) { draw(r) })
-    fn forEach(self, visit: @function(Self::Item) -> ()) {
+    pub fn forEach(self, visit: @function(Self::Item) -> ()) {
         var it = self
         loop {
             match it.next() {
@@ -258,7 +258,7 @@ pub mark Iterator {
     ///     let total = prices.as_iter().fold(0, ||(sum: i64, p: i64) -> i64 {
     ///         sum + p
     ///     })
-    fn fold<A>(self, initial: A, combine: @function(A, Self::Item) -> A) -> A {
+    pub fn fold<A>(self, initial: A, combine: @function(A, Self::Item) -> A) -> A {
         var it = self
         var carried = initial
         loop {
@@ -276,7 +276,7 @@ pub mark Iterator {
     ///     let biggest = scores.as_iter().reduce(||(a: i64, b: i64) -> i64 {
     ///         if a > b { a } else { b }
     ///     })
-    fn reduce(self, combine: @function(Self::Item, Self::Item) -> Self::Item) -> Self::Item? {
+    pub fn reduce(self, combine: @function(Self::Item, Self::Item) -> Self::Item) -> Self::Item? {
         var it = self
         var carried = it.next()
         match carried {
@@ -295,7 +295,7 @@ pub mark Iterator {
     }
 
     /// The last value, or `nil` when there are none. Walks to the end.
-    fn last(self) -> Self::Item? {
+    pub fn last(self) -> Self::Item? {
         var it = self
         var seen: Self::Item? = nil
         loop {
@@ -309,7 +309,7 @@ pub mark Iterator {
 
     /// The value at `index`, counting from zero, or `nil` if the chain is
     /// shorter than that. Everything before it is walked past and discarded.
-    fn nth(self, index: i64) -> Self::Item? {
+    pub fn nth(self, index: i64) -> Self::Item? {
         var it = self
         var left = index
         loop {
@@ -326,13 +326,13 @@ pub mark Iterator {
     /// Where the first value `keep` says yes to is, or `nil` if there is none.
     ///
     /// `find` hands back the value; this hands back its position.
-    fn position(self, keep: @function(Self::Item) -> bool) -> i64? {
+    pub fn position(self, keep: @function(&Self::Item) -> bool) -> i64? {
         var it = self
         var at = 0
         loop {
             match it.next() {
                 Option::Some(value) => {
-                    if keep(value) { return at }
+                    if keep(&value) { return at }
                     at += 1
                 },
                 Option::None => return nil,
@@ -345,7 +345,7 @@ pub mark Iterator {
     /// `better` returns true when its first argument should win, so
     /// `||(a, b) -> bool { a < b }` finds the smallest and `a > b` the
     /// largest. One comparison per value, and nothing is stored.
-    fn best(self, better: @function(Self::Item, Self::Item) -> bool) -> Self::Item? {
+    pub fn best(self, better: @function(&Self::Item, &Self::Item) -> bool) -> Self::Item? {
         var it = self
         match it.next() {
             Option::Some(first) => {
@@ -353,7 +353,7 @@ pub mark Iterator {
                 loop {
                     match it.next() {
                         Option::Some(value) => {
-                            if better(value.$clone(), winner.$clone()) { winner = value }
+                            if better(&value, &winner) { winner = value }
                         },
                         Option::None => break,
                     }
@@ -385,7 +385,7 @@ pub mark Sequence {
 
     /// Only the values `keep` says yes to.
     fn filter(self,
-              keep: @function(Self::Iter::Item) -> bool) -> Filter<Self::Iter> {
+              keep: @function(&Self::Iter::Item) -> bool) -> Filter<Self::Iter> {
         Filter<Self::Iter> { source: self.iterate(), keep: keep }
     }
 
@@ -396,13 +396,13 @@ pub mark Sequence {
 
     /// The values up to the first one `keep` says no to, and no further.
     fn take_while(self,
-                  keep: @function(Self::Iter::Item) -> bool) -> TakeWhile<Self::Iter> {
+                  keep: @function(&Self::Iter::Item) -> bool) -> TakeWhile<Self::Iter> {
         TakeWhile<Self::Iter> { source: self.iterate(), keep: keep }
     }
 
     /// Everything from the first value `drop` says no to onwards.
     fn skip_while(self,
-                  drop: @function(Self::Iter::Item) -> bool) -> SkipWhile<Self::Iter> {
+                  drop: @function(&Self::Iter::Item) -> bool) -> SkipWhile<Self::Iter> {
         SkipWhile<Self::Iter> { source: self.iterate(), drop: drop }
     }
 
@@ -504,7 +504,7 @@ bind<I: Iterator, B> Iterator to Map<I, B> {
 /// The values of `source` that `keep` says yes to. Built by `Iterator::filter`.
 pub struct Filter<I> {
     source: I
-    keep: @function(I::Item) -> bool
+    keep: @function(&I::Item) -> bool
 }
 
 bind<I: Iterator> Iterator to Filter<I> {
@@ -514,7 +514,7 @@ bind<I: Iterator> Iterator to Filter<I> {
         // caller: `next` returns only once it has something to return.
         loop {
             match self.source.next() {
-                Option::Some(value) => if (self.keep)(value) { return value },
+                Option::Some(value) => if (self.keep)(&value) { return value },
                 Option::None => return nil,
             }
         }
@@ -553,7 +553,7 @@ bind<I: Iterator, J: Iterator> Iterator to Zip<I, J> {
 /// once past the last value taken, and never again.
 pub struct TakeWhile<I> {
     source: I,
-    keep: @function(I::Item) -> bool,
+    keep: @function(&I::Item) -> bool,
     done: bool = false
 }
 
@@ -563,7 +563,7 @@ bind<I: Iterator> Iterator to TakeWhile<I> {
         if self.done { return nil }
         match self.source.next() {
             Option::Some(value) => {
-                if (self.keep)(value) {
+                if (self.keep)(&value) {
                     value
                 } else {
                     // Stop here rather than skipping: `take_while` ends at the
@@ -584,7 +584,7 @@ bind<I: Iterator> Iterator to TakeWhile<I> {
 /// then on. The mirror of `TakeWhile`. Built by `Iterator::skip_while`.
 pub struct SkipWhile<I> {
     source: I,
-    drop: @function(I::Item) -> bool,
+    drop: @function(&I::Item) -> bool,
     skipping: bool = true
 }
 
@@ -595,7 +595,7 @@ bind<I: Iterator> Iterator to SkipWhile<I> {
             match self.source.next() {
                 Option::Some(value) => {
                     if !self.skipping { return value }
-                    if !(self.drop)(value) {
+                    if !(self.drop)(&value) {
                         self.skipping = false
                         return value
                     }
@@ -712,7 +712,7 @@ bind<I: Iterator> Iterator to StepBy<I> {
 /// `Iterator::inspect`.
 pub struct Inspect<I> {
     source: I,
-    look: @function(I::Item) -> ()
+    look: @function(&I::Item) -> ()
 }
 
 bind<I: Iterator> Iterator to Inspect<I> {
@@ -720,7 +720,7 @@ bind<I: Iterator> Iterator to Inspect<I> {
     fn next(&var self) -> Self::Item? {
         match self.source.next() {
             Option::Some(value) => {
-                (self.look)(value)
+                (self.look)(&value)
                 value
             },
             Option::None => nil,

@@ -1,0 +1,151 @@
+// The rest of `std::task`: `spawn`, `async { }` blocks, `async ||` closures,
+// `pending`, `blocking`, `all`, and async methods — on a class, in a mark,
+// and in a `bind`.
+// EXPECT: spawned 7
+// EXPECT: block 8
+// EXPECT: closure 10
+// EXPECT: waiter done before complete: false
+// EXPECT: waiter 42
+// EXPECT: blocking 144
+// EXPECT: item1 item2 count=2
+// EXPECT: item#3
+// EXPECT: 2121 abab
+// EXPECT: all: 3 x!y!z!
+// EXPECT: first: 1 hare!
+// EXPECT: race: hare!
+// EXPECT: first done: 0
+// EXPECT: shared: tortoise! tortoise! true
+// EXPECT: hits 6
+// EXPECT: described item
+// EXPECT: from main: 5
+import std::io
+import std::task
+import std::time
+import std::collections::vector
+
+mark Source {
+    async fn fetch(&self, id: i64) -> String
+}
+
+class Store {
+    var prefix: String
+    var count: i64
+    fn init(self, prefix: String) { self.prefix = prefix; self.count = 0 }
+
+    /// `self` is the handle to the object, so a task may keep it.
+    pub async fn load(&var self, id: i64) -> String {
+        task::sleep(time::milliseconds(2)).await
+        self.count += 1
+        self.prefix + id.$str()
+    }
+}
+
+bind Source to Store {
+    async fn fetch(&self, id: i64) -> String {
+        task::sleep(time::milliseconds(1)).await
+        self.prefix + "#" + id.$str()
+    }
+}
+
+async fn twice<T: io::Display>(value: T) -> String {
+    let s = value.display()
+    s + s
+}
+
+async fn step(name: String, delay: i64) -> String {
+    task::sleep(time::milliseconds(delay)).await
+    name + "!"
+}
+
+fn slowSquare(n: i64) -> i64 {
+    var i = 0
+    var total = 0
+    while i < 100000 { total += (n * n) % 7; i += 1 }
+    n * n
+}
+
+class Counter {
+    var hits: i64
+    fn init(self) { self.hits = 0 }
+    fn bump(&var self) { self.hits += 1 }
+}
+
+/// Tasks on one thread take turns, so they share a class with no lock.
+async fn touch(c: Counter, times: i64) {
+    var i = 0
+    while i < times {
+        c.bump()
+        task::yieldNow()
+        i += 1
+    }
+}
+
+/// An `async { }` block is a task started where it is written, and its
+/// future is the block's value.
+fn describe(store: Store) -> task::Future<String> {
+    async { "described " + store.prefix }
+}
+
+async fn program() -> i64 {
+    io::println("spawned " + task::spawn(||() -> i64 { 3 + 4 }).await.$str())
+    let base = 5
+    io::println("block " + async { base + 3 }.await.$str())
+    let scale = async ||(x: i64) -> i64 { x * 5 }
+    io::println("closure " + scale(2).await.$str())
+
+    // A future completed by hand, from ordinary code.
+    let answer = task::pending<i64>()
+    let waiter = async { answer.await * 2 }
+    io::println("waiter done before complete: " + waiter.isDone().$str())
+    answer.complete(21)
+    io::println("waiter " + waiter.await.$str())
+
+    // Work on a thread of its own; `Send` is checked as for `thread::spawn`.
+    io::println("blocking " + task::blocking(slowSquare, 12).await.$str())
+
+    var store = Store("item")
+    let a = store.load(1)
+    let b = store.load(2)
+    io::println(a.await + " " + b.await + " count=" + store.count.$str())
+    io::println(store.fetch(3).await)
+    io::println(twice(21).await + " " + twice("ab").await)
+
+    var futures = vector::Vector<task::Future<String>>()
+    futures.push(step("x", 3))
+    futures.push(step("y", 1))
+    futures.push(step("z", 2))
+    let results = task::all(futures).await
+    io::println("all: " + results.length().$str() + " " + results.get(0) +
+                results.get(1) + results.get(2))
+
+    // The first of several to finish: its index and the future itself.
+    let tortoise = step("tortoise", 30)
+    let hare = step("hare", 5)
+    let (which, winner) = task::first(vec![tortoise, hare]).await
+    io::println("first: " + which.$str() + " " + winner.await)
+    io::println("race: " + task::race(vec![step("tortoise", 30), step("hare", 5)]).await)
+    // The loser keeps running; nothing cancels it. Give it time to finish so
+    // nothing is still parked when the program ends.
+    task::sleep(time::milliseconds(40)).await
+    // Several already done: the lowest index wins.
+    let (index, _) = task::first(vec![step("a", 1), step("b", 1)]).await
+    io::println("first done: " + index.$str())
+    // A clone is another handle to the same task.
+    let again = tortoise.$clone()
+    io::println("shared: " + tortoise.await + " " + again.await + " " + again.isDone().$str())
+
+    let c = Counter()
+    let t1 = touch(c, 3)
+    let t2 = touch(c, 3)
+    t1.await
+    t2.await
+    io::println("hits " + c.hits.$str())
+    io::println(describe(store).await)
+    5
+}
+
+/// A `main` that is not `async` drives the tasks with `run` — or `wait()`.
+fn main() -> i64 {
+    io::println("from main: " + task::run(program()).$str())
+    0
+}

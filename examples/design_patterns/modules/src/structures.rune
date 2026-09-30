@@ -1,0 +1,4 @@
+pub struct Credentials {
+  password: String,
+  username: String
+}

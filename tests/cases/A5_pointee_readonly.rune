@@ -1,0 +1,14 @@
+// EXPECT-ERROR: lends what it holds for reading
+//
+// An `Rc` is shared, so it has no `touch` and nothing writes through it. The
+// message says which stand-in refused and what to do instead, rather than
+// talking about a borrow nobody wrote.
+import std::mem
+
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 {
+    var r = mem::shared(Point { x: 1, y: 2 })
+    r.x = 5
+    0
+}

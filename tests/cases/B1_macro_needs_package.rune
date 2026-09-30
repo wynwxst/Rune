@@ -1,0 +1,11 @@
+// EXPECT-ERROR: belongs in a macro package
+//
+// A `@macro fn` is built and run while the program is compiled, so it lives
+// in a file of its own that opens with `@type(Macros)`. Writing one among
+// the program's own code is refused where it is written.
+import std::Macro
+
+@macro
+pub fn twice(input: Macro::Tokens) -> Macro::Tokens { input }
+
+fn main() -> i64 { 0 }

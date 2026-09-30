@@ -1,0 +1,12 @@
+// EXPECT-ERROR: is not a builder
+//
+// A block of values on a type that is not a `Builder`. The message names the
+// thing that was written rather than the `empty` it would have stood for.
+import std::io
+
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 {
+    let p = Point { 1; 2 }
+    p.x
+}

@@ -1,0 +1,191 @@
+// FLAGS: -L @LLVM_LIBDIR@ -l LLVM
+// EXPECT: verifier: ok
+// EXPECT: function: answer
+// EXPECT: found again: true
+// EXPECT: instruction named: sum
+// EXPECT: done
+//
+// LLVM's own C++ API, called directly: no C wrapper, no generated glue. The
+// declarations below are the headers rewritten as Rune sees them, and what
+// makes the program work is that every symbol is mangled exactly as Clang
+// mangles it and every argument crosses the way the platform's C++ ABI
+// passes it — `StringRef` as two registers, `Twine` by pointer, `this`
+// first, a class allocated with `operator new` and constructed in place.
+//
+// The subset is small on purpose: a context, a module, a function with one
+// basic block, an `add` and a `ret`, then the verifier. That is enough to
+// exercise every shape the interop has to get right.
+import std::io
+import std::cxx
+
+extern "C++" {
+    namespace llvm {
+        // --- values that travel by value ---------------------------------
+        struct StringRef { data: CString, length: c_size_t }
+        struct FunctionCallee { fnType: *var FunctionType, callee: *var Value }
+        /// LLVM's rope-of-strings: two 16-byte children and their kinds.
+        struct Twine {
+            lhs: CString, lhsExtra: c_size_t,
+            rhs: CString, rhsExtra: c_size_t,
+            lhsKind: u8, rhsKind: u8
+        }
+        struct InsertPosition {
+            node: *var c_void, parent: *var c_void
+            fn init(&var self, atEnd: *var BasicBlock)
+        }
+        struct ArrayRef<T> { data: *T, length: c_size_t }
+
+        // --- the context and the module ----------------------------------
+        @size(8)
+        class LLVMContext {
+            fn init(&var self)
+            fn deinit(&var self)
+        }
+        @size(1048)
+        class Module {
+            fn init(&var self, id: StringRef, ctx: &var LLVMContext)
+            fn deinit(&var self)
+            fn getOrInsertFunction(&var self, name: StringRef,
+                                   ty: *var FunctionType) -> FunctionCallee
+            fn getFunction(&self, name: StringRef) -> *var Function
+            fn print(&self, os: &var raw_ostream, annotator: *var AssemblyAnnotationWriter,
+                     preserveUseListOrder: bool, isForDebug: bool)
+        }
+
+        // --- types -------------------------------------------------------
+        class Type {
+            fn getInt32Ty(ctx: &var LLVMContext) -> *var IntegerType
+        }
+        class IntegerType : Type {}
+        class FunctionType : Type {
+            @as("functionType")
+            fn get(result: *var Type, params: ArrayRef<*var Type>,
+                   isVarArg: bool) -> *var FunctionType
+        }
+
+        // --- the value hierarchy -----------------------------------------
+        class Value {
+            fn getName(&self) -> StringRef
+        }
+        class User : Value {
+            struct IntrusiveOperandsAllocMarker { numOps: c_uint }
+            struct AllocInfo { bits: c_uint }
+            /// `new (marker) Inst(...)`: room for the operands ahead of the
+            /// object, which is why LLVM's instructions have their own.
+            @operator("new")
+            fn allocate(size: c_size_t, marker: IntrusiveOperandsAllocMarker) -> *var c_void
+        }
+        class Constant : User {}
+        class ConstantInt : Constant {
+            @as("constantInt")
+            fn get(ty: *var IntegerType, value: c_uint64_t, isSigned: bool,
+                   implicitTrunc: bool) -> *var ConstantInt
+        }
+        class GlobalValue : Constant {}
+        class Function : GlobalValue {}
+        @size(80)
+        class BasicBlock : Value {
+            fn init(&var self, ctx: &var LLVMContext, name: &Twine,
+                    parent: *var Function, insertBefore: *var BasicBlock)
+        }
+        class Instruction : User {
+            enum BinaryOps { Add = 13, Sub = 15, Mul = 17 }
+        }
+        class BinaryOperator : Instruction {
+            @as("createBinary")
+            fn Create(op: BinaryOps, lhs: *var Value, rhs: *var Value,
+                      name: &Twine, at: InsertPosition) -> *var BinaryOperator
+        }
+        @size(72)
+        class ReturnInst : Instruction {
+            fn init(&var self, ctx: &var LLVMContext, value: *var Value,
+                    info: AllocInfo, at: InsertPosition)
+        }
+
+        // --- output and checking -----------------------------------------
+        class raw_ostream {
+            enum OStreamKind { OK_OStream = 0, OK_FDStream = 1 }
+        }
+        @size(96)
+        class raw_fd_ostream : raw_ostream {
+            fn init(&var self, fd: c_int, shouldClose: bool, unbuffered: bool,
+                    kind: OStreamKind)
+            fn deinit(&var self)
+        }
+        class AssemblyAnnotationWriter {}
+        fn verifyModule(m: &Module, os: *var raw_ostream, brokenDebugInfo: *var bool) -> bool
+    }
+}
+
+/// A `Twine` naming a C string: LLVM's `CStringKind` on the left, empty right.
+fn twine(text: CString) -> Twine {
+    Twine { lhs: text, lhsExtra: 0, rhs: "", rhsExtra: 0, lhsKind: 3, rhsKind: 1 }
+}
+
+fn stringRef(text: &String) -> StringRef {
+    StringRef { data: text.$cstr(), length: text.$length() as c_size_t }
+}
+
+@safe("every pointer below is one LLVM handed out, or storage allocated here for it")
+fn main() -> i64 {
+    let ctx = cxx::alloc<LLVMContext>()
+    ctx.init()
+    let module = cxx::alloc<Module>()
+    let id = "demo"
+    module.init(stringRef(&id), ctx)
+
+    // i32 answer() { return 40 + 2 }
+    let i32Ty = Type::getInt32Ty(ctx)
+    let noParams: [1:*var Type] = [i32Ty as *var Type]
+    let fnTy = FunctionType::functionType(
+        i32Ty as *var Type,
+        ArrayRef<*var Type> { data: &noParams[0] as **var Type, length: 0 },
+        false)
+    let name = "answer"
+    let callee = module.getOrInsertFunction(stringRef(&name), fnTy)
+    let answer = callee.callee as *var Function
+
+    let entryName = twine("entry")
+    let entry = cxx::alloc<BasicBlock>()
+    entry.init(ctx, &entryName, answer, cxx::null<BasicBlock>())
+
+    let forty = ConstantInt::constantInt(i32Ty, 40, false, false)
+    let two = ConstantInt::constantInt(i32Ty, 2, false, false)
+    var at = InsertPosition { node: cxx::null<c_void>(), parent: cxx::null<c_void>() }
+    at.init(entry)
+    let sumName = twine("sum")
+    let sum = BinaryOperator::createBinary(BinaryOps::Add, forty as *var Value,
+                                           two as *var Value, &sumName, at)
+
+    // `new (marker) ReturnInst(...)`, spelled out: LLVM's own allocator, then
+    // the constructor on the storage it handed back.
+    let storage = User::allocate(72, IntrusiveOperandsAllocMarker { numOps: 1 })
+    let ret = storage as *var ReturnInst
+    ret.init(ctx, sum as *var Value, AllocInfo { bits: 1 }, at)
+
+    let broken = verifyModule(module, cxx::null<raw_ostream>(), cxx::null<bool>())
+    io::println("verifier: " + (if broken { "broken" } else { "ok" }))
+    io::println("function: " + answer.getName().data.$str())
+    io::println("found again: " + (module.getFunction(stringRef(&name)) == answer).$str())
+
+    // The instruction LLVM built carries the name it was given, which is the
+    // `Twine` having crossed by reference and been read on the other side.
+    io::println("instruction named: " + sum.getName().data.$str())
+
+    // The module's own printer. It goes to stderr so that what this case
+    // compares stays this program's own lines: LLVM writes to the descriptor
+    // as it goes, while Rune's `println` is buffered, and the two would
+    // interleave differently depending on what stdout is attached to.
+    let out = cxx::alloc<raw_fd_ostream>()
+    out.init(2, false, false, OStreamKind::OK_OStream)
+    module.print(out, cxx::null<AssemblyAnnotationWriter>(), false, false)
+    out.deinit()
+    cxx::free(out)
+
+    module.deinit()
+    cxx::free(module)
+    ctx.deinit()
+    cxx::free(ctx)
+    io::println("done")
+    0
+}

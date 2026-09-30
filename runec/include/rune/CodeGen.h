@@ -31,6 +31,7 @@
 #include <llvm/IR/Module.h>
 
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -150,6 +151,12 @@ private:
     /// consumer that keeps the value can take it back out of the statement's
     /// cleanup (`adopt`).
     std::map<llvm::Value *, llvm::Value *> TempOf;
+    /// Under Zombie: the address the last read of a place expression used —
+    /// a field's GEP, an element's. A consumer that moves the value out
+    /// empties *that* address rather than working the expression out a second
+    /// time, which matters when the base was a call: re-emitting it would run
+    /// it twice and empty a different copy than the one being dropped.
+    std::map<Expr *, llvm::Value *> PlaceAddr;
     std::map<VarDecl *, llvm::Value *> Slots;
     /// `i1` flags for the locals whose value can be handed on; see OwnedSlot.
     std::map<VarDecl *, llvm::Value *> LiveFlags;
@@ -222,6 +229,9 @@ private:
   static bool readsUntrackedMemory(Expr *e);
   /// `&T` for a class, `String`, closure or mark object is the handle itself,
   /// not the address of a slot holding it. A `&var T` is the slot.
+  llvm::Value *heldObject(llvm::Value *borrow, Type *ptrTy);
+  llvm::Value *subjectThroughBorrows(llvm::Value *v, Type *&t);
+  llvm::Value *receiverFor(Expr *base, Type *selfParam);
   bool handleBorrow(Type *t) const;
   /// Releases every reference held inside an aggregate stored at `addr`.
   void emitReleaseFields(llvm::Value *addr, Type *t);
@@ -300,6 +310,56 @@ private:
   /// means is decided by linkage: see `setDiscardableLinkage`.
   void pruneUnreachable();
   bool abiRejectsByValue(Type *t);
+  /// True when a place expression is rooted in something with storage of its
+  /// own — a local, `self`, a global — rather than in a value a call just
+  /// produced. Only the former can be re-evaluated for its address.
+  static bool placeRootIsStable(Expr *e);
+  /// True when a place is reached through a pointer or a class handle, so
+  /// what it names belongs to something the current function only borrows.
+  /// Matching such a place looks at it where it lies; matching a value of
+  /// one's own copies it first. See `emitMatch`.
+  static bool placeBehindBorrow(Expr *e);
+
+  //=== extern "C++" =======================================================//
+  //
+  // A C++ signature is lowered the way the target's C++ compiler lowers it —
+  // `this` first, a struct split into registers or copied to memory as the
+  // platform ABI says, a result too wide for registers written through a
+  // hidden pointer — so that what Rune emits and what the library expects
+  // agree instruction for instruction. See CodeGenCxx.cpp.
+  /// How one value crosses: as it is, coerced to another type, or through a
+  /// pointer to a copy (with or without `byval`).
+  struct CxxArg {
+    enum Kind : uint8_t { Direct, Coerce, Indirect, ByVal, Ignore } K = Direct;
+    llvm::Type *Ty = nullptr;   ///< the IR type at the call, for Direct/Coerce
+    unsigned Align = 0;         ///< for Indirect/ByVal
+    bool ZeroExt = false, SignExt = false;
+  };
+  struct CxxSignature {
+    llvm::FunctionType *FT = nullptr;
+    /// The result is written through a hidden first pointer (`sret`).
+    bool Sret = false;
+    llvm::Type *SretTy = nullptr;
+    unsigned SretAlign = 0;
+    CxxArg Ret;                    ///< how the result comes back otherwise
+    CxxArg This;                   ///< present when `HasThis`
+    bool HasThis = false;
+    std::vector<CxxArg> Args;      ///< one per Rune parameter, `self` excluded
+    llvm::CallingConv::ID CC = llvm::CallingConv::C;
+  };
+  std::map<FunctionDecl *, CxxSignature> CxxSignatures;
+  const CxxSignature &cxxSignatureFor(FunctionDecl *fn);
+  CxxArg classifyCxxArgument(Type *t, unsigned &intRegs, unsigned &sseRegs,
+                             bool isReturn, SourceRange where,
+                             const std::string &role);
+  void applyCxxAttributes(llvm::CallBase *call, llvm::Function *fn,
+                          const CxxSignature &sig);
+  llvm::Value *emitCxxCall(CallExpr *c, FunctionDecl *fn, llvm::Value *self);
+  /// `cxx::alloc<T>()` / `cxx::free<T>(p)`: C++'s own heap.
+  llvm::Value *emitCxxAlloc(CallExpr *c, Type *arg);
+  void emitCxxFree(CallExpr *c);
+  /// A C++ class with `@size` lowers to that many bytes; without, to one.
+  llvm::Type *lowerCxxClass(NominalDecl *nd);
   bool isSharedRefType(Type *t);
   const char *retainFnFor(Type *t);
   const char *releaseFnFor(Type *t);
@@ -312,6 +372,11 @@ private:
   llvm::Value *emitClone(llvm::Value *v, Type *t);
   llvm::Function *cloneFnFor(Type *t);
   FunctionDecl *userCloneOf(Type *t);
+  llvm::Value *emitUserClone(FunctionDecl *user, llvm::Value *v, Type *t);
+  bool containsUserClone(Type *t, std::set<Type *> &seen);
+  /// The value an immutable global is worth already, or null when it takes
+  /// a running program to work it out.
+  llvm::Constant *constantInitialiserFor(GlobalVarDecl *g);
   llvm::GlobalVariable *declareGlobal(GlobalVarDecl *g);
   /// Lowers `std::asm`'s two intrinsics. `resultType` is null for the one that
   /// returns nothing; `hasSideEffects` marks the assembly as something that
@@ -347,6 +412,8 @@ private:
   void emitInto(Expr *e, llvm::Value *slot, Type *slotType, bool raw = false);
 
   llvm::Value *emitCall(CallExpr *c);
+  /// The call itself; `emitCall` wraps a suspension point around it.
+  llvm::Value *emitCallPlain(CallExpr *c);
   llvm::Value *emitBinary(BinaryExpr *b);
   llvm::Value *emitUnary(UnaryExpr *u);
   llvm::Value *emitAssign(AssignExpr *a);

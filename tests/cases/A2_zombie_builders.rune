@@ -1,0 +1,115 @@
+// FLAGS: --memory zombie
+// EXPECT: text Hello []
+// EXPECT: button ok [wide]
+// EXPECT: text Bye [small]
+// EXPECT: inline 2
+// EXPECT: panel 2
+// EXPECT:   text one []
+// EXPECT:   text two []
+// EXPECT:   text three []
+// EXPECT: one item 1
+// EXPECT: empty 0
+// EXPECT: plain t x
+// EXPECT: short shorthand still a field
+//
+// The same as `A2_builders`, under single ownership: the block is ordinary
+// code by the time anything else sees it, so nothing about it is special here.
+//
+// A builder block: `Name { ... }` whose contents are values rather than
+// `field: value` pairs stands for an `empty()` and one `add` per item, which
+// is what `std::builder::Builder` asks of a type. Everything else about
+// `Name { ... }` is unchanged — a field, a shorthand field and a `..base` all
+// still mean what they did.
+import std::io
+import std::builder
+import std::collections::vector
+
+struct Node { tag: String, text: String, style: String = "" }
+
+extend Node {
+    fn style(self, s: String) -> Node {
+        Node { tag: self.tag, text: self.text, style: s }
+    }
+}
+
+fn Text(t: String) -> Node { Node { tag: "text", text: t } }
+
+struct Button { label: String = "ok" }
+
+extend Button {
+    fn style(self, s: String) -> Node {
+        Node { tag: "button", text: self.label, style: s }
+    }
+}
+
+struct Body { children: vector::Vector<Node> }
+
+bind builder::Builder to Body {
+    type Child = Node
+    fn empty() -> Self { Body { children: vector::Vector<Node>() } }
+    fn add(&var self, child: Node) { self.children.push(child) }
+}
+
+// A builder whose children are themselves built.
+struct Panel { parts: vector::Vector<Body> }
+
+bind builder::Builder to Panel {
+    type Child = Body
+    fn empty() -> Self { Panel { parts: vector::Vector<Body>() } }
+    fn add(&var self, child: Body) { self.parts.push(child) }
+}
+
+fn show(b: &Body, indent: String) {
+    var i = 0
+    while i < b.children.length() {
+        let c = b.children.at(i).unwrap()
+        println!("{}{} {} [{}]", indent, c.tag, c.text, c.style)
+        i += 1
+    }
+}
+
+fn main() -> i64 {
+    // Items on their own lines.
+    let page = Body {
+        Text("Hello")
+        Button {}.style("wide")
+        Text("Bye").style("small")
+    }
+    show(&page, "")
+
+    // The same on one line, separated by `;`.
+    let compact = Body{Text("a");Button{}.style("narrow")}
+    println!("inline {}", compact.children.length().$str())
+
+    // Nested: each item is itself a block.
+    let panel = Panel {
+        Body { Text("one") }
+        Body { Text("two"); Text("three") }
+    }
+    println!("panel {}", panel.parts.length().$str())
+    var i = 0
+    while i < panel.parts.length() {
+        let part = panel.parts.at(i).unwrap()
+        show(&part, "  ")
+        i += 1
+    }
+
+    // A single bare name would read as a field shorthand, so a trailing `;`
+    // says it is one item rather than one field.
+    let lone = Text("lonely")
+    let single = Body { lone; }
+    println!("one item {}", single.children.length().$str())
+
+    // `Name {}` is still the empty value.
+    let nothing = Body { children: vector::Vector<Node>() }
+    println!("empty {}", nothing.children.length().$str())
+
+    // Struct literals are untouched.
+    let plain = Node { tag: "t", text: "x" }
+    println!("plain {} {}", plain.tag, plain.text)
+    let tag = "shorthand"
+    let text = "still a field"
+    let short = Node { tag, text }
+    println!("short {} {}", short.tag, short.text)
+    0
+}

@@ -14,3 +14,4 @@ An `extern "C"` block declares functions that exist somewhere else. There is no 
 - [Linking](linking.md)
 - [Packaging a C half](packaging_a_c_half.md)
 - [Being called from C](being_called_from_c.md)
+- [C++ is its own block](c_plus_plus_is_its_own_block.md)

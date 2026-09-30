@@ -1,0 +1,139 @@
+// `Send` and `Sync`: which values may cross a thread boundary, and why.
+//
+//     runec -o send_sync examples/send_sync.rune && ./send_sync
+//
+// Neither mark is something you write on a type. The compiler reads both off
+// what the type is made of, the way it reads whether a type is reference
+// counted, so they stay true as a program changes instead of drifting out of
+// date. `reflect::isSend` and `reflect::isSync` ask the same question the
+// compiler asks itself.
+
+import std::io
+import std::thread
+import std::reflect
+
+//===--------------------------------------------------------------------===//
+// What the compiler decides, and from what
+//===--------------------------------------------------------------------===//
+
+struct Reading { sensor: i64, celsius: f64 }
+struct Named { label: String, value: Reading }
+
+class Counter {
+    var n: i64
+    fn init(self, n: i64) { self.n = n }
+}
+
+struct Holder { counter: Counter }
+
+fn survey() {
+    io::println("what may cross:")
+
+    // Scalars and their aggregates: yes. Nothing else can reach them.
+    println!("  i64        send {} sync {}",
+             reflect::isSend<i64>().$str(), reflect::isSync<i64>().$str())
+    println!("  Reading    send {} sync {}",
+             reflect::isSend<Reading>().$str(), reflect::isSync<Reading>().$str())
+
+    // A String is immutable and its contents never change, so it may cross.
+    println!("  Named      send {} sync {}",
+             reflect::isSend<Named>().$str(), reflect::isSync<Named>().$str())
+
+    // A class is a *mutable* shared reference: handing one over shares it,
+    // and then two threads may write the same field.
+    println!("  Counter    send {} sync {}",
+             reflect::isSend<Counter>().$str(), reflect::isSync<Counter>().$str())
+
+    // The answer follows the parts, so a struct holding a class loses it too.
+    println!("  Holder     send {} sync {}",
+             reflect::isSend<Holder>().$str(), reflect::isSync<Holder>().$str())
+
+    // The two exceptions, and what each one pays for the claim:
+    //  * `Arc` is written once and only read after, so it may be shared;
+    //  * `Mutex` synchronises every touch of what it holds, so it may hold
+    //    something that is not itself `Sync`.
+    println!("  Arc<i64>   send {} sync {}",
+             reflect::isSend<thread::Arc<i64>>().$str(),
+             reflect::isSync<thread::Arc<i64>>().$str())
+    println!("  Mutex<i64> send {} sync {}",
+             reflect::isSend<thread::Mutex<i64>>().$str(),
+             reflect::isSync<thread::Mutex<i64>>().$str())
+}
+
+//===--------------------------------------------------------------------===//
+// `Send`: a value moves to another thread
+//===--------------------------------------------------------------------===//
+//
+// `thread::spawn<A: Send, R: Send>` says it in its signature. The argument
+// goes over; the result comes back.
+
+fn warmest(batch: Reading) -> Reading {
+    Reading { sensor: batch.sensor, celsius: batch.celsius + 1.5 }
+}
+
+fn shout(name: String) -> String { name + "!" }
+
+fn sending() {
+    io::println("send:")
+
+    var one = thread::spawn(warmest, Reading { sensor: 3, celsius: 20.0 })
+    let back = one.join()
+    println!("  sensor {} now {}", back.sensor.$str(), back.celsius.$str())
+
+    var two = thread::spawn(shout, "hello" + " world")
+    println!("  {}", two.join())
+
+    // `thread::spawn(bump, Counter(0))` would not compile: `Counter` is a
+    // class, so it is not `Send`, and the bound on `spawn` is where the
+    // compiler says so.
+}
+
+//===--------------------------------------------------------------------===//
+// `Sync`: one value, reached from several threads at once
+//===--------------------------------------------------------------------===//
+//
+// `Arc<T: Sync>` is the read-only way: the value is set when the Arc is made
+// and only read afterwards, so every thread sees the same bytes and nobody
+// writes them.
+
+fn total(table: thread::Arc<[4:i64]>) -> i64 {
+    let values = table.get()
+    var sum = 0
+    var i = 0
+    while i < 4 { sum += values[i]; i += 1 }
+    sum
+}
+
+// For something that has to *change* while shared, `Mutex` is the answer: it
+// is `Sync` while holding an `i64`, which on its own is not something several
+// threads may touch at once.
+fn addOne(n: i64) -> i64 { n + 1 }
+
+fn bumpAThousand(shared: thread::Mutex<i64>) -> i64 {
+    var i = 0
+    while i < 1000 { shared.withLock(addOne); i += 1 }
+    0
+}
+
+fn syncing() {
+    io::println("sync:")
+
+    let table = thread::Arc<[4:i64]>([2, 3, 5, 7])
+    var a = thread::spawn(total, table)
+    var b = thread::spawn(total, table)
+    println!("  two readers agree: {}", (a.join() == b.join()).$str())
+
+    let counter = thread::Mutex<i64>(0)
+    var w1 = thread::spawn(bumpAThousand, counter)
+    var w2 = thread::spawn(bumpAThousand, counter)
+    var w3 = thread::spawn(bumpAThousand, counter)
+    w1.join(); w2.join(); w3.join()
+    println!("  three thousand bumps: {}", counter.get().$str())
+}
+
+fn main() -> i64 {
+    survey()
+    sending()
+    syncing()
+    0
+}

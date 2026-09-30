@@ -15,6 +15,7 @@
 import std::mem
 import std::process
 import std::collections::vector
+import std::iter
 
 extern "C" {
     fn rune_print(text: &String)
@@ -23,6 +24,10 @@ extern "C" {
     fn rune_eprintln(text: &String)
     fn rune_read_line() -> String
     fn rune_read_line_checked(more: *var i8) -> String
+    fn rune_read_stdin_exact(count: i64, ok: *var i8) -> String
+    fn rune_flush_stdout()
+    fn rune_stdin_unbuffer()
+    fn rune_stdin_waiting(millis: i64) -> i8
 }
 
 /// How a value renders as text.
@@ -40,6 +45,54 @@ extern "C" {
 bind operator::add to String {
     /// `text + 'c'` and `text += 'c'` — one character onto the end.
     fn add(&self, rhs: Character) -> String { self + rhs.$str() }
+}
+
+//===--------------------------------------------------------------------===//
+// Reading a String character by character
+//
+// A `String` is UTF-8, so its characters are not its bytes: `text[i]` — the
+// compiler's own, the same read as `text.$at(i)` — is the i-th *character*,
+// however wide the ones before it were, and `for c in text` walks them one
+// decode at a time. Indexing counts from the start on every call; it is the
+// loop that is cheap.
+//===--------------------------------------------------------------------===//
+
+extern "C" {
+    fn rune_string_char_after(text: &String, at: i64, next: *var i64) -> u32
+}
+
+/// A cursor over a string's characters: what `for c in text` drives.
+///
+/// It keeps a byte offset and decodes one character per step, so a loop
+/// over the whole string costs one pass, whatever the characters' widths.
+pub struct Chars {
+    text: &String
+    at: i64
+}
+
+bind iter::Iterator to Chars {
+    type Item = Character
+
+    @safe("the runtime reads within the string's length and says where it stopped")
+    fn next(&var self) -> Character? {
+        if self.at >= self.text.$length() { return nil }
+        var after = self.at
+        let code = unsafe { rune_string_char_after(self.text, self.at, &var after as *var i64) }
+        self.at = after
+        Some(code as Character)
+    }
+}
+
+bind iter::Sequence to String {
+    type Iter = Chars
+
+    /// A cursor at the first character.
+    ///
+    ///     for c in "héllo" { io::println(c) }
+    ///
+    /// The `from self` records that the cursor reads out of this string —
+    /// inert under counting, load-bearing under single ownership.
+    fn iterate(&self) -> Chars from self { Chars { text: self, at: 0 } }
 }
 
 pub mark Display {
@@ -90,6 +143,12 @@ bind Display to String {
 // slice, every array and every pair of printable things prints, without each
 // element type having to be written out.
 //===--------------------------------------------------------------------===//
+
+/// A borrow prints as what it borrows, so a vector of borrows — what
+/// `collect` makes of a borrowing iterator — prints like the values.
+bind<T> Display to &T where T: Display {
+    fn display(&self) -> String { (*self).display() }
+}
 
 /// `[1, 2, 3]`. An array is usable wherever a slice is, so this covers both.
 bind<T> Display to [T] where T: Display {
@@ -229,6 +288,52 @@ pub fn readLineOrEnd() -> String? {
     if more == 0i8 { return nil }
     line
 }
+
+/// Exactly `count` bytes of standard input, or `nil` when the input ends
+/// before that many arrive.
+///
+/// This is for a protocol that says how long its next message is — a
+/// `Content-Length` header, say — where the message may itself contain
+/// newlines. It reads the same buffered stream as `readLine`, so the two can
+/// be mixed without losing anything in between.
+///
+/// On Windows the first call also puts standard input and output into
+/// binary mode, so that a count means bytes. Anything `readLine` buffered
+/// before that call was read in text mode, with its `\r`s already removed —
+/// a byte protocol should read with this from its very first byte.
+@safe("the runtime sizes the buffer from the count and reports a short read")
+pub fn readExactly(count: i64) -> String? {
+    var ok = 0i8
+    let text = unsafe { rune_read_stdin_exact(count, &var ok as *var i8) }
+    if ok == 0i8 { return nil }
+    text
+}
+
+/// Pushes anything `print` has buffered out to standard output now.
+///
+/// Standard output is buffered when it is not a terminal, so a program
+/// answering requests over a pipe calls this after each answer, or the
+/// other side waits for a reply that is sitting in the buffer.
+@safe("fflush on the process's own standard output")
+pub fn flush() { rune_flush_stdout() }
+
+/// Stops standard input being buffered inside the program, so that
+/// `inputWaiting` can see everything that has been sent. Call it before the
+/// first read; afterwards it does nothing.
+///
+/// A server that answers messages as they come and does slower work between
+/// them — an editor's language server, say — reads this way.
+@safe("setvbuf on the process's own standard input")
+pub fn unbufferInput() { rune_stdin_unbuffer() }
+
+/// Whether standard input has something to read — or has ended — within
+/// `millis` milliseconds; `0` asks without waiting.
+///
+/// Input already read into a buffer is invisible to this, so call
+/// `unbufferInput` first. On Windows only a pipe can be asked: anything else
+/// answers `false`.
+@safe("poll on the process's own standard input")
+pub fn inputWaiting(millis: i64) -> bool { rune_stdin_waiting(millis) != 0i8 }
 
 //===--------------------------------------------------------------------===//
 // Files
@@ -533,7 +638,7 @@ pub fn walkDirectory(path: &String, depth: i64) -> vector::Vector<String> {
                         out.push(joinPath(e.name, inner))
                     }
                 } else {
-                    out.push(e.name)
+                    out.push(e.name.$clone())
                 }
             }
         },
@@ -613,6 +718,20 @@ pub class Bytes {
     /// How many bytes are in it.
     pub fn length(&self) -> i64 { self.count }
     pub fn isEmpty(&self) -> bool { self.count == 0 }
+
+    /// A buffer of its own holding the same bytes. This is what `$clone()`
+    /// does to a `Bytes`: the compiler's memberwise copy would give two
+    /// buffers one block, and the second to go would free it again.
+    @safe("the copy is sized to the count and filled from bytes below it")
+    pub fn clone(&self) -> Self {
+        var out = Bytes()
+        if self.count > 0 {
+            out.reserve(self.count)
+            mem::copy(out.block, self.block as *u8, self.count as usize)
+            out.count = self.count
+        }
+        out
+    }
 
     /// Room for `wanted` bytes in total, without changing what is there.
     @safe("the block is only ever grown, and the count is left alone")
@@ -975,7 +1094,7 @@ pub class BufferedReader<R: Reader> {
     pub fn inner(&var self) -> &var R { &var self.source }
 
     /// What has arrived but not yet been handed out.
-    pub fn buffered(&self) -> Bytes { self.held }
+    pub fn buffered(&self) -> &Bytes { self.held }
 
     /// True once the source has said it is finished and the buffer is empty.
     pub fn atEnd(&self) -> bool { self.finished && self.held.isEmpty() }
@@ -1111,3 +1230,8 @@ bind Writer to FileStream {
 }
 
 bind Stream to FileStream {}
+
+/// Both write their own `clone`: a `Bytes` copies its buffer, and a `File`
+/// duplicates its descriptor. Copying either is therefore a copy.
+bind mem::Clone to Bytes {}
+bind mem::Clone to File {}

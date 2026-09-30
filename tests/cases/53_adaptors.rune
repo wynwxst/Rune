@@ -109,7 +109,7 @@ fn main() -> i64 {
 
     let tagged = vector::collect(v.map(||(n: i64) -> String { "#" + n.$str() }))
     l = Line(" ")
-    for s in tagged { l.add(s) }
+    for s in tagged { l.add(s.$clone()) }
     io::println(tagged.length().$str() + " : " + l.text)
 
     var none = vector::Vector<i64>()
@@ -120,8 +120,7 @@ fn main() -> i64 {
     var held = vector::Vector<Res>()
     held.push(Res("a"))
     held.push(Res("b"))
-    let kept = vector::collect(held.filter(||(r: Res) -> bool { r.tag == "a" }))
-    held.clear()
+    let kept = vector::collect(held.drain().filter(||(r: &Res) -> bool { r.tag == "a" }))
     for r in kept { io::println("kept " + r.tag) }
     0
 }

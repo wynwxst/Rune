@@ -1,0 +1,93 @@
+// The macro package for `examples/macros.rune`.
+//
+// `@type(Macros)` makes this a package of its own: the compiler builds it
+// first — for the machine doing the compiling, whatever the program is being
+// built for — and runs it to expand each invocation.
+//
+// Two things follow, and they are why it is done this way rather than by
+// interpreting the bodies:
+//
+//   * everything works. A macro is ordinary compiled Rune, so the whole
+//     language and the whole standard library are available in one.
+//   * nothing leaks. What this file imports and declares is its own
+//     business; the program sees only the tokens its macros hand back.
+@type(Macros)
+
+import std::Macro
+import std::text
+import std::collections::vector
+import std::io
+
+/// An ordinary generic helper, used by the macros below.
+fn joined<T: io::Display>(items: vector::Vector<T>, between: String) -> String {
+    var out = ""
+    var i = 0
+    while i < items.length() {
+        if i > 0 { out += between }
+        out += items.at(i).unwrap().display()
+        i += 1
+    }
+    out
+}
+
+/// `enumerate!(Red, Green, Blue)` writes the enum and a `nameOf` for it.
+@macro
+pub fn enumerate(input: Macro::Tokens) -> Macro::Tokens {
+    var variants = vector::Vector<String>()
+    var arms = vector::Vector<String>()
+    var n = 0
+    for variant in input.split(",") {
+        let it = variant.text()
+        variants.push("    " + it + " = " + n.$str())
+        arms.push("        ." + it + " => \"" + text::lower(it) + "\",")
+        n += 1
+    }
+    Macro::parse("enum Colour {\n" + joined<String>(variants, "\n") + "\n}\n" +
+                 "fn nameOf(c: Colour) -> String {\n    match c {\n" +
+                 joined<String>(arms, "\n") + "\n    }\n}\n")
+}
+
+/// The sum of whatever numbers it is given, worked out while compiling. The
+/// program only ever sees the answer.
+@macro
+pub fn total(input: Macro::Tokens) -> Macro::Tokens {
+    var sum = 0
+    for part in input.split("+") {
+        sum += part.text().$toInt().or(0)
+    }
+    Macro::parse(sum.$str())
+}
+
+/// Refuses what it cannot use, pointing at the invocation.
+@macro
+pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
+    if input.isEmpty() {
+        Macro::error("firstWord! needs a word")
+    }
+    if !input.at(0).isA("name") {
+        Macro::error("firstWord! wants a name, and this is a " +
+                     input.at(0).kind())
+    }
+    Macro::string(input.at(0).text())
+}
+
+/// Wraps a block. The block arrives as **one** token, so it is handed back
+/// exactly as written — which is how whatever is inside it, `std::reflect`
+/// included, comes to be compiled in the program rather than here.
+@macro
+pub fn timed(input: Macro::Tokens) -> Macro::Tokens {
+    let label = input.at(0).text()
+    let body = input.at(input.length() - 1)
+    if !body.isA("block") {
+        Macro::error("timed! wants a block last, and got a " + body.kind())
+    }
+    Macro::parse("{ io::println(\"  enter " + label + "\"); " +
+                 body.inner().text() + " }")
+}
+
+/// What the program calls a type. Written as an expansion, so it is the
+/// program's `reflect` that answers.
+@macro
+pub fn typeNameOf(input: Macro::Tokens) -> Macro::Tokens {
+    Macro::parse("std::reflect::typeName<" + input.text() + ">()")
+}

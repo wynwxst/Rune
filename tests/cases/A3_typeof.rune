@@ -1,0 +1,56 @@
+// EXPECT: b 9
+// EXPECT: q 3.0
+// EXPECT: c 5
+// EXPECT: probe 1.0 2.0 3.0 4.0 style 7 n 2 flag 0
+// EXPECT: out 42
+// EXPECT: typeof is not a keyword: 3
+//
+// `typeof(expr)` is the type an expression has, worked out and never run.
+// What it is for: a macro that writes a foreign signature out of the values
+// it was handed, rather than asking the caller to spell the types a second
+// time and keep the two in step by hand.
+// CXX: cxx/probe.cpp
+import std::io
+
+struct Point { x: f64, y: f64 }
+struct Rect { x: f64, y: f64, w: f64, h: f64 }
+
+extern "C" {
+    fn rune_test_probe(a: *var u8, b: *var u8, ...) -> *var u8
+}
+
+macro Send {
+    ($recv: expr, $sel: expr $(, $item: expr)*) => {
+        (rune_test_probe as @cfunction(*var u8, *var u8
+                                       $(, typeof($item))*) -> *var u8)(
+            $recv, $sel $(, $item)*)
+    }
+}
+
+fn boom() -> i64 { io::println("SHOULD NOT PRINT"); 0 }
+
+/// `typeof` is contextual: a function of that name goes on meaning what it did.
+fn typeof(n: i64) -> i64 { n + 1 }
+
+@unsafe fn main() -> i64 {
+    let a = 7
+    let b: typeof(a) = 9
+    println!("b {}", b.$str())
+
+    let p = Point { x: 1.0, y: 2.0 }
+    var q: typeof(p) = Point { x: 3.0, y: 4.0 }
+    println!("q {}", q.x.$str())
+
+    // The expression is checked, never evaluated.
+    let c: typeof(boom()) = 5
+    println!("c {}", c.$str())
+
+    let o = 0 as *var u8
+    let r = Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 }
+    let style: u64 = 7
+    let out = Send!(o, o, r, style, 2, false)
+    println!("out {}", (out as u64).$str())
+
+    println!("typeof is not a keyword: {}", typeof(2).$str())
+    0
+}

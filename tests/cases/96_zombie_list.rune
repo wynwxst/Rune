@@ -1,0 +1,134 @@
+// FLAGS: --memory zombie
+// EXPECT: len 3
+// EXPECT: sum 6
+// EXPECT: first a
+// EXPECT: popped a
+// EXPECT: len 2
+// EXPECT: sum 12
+// EXPECT: appended d
+// EXPECT: reversed d
+//
+// A singly linked list under single ownership, written the way one would
+// want to write it: a `Handle` per node, a borrow walking the chain, and a
+// `&var` walk that writes as it goes. Everything here was either rejected or
+// quietly wrong once:
+//
+//   * `self.head = (*node).next` moved a field out of a temporary, and the
+//     temporary was destroyed afterwards — taking the moved field with it;
+//   * `cur = &node.look().next` was "assigning to `cur` while it is
+//     borrowed", because a borrow through a reference was recorded against
+//     the reference rather than against what it points at;
+//   * a binding out of a `&var` scrutinee was a shared borrow, so nothing
+//     could be written through it.
+import std::mem::{Handle}
+import std::{mem, io}
+
+enum Link<T> { Empty, More(Handle<Node<T>>) }
+struct Node<T> { elem: T, next: Link<T> }
+struct List<T> { head: Link<T> }
+
+extend List {
+    pub fn push(&var self, value: T) {
+        self.head = Link::More(Handle<Node<T>>(Node<T> {
+            elem: value, next: mem::replace(&var self.head, Link::Empty)
+        }))
+    }
+
+    pub fn pop(&var self) -> T? {
+        match mem::replace(&var self.head, Link::Empty) {
+            Link::Empty => nil,
+            Link::More(node) => {
+                self.head = (*node).next
+                Some((*node).elem)
+            }
+        }
+    }
+
+    /// A shared walk: one borrow at a time, the rest of the list untouched.
+    pub fn length(&self) -> i64 {
+        var n = 0
+        var cur = &self.head
+        while cur is Link::More(node) { n += 1; cur = &node.look().next }
+        n
+    }
+
+    pub fn first(&self) -> T? {
+        match &self.head {
+            Link::More(node) => Some(node.look().elem.$clone()),
+            Link::Empty => nil
+        }
+    }
+
+    /// A `&var` walk to the end, which is what appending needs.
+    pub fn append(&var self, value: T) {
+        var cur = &var self.head
+        loop {
+            match cur {
+                Link::Empty => break,
+                Link::More(node) => cur = &var node.touch().next
+            }
+        }
+        *cur = Link::More(Handle<Node<T>>(Node<T> { elem: value, next: Link::Empty }))
+    }
+
+    pub fn last(&self) -> T? {
+        var seen: T? = nil
+        var cur = &self.head
+        while cur is Link::More(node) {
+            seen = Some(node.look().elem.$clone())
+            cur = &node.look().next
+        }
+        seen
+    }
+
+    /// Reversal, one move at a time.
+    pub fn reverse(&var self) {
+        var done: Link<T> = Link::Empty
+        loop {
+            match mem::replace(&var self.head, Link::Empty) {
+                Link::Empty => break,
+                Link::More(node) => {
+                    var n = (*node)
+                    self.head = mem::replace(&var n.next, Link::Empty)
+                    n.next = done
+                    done = Link::More(Handle<Node<T>>(n))
+                }
+            }
+        }
+        self.head = done
+    }
+}
+
+extend List {
+    /// A second `extend` block on the same generic type adds to it too.
+    pub fn sum(&self) -> i64 {
+        var total = 0
+        var cur = &self.head
+        while cur is Link::More(node) { total += 1; cur = &node.look().next }
+        total * 2
+    }
+}
+
+fn main() -> i64 {
+    var list = List<String> { head: Link::Empty }
+    list.push("c")
+    list.push("b")
+    list.push("a")
+    io::println("len " + list.length().$str())
+    io::println("sum " + list.sum().$str())
+    io::println("first " + list.first().or("?"))
+    io::println("popped " + list.pop().or("?"))
+    io::println("len " + list.length().$str())
+
+    // Numbers, so the same methods are instantiated twice over.
+    var numbers = List<i64> { head: Link::Empty }
+    var i = 0
+    while i < 6 { numbers.push(i); i += 1 }
+    io::println("sum " + numbers.sum().$str())
+
+    list.append("d")
+    io::println("appended " + list.last().or("?"))
+    list.reverse()
+    io::println("reversed " + list.first().or("?"))
+    0
+}

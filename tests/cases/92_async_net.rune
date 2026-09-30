@@ -1,0 +1,69 @@
+// Sockets driven by tasks: `net::AsyncListener` and `net::AsyncStream` park
+// the task on the socket until it is ready, so one thread serves several
+// connections at once. Three clients and the server share one thread; only
+// `connectAsync`, which resolves a name, goes to a worker.
+// EXPECT: echo: one
+// EXPECT: echo: two
+// EXPECT: echo: three
+// EXPECT: served 3
+import std::io
+import std::net
+import std::task
+import std::time
+import std::collections::vector
+
+async fn serve(server: net::AsyncListener, count: i64) -> i64 {
+    var served = 0
+    while served < count {
+        match server.accept().await {
+            Ok(conn) => {
+                handle(conn)                 // a task per connection
+                served += 1
+            },
+            Err(e) => {
+                io::println("accept failed: " + net::describe(e))
+                return served
+            },
+        }
+    }
+    served
+}
+
+async fn handle(conn: net::AsyncStream) {
+    var c = conn
+    match c.read(1024).await {
+        Ok(bytes) => {
+            task::sleep(time::milliseconds(5)).await     // pretend to work
+            c.writeText("echo: " + bytes.toString()).await
+            c.shutdown(net::Shutdown::Write)
+            ()
+        },
+        Err(e) => io::println("read failed: " + io::describeStream(e)),
+    }
+}
+
+async fn client(port: i32, message: String) -> String {
+    match net::connectAsync("127.0.0.1", port).await {
+        Ok(conn) => {
+            var c = conn
+            c.writeText(message).await
+            c.shutdown(net::Shutdown::Write)
+            match c.readAll().await {
+                Ok(reply) => reply,
+                Err(e) => "client read failed: " + io::describeStream(e),
+            }
+        },
+        Err(e) => "connect failed: " + net::describe(e),
+    }
+}
+
+async fn main() -> i64 {
+    var server = net::listenAsync("127.0.0.1", 0).unwrap()
+    let port = server.port()
+    let serving = serve(server, 3)
+    let replies = task::all(vec![client(port, "one"), client(port, "two"),
+                                 client(port, "three")]).await
+    for r in replies { io::println(r) }
+    io::println("served " + serving.await.$str())
+    0
+}

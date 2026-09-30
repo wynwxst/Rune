@@ -1,0 +1,692 @@
+// The token stream the editor tools read.
+//
+// This is a second lexer for Rune, written in Rune, and it agrees with the
+// compiler's on everything the tools look at: where tokens begin and end,
+// which newlines end a statement, and what counts as a comment. It differs
+// in one deliberate way — it never fails. Source in an editor is usually
+// half-written, so an unterminated string or comment simply runs to where
+// the compiler would have given up, and everything after it is still read.
+//
+// Comments are not tokens here. They are kept beside the stream, because
+// the linter wants to find `TODO`s in them and the index wants
+// the `///` lines above a declaration, but nothing that walks the code
+// wants to step over them.
+
+import std::collections::vector
+
+/// What a token is.
+pub enum Kind {
+    Ident,
+    Keyword,
+    Int,
+    Float,
+    Str,
+    Char,
+    Punct,
+    /// A newline that ends a statement. Newlines inside brackets, after an
+    /// operator or before a leading `.` are not tokens at all, exactly as in
+    /// the compiler.
+    Newline,
+    End,
+}
+
+/// One token: its text and where it is.
+///
+/// Positions are byte offsets into the source, and 0-based line and byte
+/// column. Editors count columns in other units; converting is the
+/// server's job, and it has the line text to do it with.
+pub struct Token {
+    pub kind: Kind
+    pub text: String
+    pub start: i64
+    pub end: i64
+    pub line: i64
+    pub col: i64
+}
+
+/// A comment, which the stream itself leaves out.
+pub struct Comment {
+    pub text: String
+    pub start: i64
+    pub end: i64
+    pub line: i64
+    pub col: i64
+    /// `///` — documentation for whatever declaration comes next.
+    pub isDoc: bool
+    /// `/* ... */`, which may span lines.
+    pub isBlock: bool
+}
+
+/// A whole file, lexed.
+pub class Lexed {
+    pub source: String
+    pub tokens: vector::Vector<Token>
+    pub comments: vector::Vector<Comment>
+    /// The byte offset each line starts at.
+    pub lineStarts: vector::Vector<i64>
+
+    fn init(self, source: String) {
+        self.source = source
+        self.tokens = vector::Vector<Token>()
+        self.comments = vector::Vector<Comment>()
+        self.lineStarts = vector::Vector<i64>()
+    }
+
+    /// How many tokens there are, the closing `End` included.
+    pub fn count(&self) -> i64 { self.tokens.length() }
+
+    /// The token at `i`; past the end is the `End` token.
+    pub fn at(&self, i: i64) -> &Token from self {
+        let n = self.tokens.length()
+        if i < 0 { return self.tokens.look(0) }
+        if i >= n { return self.tokens.look(n - 1) }
+        self.tokens.look(i)
+    }
+
+    /// The text of the token at `i`, or "" out of range.
+    pub fn text(&self, i: i64) -> String {
+        if i < 0 || i >= self.tokens.length() { return "" }
+        self.tokens.look(i).text.$clone()
+    }
+
+    /// True when token `i` is the punctuation or keyword `what`.
+    pub fn isText(&self, i: i64, what: &String) -> bool {
+        if i < 0 || i >= self.tokens.length() { return false }
+        let t = self.tokens.look(i)
+        t.kind != Kind::Str && t.kind != Kind::Char && t.text == what
+    }
+
+    pub fn isIdent(&self, i: i64) -> bool {
+        if i < 0 || i >= self.tokens.length() { return false }
+        self.tokens.look(i).kind == Kind::Ident
+    }
+
+    pub fn isNewline(&self, i: i64) -> bool {
+        if i < 0 || i >= self.tokens.length() { return false }
+        self.tokens.look(i).kind == Kind::Newline
+    }
+
+    pub fn isEnd(&self, i: i64) -> bool {
+        if i < 0 { return false }
+        if i >= self.tokens.length() { return true }
+        self.tokens.look(i).kind == Kind::End
+    }
+
+    /// How many lines the file has.
+    pub fn lineCount(&self) -> i64 { self.lineStarts.length() }
+
+    /// The text of 0-based `line`, without its line break.
+    pub fn lineText(&self, line: i64) -> String {
+        if line < 0 || line >= self.lineStarts.length() { return "" }
+        let from = self.lineStarts.get(line)
+        var upto = self.source.$length()
+        if line + 1 < self.lineStarts.length() { upto = self.lineStarts.get(line + 1) - 1 }
+        if upto > from && self.source.$byteAt(upto - 1) == 13 { upto -= 1 }
+        if upto < from { return "" }
+        self.source.$substring(from, upto)
+    }
+
+    /// The 0-based line holding byte `offset`.
+    pub fn lineOf(&self, offset: i64) -> i64 {
+        var lo = 0
+        var hi = self.lineStarts.length() - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if self.lineStarts.get(mid) <= offset { lo = mid } else { hi = mid - 1 }
+        }
+        lo
+    }
+
+    /// The byte offset of 0-based `line` and byte `col`, clamped to the file.
+    pub fn offsetOf(&self, line: i64, col: i64) -> i64 {
+        if line < 0 { return 0 }
+        if line >= self.lineStarts.length() { return self.source.$length() }
+        let o = self.lineStarts.get(line) + col
+        if o > self.source.$length() { return self.source.$length() }
+        o
+    }
+
+    /// The index of the token covering byte `offset`, or of the last token
+    /// that ends at or before it. `-1` when `offset` is before every token.
+    pub fn tokenAt(&self, offset: i64) -> i64 {
+        var lo = 0
+        var hi = self.tokens.length() - 1
+        var best = -1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if self.tokens.look(mid).start <= offset {
+                best = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        best
+    }
+
+    /// Source text from token `a` through token `b`, as written.
+    pub fn span(&self, a: i64, b: i64) -> String {
+        if a > b || a < 0 || b >= self.tokens.length() { return "" }
+        self.source.$substring(self.tokens.look(a).start, self.tokens.look(b).end)
+    }
+
+    /// Where the bracket opened at `i` closes, or the last token when it
+    /// never does. Works for `(`, `[`, `{` and — counting only its own kind,
+    /// since `<` is also less-than — `<`.
+    pub fn closing(&self, i: i64) -> i64 {
+        let open = self.text(i)
+        var close = ""
+        if open == "(" { close = ")" }
+        elif open == "[" { close = "]" }
+        elif open == "{" { close = "}" }
+        elif open == "<" { return self.closingAngle(i) }
+        else { return i }
+        var depth = 0
+        var j = i
+        let n = self.tokens.length()
+        while j < n {
+            let t = self.tokens.look(j)
+            if t.kind == Kind::Punct {
+                if t.text == open { depth += 1 }
+                elif t.text == close {
+                    depth -= 1
+                    if depth == 0 { return j }
+                }
+            }
+            j += 1
+        }
+        n - 1
+    }
+
+    /// The `>` matching the `<` at `i`, reading `>>` as two. Gives up at
+    /// anything a type argument list cannot contain, returning `i`.
+    pub fn closingAngle(&self, i: i64) -> i64 {
+        var depth = 0
+        var j = i
+        let n = self.tokens.length()
+        while j < n {
+            let t = self.tokens.look(j)
+            if t.kind == Kind::Newline || t.kind == Kind::End { return i }
+            if t.kind == Kind::Punct {
+                if t.text == "<" { depth += 1 }
+                elif t.text == ">" { depth -= 1 }
+                elif t.text == ">>" { depth -= 2 }
+                elif t.text == "{" || t.text == "}" || t.text == ";" || t.text == "=" { return i }
+                if depth <= 0 { return j }
+            }
+            j += 1
+        }
+        i
+    }
+
+    /// Where the bracket closed at `i` was opened, or `i` when it never was.
+    pub fn opening(&self, i: i64) -> i64 {
+        let close = self.text(i)
+        var open = ""
+        if close == ")" { open = "(" }
+        elif close == "]" { open = "[" }
+        elif close == "}" { open = "{" }
+        else { return i }
+        var depth = 0
+        var j = i
+        while j >= 0 {
+            let t = self.tokens.look(j)
+            if t.kind == Kind::Punct {
+                if t.text == close { depth += 1 }
+                elif t.text == open {
+                    depth -= 1
+                    if depth == 0 { return j }
+                }
+            }
+            j -= 1
+        }
+        i
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Words
+//===--------------------------------------------------------------------===//
+
+/// Every reserved word, in the order the compiler's token table lists them.
+pub fn keywords() -> vector::Vector<String> {
+    vector::from(["fn", "var", "let", "mut", "global", "class", "struct", "enum",
+                  "mark", "bind", "to", "extend", "super", "self", "Self",
+                  "import", "pub", "as", "into", "is", "if", "elif", "else",
+                  "while", "loop", "for", "in", "match", "return", "break",
+                  "continue", "extern", "where", "defer", "unsafe", "operator",
+                  "dyn", "type", "weak", "uniq", "move", "macro", "async",
+                  "await", "true", "false", "nil"])
+}
+
+pub fn isKeyword(word: &String) -> bool {
+    match word {
+        "fn" => true, "var" => true, "let" => true, "mut" => true,
+        "global" => true, "class" => true, "struct" => true, "enum" => true,
+        "mark" => true, "bind" => true, "to" => true, "extend" => true,
+        "super" => true, "self" => true, "Self" => true, "import" => true,
+        "pub" => true, "as" => true, "into" => true, "is" => true,
+        "if" => true, "elif" => true, "else" => true, "while" => true,
+        "loop" => true, "for" => true, "in" => true, "match" => true,
+        "return" => true, "break" => true, "continue" => true,
+        "extern" => true, "where" => true, "defer" => true, "unsafe" => true,
+        "operator" => true, "dyn" => true, "type" => true, "weak" => true,
+        "uniq" => true, "move" => true, "macro" => true, "async" => true,
+        "await" => true, "true" => true, "false" => true, "nil" => true,
+        _ => false,
+    }
+}
+
+/// The types the language itself defines.
+pub fn builtinTypes() -> vector::Vector<String> {
+    vector::from(["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64",
+                  "usize", "f32", "f64", "bool", "Character", "String", "CString",
+                  "Never", "Any", "Option", "Result"])
+}
+
+pub fn isBuiltinType(word: &String) -> bool {
+    match word {
+        "i8" => true, "i16" => true, "i32" => true, "i64" => true,
+        "isize" => true, "u8" => true, "u16" => true, "u32" => true,
+        "u64" => true, "usize" => true, "f32" => true, "f64" => true,
+        "bool" => true, "Character" => true, "String" => true,
+        "CString" => true, "Never" => true, "Any" => true,
+        _ => false,
+    }
+}
+
+/// Whether a token of this kind and text can end a statement, which is
+/// what decides if the newline after it is one. The compiler's own rule.
+pub fn canEnd(kind: &Kind, text: &String) -> bool {
+    match kind {
+        Kind::Ident => true,
+        Kind::Int => true,
+        Kind::Float => true,
+        Kind::Str => true,
+        Kind::Char => true,
+        Kind::Keyword => {
+            text == "self" || text == "Self" || text == "super" || text == "true" ||
+                text == "false" || text == "nil" || text == "return" ||
+                text == "break" || text == "continue" || text == "await"
+        },
+        Kind::Punct => text == ")" || text == "]" || text == "}" || text == "?" || text == "_",
+        _ => false,
+    }
+}
+
+fn isIdentStart(b: i64) -> bool {
+    (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95 || b >= 128
+}
+
+fn isIdentByte(b: i64) -> bool { isIdentStart(b) || (b >= 48 && b <= 57) }
+
+fn isDigit(b: i64) -> bool { b >= 48 && b <= 57 }
+
+fn isHexDigit(b: i64) -> bool {
+    isDigit(b) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70)
+}
+
+/// True when `word` is a name: a letter or `_`, then letters, digits and `_`.
+pub fn isName(word: &String) -> bool {
+    let n = word.$length()
+    if n == 0 { return false }
+    if !isIdentStart(word.$byteAt(0) as i64) { return false }
+    var i = 1
+    while i < n {
+        if !isIdentByte(word.$byteAt(i) as i64) { return false }
+        i += 1
+    }
+    true
+}
+
+//===--------------------------------------------------------------------===//
+// Lexing
+//===--------------------------------------------------------------------===//
+
+/// Punctuation, longest first, so the first match is the right one.
+fn punctuation() -> vector::Vector<String> {
+    vector::from(["<<=", ">>=", "...", "..=", "..", "::", "->", "=>", "??", "&&",
+                  "||", "<<", ">>", "<=", ">=", "==", "!=", "+=", "-=", "*=",
+                  "/=", "%=", "&=", "|=", "^="])
+}
+
+/// A cursor over the source, which the lexer moves along.
+struct Scan {
+    src: String = "",
+    pos: i64 = 0,
+    len: i64 = 0,
+}
+
+extend Scan {
+    fn at(&self, ahead: i64) -> i64 {
+        let i = self.pos + ahead
+        if i >= self.len { return 0 }
+        self.src.$byteAt(i) as i64
+    }
+}
+
+/// Where a `"`, `"""` or raw string that starts at `from` ends: the offset
+/// one past its closing quote, or the end of the line when it never closes.
+fn stringEnd(src: &String, from: i64) -> i64 {
+    let n = src.$length()
+    // Raw: r"..." or r#"..."#, with as many #s at the end as at the start.
+    if src.$byteAt(from) == 114 {
+        var hashes = 0
+        var i = from + 1
+        while i < n && src.$byteAt(i) == 35 { hashes += 1; i += 1 }
+        i += 1                                   // the opening quote
+        while i < n {
+            if src.$byteAt(i) == 34 {
+                var k = 0
+                while k < hashes && i + 1 + k < n && src.$byteAt(i + 1 + k) == 35 { k += 1 }
+                if k == hashes { return i + 1 + hashes }
+            }
+            i += 1
+        }
+        return n
+    }
+    // Block: """ ... """, which may span lines.
+    if from + 2 < n && src.$byteAt(from + 1) == 34 && src.$byteAt(from + 2) == 34 {
+        var i = from + 3
+        while i < n {
+            let b = src.$byteAt(i)
+            if b == 92 { i += 2; continue }
+            if b == 34 && i + 2 < n && src.$byteAt(i + 1) == 34 && src.$byteAt(i + 2) == 34 {
+                return i + 3
+            }
+            i += 1
+        }
+        return n
+    }
+    var i = from + 1
+    while i < n {
+        let b = src.$byteAt(i)
+        if b == 92 { i += 2; continue }
+        if b == 34 { return i + 1 }
+        if b == 10 { return i }
+        i += 1
+    }
+    n
+}
+
+/// Where a character literal starting at `from` ends, or `-1` when the `'`
+/// does not start one.
+fn charEnd(src: &String, from: i64) -> i64 {
+    let n = src.$length()
+    var i = from + 1
+    if i >= n { return -1 }
+    if src.$byteAt(i) == 92 {
+        i += 2
+        // \u{...} and \x.. run on to the closing quote.
+        while i < n && i < from + 14 {
+            let b = src.$byteAt(i)
+            if b == 39 { return i + 1 }
+            if b == 10 { return -1 }
+            i += 1
+        }
+        return -1
+    }
+    // One character, however many bytes it takes.
+    let lead = src.$byteAt(i) as i64
+    if lead == 39 || lead == 10 { return -1 }
+    var width = 1
+    if lead >= 240 { width = 4 } elif lead >= 224 { width = 3 } elif lead >= 192 { width = 2 }
+    i += width
+    if i < n && src.$byteAt(i) == 39 { return i + 1 }
+    -1
+}
+
+/// Where the number starting at `from` ends. `afterDot` is a tuple index,
+/// which is digits and nothing else.
+fn numberEnd(src: &String, from: i64, afterDot: bool) -> i64 {
+    let n = src.$length()
+    var i = from
+    if afterDot {
+        while i < n && isDigit(src.$byteAt(i) as i64) { i += 1 }
+        return i
+    }
+    let b1 = if from + 1 < n { src.$byteAt(from + 1) as i64 } else { 0 }
+    if src.$byteAt(from) == 48 && (b1 == 120 || b1 == 88 || b1 == 98 || b1 == 66 || b1 == 111 || b1 == 79) {
+        i += 2
+        while i < n && (isHexDigit(src.$byteAt(i) as i64) || src.$byteAt(i) == 95) { i += 1 }
+    } else {
+        while i < n && (isDigit(src.$byteAt(i) as i64) || src.$byteAt(i) == 95) { i += 1 }
+        // A `.` starts a fraction only when a digit follows: `1..5` is a range.
+        if i + 1 < n && src.$byteAt(i) == 46 && isDigit(src.$byteAt(i + 1) as i64) {
+            i += 1
+            while i < n && (isDigit(src.$byteAt(i) as i64) || src.$byteAt(i) == 95) { i += 1 }
+        }
+        if i < n && (src.$byteAt(i) == 101 || src.$byteAt(i) == 69) {
+            var j = i + 1
+            if j < n && (src.$byteAt(j) == 43 || src.$byteAt(j) == 45) { j += 1 }
+            if j < n && isDigit(src.$byteAt(j) as i64) {
+                i = j
+                while i < n && (isDigit(src.$byteAt(i) as i64) || src.$byteAt(i) == 95) { i += 1 }
+            }
+        }
+    }
+    // A suffix: i64, u8, f32 ...
+    while i < n && isIdentByte(src.$byteAt(i) as i64) { i += 1 }
+    i
+}
+
+/// Whether a number's text is a float: a fraction, an exponent or an `f`
+/// suffix, and not hexadecimal (where `e` and `f` are digits).
+fn looksFloat(text: &String) -> bool {
+    let n = text.$length()
+    if n > 1 && text.$byteAt(0) == 48 {
+        let b = text.$byteAt(1)
+        if b == 120 || b == 88 || b == 98 || b == 66 || b == 111 || b == 79 { return false }
+    }
+    var i = 0
+    while i < n {
+        let b = text.$byteAt(i)
+        if b == 46 || b == 101 || b == 69 || b == 102 { return true }
+        i += 1
+    }
+    false
+}
+
+/// Whether the next thing after offset `from`, skipping space and comments,
+/// is a `.` that is not the start of `..` — the compiler's rule for a line
+/// that continues the one before it.
+fn continuesWithDot(src: &String, from: i64) -> bool {
+    let n = src.$length()
+    var p = from
+    while p < n {
+        let b = src.$byteAt(p)
+        if b == 32 || b == 9 || b == 13 || b == 10 { p += 1; continue }
+        if b == 47 && p + 1 < n && src.$byteAt(p + 1) == 47 {
+            while p < n && src.$byteAt(p) != 10 { p += 1 }
+            continue
+        }
+        if b == 47 && p + 1 < n && src.$byteAt(p + 1) == 42 {
+            var depth = 0
+            while p < n {
+                if src.$byteAt(p) == 47 && p + 1 < n && src.$byteAt(p + 1) == 42 { depth += 1; p += 2; continue }
+                if src.$byteAt(p) == 42 && p + 1 < n && src.$byteAt(p + 1) == 47 {
+                    depth -= 1
+                    p += 2
+                    if depth == 0 { break }
+                    continue
+                }
+                p += 1
+            }
+            continue
+        }
+        if b == 46 { return !(p + 1 < n && src.$byteAt(p + 1) == 46) }
+        return false
+    }
+    false
+}
+
+/// Lexes `source` completely. Never fails: whatever cannot be read becomes
+/// a one-byte `Punct`, and the stream always ends with `End`.
+pub fn lex(source: String) -> Lexed {
+    var out = Lexed(source)
+    let src = out.source.$clone()
+    let n = src.$length()
+
+    out.lineStarts.push(0)
+    var k = 0
+    while k < n {
+        if src.$byteAt(k) == 10 { out.lineStarts.push(k + 1) }
+        k += 1
+    }
+
+    let puncts = punctuation()
+    var pos = 0
+    var groupDepth = 0
+    var prevCanEnd = false
+    var prevWasDot = false
+
+    while pos < n {
+        let b = src.$byteAt(pos) as i64
+
+        if b == 10 {
+            if groupDepth == 0 && prevCanEnd && !continuesWithDot(src, pos + 1) {
+                let line = out.lineOf(pos)
+                out.tokens.push(Token { kind: Kind::Newline, text: "\n", start: pos, end: pos + 1,
+                                        line: line, col: pos - out.lineStarts.get(line) })
+                prevCanEnd = false
+                prevWasDot = false
+            }
+            pos += 1
+            continue
+        }
+        if b == 32 || b == 9 || b == 13 || b == 11 || b == 12 { pos += 1; continue }
+
+        // Comments.
+        if b == 47 && pos + 1 < n && src.$byteAt(pos + 1) == 47 {
+            var e = pos
+            while e < n && src.$byteAt(e) != 10 { e += 1 }
+            let isDoc = pos + 2 < n && src.$byteAt(pos + 2) == 47 &&
+                        !(pos + 3 < n && src.$byteAt(pos + 3) == 47)
+            let line = out.lineOf(pos)
+            out.comments.push(Comment { text: src.$substring(pos, e), start: pos, end: e, line: line,
+                                        col: pos - out.lineStarts.get(line), isDoc: isDoc, isBlock: false })
+            pos = e
+            continue
+        }
+        if b == 47 && pos + 1 < n && src.$byteAt(pos + 1) == 42 {
+            var e = pos
+            var depth = 0
+            while e < n {
+                if src.$byteAt(e) == 47 && e + 1 < n && src.$byteAt(e + 1) == 42 { depth += 1; e += 2; continue }
+                if src.$byteAt(e) == 42 && e + 1 < n && src.$byteAt(e + 1) == 47 {
+                    depth -= 1
+                    e += 2
+                    if depth == 0 { break }
+                    continue
+                }
+                e += 1
+            }
+            let line = out.lineOf(pos)
+            out.comments.push(Comment { text: src.$substring(pos, e), start: pos, end: e, line: line,
+                                        col: pos - out.lineStarts.get(line), isDoc: false, isBlock: true })
+            pos = e
+            continue
+        }
+
+        var kind = Kind::Punct
+        var e = pos + 1
+        if b == 114 && pos + 1 < n && (src.$byteAt(pos + 1) == 34 ||
+                                       (src.$byteAt(pos + 1) == 35 && pos + 2 < n && src.$byteAt(pos + 2) == 34)) {
+            kind = Kind::Str
+            e = stringEnd(src, pos)
+        } elif isIdentStart(b) {
+            while e < n && isIdentByte(src.$byteAt(e) as i64) { e += 1 }
+            let word = src.$substring(pos, e)
+            if word == "_" { kind = Kind::Punct }
+            elif isKeyword(word) { kind = Kind::Keyword }
+            else { kind = Kind::Ident }
+        } elif isDigit(b) {
+            e = numberEnd(src, pos, prevWasDot)
+            kind = if !prevWasDot && looksFloat(src.$substring(pos, e)) { Kind::Float } else { Kind::Int }
+        } elif b == 34 {
+            kind = Kind::Str
+            e = stringEnd(src, pos)
+        } elif b == 39 {
+            let ce = charEnd(src, pos)
+            if ce > 0 { kind = Kind::Char; e = ce }
+        } else {
+            for p in puncts {
+                let m = p.$length()
+                if pos + m <= n && src.$substring(pos, pos + m) == p {
+                    e = pos + m
+                    break
+                }
+            }
+            // A lone byte of a multi-byte character outside a string or
+            // identifier is taken whole, so positions stay on boundaries.
+            if e == pos + 1 && b >= 128 {
+                while e < n && (src.$byteAt(e) as i64) >= 128 && (src.$byteAt(e) as i64) < 192 { e += 1 }
+            }
+        }
+
+        let text = src.$substring(pos, e)
+        if kind == Kind::Punct {
+            if text == "(" || text == "[" { groupDepth += 1 }
+            elif (text == ")" || text == "]") && groupDepth > 0 { groupDepth -= 1 }
+        }
+        let line = out.lineOf(pos)
+        prevCanEnd = canEnd(kind, text)
+        prevWasDot = kind == Kind::Punct && text == "."
+        out.tokens.push(Token { kind: kind, text: text, start: pos, end: e, line: line,
+                                col: pos - out.lineStarts.get(line) })
+        pos = e
+    }
+
+    let last = out.lineStarts.length() - 1
+    out.tokens.push(Token { kind: Kind::End, text: "", start: n, end: n, line: last,
+                            col: n - out.lineStarts.get(last) })
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Text helpers the tools share
+//===--------------------------------------------------------------------===//
+
+/// `text` with every run of whitespace made one space, and trimmed.
+pub fn collapse(text: &String) -> String {
+    var out = ""
+    var space = false
+    var i = 0
+    let n = text.$length()
+    var from = 0
+    // Built from slices rather than byte by byte: most of a signature is
+    // already single-spaced.
+    while i < n {
+        let b = text.$byteAt(i)
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            if !space {
+                out += text.$substring(from, i)
+                space = true
+            }
+        } elif space {
+            if !out.$isEmpty() { out += " " }
+            from = i
+            space = false
+        }
+        i += 1
+    }
+    if !space { out += text.$substring(from, n) }
+    out
+}
+
+/// The body of a `///` comment line: the slashes and one space removed.
+pub fn docLine(comment: &String) -> String {
+    var s = comment.$substring(3, comment.$length())
+    if s.$length() > 0 && s.$byteAt(0) == 32 { s = s.$substring(1, s.$length()) }
+    s
+}
+
+/// True when `word` starts with an upper-case ASCII letter.
+pub fn startsUpper(word: &String) -> bool {
+    word.$length() > 0 && word.$byteAt(0) >= 65 && word.$byteAt(0) <= 90
+}
+
+/// True when `word` starts with a lower-case ASCII letter.
+pub fn startsLower(word: &String) -> bool {
+    word.$length() > 0 && word.$byteAt(0) >= 97 && word.$byteAt(0) <= 122
+}

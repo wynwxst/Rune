@@ -1,0 +1,73 @@
+// EXPECT: word -7 9 1.5
+// EXPECT: sizes 8 8 8
+// EXPECT: bits agree true
+// EXPECT: endian agree true
+// EXPECT: triple named true
+// EXPECT: apply 40
+// EXPECT: bound 42
+// EXPECT: mapped 100 200 300
+// EXPECT: even 2 4
+// EXPECT: names #1 #5
+// EXPECT: mixed 5
+//
+// `std::arch` answers for the machine being *built for*, from the target
+// triple, while compiling. A cross build gets the cross answers.
+//
+// And a closure written where the context already says what it takes may
+// leave the types out: `||(n) { n * 10 }` rather than
+// `||(n: i64) -> i64 { n * 10 }`.
+import std::io
+import std::arch
+import std::mem
+import std::iter
+import std::collections::vector
+
+fn apply(f: @function(i64) -> i64, n: i64) -> i64 { f(n) }
+
+fn main() -> i64 {
+    let n: arch::size = -7
+    let c: arch::usize = 9
+    let f: arch::float = 1.5
+    println!("word {} {} {}", n.$str(), c.$str(), f.$str())
+    println!("sizes {} {} {}", mem::size_of<arch::size>().$str(),
+             mem::size_of<arch::usize>().$str(),
+             mem::size_of<arch::float>().$str())
+
+    // Every answer agrees with every other, whichever machine this is.
+    println!("bits agree {}",
+             (arch::bits == arch::pointerSize * 8 &&
+              arch::bits == (mem::size_of<arch::size>() as i64) * 8 &&
+              arch::is64Bit != arch::is32Bit).$str())
+    println!("endian agree {}",
+             (arch::littleEndian != arch::bigEndian &&
+              (arch::endian == "little") == arch::littleEndian).$str())
+    // The triple is the compiler's own spelling and need not match `name`
+    // word for word — `arm64-apple-darwin` is an `aarch64` machine — so what
+    // is checked is that there is one.
+    println!("triple named {}", (!arch::triple().$isEmpty()).$str())
+
+    println!("apply {}", apply(||(n) { n * 10 }, 4).$str())
+    let double: @function(i64) -> i64 = ||(n) { n * 2 }
+    println!("bound {}", double(21).$str())
+
+    let v = vec![1, 2, 3]
+    var mapped = ""
+    for m in v.map(||(n) { n * 100 }) {
+        if !mapped.$isEmpty() { mapped += " " }
+        mapped += m.$str()
+    }
+    println!("mapped {}", mapped)
+
+    let five = vec![1, 2, 3, 4, 5]
+    var evens = ""
+    for m in five.filter(||(n) { n % 2 == 0 }) {
+        if !evens.$isEmpty() { evens += " " }
+        evens += m.$str()
+    }
+    println!("even {}", evens)
+
+    let names = vector::collect(five.map(||(n) { "#" + n.$str() }))
+    println!("names {} {}", names.at(0).unwrap(), names.at(4).unwrap())
+    println!("mixed {}", five.map(||(n: i64) { n + 1 }).count().$str())
+    0
+}

@@ -4,7 +4,7 @@ Bump `version` in the manifest, make the change, and add the package again: the 
 
 ```sh
 $ sed -i 's/^version = "2.0.0"/version = "2.1.0"/' stats/Rune.toml
-$ rune pkg server --addPackage stats --dir registry
+$ rune registry --addPackage stats --dir registry
 ● Added stats v2.1.0 (9.0 KB, sha256 d00426eaff5b…)
 $ cd ../dashboard && rune update
 ○ Fetching stats v2.1.0
@@ -16,4 +16,4 @@ $ cd ../dashboard && rune update
 > [!WARNING]
 > **Trust**
 >
-> Every install checks the archive against the checksum the index recorded, which catches a corrupted or tampered file. It does not vouch for the package: a registry added with `rune pkg server add` is whoever runs it, and nothing reviews what it serves. Read what you depend on, and keep `Rune.lock` so what you read is what you build.
+> Every install checks the archive against the checksum the index recorded, which catches a corrupted or tampered file. It does not vouch for the package: a registry added with `rune registry add` is whoever runs it, and nothing reviews what it serves. Read what you depend on, and keep `Rune.lock` so what you read is what you build.

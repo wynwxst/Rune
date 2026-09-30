@@ -11,6 +11,12 @@
 //     @Config(os == "linux" || os == "macos")
 //     fn consoleWidth() -> i64 { ... }        // uses ioctl
 //
+// A package names keys of its own in `[config]`, and a package that depends
+// on it may choose them; both arrive as `--cfg key=value`.
+//
+//     @Config(backend == vulkan)
+//     fn present() { ... }
+//
 // The expression language is deliberately tiny, because it has to be answered
 // without a type checker: a key compared against a string, a bare name that is
 // either set or not, and `&&`, `||`, `!` and parentheses over those.
@@ -37,6 +43,9 @@ struct ConfigSet {
   std::map<std::string, std::string> Values;
   /// Names that are simply set or not: `debug`, and everything `--cfg` named.
   std::set<std::string> Flags;
+  /// Which of `Values` the target and the flags decided, rather than the
+  /// manifest: those cannot be overridden by a `[config]` entry.
+  std::set<std::string> Builtin;
 
   /// The facts about `opts` and the target it builds for.
   static ConfigSet forOptions(const CompilerOptions &opts);

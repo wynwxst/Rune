@@ -1,0 +1,11 @@
+// EXPECT-ERROR: `String` is not a C
+//
+// `String` is Rune's counted buffer; C++ has no name for it. `.$cstr()` is
+// the view that crosses.
+extern "C++" {
+    namespace demo {
+        fn greet(name: String)
+    }
+}
+
+fn main() -> i64 { 0 }

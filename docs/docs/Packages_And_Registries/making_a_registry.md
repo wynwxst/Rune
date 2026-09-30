@@ -5,10 +5,10 @@ A registry is a directory: an `index.toml` listing every release with its checks
 ```sh
 $ rune pkg init registry --name ecosystem
 ● Created registry 'ecosystem' in /work/registry
-$ rune pkg server --addPackage ../geometry --dir registry
+$ rune registry --addPackage ../geometry --dir registry
 ○ Packing geometry v0.3.0
 ● Added geometry v0.3.0 (7.5 KB, sha256 2980aae944e4…)
-$ rune pkg server --addPackage ../shapes --dir registry
+$ rune registry --addPackage ../shapes --dir registry
 $ cat registry/index.toml
 [registry]
 name = "ecosystem"
@@ -38,18 +38,18 @@ Because it is files, there are three ways to make it reachable, and they need no
 
 | Reach it as | Set up with | Good for |
 | --- | --- | --- |
-| a directory | `rune pkg server add /shared/registry` | a team on one machine or a shared drive |
-| `file://…` | `rune pkg server add file:///shared/registry` | the same, spelled as a URL |
-| `http://host:port` | `rune pkg server --serve --dir registry --port 7878`, then `rune pkg server add http://host:7878` | a network; any static web server works too |
+| a directory | `rune registry add /shared/registry` | a team on one machine or a shared drive |
+| `file://…` | `rune registry add file:///shared/registry` | the same, spelled as a URL |
+| `http://host:port` | `rune registry --serve --dir registry --port 7878`, then `rune registry add http://host:7878` | a network; any static web server works too |
 
 *Mirroring a registry is copying the directory.*
 
 ```sh
-$ rune pkg server --serve --dir registry
+$ rune registry --serve --dir registry
 ● Serving /work/registry at http://localhost:7878/
-  ─  note: add it to a client with `rune pkg server add http://<this host>:7878`; Ctrl-C stops it
+  ─  note: add it to a client with `rune registry add http://<this host>:7878`; Ctrl-C stops it
 
-$ rune pkg server add http://localhost:7878
+$ rune registry add http://localhost:7878
 ● Added registry 'ecosystem' at http://localhost:7878 (2 releases)
 ● this registry is not monitored: nothing here reviews what it serves, so read a package before you depend on it
 $ rune search 'geo|shape'

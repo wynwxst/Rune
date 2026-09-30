@@ -29,8 +29,13 @@ struct FromEntry {
   unsigned Param = kNone;
   std::vector<unsigned> Path;
   bool Global = false;
+  /// Not a borrow *of* the parameter but of what it already carries: the
+  /// borrows inside a `T` that happens to be `&Row`. Taking one borrows
+  /// nothing of the argument's own place.
+  bool Carried = false;
   bool operator==(const FromEntry &o) const {
-    return Param == o.Param && Path == o.Path && Global == o.Global;
+    return Param == o.Param && Path == o.Path && Global == o.Global &&
+           Carried == o.Carried;
   }
 };
 

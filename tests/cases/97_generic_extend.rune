@@ -1,0 +1,52 @@
+// EXPECT: 3 and 7
+// EXPECT: two: a|b
+// EXPECT: swapped 7 3
+// EXPECT: bound 5
+//
+// `extend` on a generic type. Written without arguments it uses the names the
+// type declares; written with them it names them itself, and either way the
+// methods belong to the type — every instantiation carries them, and two
+// blocks may both add to one type.
+import std::io
+
+struct Pair<A, B> { first: A, second: B }
+
+extend Pair {
+    pub fn swapped(&self) -> Pair<B, A> {
+        Pair<B, A> { first: self.second.$clone(), second: self.first.$clone() }
+    }
+}
+
+extend<X, Y> Pair<X, Y> {
+    pub fn describe(&self) -> String where X: io::Display, Y: io::Display {
+        self.first.display() + "|" + self.second.display()
+    }
+}
+
+struct Box<T> { value: T }
+
+extend<V> Box<V> {
+    pub fn get(&self) -> V { self.value.$clone() }
+    pub fn also(&self, other: V) -> i64 { 2 }
+}
+
+/// A bound written on the extend's parameter is a bound on the type's.
+struct Wrapper<T> { held: T }
+extend<T> Wrapper<T> {
+    pub fn shown(&self) -> String where T: io::Display { self.held.display() }
+}
+
+fn main() -> i64 {
+    let numbers = Pair<i64, i64> { first: 3, second: 7 }
+    io::println(numbers.first.$str() + " and " + numbers.second.$str())
+
+    let letters = Pair<String, String> { first: "a", second: "b" }
+    io::println("two: " + letters.describe())
+
+    let swapped = numbers.swapped()
+    io::println("swapped " + swapped.first.$str() + " " + swapped.second.$str())
+
+    let boxed = Box<i64> { value: 5 }
+    io::println("bound " + boxed.get().$str())
+    0
+}

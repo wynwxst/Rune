@@ -1,0 +1,12 @@
+// WITH: macros/pack.rune
+// EXPECT-ERROR: shout! needs something to shout
+//
+// A macro refusing what it was given. `Macro::error` reports against the
+// invocation — the thing the reader wrote — and points back at the line in
+// the macro that refused.
+import std::io
+
+fn main() -> i64 {
+    io::println(shout!())
+    0
+}

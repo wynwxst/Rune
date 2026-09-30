@@ -1,10 +1,11 @@
 # The standard library
 
-Small on purpose, and written in Rune over a C runtime you can read in an afternoon. `io`, `option`, `result`, `math` and `process` are what most programs touch; `mem` and `collections` are there for code that has to manage its own storage, `iter` is what `for` dispatches through, `any` is what a value of unknown type is asked about, `reflect` is what the compiler is asked about a type, `thread` is how a program does more than one thing at once, `net` is TCP in the shape `io`'s stream marks already describe, `fmt` is what a format string expands into, and `testing` is what a file under `tests/` reports through. `env`, `random`, `hash`, `json` and `cli` are the everyday things a program wants from outside itself — its environment, a number nobody can predict, a checksum, a document, its command line — and `time` keeps a calendar as well as a clock.
+Small on purpose, and written in Rune over a C runtime you can read in an afternoon. `io`, `option`, `result`, `math` and `process` are what most programs touch; `mem` and `collections` are there for code that has to manage its own storage, `iter` is what `for` dispatches through, `any` is what a value of unknown type is asked about, `reflect` is what the compiler is asked about a type, `thread` is how a program does more than one thing at once and `task` how one thread keeps several things in progress, `net` is TCP in the shape `io`'s stream marks already describe, `fmt` is what a format string expands into, and `testing` is what a file under `tests/` reports through. `env`, `random`, `hash`, `json` and `cli` are the everyday things a program wants from outside itself — its environment, a number nobody can predict, a checksum, a document, its command line — and `time` keeps a calendar as well as a clock.
 
 ## Pages
 
 - [std::thread](std_thread.md)
+- [std::task](std_task.md)
 - [std::atomic](std_atomic.md)
 - [std::time](std_time.md)
 - [std::reflect](std_reflect.md)
@@ -21,12 +22,13 @@ Small on purpose, and written in Rune over a C runtime you can read in an aftern
 - [std::math](std_math.md)
 - [std::process](std_process.md)
 - [std::env](std_env.md)
+- [std::arch](std_arch.md)
 - [std::random](std_random.md)
 - [std::hash](std_hash.md)
 - [std::json](std_json.md)
 - [std::cli](std_cli.md)
 - [std::mem](std_mem.md)
-- [std::mem](std_mem_2.md)
+- [std::mem: Buffer](std_mem_buffer.md)
 - [std::dictionary](std_dictionary.md)
 - [std::collections](std_collections.md)
 - [std::collections::slice](std_collections_slice.md)

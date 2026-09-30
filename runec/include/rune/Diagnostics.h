@@ -175,6 +175,20 @@ public:
   void setErrorLimit(unsigned n) { ErrorLimit = n; }
   /// Suppresses every warning; errors still print.
   void setQuietWarnings(bool on) { QuietWarnings = on; }
+  /// One JSON object per line instead of the boxed rendering, for editors
+  /// and other tools. Status lines are not written at all in this mode, so
+  /// every line on stderr is a diagnostic.
+  void setJsonOutput(bool on) { Json = on; }
+  /// One `file:line:column: severity: message [code]` line per diagnostic —
+  /// the compilers' old shape, which `make`-style tools and editors such as
+  /// Vim already read. Notes and related places follow as `note:` lines.
+  void setShortOutput(bool on) { Short = on; }
+  /// Counts errors and warnings but writes nothing, and ignores every
+  /// thread-wide setting — speculation, capture. For a throwaway engine that
+  /// only has to answer "did that go wrong?": `beginSpeculation` would not
+  /// do, since its depth belongs to the thread, not to this engine, and it
+  /// discards errors without counting them.
+  void setSilent(bool on) { Silent = on; }
 
   template <typename... Args>
   DiagBuilder error(SourceRange r, const char *pattern, const Args &...args) {
@@ -224,6 +238,7 @@ public:
   /// an ambiguous production must not swallow another's real error.
   void beginSpeculation() { ++suppressDepth(); }
   void endSpeculation() { if (suppressDepth()) --suppressDepth(); }
+  bool speculating() const { return suppressDepth() > 0; }
 
   bool hadError() const { return ErrorCount > 0; }
   unsigned errorCount() const { return ErrorCount; }
@@ -245,6 +260,16 @@ public:
   void noteExpansion(SourceRange at, std::string macro, std::string expansion) {
     std::lock_guard<std::mutex> lock(Mutex);
     Expansions.push_back({at, std::move(macro), std::move(expansion)});
+  }
+
+  /// Every range a macro was invoked over: what an editor must not write
+  /// into, since the code there is the macro's to make.
+  std::vector<SourceRange> expansionRanges() const {
+    std::lock_guard<std::mutex> lock(Mutex);
+    std::vector<SourceRange> out;
+    for (const Expansion &e : Expansions)
+      out.push_back(e.At);
+    return out;
   }
 
 private:
@@ -281,6 +306,11 @@ private:
     bool UseCaret = true;     ///< carets (^^^) vs. an arrow rule (───>)
   };
 
+  /// `d` as one line of JSON, for `--diagnostic-format json`.
+  void emitJson(std::ostream &os, const Diagnostic &d, Severity sev);
+  /// `d` as `file:line:col: severity: message`, for `--diagnostic-format short`.
+  void emitShort(std::ostream &os, const Diagnostic &d, Severity sev);
+
   void renderSnippet(std::ostream &os, SourceRange range, Severity sev,
                      const std::string &caretMessage,
                      const std::string &trailingHint, const SnippetStyle &style,
@@ -290,6 +320,9 @@ private:
   bool Color = false;
   bool WarnAsError = false;
   bool QuietWarnings = false;
+  bool Json = false;
+  bool Short = false;
+  bool Silent = false;
   unsigned ErrorLimit = 0;
   std::atomic<unsigned> ErrorCount{0};
   std::atomic<unsigned> WarningCount{0};

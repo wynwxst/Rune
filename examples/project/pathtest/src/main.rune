@@ -1,6 +1,6 @@
 import std::{io,reflect}
 import std::json
-
+import std::hash
 // A document written out with `json!`, then reached into with `[]`: a
 // member name for an object, a position for an array, and `null` for
 // anything that is not there — so the chain never aborts halfway.
@@ -18,5 +18,7 @@ fn main() -> i64 {
     println!("{}",jtest["Rec"]["missing"][2])
     println!("{}",json::pretty(jtest))
     io::println("Hello from pathtest!")
+    println!("hash: {}",
+        hash::sha256("admin"))
     0
 }

@@ -13,6 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "rune/Sema.h"
+#include "rune/Zombie.h"
 
 namespace rune {
 
@@ -281,9 +282,29 @@ void Sema::resolveSignatureAnnotations(FunctionDecl *fn) {
     }
   }
 
+  // A `from` clause names where a borrow comes from. Written on a type
+  // that holds no borrow — a `String`, an `i64`, a struct of them — it says
+  // nothing, and a reader who wrote it meant something else: usually that
+  // the value should move, which it does on its own.
+  auto rejectOwnedFrom = [&](TypeRepr *repr, Type *t, const char *what) {
+    if (!repr || !repr->Origin || !t || t->isError() || zombie::carriesReference(t))
+      return;
+    auto d = Diags.error(repr->Origin->Range,
+                         "`from` names where a borrow comes from, and {} is "
+                         "not a borrow: a '{}' is owned outright",
+                         what, t->toString());
+    d.note("an owned value moves by itself — returning it, passing it by "
+           "value, assigning it — and needs no clause; `from` goes on a "
+           "`&T`, a slice, or a type holding one");
+    d.code(276);
+  };
+
   for (Param &p : fn->Params) {
     if (p.TypeAnnotation)
       resolveOriginClauses(p.TypeAnnotation.get(), ctx);
+    if (!p.IsSelf)
+      rejectOwnedFrom(p.TypeAnnotation.get(), p.Ty,
+                      fmt("parameter '{}'", p.Name).c_str());
     if (!p.HasView)
       continue;
     // A view is a promise about what is reached *through* the parameter, so
@@ -303,8 +324,11 @@ void Sema::resolveSignatureAnnotations(FunctionDecl *fn) {
     for (FieldPathRepr &f : p.View)
       resolveFieldPath(pt, f.Path, 0, f.Resolved, f.Range);
   }
-  if (fn->ReturnType)
+  if (fn->ReturnType) {
     resolveOriginClauses(fn->ReturnType.get(), ctx);
+    rejectOwnedFrom(fn->ReturnType.get(), fn->Ty ? fn->Ty->result() : nullptr,
+                    "the result");
+  }
 }
 
 void Sema::resolveFieldAnnotations(NominalDecl *nd) {

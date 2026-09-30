@@ -14,3 +14,5 @@ Class instances are reference counted. The compiler inserts every retain and rel
 - [`weak`, in detail](weak_in_detail.md)
 - [Leak reporting](leak_reporting.md)
 - [Where the counting happens](where_the_counting_happens.md)
+- [Three owning pointers, and what tells them apart](three_owning_pointers_and_what_tells_them_apart.md)
+- [Reaching through a stand-in](reaching_through_a_stand_in.md)

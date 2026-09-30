@@ -152,6 +152,8 @@ private:
       return "some " + typeStr(cast<SomeTypeRepr>(t)->MarkType.get());
     case NodeKind::UniqType:
       return "uniq " + typeStr(cast<UniqTypeRepr>(t)->Element.get());
+    case NodeKind::TypeOfType:
+      return "typeof(...)";
     case NodeKind::SelfType:
       return "Self";
     case NodeKind::InferType:
@@ -176,6 +178,9 @@ private:
       if (f->IsUnsafe) s += " unsafe";
       if (f->IsSafeJustified) s += " @safe(\"" + f->SafetyReason + "\")";
       if (f->IsVariadic) s += " variadic";
+      // Written `async fn`: what follows is the rewrite — a `Future` result
+      // and a body that hands a closure to `std::task::spawn`.
+      if (f->IsAsync) s += " async";
       line(s + loc(d));
       Scope sc(*this);
       // Prose the compiler kept, from `@Doc` or a `///` comment. Shown as one
@@ -673,7 +678,8 @@ private:
     }
     case NodeKind::Closure: {
       const auto *c = cast<ClosureExpr>(e);
-      line("Closure" + loc(e));
+      line(std::string("Closure") + (c->IsMove ? " move" : "") +
+           (c->IsAsyncBody ? " async-body" : "") + loc(e));
       Scope sc(*this);
       for (const Param &p : c->Params)
         line("param " + p.Name + ": " + typeStr(p.TypeAnnotation.get()));

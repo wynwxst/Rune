@@ -851,6 +851,15 @@ bool isImplicitlyConvertible(Type *from, Type *to) {
       return true;
   }
 
+  // A boolean is one of two values, and every integer type has room for
+  // both: `false` is 0 and `true` is 1. So a `bool` goes wherever a number is
+  // asked for by name — which is what lets a foreign `BOOL` parameter take
+  // `true` rather than a hand-written `YES: i8 = 1`. The reverse is not a
+  // conversion: which integers count as true is a question with no one
+  // answer, and `n != 0` says which one is meant.
+  if (from->isBool() && to->isInt())
+    return true;
+
   // Integer widening that cannot lose information.
   if (from->isInt() && to->isInt()) {
     if (from->isSigned() == to->isSigned())
@@ -908,6 +917,24 @@ bool isImplicitlyConvertible(Type *from, Type *to) {
   if (from->is(TypeKind::Pointer) && to->is(TypeKind::Slice))
     return from->pointee() && from->pointee()->is(TypeKind::Array) &&
            from->pointee()->element() == to->element();
+
+  // `struct Derived : Base` — the parent's fields are the child's first
+  // fields, so a `Derived` reads as a `Base` by keeping that prefix. An enum
+  // goes the other way: every value of the parent is one of the child, since
+  // the child's variants start with the parent's and keep their numbers.
+  if (from->is(TypeKind::Struct) && to->is(TypeKind::Struct)) {
+    for (NominalDecl *p = from->nominal() ? from->nominal()->InheritsDecl
+                                          : nullptr;
+         p; p = p->InheritsDecl)
+      if (p->DeclaredType == to)
+        return true;
+  }
+  if (from->is(TypeKind::Enum) && to->is(TypeKind::Enum)) {
+    for (NominalDecl *p = to->nominal() ? to->nominal()->InheritsDecl : nullptr;
+         p; p = p->InheritsDecl)
+      if (p->DeclaredType == from)
+        return true;
+  }
 
   // A subclass is usable wherever its base class is.
   if (from->is(TypeKind::Class) && to->is(TypeKind::Class)) {

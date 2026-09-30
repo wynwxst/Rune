@@ -122,7 +122,7 @@ fn main() -> i64 {
     names.push("ada")
     names.push("grace")
     l = Line()
-    for n in names { l.add(n) }
+    for n in names { l.add(n.$clone()) }
     io::println(l.text)
 
     // Destructuring: the loop binding is a pattern.

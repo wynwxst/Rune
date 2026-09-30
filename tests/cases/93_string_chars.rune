@@ -1,0 +1,55 @@
+// A String's characters: `text[i]` is the i-th character, however wide the
+// ones before it were, and `for c in text` walks them one decode at a time.
+// A character read is a value, not a slot.
+// EXPECT: héllo
+// EXPECT: éö
+// EXPECT: 11 characters in 13 bytes
+// EXPECT: cba
+// EXPECT: 5
+// EXPECT: ABC
+// EXPECT: ab
+// EXPECT-PANIC: index 99 is out of bounds for a collection of length 11
+import std::io
+import std::iter
+import std::collections::vector
+
+fn first_word(text: &String) -> String {
+    var word = ""
+    for c in text {
+        if c == ' ' { break }
+        word += c
+    }
+    word
+}
+
+fn vowels(text: &String) -> i64 {
+    var n = 0
+    for c in text { if c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' { n += 1 } }
+    n
+}
+
+fn main() -> i64 {
+    let text = "héllo wörld"
+    io::println(first_word(&text))
+    io::println(text[1].$str() + text[7].$str())
+    var count = 0
+    for c in text { count += 1 }
+    io::println(count.$str() + " characters in " + text.$length().$str() + " bytes")
+    var reversed = ""
+    for c in "abc" { reversed = c.$str() + reversed }
+    io::println(reversed)
+    for c in "" { io::println("never") }
+    io::println(vowels(&"education").$str())
+    // A String is a Sequence, so the adaptors apply.
+    var upper = ""
+    for c in "abc".iterate().map(||(c: Character) -> Character { (c as u32 - 32) as Character }) {
+        upper += c
+    }
+    io::println(upper)
+    let words = vec!["alpha", "beta"]
+    var initials = ""
+    for w in words { initials += w[0] }
+    io::println(initials)
+    io::println(text[99].$str())
+    0
+}

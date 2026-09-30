@@ -1,0 +1,146 @@
+// Copying a value: when the compiler does it for you, and when you say what
+// it means.
+//
+//     runec -o cloning examples/cloning.rune && ./cloning
+//
+// The same file works under either memory model. Try it both ways:
+//
+//     runec --memory zombie -o cloning examples/cloning.rune && ./cloning
+
+import std::io
+import std::mem
+import std::reflect
+import std::collections::vector
+
+//===--------------------------------------------------------------------===//
+// 1. Automatic: a type whose parts can be copied is copied
+//===--------------------------------------------------------------------===//
+//
+// `mem::Clone` is an **automatic** mark. Nobody implements it, because there
+// is nothing to implement: a type has it when every part of it has it. These
+// two say nothing about copying and are copyable all the same.
+
+struct Point { x: f64, y: f64 }
+
+struct Label {
+    text: String            // a String is immutable, so a copy of one is a copy
+    at: Point
+}
+
+fn automatic() {
+    io::println("automatic:")
+
+    let origin = Point { x: 1.0, y: 2.0 }
+    var moved = origin.$clone()
+    moved.x = 10.0
+    // The clone is its own value: writing to it left the original alone.
+    println!("  origin  {} {}", origin.x.$str(), origin.y.$str())
+    println!("  moved   {} {}", moved.x.$str(), moved.y.$str())
+
+    let tag = Label { text: "corner", at: origin.$clone() }
+    let copy = tag.$clone()
+    println!("  label   {} and {}", tag.text, copy.text)
+
+    // The mark follows the type as it changes, so it can be asked about.
+    println!("  Point is Clone: {}", reflect::conforms<Point, mem::Clone>().$str())
+    println!("  Label is Clone: {}", reflect::conforms<Label, mem::Clone>().$str())
+}
+
+//===--------------------------------------------------------------------===//
+// 2. A bound: a function that has to copy what it is given
+//===--------------------------------------------------------------------===//
+//
+// Write `mem::Clone` where a generic function needs a second copy. A caller
+// passing something that cannot be copied is told so at the call.
+
+fn twice<T: mem::Clone>(value: &T) -> (T, T) {
+    (value.$clone(), value.$clone())
+}
+
+fn bounded() {
+    io::println("bounded:")
+    let corner = Point { x: 3.0, y: 4.0 }
+    let pair = twice<Point>(&corner)
+    println!("  {} {}", pair.0.x.$str(), pair.1.y.$str())
+}
+
+//===--------------------------------------------------------------------===//
+// 3. Written by hand: a type that owns something
+//===--------------------------------------------------------------------===//
+//
+// A destructor is a promise — close this, free that — and a copy made field
+// by field would make the promise twice. So a type with a `deinit` does not
+// get the mark for nothing; the compiler refuses the memberwise copy and
+// waits to be told what copying one means.
+//
+// Say it by writing `clone`, and claim the mark with a `bind`. `$clone()`
+// then calls what you wrote, for this value and for any value holding one.
+
+struct Buffer {
+    name: String
+    bytes: vector::Vector<i64>
+
+    /// A buffer of its own with the same contents. Without this, two
+    /// `Buffer`s would share one vector and the second to go would free it
+    /// again.
+    fn clone(&self) -> Self {
+        var copied = vector::Vector<i64>()
+        var i = 0
+        while i < self.bytes.length() {
+            copied.push(self.bytes.at(i).unwrap())
+            i += 1
+        }
+        Buffer { name: self.name + " (copy)", bytes: copied }
+    }
+
+    fn deinit(&self) { println!("  closing {}", self.name) }
+}
+
+bind mem::Clone to Buffer {}
+
+fn written() {
+    io::println("written:")
+    var first = Buffer { name: "first", bytes: vector::Vector<i64>() }
+    first.bytes.push(1)
+    first.bytes.push(2)
+
+    var second = first.$clone()
+    second.bytes.push(3)
+
+    // Two independent buffers: the push above did not reach the first one.
+    println!("  first  {} items", first.bytes.length().$str())
+    println!("  second {} items", second.bytes.length().$str())
+
+    // `clone` is called for *parts* too, so a struct holding a Buffer is
+    // copied by copying the Buffer properly rather than sharing its vector.
+    println!("  Buffer is Clone: {}",
+             reflect::conforms<Buffer, mem::Clone>().$str())
+}
+
+//===--------------------------------------------------------------------===//
+// 4. Refusing it outright
+//===--------------------------------------------------------------------===//
+//
+// `@never(mem::Clone)` says no whatever the parts say — for a type whose
+// identity is the point, such as a ticket that must not be duplicated.
+
+@never(mem::Clone)
+struct Ticket { serial: i64 }
+
+fn refused() {
+    io::println("refused:")
+    let t = Ticket { serial: 7 }
+    println!("  ticket {}", t.serial.$str())
+    println!("  Ticket is Clone: {}",
+             reflect::conforms<Ticket, mem::Clone>().$str())
+    // `let copy = t.$clone()` would not compile, and
+    // `twice<Ticket>(&t)` would be refused at the call.
+}
+
+fn main() -> i64 {
+    automatic()
+    bounded()
+    written()
+    refused()
+    0
+}

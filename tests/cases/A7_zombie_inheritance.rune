@@ -1,0 +1,75 @@
+// FLAGS: --memory zombie
+// EXPECT: method  seven#7
+// EXPECT: mutated 8
+// EXPECT: passed  seven#8
+// EXPECT: deep    one#1 yes
+// EXPECT: deep as one#1
+// EXPECT: sliced  8 seven
+// EXPECT: widen   1
+// EXPECT: own     2
+// EXPECT: match   critical
+// EXPECT: nested  1 x 7
+//
+// `struct Derived : Base` puts the parent's fields at the front of the
+// child's, so a `Derived` *is* a `Base` with more on the end: the parent's
+// methods work on it, and it reads as a `Base` wherever one is wanted.
+//
+// An enum goes the other way. The child's variants start with the parent's
+// and keep their numbers, so every `Level` is an `Extended` — and a `match`
+// over the child covers the parent's variants by name.
+import std::io
+
+struct Base { id: i64, name: String }
+
+extend Base {
+    fn label(&self) -> String { self.name + "#" + self.id.$str() }
+    fn bump(&var self) { self.id += 1 }
+}
+
+struct Derived : Base { extra: i64 }
+struct Deeper : Derived { more: String }
+
+enum Level { Low, High }
+enum Extended : Level { Critical }
+
+struct Inner { a: i64, b: String }
+struct Outer { inner: Inner, tag: i64 }
+enum Wrap { One(Outer), Nothing }
+
+fn describe(b: Base) -> String { b.label() }
+fn urgency(e: Extended) -> i64 { e as i64 }
+
+fn main() -> i64 {
+    var d = Derived { id: 7, name: "seven", extra: 3 }
+    println!("method  {}", d.label())
+    d.bump()
+    println!("mutated {}", d.id.$str())
+    println!("passed  {}", describe(d.$clone()))
+
+    let deep = Deeper { id: 1, name: "one", extra: 2, more: "yes" }
+    println!("deep    {} {}", deep.label(), deep.more)
+    println!("deep as {}", describe(deep.$clone()))
+
+    let b: Base = d.$clone()
+    println!("sliced  {} {}", b.id.$str(), b.name)
+
+    // A bare name two enums both claim is settled by what the context wants.
+    let l: Level = High
+    println!("widen   {}", urgency(l).$str())
+    let e: Extended = .Critical
+    println!("own     {}", urgency(e).$str())
+    match e {
+        .Low => println!("match   low"),
+        .High => println!("match   high"),
+        .Critical => println!("match   critical"),
+    }
+
+    // Patterns nest as deep as the data does.
+    let w = Wrap::One(Outer { inner: Inner { a: 1, b: "x" }, tag: 7 })
+    match w {
+        .One(Outer { inner: Inner { a, b }, tag }) =>
+            println!("nested  {} {} {}", a.$str(), b, tag.$str()),
+        .Nothing => println!("nested  none"),
+    }
+    0
+}

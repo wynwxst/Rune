@@ -1,0 +1,7 @@
+// EXPECT-ERROR: the value of variant 'Both' is not a constant number
+//
+// A variant's value is a literal. Anything else used to be ignored without a
+// word, leaving the variant with whatever value came next.
+enum Flags { One = 1, Two = 2, Both = 1 + 2 }
+
+fn main() -> i64 { 0 }

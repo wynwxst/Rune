@@ -31,8 +31,8 @@ fn main() -> i64 {
     people.push(Person { name: "tom", age: 11 })
     people.push(Person { name: "grace", age: 45 })
 
-    for name in people.filter(||(p: Person) -> bool { p.age >= 18 })
-                      .map(||(p: Person) -> String { p.name }) {
+    for name in people.filter(||(p: &Person) -> bool { p.age >= 18 })
+                      .map(||(p: &Person) -> String { p.name.$clone() }) {
         io::println(name)
     }
     0

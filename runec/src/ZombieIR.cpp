@@ -200,6 +200,12 @@ bool carriesReference(Type *t) {
       for (const auto &f : nd->Fields)
         if (go(f->Ty))
           return true;
+      // A container keeps its elements where no field says so — `Vector<&T>`
+      // holds its borrows in a block of raw storage — so what it is an
+      // instance *of* counts as much as what it declares.
+      for (Type *a : x->typeArguments())
+        if (go(a))
+          return true;
       if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
         for (const auto &v : e->Variants) {
           for (const auto &tt : v->TupleTypes)
@@ -702,7 +708,17 @@ private:
   void lowerStmt(Stmt *) = delete;
   void lowerStatement(rune::Stmt *s);
   void lowerDeferred(const Expr *body);
-  void bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r);
+  void bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r,
+                   bool mutableAlias = false);
+  /// The place a `match`, `if … is` or `while … is` really looks at.
+  ///
+  /// A scrutinee of reference type is matched *through* the reference, so
+  /// what the payload comes out of is the referent — `cur.*@1.0`, not
+  /// `cur@1.0` — and `match &var x` names `x` itself. `owned` comes back
+  /// false when there is such a place and true when the subject is a value
+  /// of the match's own; `mutableThrough` says whether it was reached
+  /// exclusively, which is what lets a binding out of it be written through.
+  PlaceId scrutineePlace(Expr *e, bool &owned, bool &mutableThrough);
   /// Materialises a value into a fresh temporary, consuming the place it
   /// came from. Returns the temporary's place.
   PlaceId materialise(PlaceId src, Type *t, const Expr *e, SourceRange r);
@@ -1225,8 +1241,8 @@ PlaceId Lowerer::lowerPlace(Expr *e) {
   }
   case NodeKind::Index: {
     auto *i = cast<IndexExpr>(e);
-    if (i->OverloadResolved)
-      return kNone; // a call
+    if (i->OverloadResolved || i->StringChar)
+      return kNone; // a call, or a character read out of a String: a value
     if (i->ThroughRawPointer)
       return untracked();
     PlaceId base = lowerPlace(i->Base.get());
@@ -1243,6 +1259,10 @@ PlaceId Lowerer::lowerPlace(Expr *e) {
       base = project(base, Projection::Deref);
       bt = bt->pointee();
     }
+    // A slice is a view: its elements are behind it, not in it, so an
+    // element of one is reached through the view the way `*r` is.
+    if (bt && bt->is(TypeKind::Slice))
+      base = project(base, Projection::Deref);
     // Slicing (`v[a..b]`) is a borrow of the range, not an element.
     if (isa<RangeExpr>(i->Index.get()))
       return base;
@@ -1319,6 +1339,26 @@ PlaceId Lowerer::lower(Expr *e) {
   }
   case NodeKind::Index: {
     auto *i = cast<IndexExpr>(e);
+    if (i->StringChar) {
+      // `text[i]`: a read of the string and of the index, producing a
+      // character that borrows nothing.
+      PlaceId base = lowerPlace(i->Base.get());
+      if (base == kNone)
+        base = lower(i->Base.get());
+      PlaceId idx = lower(i->Index.get());
+      PlaceId dst = resultTemp(e->Ty, e->Range);
+      Stmt s;
+      s.K = Stmt::FakeRead;
+      s.Range = e->Range;
+      s.Source = e;
+      if (base != kNone)
+        read(s, base, i->Base.get(), i->Base->Range);
+      if (idx != kNone)
+        read(s, idx, i->Index.get(), i->Index->Range);
+      if (!s.Accesses.empty())
+        emit(std::move(s));
+      return dst;
+    }
     if (auto *impl = i->OverloadResolved) {
       // `index(&self, i)`: a call with the base as receiver.
       PlaceId base = lowerPlace(i->Base.get());
@@ -1423,8 +1463,11 @@ PlaceId Lowerer::lower(Expr *e) {
     return kNone;
   case NodeKind::StringLit: {
     // A literal is an owned `String`; it needs a place so a move of it can
-    // be followed, though its drop is nothing.
+    // be followed, though its drop is nothing. The object itself is
+    // immortal, which a borrow of the temporary gets to rely on.
     PlaceId dst = resultTemp(e->Ty, e->Range);
+    if (dst != kNone)
+      B.Locals[B.Places.get(dst).Root].Immortal = true;
     Stmt s;
     s.K = Stmt::Assign;
     s.Dst = dst;
@@ -2316,10 +2359,8 @@ PlaceId Lowerer::lowerIf(IfExpr *i) {
   BlockId thenB = newBlock(), elseB = newBlock(), join = newBlock();
   if (i->BindingPat) {
     // `if x is Pat`: the scrutinee is a place when it can be.
-    PlaceId scrut = lowerPlace(i->Cond.get());
-    bool owned = scrut == kNone;
-    if (scrut == kNone)
-      scrut = lower(i->Cond.get());
+    bool owned = true, scrutMutable = false;
+    PlaceId scrut = scrutineePlace(i->Cond.get(), owned, scrutMutable);
     if (scrut != kNone) {
       Stmt fr;
       fr.K = Stmt::FakeRead;
@@ -2333,7 +2374,7 @@ PlaceId Lowerer::lowerIf(IfExpr *i) {
     pushScope();
     bindPattern(i->BindingPat.get(), scrut,
                 (owned || !B.Places.throughDeref(scrut)) && !scrutBorrowed,
-                i->BindingPat->Range);
+                i->BindingPat->Range, scrutMutable);
     PlaceId v = lowerBlock(i->Then.get(), dst != kNone);
     if (!Dead && dst != kNone)
       assignInto(dst, v, i->Then->Tail.get(), i->Then->Range);
@@ -2364,10 +2405,8 @@ PlaceId Lowerer::lowerIf(IfExpr *i) {
 
 PlaceId Lowerer::lowerMatch(MatchExpr *m) {
   PlaceId dst = resultTemp(m->Ty, m->Range);
-  PlaceId scrut = lowerPlace(m->Scrutinee.get());
-  bool owned = scrut == kNone;
-  if (scrut == kNone)
-    scrut = lower(m->Scrutinee.get());
+  bool owned = true, scrutMutable = false;
+  PlaceId scrut = scrutineePlace(m->Scrutinee.get(), owned, scrutMutable);
   if (scrut != kNone) {
     Stmt fr;
     fr.K = Stmt::FakeRead;
@@ -2391,7 +2430,8 @@ PlaceId Lowerer::lowerMatch(MatchExpr *m) {
     MatchArm &arm = m->Arms[i];
     setBlock(arms[i]);
     pushScope();
-    bindPattern(arm.Pat.get(), scrut, ownedScrut && !arm.Guard, arm.Range);
+    bindPattern(arm.Pat.get(), scrut, ownedScrut && !arm.Guard, arm.Range,
+                scrutMutable && !arm.Guard);
     if (arm.Guard) {
       // A guard sees the bindings but cannot consume them: the arm may not
       // be taken. Bindings are taken by reference until the guard passes.
@@ -2427,10 +2467,8 @@ PlaceId Lowerer::lowerLoop(Expr *e) {
     setBlock(header);
     Loops.push_back(frame);
     if (w->BindingPat) {
-      PlaceId scrut = lowerPlace(w->Cond.get());
-      bool owned = scrut == kNone;
-      if (scrut == kNone)
-        scrut = lower(w->Cond.get());
+      bool owned = true, scrutMutable = false;
+      PlaceId scrut = scrutineePlace(w->Cond.get(), owned, scrutMutable);
       if (scrut != kNone) {
         Stmt fr;
         fr.K = Stmt::FakeRead;
@@ -2444,7 +2482,7 @@ PlaceId Lowerer::lowerLoop(Expr *e) {
       pushScope();
       bindPattern(w->BindingPat.get(), scrut,
                   (owned || !B.Places.throughDeref(scrut)) && !scrutBorrowed,
-                  w->BindingPat->Range);
+                  w->BindingPat->Range, scrutMutable);
       lowerBlock(w->Body.get(), false);
       if (!Dead)
         popScope();
@@ -2741,7 +2779,49 @@ void Lowerer::lowerReturn(Expr *value, SourceRange r) {
 // Patterns
 //===----------------------------------------------------------------------===//
 
-void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
+PlaceId Lowerer::scrutineePlace(Expr *e, bool &owned, bool &mutableThrough) {
+  mutableThrough = false;
+  owned = true;
+  if (!e)
+    return kNone;
+  // `match &var list.head { ... }` looks at `list.head`; the borrow says how
+  // exclusively, and there is no separate reference to reach through.
+  bool borrowed = false, borrowMutable = false;
+  Expr *inner = e;
+  while (auto *b = dyn_cast<BorrowExpr>(inner)) {
+    borrowed = true;
+    borrowMutable = b->IsMutable;
+    inner = b->Operand.get();
+  }
+  PlaceId scrut = lowerPlace(inner);
+  if (scrut == kNone) {
+    // Not a place: a value of the match's own, lowered as written.
+    return lower(e);
+  }
+  owned = false;
+  if (isUntracked(scrut))
+    return scrut;
+  if (borrowed) {
+    mutableThrough = borrowMutable;
+    return scrut;
+  }
+  // A reference the scrutinee already is: matched through it.
+  Type *ty = inner->Ty;
+  bool any = false, allMutable = true;
+  while (ty && ty->is(TypeKind::Pointer)) {
+    if (ty->isRawPointer() || ty->isWeakPointer())
+      return untracked();
+    allMutable = allMutable && ty->isMutablePointer();
+    any = true;
+    scrut = project(scrut, Projection::Deref);
+    ty = ty->pointee();
+  }
+  mutableThrough = any && allMutable;
+  return scrut;
+}
+
+void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r,
+                          bool mutableAlias) {
   if (!p)
     return;
   switch (p->Kind) {
@@ -2771,7 +2851,7 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
       s.Accesses.push_back(w);
       emit(std::move(s));
       if (bp->Sub)
-        bindPattern(bp->Sub.get(), src, owned, r);
+        bindPattern(bp->Sub.get(), src, owned, r, mutableAlias);
       return;
     }
     Type *st = typeOf(src);
@@ -2784,9 +2864,12 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
       }
     } else {
       // Out of borrowed content: an alias. The binding holds the value
-      // where it is, as a shared borrow of the scrutinee place. Codegen
-      // reads the flag: an alias is never dropped and never emptied.
+      // where it is, as a borrow of the scrutinee place — exclusive when the
+      // scrutinee was reached through a `&var`, which is what lets a walk
+      // write as it goes. Codegen reads the flag: an alias is never dropped
+      // and never emptied.
       loc.RefLike = true;
+      loc.RefMutable = mutableAlias;
       loc.Owned = false;
       bp->Binding->ZombieAlias = true;
       if (loc.Origin == kNone) {
@@ -2796,10 +2879,10 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
         loc.Origin = static_cast<OriginId>(B.Origins.size());
         B.Origins.push_back(o);
       }
-      borrowInto(place(l), src, false, false, nullptr, bp->Range);
+      borrowInto(place(l), src, mutableAlias, false, nullptr, bp->Range);
     }
     if (bp->Sub)
-      bindPattern(bp->Sub.get(), src, owned, r);
+      bindPattern(bp->Sub.get(), src, owned, r, mutableAlias);
     return;
   }
   case NodeKind::WildcardPat:
@@ -2814,7 +2897,7 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
     Type *st = typeOf(src);
     if (st && isTrackedRef(st))
       inner = project(src, Projection::Deref);
-    bindPattern(rp->Sub.get(), inner, /*owned=*/false, r);
+    bindPattern(rp->Sub.get(), inner, /*owned=*/false, r, mutableAlias);
     return;
   }
   case NodeKind::TuplePat: {
@@ -2823,7 +2906,7 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
       PlaceId el = src == kNone ? kNone
                                 : project(src, Projection::Field,
                                           static_cast<uint32_t>(i));
-      bindPattern(tp->Elements[i].get(), el, owned, r);
+      bindPattern(tp->Elements[i].get(), el, owned, r, mutableAlias);
     }
     return;
   }
@@ -2836,7 +2919,7 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
     for (auto &f : sp->Fields) {
       PlaceId fp = base == kNone ? kNone
                                  : project(base, Projection::Field, f.FieldIndex);
-      bindPattern(f.Value.get(), fp, owned, r);
+      bindPattern(f.Value.get(), fp, owned, r, mutableAlias);
     }
     return;
   }
@@ -2850,7 +2933,7 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
       PlaceId fp = base == kNone ? kNone
                                  : project(base, Projection::Field,
                                            static_cast<uint32_t>(i));
-      bindPattern(ep->Elements[i].get(), fp, owned, r);
+      bindPattern(ep->Elements[i].get(), fp, owned, r, mutableAlias);
     }
     return;
   }
@@ -2858,16 +2941,16 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r) {
     // Each alternative binds the same names; the first says how.
     auto *op = cast<OrPattern>(p);
     if (!op->Alternatives.empty())
-      bindPattern(op->Alternatives[0].get(), src, owned, r);
+      bindPattern(op->Alternatives[0].get(), src, owned, r, mutableAlias);
     return;
   }
   case NodeKind::SlicePat: {
     auto *sp = cast<SlicePattern>(p);
     PlaceId el = src == kNone ? kNone : project(src, Projection::Index);
     for (auto &e : sp->Prefix)
-      bindPattern(e.get(), el, owned, r);
+      bindPattern(e.get(), el, owned, r, mutableAlias);
     for (auto &e : sp->Suffix)
-      bindPattern(e.get(), el, owned, r);
+      bindPattern(e.get(), el, owned, r, mutableAlias);
     if (sp->Rest) {
       // `..rest` is a slice of the middle: a borrow of the elements.
       if (auto *bp = dyn_cast<BindingPattern>(sp->Rest.get()))

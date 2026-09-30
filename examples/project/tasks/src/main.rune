@@ -1,0 +1,74 @@
+// A fetcher that never fetches: three "downloads" of different lengths, a
+// checksum computed on a thread of its own, and a result handed over by
+// hand. Everything here runs on one thread except the checksum, and the
+// order the lines come out in is the order the tasks got their turns.
+import std::io
+import std::task
+import std::time
+import std::collections::vector
+
+/// Pretends to fetch a page: the body is a sleep, so three of these overlap
+/// instead of adding up.
+async fn fetch(name: String, millis: i64) -> String {
+    io::println("  fetching " + name)
+    task::sleep(time::milliseconds(millis)).await
+    io::println("  got " + name)
+    "<" + name + ">"
+}
+
+/// A slow, plain function — the kind of thing that would hold up every other
+/// task if it ran on their thread. `task::blocking` gives it one of its own.
+fn checksum(text: String) -> i64 {
+    var sum = 0
+    var i = 0
+    while i < text.$length() {
+        sum = (sum * 31 + text.$byteAt(i) as i64) % 1000003
+        i += 1
+    }
+    sum
+}
+
+/// A cache the tasks share. Tasks take turns rather than running at once, so
+/// an ordinary class is enough: no lock, no `Send`, no `Sync`.
+class Cache {
+    var pages: vector::Vector<String>
+    fn init(self) { self.pages = vector::Vector<String>() }
+    fn keep(&var self, page: String) { self.pages.push(page) }
+    fn count(&self) -> i64 { self.pages.length() }
+}
+
+async fn fetchInto(cache: Cache, name: String, millis: i64) {
+    let page = fetch(name, millis).await
+    cache.keep(page)
+}
+
+async fn main() -> i64 {
+    io::println("three fetches, started together:")
+    let started = time::now()
+    let pages = task::all(vec![fetch("a", 30), fetch("b", 10), fetch("c", 20)]).await
+    var joined = ""
+    for p in pages { joined += p }
+    io::println("  in order: " + joined)
+    io::println("  overlapped: " + (started.elapsed().asMilliseconds() < 55).$str())
+
+    io::println("a checksum on another thread, while a fetch waits here:")
+    let sum = task::blocking(checksum, joined)
+    let d = fetch("d", 5)
+    io::println("  " + d.await + " " + sum.await.$str())
+
+    io::println("a cache shared by two tasks:")
+    let cache = Cache()
+    let x = fetchInto(cache, "x", 4)
+    let y = fetchInto(cache, "y", 2)
+    x.await
+    y.await
+    io::println("  cached " + cache.count().$str())
+
+    io::println("a result handed over by hand:")
+    let answer = task::pending<i64>()
+    let waiting = async { answer.await * 2 }
+    io::println("  done yet: " + waiting.isDone().$str())
+    answer.complete(21)
+    io::println("  " + waiting.await.$str())
+    0
+}

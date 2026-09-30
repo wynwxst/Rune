@@ -1,0 +1,38 @@
+@type(Executable)
+import std::io
+import std::task
+import std::time
+import std::collections::vector
+
+async fn fetch(id: i64) -> String {
+    task::sleep(time::milliseconds(3 - id)).await
+    "item " + id.$str()
+}
+
+async fn non_async() -> i64 {
+    let results = task::all(vec![fetch(1), fetch(2), fetch(3)]).await
+    for r in results { io::println(r) }
+
+    let answer = task::pending<i64>()
+    let borrow = &answer
+    let doubled = async { borrow.await * 2 }
+    io::println(doubled.isDone())
+    answer.complete(21)
+    io::println(doubled.await)
+    doubled.await * 2
+}
+
+fn longer(a: &String from a, b: &String from a) -> &String from (a,b) {
+    if a.$length() > b.$length() {
+        a
+    } else {
+        b
+    }
+}
+
+async fn main() -> i64 {
+    a = non_async().await
+    
+    println!("{} : {}",longer(&"Hello",&"Worlde"),a)
+    0
+}

@@ -9,3 +9,4 @@ One file is one module. There are no headers and no forward declarations: the co
 - [Importing](importing.md)
 - [Namespaces, and names that collide](namespaces_and_names_that_collide.md)
 - [Packages and `.rul` libraries](packages_and_rul_libraries.md)
+- [What is in a `.rul`](what_is_in_a_rul.md)

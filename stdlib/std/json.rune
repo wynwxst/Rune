@@ -166,10 +166,13 @@ pub class Object {
     pub fn isEmpty(&self) -> bool { self.members.isEmpty() }
 
     /// True when `name` is a member.
-    pub fn holds(&self, name: String) -> bool { self.members.holds(name) }
+    pub fn holds(&self, name: &String) -> bool { self.members.holds(name) }
 
-    /// The value of `name`, or nothing.
-    pub fn at(&self, name: String) -> Value? { self.members.at(name) }
+    /// The value of `name`, borrowed, or nothing.
+    pub fn peek(&self, name: &String) -> (&Value from self)? { self.members.peek(name) }
+
+    /// A copy of the value of `name`, or nothing.
+    pub fn at(&self, name: &String) -> Value? { self.members.at(name) }
 
     /// The member names, in the order they were first set.
     pub fn keys(&self) -> vector::Vector<String> { self.order.$clone() }
@@ -182,12 +185,12 @@ pub class Object {
     }
 
     /// Removes `name`. The order forgets it too.
-    pub fn remove(&var self, name: String) -> Value? {
+    pub fn remove(&var self, name: &String) -> Value? {
         let gone = self.members.remove(name)
         if gone.hasValue() {
             var kept = vector::Vector<String>()
             for k in self.order {
-                if k != name { kept.push(k) }
+                if k != name { kept.push(k.$clone()) }
             }
             self.order = kept
         }
@@ -842,7 +845,7 @@ fn parseObject(c: &var Cursor) -> Result<Value, Error> {
 //===--------------------------------------------------------------------===//
 pub fn compact(v: Value) -> String {
     var out = ""
-    render(v, false, 0, &var out)
+    render(&v, false, 0, &var out)
     out
 }
 
@@ -850,7 +853,7 @@ pub fn compact(v: Value) -> String {
 /// two spaces per level.
 pub fn pretty(v: Value) -> String {
     var out = ""
-    render(v, true, 0, &var out)
+    render(&v, true, 0, &var out)
     out
 }
 
@@ -859,7 +862,7 @@ pub fn prettyLine(v: Value) -> String { pretty(v) + "\n" }
 
 fn indent(depth: i64) -> String { "  ".$repeat(depth) }
 
-fn render(v: Value, spaced: bool, depth: i64, out: &var String) {
+fn render(v: &Value, spaced: bool, depth: i64, out: &var String) {
     match v {
         Value::Null      => *out += "null",
         Value::Bool(b)   => *out += if b { "true" } else { "false" },
@@ -873,7 +876,7 @@ fn render(v: Value, spaced: bool, depth: i64, out: &var String) {
             for i in 0..a.length() {
                 if i != 0 { *out += "," }
                 if spaced { *out += "\n" + indent(depth + 1) }
-                render(a.at(i).unwrap(), spaced, depth + 1, out)
+                render(a.items.look(i), spaced, depth + 1, out)
             }
             if spaced { *out += "\n" + indent(depth) }
             *out += "]"
@@ -885,13 +888,13 @@ fn render(v: Value, spaced: bool, depth: i64, out: &var String) {
             var first = true
             // The order the members were set in, so a document read and
             // written back comes out looking like the one that went in.
-            for name in o.keys() {
+            for name in o.order {
                 if !first { *out += "," }
                 first = false
                 if spaced { *out += "\n" + indent(depth + 1) }
                 *out += quote(name)
                 *out += if spaced { ": " } else { ":" }
-                match o.at(name) {
+                match o.peek(name) {
                     Some(member) => render(member, spaced, depth + 1, out),
                     // A key in the order with no member is not reachable:
                     // `put` writes both and `remove` clears both.

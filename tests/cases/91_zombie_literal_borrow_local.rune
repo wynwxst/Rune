@@ -1,0 +1,14 @@
+// The coercion is for what is immortal. A local holding a literal is still
+// a local: it can be reassigned, and a borrow of it is a borrow of it.
+// FLAGS: --memory zombie
+// EXPECT-ERROR: 'b' must borrow from 'a'
+fn longer(a: &String from a, b: &String from a) -> &String from (a, b) {
+    if a.$length() > b.$length() { a } else { b }
+}
+
+fn main() -> i64 {
+    let h = "Hello"
+    let w = "Worlde"
+    longer(&h, &w)
+    0
+}

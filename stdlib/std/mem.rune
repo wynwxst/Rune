@@ -6,6 +6,7 @@
 // frees itself. Anything built on these — see `std::collections` — pays for
 // `unsafe` once, inside, and offers a checked interface outside.
 
+import std::io
 import std::process
 import std::collections::vector
 
@@ -166,6 +167,17 @@ pub fn isZeroed(block: *u8, bytes: usize) -> bool {
 @intrinsic("slice_of")
 pub fn slice_of<T>(block: *var T, count: usize) -> [T]
 
+/// Where a slice's elements start.
+///
+/// The other direction: a slice is an address and a count, and this is the
+/// address. It is what a routine that has to reach the *slots* rather than
+/// the values needs — `&values[i]` hands back the value where `T` is a
+/// handle, which is the right answer for reading and the wrong one for
+/// emptying.
+@unsafe
+@intrinsic("slice_data")
+pub fn slice_data<T>(values: [T]) -> *var T
+
 //===--------------------------------------------------------------------===//
 // Ownership in raw storage
 //===--------------------------------------------------------------------===//
@@ -193,6 +205,14 @@ pub fn take<T>(slot: *var T) -> T
 @intrinsic("drop_at")
 pub fn drop_at<T>(slot: *var T)
 
+/// All-zero bytes, read as a `T`. Not a value: a null reference, an empty
+/// string that is no string, a struct of nothing. For the one place that
+/// has to hand back a `T` it does not have — a task leaving a suspension
+/// point because it was cancelled, whose result nothing will look at.
+@unsafe
+@intrinsic("zeroed")
+pub fn zeroed<T>() -> T
+
 /// Puts `value` into `place` and hands back what was there.
 @safe("the place is a live borrow, and every write into it is balanced")
 @intrinsic("replace")
@@ -216,8 +236,63 @@ pub fn retain<T>(value: T)
 pub fn release<T>(value: T)
 
 //===--------------------------------------------------------------------===//
+// Clone: values a copy of which means what it says
+//===--------------------------------------------------------------------===//
+
+/// Types the compiler will copy for you.
+///
+/// `Clone` is an **automatic** mark: nobody implements it, because there is
+/// nothing to implement. A type has it when every part of it has it, so a
+/// struct of numbers has it without saying so and a struct that gains a
+/// `String` field keeps it — the answer follows the type as it changes.
+///
+/// Two things do not have it on their own:
+///
+///  * anything that runs a `deinit`. A destructor is a promise — close this,
+///    free that — and a copy made field by field would make the promise
+///    twice. Such a type says what copying it means by writing
+///    `fn clone(&self) -> Self`, which `$clone()` then calls, and claims the
+///    mark with `bind mem::Clone to ...`.
+///  * anything the compiler cannot look into: a closure and its captures, an
+///    `Any`, a `dyn Mark`, a raw pointer. `String` is bound below, because a
+///    string's contents never change and a copy of one is a copy.
+///
+/// Write it as a bound when a function has to copy what it is given:
+///
+///     fn twice<T: mem::Clone>(value: &T) -> (T, T) {
+///         (value.$clone(), value.$clone())
+///     }
+///
+/// `@never(mem::Clone)` on a type refuses it outright, whatever its parts
+/// say.
+@auto
+pub mark Clone {}
+
+/// A `String` is immutable and counted: a copy of one is a copy of a value.
+bind Clone to String {}
+
+//===--------------------------------------------------------------------===//
 // Handle: one owned value on the heap
 //===--------------------------------------------------------------------===//
+
+//===--------------------------------------------------------------------===//
+// Standing in for a value
+//===--------------------------------------------------------------------===//
+//
+// `Handle`, `Box`, `Rc` and the borrows `Checked` hands out all hold a value
+// and lend it. That is what makes `.` reach through them: a type with a
+// `look(&self) -> &T from self` answers a member it does not have itself
+// with `T`'s, and one with a `touch(&var self) -> &var T from self` lets it
+// be written as well.
+//
+//     var b = mem::boxed(Point { x: 1, y: 2 })
+//     b.x = 10            // through `touch`
+//     io::println(b.sum().$str())   // through `look`
+//
+// It can never hide anything: the reach-through only runs once the member
+// has *not* been found on the stand-in, so `b.duplicate()` is still the
+// box's own. An `Rc` has no `touch`, so writing through one is refused and
+// the message says to put a `Checked<T>` inside.
 
 /// A single `T` living on the heap, owned by this handle.
 ///
@@ -238,8 +313,74 @@ pub class Handle<T> {
     /// ownership.
     pub fn get(&self) -> T { self.value.$clone() }
 
+    /// The value where it lies, borrowed for as long as the handle is.
+    ///
+    /// This is what a structure built out of handles walks with: `*h` and
+    /// `get()` both hand back a *copy*, which under single ownership means
+    /// cloning everything below — a list traversal that clones the rest of
+    /// the list at every step. A borrow reads the one that is there.
+    ///
+    ///     var cur = &list.head
+    ///     loop {
+    ///         match cur {
+    ///             Link::Empty => break,
+    ///             Link::More(node) => { n += 1; cur = &node.look().next }
+    ///         }
+    ///     }
+    pub fn look(&self) -> &T from self { &self.value }
+
+    /// The same, to write through: `h.touch().field = v` changes the value
+    /// in place rather than replacing the whole of it.
+    pub fn touch(&var self) -> &var T from self { &var self.value }
+
+    /// `look` under its older name.
+    @alias("get_ref")
+    pub fn borrowed(&self) -> &T from self { &self.value }
+
     /// Replaces the value. Every handle sharing it sees the change.
     pub fn set(&var self, value: T) { self.value = value }
+
+    /// Puts `value` in and hands back what was there — the read and the write
+    /// in one step, so nothing has to clone the old value to keep it.
+    ///
+    ///     let previous = h.replace(next)
+    pub fn replace(&var self, value: T) -> T {
+        replace<T>(&var self.value, value)
+    }
+
+    /// Exchanges the two handles' values.
+    pub fn swap(&var self, other: &var Handle<T>) {
+        let mine = replace<T>(&var self.value, unsafe { zeroed<T>() })
+        let theirs = replace<T>(&var other.value, mine)
+        self.value = theirs
+    }
+
+    /// True when the two names refer to the *same* handle, rather than to two
+    /// handles whose values agree. `==` answers the second question; this one
+    /// compares addresses and asks nothing of `T`.
+    ///
+    ///     let a = mem::of(1)
+    ///     let b = a                    // the same handle
+    ///     a.sameAs(&b)                 // true
+    ///     a.sameAs(&mem::of(1))        // false — an equal value, not the same handle
+    pub fn sameAs(&self, other: &Handle<T>) -> bool { equals<Handle<T>>(self, other) }
+
+    /// A second handle on a value of its own, cloned from this one. Where a
+    /// plain copy of a handle shares the value, this one does not.
+    pub fn duplicate(&self) -> Handle<T> { Handle<T>(self.value.$clone()) }
+}
+
+// Two handles are equal when the values they hold are, whatever `T` is: the
+// comparison is worked out from the layout, so `T` needs no mark for it. Use
+// `sameAs` for the other question — whether they are the same handle.
+bind<T> operator::eq to Handle<T> {
+    fn eq(&self, other: &Handle<T>) -> bool { equals<T>(self.look(), other.look()) }
+}
+
+// A handle shows what it holds, so `println!("{h}")` reads the value rather
+// than an address.
+bind<T: io::Display> io::Display to Handle<T> {
+    fn display(&self) -> String { self.look().display() }
 }
 
 // A handle behaves like a pointer: `*h` reads the value, `*h = v` writes it.
@@ -255,6 +396,275 @@ bind<T> operator::"*" to Handle<T> {
 
 /// `mem::of(v)` reads better than `Handle<T>(v)` when `T` is obvious.
 pub fn of<T>(value: T) -> Handle<T> { Handle<T>(value) }
+
+//===--------------------------------------------------------------------===//
+// Box: one value on the heap, with exactly one owner
+//===--------------------------------------------------------------------===//
+
+/// A `T` on the heap that exactly one place owns.
+///
+/// `Handle` is a class, so under `--memory arc` two names for one handle share
+/// the value and a reference count decides when it goes. A `Box` keeps no
+/// count: it is a value with a destructor, so it is **moved** rather than
+/// copied — in both memory models — and the one place holding it is the one
+/// that frees it. That makes it the honest choice for a node in a structure
+/// you own outright, and the only smart pointer whose cost is a single
+/// machine word and no bookkeeping at all.
+///
+///     var b = mem::boxed(41)
+///     *b.touch() += 1
+///     io::println(b.look().$str())     // 42
+///
+/// A box is not `Clone`: duplicating one would free the same block twice.
+/// `duplicate()` makes a second box over a clone of the value, which is a
+/// different and explicit thing.
+pub struct Box<T> {
+    block: *var u8
+
+    /// Destroys the value and returns its block.
+    fn deinit(&self) {
+        if isNull(self.block) { return }
+        unsafe { drop_at<T>(self.block as *var T) }
+        allocator.deallocate(self.block)
+    }
+
+    /// The value where it lies, borrowed for as long as the box is. This is
+    /// the read that costs nothing; `get()` hands back a copy.
+    pub fn look(&self) -> &T from self { unsafe { &(self.block as *var T)[0] } }
+
+    /// The same, to write through: `b.touch().field = v` changes the value in
+    /// place rather than replacing the whole of it.
+    pub fn touch(&var self) -> &var T from self {
+        unsafe { &var (self.block as *var T)[0] }
+    }
+
+    /// A copy of the value.
+    pub fn get(&self) -> T { self.look().$clone() }
+
+    /// Replaces the value, destroying what was there.
+    pub fn set(&var self, value: T) { *self.touch() = value }
+
+    /// Puts `value` in and hands back what was there.
+    pub fn replace(&var self, value: T) -> T { replace<T>(self.touch(), value) }
+
+    /// True when the two names are the same box.
+    pub fn sameAs(&self, other: &Box<T>) -> bool {
+        unsafe { self.block as u64 == other.block as u64 }
+    }
+
+    /// A second box over a clone of the value.
+    pub fn duplicate(&self) -> Box<T> { boxed<T>(self.look().$clone()) }
+}
+
+/// `mem::boxed(v)` — a `T` on the heap, owned by the box it hands back.
+pub fn boxed<T>(value: T) -> Box<T> {
+    let bytes = size_of<T>()
+    let block = allocator.allocate(bytes)
+    if isNull(block) { process::panic("Box: out of memory") }
+    zero(block, bytes)
+    unsafe { store<T>(block as *var T, value) }
+    Box<T> { block: block }
+}
+
+// A box behaves like a pointer: `*b` reads the value, `*b = v` writes it.
+bind<T> operator::"*" to Box<T> {
+    @alias("Asterisk")
+    fn deref(&self) -> T { self.look().$clone() }
+
+    @alias("AsteriskEquals")
+    fn derefSet(&var self, value: T) { *self.touch() = value }
+}
+
+// Two boxes are equal when the values they hold are; `sameAs` asks the other
+// question.
+bind<T> operator::eq to Box<T> {
+    fn eq(&self, other: &Box<T>) -> bool { equals<T>(self.look(), other.look()) }
+}
+
+bind<T: io::Display> io::Display to Box<T> {
+    fn display(&self) -> String { self.look().display() }
+}
+
+//===--------------------------------------------------------------------===//
+// Rc and Weak: shared ownership with a count you can see
+//===--------------------------------------------------------------------===//
+//
+// One block holds two counts and the value:
+//
+//     [ strong: i64 ][ weak: i64 ][ padding ][ T ]
+//
+// `strong` is how many `Rc`s there are, `weak` how many `Weak`s. The value is
+// destroyed when `strong` reaches zero; the block is returned when both do, so
+// a `Weak` that outlives the value has somewhere to read the zero from.
+
+/// Where the value starts in an `Rc` block: after the two counts, rounded up
+/// to whatever `T` needs.
+fn rcValueOffset<T>() -> usize {
+    let head: usize = 16
+    let a = align_of<T>()
+    if a <= 8 { return head }
+    ((head + a - 1) / a) * a
+}
+
+@safe("the counts are the first two words of a block this module allocated")
+fn rcStrong(block: *var u8) -> i64 { unsafe { (block as *var i64)[0] } }
+
+@safe("the counts are the first two words of a block this module allocated")
+fn rcSetStrong(block: *var u8, n: i64) { unsafe { (block as *var i64)[0] = n } }
+
+@safe("the counts are the first two words of a block this module allocated")
+fn rcWeakCount(block: *var u8) -> i64 { unsafe { (block as *var i64)[1] } }
+
+@safe("the counts are the first two words of a block this module allocated")
+fn rcSetWeak(block: *var u8, n: i64) { unsafe { (block as *var i64)[1] = n } }
+
+/// A `T` on the heap shared by as many owners as ask for one, each of which
+/// says so by cloning.
+///
+/// This is the count `--memory zombie` does not give you for free. Under
+/// `--memory arc` a class already behaves this way, and an `Rc` costs the same
+/// thing written down; under single ownership it is the only way two places
+/// can hold the same value, because the count is an ordinary field this
+/// module keeps rather than something the compiler emits.
+///
+///     let a = mem::shared("hello")
+///     let b = a.$clone()              // two owners
+///     io::println(a.strongCount().$str())   // 2
+///
+/// Sharing is read-only: `look()` borrows the value, and there is no `touch()`
+/// because two owners could then write at once. Put a `mem::Checked<T>` inside
+/// when the value has to change:
+///
+///     let cell = mem::shared(mem::Checked<i64>(0))
+///     { var w = cell.look().borrowVar(); *w = 42 }
+///
+/// A cycle of `Rc`s never reaches zero, which is what `Weak` is for: take a
+/// `downgrade()` for the back-edge and `upgrade()` it when you need the value.
+pub struct Rc<T> {
+    block: *var u8
+
+    /// One more owner.
+    fn clone(&self) -> Self {
+        if !isNull(self.block) { rcSetStrong(self.block, rcStrong(self.block) + 1) }
+        Rc<T> { block: self.block }
+    }
+
+    /// One fewer. The value goes when the last owner does; the block waits for
+    /// the last `Weak` as well.
+    fn deinit(&self) {
+        if isNull(self.block) { return }
+        let n = rcStrong(self.block) - 1
+        rcSetStrong(self.block, n)
+        if n > 0 { return }
+        unsafe { drop_at<T>(offset(self.block, rcValueOffset<T>()) as *var T) }
+        if rcWeakCount(self.block) == 0 { allocator.deallocate(self.block) }
+    }
+
+    /// The value where it lies, borrowed for as long as this owner is.
+    pub fn look(&self) -> &T from self {
+        unsafe { &(offset(self.block, rcValueOffset<T>()) as *var T)[0] }
+    }
+
+    /// A copy of the value.
+    pub fn get(&self) -> T { self.look().$clone() }
+
+    /// How many owners there are, this one included.
+    pub fn strongCount(&self) -> i64 {
+        if isNull(self.block) { return 0 }
+        rcStrong(self.block)
+    }
+
+    /// How many `Weak`s point at it.
+    pub fn weakCount(&self) -> i64 {
+        if isNull(self.block) { return 0 }
+        rcWeakCount(self.block)
+    }
+
+    /// True when this is the only owner.
+    pub fn isUnique(&self) -> bool { self.strongCount() == 1 }
+
+    /// A reference that does not keep the value alive — the back-edge of a
+    /// cycle, or a cache that should not stop anything being freed.
+    pub fn downgrade(&self) -> Weak<T> {
+        if !isNull(self.block) { rcSetWeak(self.block, rcWeakCount(self.block) + 1) }
+        Weak<T> { block: self.block }
+    }
+
+    /// True when the two names are owners of the same value.
+    pub fn sameAs(&self, other: &Rc<T>) -> bool {
+        unsafe { self.block as u64 == other.block as u64 }
+    }
+}
+
+/// Cloning an `Rc` is claiming a share, which is what a copy of one means.
+bind<T> Clone to Rc<T> {}
+
+bind<T> operator::"*" to Rc<T> {
+    @alias("Asterisk")
+    fn deref(&self) -> T { self.look().$clone() }
+}
+
+bind<T> operator::eq to Rc<T> {
+    fn eq(&self, other: &Rc<T>) -> bool { equals<T>(self.look(), other.look()) }
+}
+
+bind<T: io::Display> io::Display to Rc<T> {
+    fn display(&self) -> String { self.look().display() }
+}
+
+/// `mem::shared(v)` — a `T` on the heap with one owner to start with.
+pub fn shared<T>(value: T) -> Rc<T> {
+    let bytes = rcValueOffset<T>() + size_of<T>()
+    let block = allocator.allocate(bytes)
+    if isNull(block) { process::panic("Rc: out of memory") }
+    zero(block, bytes)
+    rcSetStrong(block, 1)
+    unsafe { store<T>(offset(block, rcValueOffset<T>()) as *var T, value) }
+    Rc<T> { block: block }
+}
+
+/// A reference to an `Rc`'s value that does not keep it alive.
+///
+/// Ask for the value with `upgrade()`, which hands back an owner when there
+/// still is one and nothing when the value has gone. This is what breaks a
+/// cycle: a parent owns its children with `Rc`, each child points back with a
+/// `Weak`, and dropping the parent frees the lot.
+///
+///     let parent = mem::shared(Node { ... })
+///     let back = parent.downgrade()
+///     match back.upgrade() { Some(p) => ..., None => ... }
+pub struct Weak<T> {
+    block: *var u8
+
+    fn clone(&self) -> Self {
+        if !isNull(self.block) { rcSetWeak(self.block, rcWeakCount(self.block) + 1) }
+        Weak<T> { block: self.block }
+    }
+
+    fn deinit(&self) {
+        if isNull(self.block) { return }
+        let n = rcWeakCount(self.block) - 1
+        rcSetWeak(self.block, n)
+        if n == 0 && rcStrong(self.block) == 0 { allocator.deallocate(self.block) }
+    }
+
+    /// An owner of the value, or nothing when the value has gone.
+    pub fn upgrade(&self) -> Rc<T>? {
+        if isNull(self.block) { return nil }
+        if rcStrong(self.block) == 0 { return nil }
+        rcSetStrong(self.block, rcStrong(self.block) + 1)
+        Some(Rc<T> { block: self.block })
+    }
+
+    /// True when the value is still there.
+    pub fn isAlive(&self) -> bool {
+        if isNull(self.block) { return false }
+        rcStrong(self.block) > 0
+    }
+}
+
+/// Cloning a `Weak` is claiming another weak reference.
+bind<T> Clone to Weak<T> {}
 
 //===--------------------------------------------------------------------===//
 // Buffer: n values, checked on every access
@@ -356,7 +766,41 @@ pub class Buffer<T> {
         !isZeroed(unsafe { slot as *u8 }, stride)
     }
 
-    //=== Reading ========================================================//
+    //=== Borrowing ======================================================//
+
+    /// The value at `index`, borrowed, or nothing when there is no such slot
+    /// or nothing has been written to it — the borrowing form of `at`.
+    @safe("the slot is checked for range and for contents before the borrow")
+    pub fn peek(&self, index: i64) -> (&T from self)? {
+        if !self.occupied(index) { return nil }
+        Some(unsafe { &(self.block as *var T)[index] })
+    }
+
+    /// The value at `index`, borrowed, whatever its bytes are. Aborts when
+    /// there is no such slot.
+    ///
+    /// Like `read`, it takes the caller's word that the slot has been
+    /// written: a table that keeps its own record of which slots are live
+    /// borrows through this.
+    @safe("the index is compared against the count before the borrow")
+    pub fn look(&self, index: i64) -> &T from self {
+        if !self.holds(index) { process::panic("Buffer index out of range") }
+        unsafe { &(self.block as *var T)[index] }
+    }
+
+    /// The value at `index`, borrowed to write through. Aborts when there is
+    /// no such slot.
+    @safe("the index is compared against the count before the borrow")
+    pub fn touch(&var self, index: i64) -> &var T from self {
+        if !self.holds(index) { process::panic("Buffer index out of range") }
+        unsafe { &var (self.block as *var T)[index] }
+    }
+
+    //=== Copying ========================================================//
+    //
+    // Each of these hands back a value of the caller's own — a share under
+    // counting, a deep copy under single ownership — and so is only here for
+    // a `T` that can be cloned. `peek` and `look` are for the rest.
 
     /// The value at `index`, or nothing when there is no such slot or nothing
     /// has been written to it. This is the form to reach for when the index
@@ -369,9 +813,31 @@ pub class Buffer<T> {
     /// counted enum that carries nothing. A caller that keeps its own record
     /// of which slots are live wants `read`, which asks no such question.
     @safe("the slot is checked for range and for contents before the read")
-    pub fn at(&self, index: i64) -> T? {
-        if !self.occupied(index) { return nil }
-        Some(unsafe { (self.block as *var T)[index] }.$clone())
+    pub fn at(&self, index: i64) -> T? where T: Clone {
+        match self.peek(index) {
+            Some(r) => Some(r.$clone())
+            None => nil
+        }
+    }
+
+    /// A buffer of its own, the same size, holding a clone of every slot
+    /// — written or not: a slot nobody wrote is zero bytes here too. What
+    /// `$clone()` does to a `Buffer`; the memberwise copy would share the
+    /// block.
+    @safe("both blocks are sized by the same count; every slot below it is read once")
+    pub fn clone(&self) -> Self where T: Clone {
+        var out = Buffer<T>(self.count)
+        var i = 0
+        while i < self.count {
+            // A counted slot nobody wrote is zero bytes: no value to clone,
+            // and the fresh buffer already has zero bytes there.
+            if self.occupied(i) {
+                let value = unsafe { (self.block as *var T)[i] }.$clone()
+                unsafe { store<T>(&var (out.block as *var T)[i] as *var T, value) }
+            }
+            i += 1
+        }
+        out
     }
 
     /// The value at `index`, whatever its bytes are, or nothing when there is
@@ -382,14 +848,14 @@ pub class Buffer<T> {
     /// is rather than as nothing. A hash table with a state buffer of its own
     /// already knows which slots are live, and this is the read for it.
     @safe("the index is compared against the count before the read")
-    pub fn read(&self, index: i64) -> T? {
+    pub fn read(&self, index: i64) -> T? where T: Clone {
         if !self.holds(index) { return nil }
-        Some(unsafe { (self.block as *var T)[index] }.$clone())
+        Some(self.look(index).$clone())
     }
 
     /// The value at `index`. Aborts when there is no such slot, or when
     /// nothing has been written to it.
-    pub fn get(&self, index: i64) -> T {
+    pub fn get(&self, index: i64) -> T where T: Clone {
         match self.at(index) {
             Some(v) => v,
             None => {
@@ -448,8 +914,8 @@ pub class Buffer<T> {
         true
     }
 
-    /// Writes `value` into every slot.
-    pub fn fill(&var self, value: T) {
+    /// Writes a copy of `value` into every slot.
+    pub fn fill(&var self, value: T) where T: Clone {
         var i = 0
         while i < self.count {
             // A copy per slot — a share under counting, a clone under single
@@ -460,10 +926,27 @@ pub class Buffer<T> {
     }
 }
 
+/// A buffer writes its own `clone`, so it claims the mark that copy stands
+/// behind — when what it holds can be copied too.
+bind<T> Clone to Buffer<T> where T: Clone {}
+
 // `b[i]` and `b[i] = v`, both bounds checked: reading past the end aborts
-// rather than reading whatever is there.
+// rather than reading whatever is there. Reading borrows, like `peek`, and
+// aborts on a slot nothing has been written to.
 bind<T> operator::"[]" to Buffer<T> {
-    fn index(&self, index: i64) -> T { self.get(index) }
+    fn index(&self, index: i64) -> &T from self {
+        match self.peek(index) {
+            Some(r) => r,
+            None => {
+                if self.holds(index) {
+                    process::panic("Buffer slot has not been written")
+                } else {
+                    process::panic("Buffer index out of range")
+                }
+                self.look(index)
+            }
+        }
+    }
 
     fn indexSet(&var self, index: i64, value: T) {
         if !self.put(index, value) {
@@ -534,6 +1017,10 @@ pub struct Ref<T> {
     owner: &Checked<T>
 
     fn deinit(&self) { self.owner.setState(self.owner.state - 1) }
+
+    /// The value where it lies. `.` reaches through a `Ref` to it, so
+    /// `r.field` and `r.method()` read the value without copying it.
+    pub fn look(&self) -> &T from self { &self.owner.value }
 }
 bind<T> operator::"*" to Ref<T> {
     @alias("Asterisk")
@@ -553,6 +1040,16 @@ pub struct RefVar<T> {
             drop_at<T>(&self.owner.value as *var T)
             store<T>(&self.owner.value as *var T, value)
         }
+    }
+
+    /// The value where it lies, to read.
+    pub fn look(&self) -> &T from self { &self.owner.value }
+
+    /// The value where it lies, to write: the run-time check has already
+    /// made this the only borrow.
+    @safe("the run-time check makes this the only borrow out")
+    pub fn touch(&var self) -> &var T from self {
+        unsafe { &var (&self.owner.value as *var T)[0] }
     }
 }
 bind<T> operator::"*" to RefVar<T> {

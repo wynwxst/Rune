@@ -1,6 +1,7 @@
 //===- CodeGenExpr.cpp - Lowering expressions and patterns -----*- C++ -*-===//
 
 #include "rune/CodeGen.h"
+#include "rune/CxxInterop.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InlineAsm.h>
@@ -70,6 +71,15 @@ static FieldDecl *weakFieldOf(const MemberExpr *m, Type *effectiveBase) {
   return nullptr;
 }
 
+/// Remembers where a place expression was just read from, so a consumer can
+/// empty exactly that address. See `FunctionState::PlaceAddr`.
+static llvm::Value *rememberPlace(std::map<Expr *, llvm::Value *> &table,
+                                  Expr *e, llvm::Value *addr) {
+  if (addr)
+    table[e] = addr;
+  return addr;
+}
+
 Value *CodeGen::emitMemberAddress(MemberExpr *m) {
   Type *baseTy = m->Base->Ty;
   Value *addr = nullptr;
@@ -98,8 +108,10 @@ Value *CodeGen::emitMemberAddress(MemberExpr *m) {
     return nullptr;
 
   if (eff->is(TypeKind::Tuple)) {
-    return B->CreateStructGEP(lower(eff), addr,
-                              static_cast<unsigned>(m->FieldIndex), m->Name);
+    return rememberPlace(
+        fs().PlaceAddr, m,
+        B->CreateStructGEP(lower(eff), addr,
+                           static_cast<unsigned>(m->FieldIndex), m->Name));
   }
   if (!eff->isNominal())
     return nullptr;
@@ -108,7 +120,8 @@ Value *CodeGen::emitMemberAddress(MemberExpr *m) {
   // Class instances carry the object header in slot 0.
   if (eff->is(TypeKind::Class))
     index += 1;
-  return B->CreateStructGEP(layout, addr, index, m->Name);
+  return rememberPlace(fs().PlaceAddr, m,
+                       B->CreateStructGEP(layout, addr, index, m->Name));
 }
 
 Value *CodeGen::emitIndexAddress(IndexExpr *i) {
@@ -139,8 +152,9 @@ Value *CodeGen::emitIndexAddress(IndexExpr *i) {
   if (eff->is(TypeKind::Array)) {
     emitBoundsCheck(index, ConstantInt::get(B->getInt64Ty(), eff->arraySize()),
                     i->BracketRange.isValid() ? i->BracketRange : i->Range);
-    return B->CreateInBoundsGEP(lower(eff), addr,
-                                {B->getInt64(0), index}, "elem");
+    return rememberPlace(
+        fs().PlaceAddr, i,
+        B->CreateInBoundsGEP(lower(eff), addr, {B->getInt64(0), index}, "elem"));
   }
   if (eff->is(TypeKind::Slice)) {
     StructType *sliceTy = cast<StructType>(lower(eff));
@@ -149,7 +163,9 @@ Value *CodeGen::emitIndexAddress(IndexExpr *i) {
         B->CreateLoad(B->getInt64Ty(), B->CreateStructGEP(sliceTy, addr, 1));
     emitBoundsCheck(index, len,
                     i->BracketRange.isValid() ? i->BracketRange : i->Range);
-    return B->CreateInBoundsGEP(lower(eff->element()), data, index, "elem");
+    return rememberPlace(
+        fs().PlaceAddr, i,
+        B->CreateInBoundsGEP(lower(eff->element()), data, index, "elem"));
   }
   return nullptr;
 }
@@ -216,8 +232,9 @@ Value *CodeGen::emitLValue(Expr *e) {
       break;
     // An overloaded `[]` is a call. What it returns is a value, not a place,
     // so it has no address either — materialise it below. Writing through one
-    // does not come here; that is `index_set`, handled in emitAssign.
-    if (i->OverloadResolved)
+    // does not come here; that is `index_set`, handled in emitAssign. A
+    // character read out of a String is a value for the same reason.
+    if (i->OverloadResolved || i->StringChar)
       break;
     return emitIndexAddress(i);
   }
@@ -245,6 +262,15 @@ Value *CodeGen::emitLValue(Expr *e) {
   Value *v = emitRValue(e);
   if (!v)
     return nullptr;
+  // A temporary the statement already owns has a slot of its own, and that
+  // slot is what the cleanup will destroy. Addressing the value there rather
+  // than in a second copy is what makes a field moved out of it — emptied
+  // through this very address — actually stay out of that destruction.
+  if (zombie()) {
+    auto it = fs().TempOf.find(v);
+    if (it != fs().TempOf.end())
+      return it->second;
+  }
   Value *tmp = createEntryAlloca(lower(e->Ty), "materialised");
   B->CreateStore(v, tmp);
   return tmp;
@@ -299,8 +325,15 @@ void CodeGen::emitInto(Expr *e, Value *slot, Type *slotType, bool raw) {
   // assumption that the slot already held anything. `mem::retain` and
   // `mem::release` are how the caller keeps the books in that case. Under
   // Zombie the value still moves in: the source gives it up either way.
-  if (zombie() && AdoptedResult != e)
+  if (zombie() && AdoptedResult != e) {
     takeOwnership(e, produced, e->Ty);
+    // The coercion may have built an owned object of its own — boxing a
+    // value into an `Any` or a `dyn Mark` does exactly that — and it is the
+    // box, not the value, that this slot takes. Hand it over, or the
+    // statement would destroy what the slot now holds.
+    if (v != produced)
+      adopt(v);
+  }
   if (!raw && AdoptedResult != e) {
     // Retain before releasing the old value: they may be the same object.
     emitRetain(v, slotType);
@@ -353,6 +386,11 @@ GlobalVariable *CodeGen::envTypeInfoFor(ClosureExpr *c) {
     for (unsigned i = 0; i < c->Captures.size(); ++i) {
       Type *ct = c->Captures[i].Ty;
       if (!ct || !ct->isRefCounted())
+        continue;
+      // Under Zombie a captured alias — a borrowed `self`, a binding out
+      // of borrowed content — is a copy of a handle the closure does not
+      // own, and goes with the environment undropped.
+      if (zombie() && c->Captures[i].Var && c->Captures[i].Var->ZombieAlias)
         continue;
       Value *p = B->CreateStructGEP(envTy, env, 1 + i);
       emitRelease(B->CreateLoad(lower(ct), p), ct);
@@ -635,10 +673,19 @@ std::vector<Value *> CodeGen::buildArguments(CallExpr *c, FunctionDecl *fn,
     Value *v = emitRValue(value);
     // Under Zombie an argument passed by value is moved in: the callee owns
     // it from here. A borrow (`&T`) is a copy of a pointer and owns nothing.
-    if (zombie() && want && !want->is(TypeKind::Pointer))
+    const bool byValue = want && !want->is(TypeKind::Pointer);
+    if (zombie() && byValue)
       takeOwnership(value, v, value->Ty);
-    if (want)
-      v = coerce(v, value->Ty, want);
+    if (want) {
+      Value *coerced = coerce(v, value->Ty, want);
+      // The coercion may have built an owned object of its own — boxing a
+      // value into a `dyn Mark` or an `Any` does exactly that — and it is the
+      // box, not the value, that the callee receives and owns. Hand that over
+      // too, or this statement would destroy what the callee has taken.
+      if (zombie() && byValue && coerced != v)
+        adopt(coerced);
+      v = coerced;
+    }
     args.push_back(v);
   }
 
@@ -730,8 +777,11 @@ Value *CodeGen::emitEnumConstruction(CallExpr *c) {
 
 Value *CodeGen::emitBuiltinMethod(CallExpr *c) {
   auto *member = cast<MemberExpr>(c->Callee.get());
+  // A `$clone()` of a borrow of a borrow copies the inner borrow: Sema
+  // stopped at it, and its result is the type the receiver is read as.
+  Type *stopAt = c->Builtin == BuiltinMethod::Clone ? c->Ty : nullptr;
   Type *recvTy = member->Base->Ty;
-  while (recvTy->is(TypeKind::Pointer))
+  while (recvTy->is(TypeKind::Pointer) && recvTy != stopAt)
     recvTy = recvTy->pointee();
 
   // The receiver may arrive borrowed (`&self` inside a bind on a builtin), so
@@ -739,7 +789,7 @@ Value *CodeGen::emitBuiltinMethod(CallExpr *c) {
   auto recvValue = [&]() -> Value * {
     Value *v = emitRValue(member->Base.get());
     Type *t = member->Base->Ty;
-    while (t->is(TypeKind::Pointer)) {
+    while (t->is(TypeKind::Pointer) && t != stopAt) {
       // A shared `&String` under Zombie is the string itself.
       if (handleBorrow(t)) {
         t = t->pointee();
@@ -961,7 +1011,45 @@ Value *CodeGen::emitBuiltinMethod(CallExpr *c) {
   }
 }
 
+/// A call to a `@suspend` function from inside an `async` body is a point
+/// where the task may be set aside — and so the point where a cancelled task
+/// leaves. The runtime is told the call is one, and asked afterwards whether
+/// the task is leaving; if it is, the body ends here the way `?` ends it:
+/// the statement's temporaries and every scope's locals are released, the
+/// deferred blocks run, and the closure returns with no value. The task's
+/// box is told separately that there is none.
 Value *CodeGen::emitCall(CallExpr *c) {
+  auto *target = dyn_cast<FunctionDecl>(c->Target);
+  bool suspends = target && target->hasAttr("suspend") && !FnStack.empty() &&
+                  fs().Closure && fs().Closure->IsAsyncBody;
+  if (!suspends)
+    return emitCallPlain(c);
+
+  B->CreateCall(runtimeFn("rune_task_suspend_enter", B->getVoidTy(), {}));
+  Value *v = emitCallPlain(c);
+  Value *leaving = B->CreateCall(
+      runtimeFn("rune_task_suspend_leave", B->getInt64Ty(), {}));
+
+  Function *f = fs().Fn;
+  auto *exitBB = BasicBlock::Create(*Ctx, "await.cancelled", f);
+  auto *contBB = BasicBlock::Create(*Ctx, "await.value", f);
+  B->CreateCondBr(B->CreateICmpNE(leaving, B->getInt64(0)), exitBB, contBB);
+
+  B->SetInsertPoint(exitBB);
+  if (fs().ReturnSlot && fs().ReturnType && !fs().ReturnType->isVoid()) {
+    Type *retTy = fs().ReturnType;
+    emitRelease(B->CreateLoad(lower(retTy), fs().ReturnSlot), retTy);
+    B->CreateStore(Constant::getNullValue(lower(retTy)), fs().ReturnSlot);
+  }
+  emitStatementCleanup(/*consume=*/false);
+  emitAllScopeCleanups(0);
+  B->CreateBr(fs().ReturnBlock);
+
+  B->SetInsertPoint(contBB);
+  return v;
+}
+
+Value *CodeGen::emitCallPlain(CallExpr *c) {
   // Builtins decide their own ownership: some create a fresh object (which
   // they track), while others hand back a borrowed reference that the receiver
   // still owns. Tracking here unconditionally would over-release the latter.
@@ -1003,26 +1091,54 @@ Value *CodeGen::emitCall(CallExpr *c) {
       Value *slot = slotExpr ? emitRValue(slotExpr) : nullptr;
       if (!slot)
         return nullptr;
+      // A slot of `()` holds nothing: there is nothing to move in or out,
+      // and a store of a void value is not something LLVM can be asked for.
+      // A generic container instantiated at `()` still reaches here.
+      if (arg->isVoid()) {
+        for (size_t i = 1; i < c->Args.size(); ++i)
+          emitRValue(c->Args[i].Value.get());
+        return nullptr;
+      }
       llvm::Type *ty = lower(arg);
+      // Under counting, a borrow of a heap object kept in raw storage — a
+      // `Vector<&Row>` — holds the object the way a borrow kept in a field
+      // does: strongly, from the store until the slot is destroyed. What the
+      // checker proves under single ownership, the count keeps true here.
+      // One taken back out is handed over as the borrow it is, at +0.
+      const bool heldBorrow = !zombie() && arg->isSharedHeapBorrow();
       if (which == "store") {
         Expr *ve = c->Args.size() > 1 ? c->Args[1].Value.get() : nullptr;
         Value *v = ve ? emitRValue(ve) : nullptr;
         if (!v)
           return nullptr;
         takeOwnership(ve, v, arg);   // ARC retains; Zombie moves
-        B->CreateStore(coerce(v, ve->Ty, arg), slot);
+        v = coerce(v, ve->Ty, arg);
+        if (heldBorrow)
+          emitRetain(heldObject(v, arg), arg->pointee());
+        B->CreateStore(v, slot);
         return nullptr;
       }
       if (which == "take") {
         Value *v = B->CreateLoad(ty, slot, "taken");
-        if (arg->isRefCounted())
+        if (arg->isRefCounted() || heldBorrow)
           B->CreateStore(Constant::getNullValue(ty), slot);
+        if (heldBorrow)
+          emitRelease(heldObject(v, arg), arg->pointee());
         return track(v, arg);
       }
+      if (which == "drop_at" && heldBorrow) {
+        Value *v = B->CreateLoad(ty, slot);
+        emitRelease(heldObject(v, arg), arg->pointee());
+        B->CreateStore(Constant::getNullValue(ty), slot);
+        return nullptr;
+      }
       if (which == "drop_at") {
-        emitRelease(B->CreateLoad(ty, slot), arg);
-        if (arg->isRefCounted())
-          B->CreateStore(Constant::getNullValue(ty), slot);
+        // Everything the slot owns: the destructor of a value that has one,
+        // and then the references it holds. This is exactly what a local's
+        // slot is given at the end of its scope, and a slot in raw storage is
+        // owed the same — otherwise a `Buffer<T>` of values that own
+        // something would free its block and run none of their `deinit`s.
+        emitDestroy(slot, arg);
         return nullptr;
       }
       // replace: the old value is the caller's, the new one the slot's.
@@ -1031,9 +1147,31 @@ Value *CodeGen::emitCall(CallExpr *c) {
       if (!v)
         return nullptr;
       takeOwnership(ve, v, arg);
+      v = coerce(v, ve->Ty, arg);
       Value *old = B->CreateLoad(ty, slot, "replaced");
-      B->CreateStore(coerce(v, ve->Ty, arg), slot);
+      if (heldBorrow) {
+        emitRetain(heldObject(v, arg), arg->pointee());
+        emitRelease(heldObject(old, arg), arg->pointee());
+      }
+      B->CreateStore(v, slot);
       return track(old, arg);
+    }
+    // `mem::slice_data<T>(values)`: where the elements start. A slice is an
+    // address and a count; this is the address.
+    if (arg && which == "slice_data") {
+      Expr *sliceExpr = c->Args.empty() ? nullptr : c->Args[0].Value.get();
+      Value *slice = sliceExpr ? emitRValue(sliceExpr) : nullptr;
+      if (!slice)
+        return ConstantPointerNull::get(PtrTy);
+      return B->CreateExtractValue(slice, 0, "slice.data");
+    }
+    // `mem::zeroed<T>()`: all-zero bytes read as a `T`. Never a value in its
+    // own right — it is what a task hands back when it is leaving without
+    // one, and nothing looks at it.
+    if (arg && which == "zeroed") {
+      if (arg->isVoid())
+        return nullptr;
+      return Constant::getNullValue(lower(arg));
     }
     if (arg && (which == "size_of" || which == "align_of")) {
       llvm::Type *lowered = lower(arg);
@@ -1153,6 +1291,13 @@ Value *CodeGen::emitCall(CallExpr *c) {
         return B->CreateExtractValue(pair, 1, "swapped");
       }
     }
+    // --- std::arch -------------------------------------------------------
+    // The one thing about a target that is not a fixed list: the triple
+    // itself. Everything else `std::arch` offers is written in Rune, under
+    // `@Config`, because the compiler already answers those.
+    if (which == "target_triple")
+      return emitStringLiteral(M->getTargetTriple().str(), false);
+
     // --- std::reflect ----------------------------------------------------
     // Everything the compiler already knows in order to lay a value out,
     // answered as a constant. None of these survives to run time.
@@ -1176,16 +1321,23 @@ Value *CodeGen::emitCall(CallExpr *c) {
       return ConstantInt::get(lower(c->Ty),
                               dl.getTypeAllocSize(lower(arg)).getFixedValue());
     }
+    // `std::cxx`: C++'s own heap, for objects C++ will destroy or own.
+    if (which == "cxx_alloc")
+      return emitCxxAlloc(c, arg);
+    if (which == "cxx_free") {
+      emitCxxFree(c);
+      return nullptr;
+    }
     if (arg && which == "kind_of")
       return emitKindOf(arg, c->Ty);
     if (arg && which == "field_count")
       return ConstantInt::get(lower(c->Ty), reflectFieldCount(arg));
     if (arg && (which == "field_name" || which == "field_type")) {
       int64_t index = 0;
-      if (!c->Args.empty())
-        if (const auto *lit = dyn_cast<IntLitExpr>(c->Args[0].Value.get()))
+      if (!c->Args.empty()) {
+        if (const auto *lit = dyn_cast<IntLitExpr>(c->Args[0].Value.get())) {
           index = static_cast<int64_t>(lit->Value);
-        else {
+        } else {
           Diags.error(c->Args[0].Value->Range,
                       "the index has to be a literal, because the answer is "
                       "chosen while compiling")
@@ -1194,6 +1346,7 @@ Value *CodeGen::emitCall(CallExpr *c) {
               .code(506);
           return emitStringLiteral("", false);
         }
+      }
       return emitStringLiteral(
           reflectFieldText(arg, index, which == "field_type"), false);
     }
@@ -1207,6 +1360,11 @@ Value *CodeGen::emitCall(CallExpr *c) {
     if (arg && (which == "is_send" || which == "is_sync"))
       return B->getInt1(typeIsThreadSafe(arg, which == "is_sync"));
     if (arg && which == "conforms") {
+      // Checking worked the answer out, where every way a type can come by a
+      // mark is visible; `reflectConforms` is the fallback for a call that
+      // did not go through it.
+      if (c->ReflectAnswer >= 0)
+        return B->getInt1(c->ReflectAnswer != 0);
       Type *markType = target->TypeArguments.size() > 1
                            ? target->TypeArguments[1]
                            : nullptr;
@@ -1233,8 +1391,17 @@ Value *CodeGen::emitCall(CallExpr *c) {
   // Method call: the receiver becomes the first argument.
   if (auto *member = dyn_cast<MemberExpr>(c->Callee.get())) {
     // A call on a mark object goes through its dispatch table rather than to
-    // any particular implementation.
+    // any particular implementation. A borrowed one is still one: `&dyn Mark`
+    // is how a mark object arrives from a `Box`'s `look()`, and the vtable is
+    // just as reachable through it.
     Type *receiverTy = member->Base->Ty;
+    unsigned dynBorrows = 0;
+    while (receiverTy && receiverTy->is(TypeKind::Pointer) &&
+           !receiverTy->isRawPointer() && receiverTy->pointee() &&
+           receiverTy->pointee()->is(TypeKind::DynMark)) {
+      receiverTy = receiverTy->pointee();
+      ++dynBorrows;
+    }
     if (target && receiverTy && receiverTy->is(TypeKind::DynMark)) {
       MarkDecl *mark = receiverTy->mark();
       int slotIndex = -1;
@@ -1249,6 +1416,12 @@ Value *CodeGen::emitCall(CallExpr *c) {
       }
 
       Value *object = emitRValue(member->Base.get());
+      // A mark object is two words, so a borrow of one is a pointer *to* the
+      // pair rather than the pair itself — unlike a class or a `String`,
+      // where the handle is the one word a borrow would have pointed at. Each
+      // borrow is therefore one load.
+      for (unsigned i = 0; i < dynBorrows; ++i)
+        object = B->CreateLoad(lower(receiverTy), object, "dyn.borrowed");
       Value *data = B->CreateExtractValue(object, 0, "dyn.data");
       Value *vtable = B->CreateExtractValue(object, 1, "dyn.vtable");
       Value *slot = B->CreateInBoundsGEP(PtrTy, vtable, B->getInt32(slotIndex));
@@ -1288,13 +1461,30 @@ Value *CodeGen::emitCall(CallExpr *c) {
         Type *baseTy = member->Base->Ty;
         self = baseTy->is(TypeKind::Pointer) ? emitRValue(member->Base.get())
                                              : emitLValue(member->Base.get());
+        // A borrow of a borrow — `&&Row` from a borrowing iterator handed to
+        // a predicate — is read through to the one the method takes.
+        for (Type *t = baseTy; t->is(TypeKind::Pointer) && t->pointee() &&
+                               t->pointee()->is(TypeKind::Pointer) &&
+                               !t->isRawPointer() && t != selfParam;
+             t = t->pointee())
+          self = B->CreateLoad(PtrTy, self);
       } else {
         self = emitRValue(member->Base.get());
         bool baseIsPtr =
             member->Base->Ty && member->Base->Ty->is(TypeKind::Pointer);
-        if (baseIsPtr && selfParam && !selfParam->is(TypeKind::Pointer) &&
-            !handleBorrow(member->Base->Ty))
-          self = B->CreateLoad(lower(selfParam), self);
+        if (baseIsPtr && selfParam && !selfParam->is(TypeKind::Pointer)) {
+          // Through every borrow between the receiver and the value.
+          Type *t = member->Base->Ty;
+          while (t && t->is(TypeKind::Pointer) && !t->isRawPointer() &&
+                 t != selfParam) {
+            if (handleBorrow(t)) {
+              t = t->pointee();
+              continue;
+            }
+            self = B->CreateLoad(lower(t->pointee()), self);
+            t = t->pointee();
+          }
+        }
         else if (zombie() && !baseIsPtr && selfParam && !selfByRef)
           // A receiver taken *by value* (`fn f(self)`, not `&self`/`&var self`)
           // is moved into the method, exactly like a by-value argument (see
@@ -1305,6 +1495,11 @@ Value *CodeGen::emitCall(CallExpr *c) {
           // a pointer) but borrows, so `SelfByRef` keeps it out.
           takeOwnership(member->Base.get(), self, member->Base->Ty);
       }
+
+      // A C++ member: `this` and the arguments cross the way the target's
+      // C++ ABI says, which is not how Rune passes its own.
+      if (isCxxExtern(target))
+        return emitCxxCall(c, target, self);
 
       std::vector<Value *> args;
       if (self)
@@ -1332,6 +1527,9 @@ Value *CodeGen::emitCall(CallExpr *c) {
       return track(r, c->Ty);
     }
   }
+
+  if (target && isCxxExtern(target))
+    return emitCxxCall(c, target, nullptr);
 
   if (target) {
     Function *f = declareFunction(target);
@@ -1573,7 +1771,8 @@ Value *CodeGen::emitUnary(UnaryExpr *u) {
     for (const Param &p : impl->Params)
       if (p.IsSelf)
         selfParam = p.Ty;
-    Value *self = selfParam && selfParam->is(TypeKind::Pointer)
+    Value *self = selfParam && selfParam->is(TypeKind::Pointer) &&
+                          !handleBorrow(selfParam)
                       ? emitLValue(u->Operand.get())
                       : emitRValue(u->Operand.get());
     return track(B->CreateCall(f, {self}), u->Ty);
@@ -1635,7 +1834,15 @@ Value *CodeGen::emitBinary(BinaryExpr *b) {
     B->CreateCondBr(emitVariantTest(opt, optTy, "Some"), someBB, noneBB);
 
     B->SetInsertPoint(someBB);
-    Value *someVal = emitVariantPayload(opt, optTy, someIndex, 0, b->Ty);
+    Type *payloadTy = optionPayload(optTy);
+    Value *someVal;
+    if (payloadTy && payloadTy != b->Ty && payloadTy->is(TypeKind::Pointer)) {
+      // A lent value of plain data, read through (Sema allowed only that).
+      someVal = emitVariantPayload(opt, optTy, someIndex, 0, payloadTy);
+      someVal = B->CreateLoad(lower(b->Ty), someVal);
+    } else {
+      someVal = emitVariantPayload(opt, optTy, someIndex, 0, b->Ty);
+    }
     someBB = B->GetInsertBlock();
     B->CreateBr(doneBB);
 
@@ -1662,13 +1869,17 @@ Value *CodeGen::emitBinary(BinaryExpr *b) {
       else if (!rhsParam)
         rhsParam = p.Ty;
     }
-    Value *self = selfParam && selfParam->is(TypeKind::Pointer)
-                      ? emitLValue(b->LHS.get())
-                      : emitRValue(b->LHS.get());
-    Value *rhs = rhsParam && rhsParam->is(TypeKind::Pointer)
-                     ? emitLValue(b->RHS.get())
-                     : emitRValue(b->RHS.get());
-    if (rhsParam && !rhsParam->is(TypeKind::Pointer))
+    // A parameter that names a slot (`&var T`, or `&T` of something held by
+    // value) wants the slot's address; a shared borrow of an object *is* the
+    // object, so that one is read as a value like any other.
+    auto byAddress = [&](Type *p) {
+      return p && p->is(TypeKind::Pointer) && !handleBorrow(p);
+    };
+    Value *self = byAddress(selfParam) ? emitLValue(b->LHS.get())
+                                       : emitRValue(b->LHS.get());
+    Value *rhs = byAddress(rhsParam) ? emitLValue(b->RHS.get())
+                                     : emitRValue(b->RHS.get());
+    if (rhsParam && !byAddress(rhsParam))
       rhs = coerce(rhs, b->RHS->Ty, rhsParam);
     Value *r = B->CreateCall(f, {self, rhs});
 
@@ -1884,10 +2095,9 @@ Value *CodeGen::emitAssign(AssignExpr *a) {
     for (const Param &p : setter->Params) {
       if (p.IsSelf) { selfParam = p.Ty; continue; }
       if (++seen == 1) indexParam = p.Ty;
+      else if (seen == 2 && p.Ty) valueTy = p.Ty; // what is written back
     }
-    Value *self = selfParam && selfParam->is(TypeKind::Pointer)
-                      ? emitLValue(idx->Base.get())
-                      : emitRValue(idx->Base.get());
+    Value *self = receiverFor(idx->Base.get(), selfParam);
     Value *where = emitRValue(idx->Index.get());
     if (where && indexParam)
       where = coerce(where, idx->Index->Ty, indexParam);
@@ -1898,9 +2108,18 @@ Value *CodeGen::emitAssign(AssignExpr *a) {
     if (valueTy->isRefCounted())
       B->CreateStore(Constant::getNullValue(lower(valueTy)), scratch);
     if (a->Op != AssignOp::Assign && getter) {
-      // The getter returns owned, so the slot already holds a reference.
-      B->CreateStore(B->CreateCall(declareFunction(getter), {self, where}),
-                     scratch);
+      Value *got = B->CreateCall(declareFunction(getter), {self, where});
+      Type *gotTy = getter->Ty ? getter->Ty->result() : valueTy;
+      if (gotTy && gotTy->is(TypeKind::Pointer) && gotTy != valueTy) {
+        // A getter that lends the element: read it out, and give the scratch
+        // slot a value of its own — the setter is about to replace the one
+        // the container holds.
+        if (!handleBorrow(gotTy))
+          got = B->CreateLoad(lower(valueTy), got);
+        got = emitClone(got, valueTy);
+      }
+      // Otherwise the getter returns owned, so the slot already holds one.
+      B->CreateStore(got, scratch);
     }
     emitAssignInto(a, scratch, valueTy);
     Value *result = B->CreateLoad(lower(valueTy), scratch);
@@ -2081,7 +2300,8 @@ Value *CodeGen::emitInto(IntoExpr *e) {
   for (const Param &p : impl->Params)
     if (p.IsSelf)
       selfParam = p.Ty;
-  Value *self = selfParam && selfParam->is(TypeKind::Pointer)
+  Value *self = selfParam && selfParam->is(TypeKind::Pointer) &&
+                        !handleBorrow(selfParam)
                     ? emitLValue(e->Operand.get())
                     : emitRValue(e->Operand.get());
   if (!self)
@@ -2195,12 +2415,10 @@ Value *CodeGen::emitIf(IfExpr *i, Value *slot, Type *slotType) {
     Value *addr = nullptr;
     fs().Scopes.push_back(LexicalScope{});
     if (condTy->is(TypeKind::Pointer)) {
-      addr = emitRValue(i->Cond.get());
-      condTy = condTy->pointee();
-      while (condTy->is(TypeKind::Pointer)) {
-        addr = B->CreateLoad(PtrTy, addr);
-        condTy = condTy->pointee();
-      }
+      addr = subjectThroughBorrows(emitRValue(i->Cond.get()), condTy);
+    } else if (zombie() && placeBehindBorrow(i->Cond.get()) &&
+               (addr = emitLValue(i->Cond.get()))) {
+      // Borrowed content: tested where it lies, as `match` does.
     } else {
       addr = createEntryAlloca(lower(condTy), "if.subject");
       if (condTy->isRefCounted())
@@ -2261,12 +2479,10 @@ Value *CodeGen::emitWhile(WhileExpr *w) {
     bindDepth = fs().Scopes.size();
     Value *addr = nullptr;
     if (condTy->is(TypeKind::Pointer)) {
-      addr = emitRValue(w->Cond.get());
-      condTy = condTy->pointee();
-      while (condTy->is(TypeKind::Pointer)) {
-        addr = B->CreateLoad(PtrTy, addr);
-        condTy = condTy->pointee();
-      }
+      addr = subjectThroughBorrows(emitRValue(w->Cond.get()), condTy);
+    } else if (zombie() && placeBehindBorrow(w->Cond.get()) &&
+               (addr = emitLValue(w->Cond.get()))) {
+      // Borrowed content: tested where it lies, as `match` does.
     } else {
       addr = createEntryAlloca(lower(condTy), "while.subject");
       if (condTy->isRefCounted())
@@ -2293,12 +2509,15 @@ Value *CodeGen::emitWhile(WhileExpr *w) {
   frame.Continue = condBB;
   frame.Break = doneBB;
   frame.Label = w->Label;
-  frame.ScopeDepth = fs().Scopes.size();
+  // `break` and `continue` leave this turn's subject and bindings behind, so
+  // they unwind the pattern's scope too, as `for` does with its element.
+  frame.ScopeDepth = bindDepth ? bindDepth - 1 : fs().Scopes.size();
   fs().Loops.push_back(frame);
   emitBlock(w->Body.get(), nullptr, nullptr);
   fs().Loops.pop_back();
   if (bindDepth) {
-    emitScopeCleanup(bindDepth - 1);
+    if (!blockIsTerminated())
+      emitScopeCleanup(bindDepth - 1);
     fs().Scopes.pop_back();
   }
   ensureTerminated(condBB);
@@ -2443,9 +2662,14 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
   Value *payload = emitVariantPayload(B->CreateLoad(lower(optTy), optSlot),
                                       optTy, variantIndexNamed(optTy, "Some"),
                                       0, elemTy);
-  if (zombie()) {
+  // A value that owns something without a count — a `Box`, a `File` — has
+  // one owner in either memory model, so it is handed along rather than
+  // shared: out of the step, then into the binding, each slot left empty
+  // behind it. Only a counted value can be shared by a retain.
+  const bool moveOnly = typeHasDeinit(elemTy) && !elemTy->isRefCounted();
+  if (zombie() || moveOnly) {
     // The element moves out of the step; the step then holds nothing.
-    if (optTy->isRefCounted())
+    if (optTy->isRefCounted() || moveOnly)
       B->CreateStore(Constant::getNullValue(lower(optTy)), optSlot);
   } else {
     emitRetain(payload, elemTy);
@@ -2453,6 +2677,10 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
   B->CreateStore(payload, elemSlot);
   fs().Scopes.back().Locals.push_back({elemSlot, elemTy});
   emitPatternBind(f->Binding.get(), elemSlot, elemTy);
+  if (moveOnly)
+    if (auto *bp = dyn_cast<BindingPattern>(f->Binding.get()))
+      if (!bp->ByRef && bp->Binding && !bp->Binding->ZombieAlias)
+        B->CreateStore(Constant::getNullValue(lower(elemTy)), elemSlot);
 
   LoopFrame frame;
   frame.Continue = condBB;
@@ -2479,7 +2707,6 @@ Value *CodeGen::emitFor(ForExpr *f) {
   TempScope ownTemps(*this);
   Function *fn = fs().Fn;
   fs().Scopes.push_back(LexicalScope{});
-  size_t scopeDepth = fs().Scopes.size();
 
   Value *index = nullptr, *limit = nullptr, *dataPtr = nullptr;
   Type *elemTy = nullptr;
@@ -2693,6 +2920,17 @@ void CodeGen::emitPatternBind(Pattern *pat, Value *addr, Type *t) {
     if (b->isVariantTest() || !b->Binding)
       return;
     Value *slot = declareLocalSlot(b->Binding, b->Name);
+    if (b->ByRef) {
+      // A borrow of the matched part where it is: its address, or — for a
+      // shared borrow of a heap handle, which *is* the handle — the handle.
+      // Nothing is claimed, copied or emptied.
+      Type *refTy = b->Binding->Ty;
+      B->CreateStore(handleBorrow(refTy) ? B->CreateLoad(lower(t), addr) : addr,
+                     slot);
+      if (b->Sub)
+        emitPatternBind(b->Sub.get(), addr, t);
+      return;
+    }
     Value *v = B->CreateLoad(lower(t), addr);
     if (zombie()) {
       // The binding takes the value: what it was taken from is emptied —
@@ -2977,6 +3215,57 @@ void CodeGen::emitPatternTest(Pattern *pat, Value *addr, Type *t,
   }
 }
 
+/// The address of what a borrowed subject — `match r`, `if r is …` — points
+/// at, reading through every borrow between. `t` comes in as the borrow's
+/// type and leaves as the subject's. A shared borrow of a `String` or a class
+/// *is* the handle rather than an address, so that one is parked in a slot
+/// of its own for the patterns to look at.
+/// A method's receiver, in the shape its `self` takes: the address of the
+/// value for `&self`/`&var self` on a value type, the value itself otherwise
+/// — reading through however many borrows the base arrived in. A class's
+/// `&var self` takes the handle, so `v.touch(i)[j] = x`, whose base is a
+/// `&var` of the slot holding a vector, hands over the vector.
+Value *CodeGen::receiverFor(Expr *base, Type *selfParam) {
+  Type *bt = base->Ty;
+  if (selfParam && selfParam->is(TypeKind::Pointer)) {
+    if (!bt->is(TypeKind::Pointer))
+      return emitLValue(base);
+    Value *v = emitRValue(base);
+    for (Type *t = bt; t->is(TypeKind::Pointer) && t->pointee() &&
+                       t->pointee()->is(TypeKind::Pointer) &&
+                       !t->isRawPointer() && t != selfParam;
+         t = t->pointee())
+      v = B->CreateLoad(PtrTy, v);
+    return v;
+  }
+  Value *v = emitRValue(base);
+  for (Type *t = bt; t && t->is(TypeKind::Pointer) && !t->isRawPointer() &&
+                     t != selfParam;
+       t = t->pointee()) {
+    if (handleBorrow(t))
+      continue;
+    v = B->CreateLoad(lower(t->pointee()), v);
+  }
+  return v;
+}
+
+Value *CodeGen::subjectThroughBorrows(Value *v, Type *&t) {
+  while (t->is(TypeKind::Pointer)) {
+    Type *inner = t->pointee();
+    if (handleBorrow(t)) {
+      Value *slot = createEntryAlloca(lower(inner), "subject.lent");
+      B->CreateStore(v, slot);
+      t = inner;
+      return slot;
+    }
+    t = inner;
+    if (!inner->is(TypeKind::Pointer))
+      return v;
+    v = B->CreateLoad(PtrTy, v);
+  }
+  return v;
+}
+
 Value *CodeGen::emitMatch(MatchExpr *m, Value *slot, Type *slotType) {
   TempScope ownTemps(*this);
   Function *f = fs().Fn;
@@ -2994,12 +3283,12 @@ Value *CodeGen::emitMatch(MatchExpr *m, Value *slot, Type *slotType) {
   Value *addr = nullptr;
   bool ownsSubject = false;
   if (scrutTy->is(TypeKind::Pointer)) {
-    addr = emitRValue(m->Scrutinee.get());
-    scrutTy = scrutTy->pointee();
-    while (scrutTy->is(TypeKind::Pointer)) {
-      addr = B->CreateLoad(PtrTy, addr);
-      scrutTy = scrutTy->pointee();
-    }
+    addr = subjectThroughBorrows(emitRValue(m->Scrutinee.get()), scrutTy);
+  } else if (zombie() && placeBehindBorrow(m->Scrutinee.get()) &&
+             (addr = emitLValue(m->Scrutinee.get()))) {
+    // A field of something this function only borrows: matched where it
+    // lies. The arms' bindings alias it, which is what the borrow checker
+    // has already checked them as.
   } else {
     addr = createEntryAlloca(lower(scrutTy), "match.subject");
     if (scrutTy->isRefCounted())
@@ -3206,6 +3495,19 @@ Value *CodeGen::emitRValue(Expr *e) {
 
   case NodeKind::Index: {
     auto *i = cast<IndexExpr>(e);
+    if (i->StringChar) {
+      // `text[i]`: the same decode `$at` makes, with the same bounds panic.
+      // A `&String` base is the handle itself, so either spelling of the
+      // base yields the string to read.
+      Value *s = emitRValue(i->Base.get());
+      Value *idx = emitRValue(i->Index.get());
+      idx = coerce(idx, i->Index->Ty, Types.i64());
+      Value *next = createEntryAlloca(B->getInt64Ty(), "next");
+      return B->CreateCall(
+          runtimeFn("rune_string_char_at", B->getInt32Ty(),
+                    {PtrTy, B->getInt64Ty(), PtrTy, PtrTy}),
+          {s, idx, next, locationString(i->Range)});
+    }
     if (auto *impl = i->OverloadResolved) {
       Function *f = declareFunction(impl);
       Type *selfParam = nullptr, *idxParam = nullptr;
@@ -3213,13 +3515,15 @@ Value *CodeGen::emitRValue(Expr *e) {
         if (p.IsSelf) selfParam = p.Ty;
         else if (!idxParam) idxParam = p.Ty;
       }
-      Value *self = selfParam && selfParam->is(TypeKind::Pointer)
-                        ? emitLValue(i->Base.get())
-                        : emitRValue(i->Base.get());
+      Value *self = receiverFor(i->Base.get(), selfParam);
       Value *idx = emitRValue(i->Index.get());
       if (idxParam)
         idx = coerce(idx, i->Index->Ty, idxParam);
-      return track(B->CreateCall(f, {self, idx}), e->Ty);
+      Value *r = B->CreateCall(f, {self, idx});
+      // A lent element of plain data is read out where it lies.
+      if (i->ReadsThrough)
+        return B->CreateLoad(lower(e->Ty), r);
+      return track(r, e->Ty);
     }
     // `values[a..b]` produces a slice pointing into the same storage.
     if (auto *range = dyn_cast<RangeExpr>(i->Index.get())) {

@@ -21,3 +21,8 @@ fn main() -> i64 {
     0
 }
 ```
+
+> [!NOTE]
+> **Checking it yourself**
+>
+> `process::liveObjectCount()` is the same counter the leak report uses. It is a legitimate way to assert in a test that a data structure released everything it should.

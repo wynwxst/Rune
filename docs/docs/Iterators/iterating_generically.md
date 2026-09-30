@@ -56,12 +56,12 @@ import std::collections::vector
 
 fn main() -> i64 {
     let rows = vec!(vec!(1, 2), vec!(3), vec!())
-    let flat = rows.flatMap(||(r: vector::Vector<i64>) -> vector::VectorIter<i64> { r.as_iter() })
+    let flat = rows.flatMap(||(r: &vector::Vector<i64>) -> vector::VectorIter<i64> { r.as_iter() })
     io::println(flat.fold(0, ||(acc: i64, x: i64) -> i64 { acc + x }))
 
     let names = vec!("ab", "cd")
     var letters = ""
-    for c in names.flatMap(||(n: String) -> text::Chars { text::chars(n) }) {
+    for c in names.flatMap(||(n: &String) -> text::Chars { text::chars(n.$clone()) }) {
         letters += c.$str()
     }
     io::println(letters)

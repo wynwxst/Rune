@@ -1,0 +1,65 @@
+// EXPECT: point: plain
+// EXPECT: tuple: plain
+// EXPECT: conforms Point: true
+// EXPECT: conforms Named: false
+// EXPECT: conforms String: true
+// EXPECT: never: false
+// EXPECT: holder: false
+// EXPECT: clone twice: 4
+// EXPECT: vector clone: 2
+//
+// An automatic mark — one the compiler answers for, rather than one a type
+// binds. A type has it when every part of it has it; a `bind` claims it
+// where the structure cannot say so, and `@never` refuses it outright.
+import std::io
+import std::mem
+import std::reflect
+import std::collections::vector
+
+/// Holds nothing but plain values.
+@auto
+pub mark Plain {}
+
+/// Claimed where the structure has nothing to look at.
+bind Plain to String {}
+
+struct Point { x: i64, y: i64 }
+struct Named { held: NotPlain, at: Point }
+/// Runs something when it goes, so the compiler will not vouch for it.
+struct NotPlain { n: i64 }
+extend NotPlain { fn deinit(&var self) { } }
+
+/// Refused, whatever its parts say.
+@never(Plain)
+struct Special { n: i64 }
+
+@never(Plain)
+struct AlsoSpecial { n: i64 }
+struct Holder { inner: AlsoSpecial }
+
+fn describe<T: Plain>(value: &T) -> String { "plain" }
+fn twice<T: mem::Clone>(value: &T) -> (T, T) { (value.$clone(), value.$clone()) }
+
+fn main() -> i64 {
+    let p = Point { x: 1, y: 2 }
+    io::println("point: " + describe(&p))
+    let t = (1, 2.0, true)
+    io::println("tuple: " + describe(&t))
+
+    io::println("conforms Point: " + reflect::conforms<Point, Plain>().$str())
+    io::println("conforms Named: " + reflect::conforms<Named, Plain>().$str())
+    io::println("conforms String: " + reflect::conforms<String, Plain>().$str())
+    // Refused by `@never`, and anything holding one is refused with it.
+    io::println("never: " + reflect::conforms<Special, Plain>().$str())
+    io::println("holder: " + reflect::conforms<Holder, Plain>().$str())
+
+    // `mem::Clone` is the one the standard library ships: automatic for
+    // plain values, claimed by the types that write their own `clone`.
+    let pair = twice(&p)
+    io::println("clone twice: " + (pair.0.x + pair.1.y + 1).$str())
+    var v = vector::Vector<i64>()
+    v.push(1)
+    let copies = twice(&v)
+    io::println("vector clone: " + (copies.0.length() + copies.1.length()).$str())
+    0
+}

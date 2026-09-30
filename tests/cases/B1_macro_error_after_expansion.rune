@@ -1,0 +1,15 @@
+// WITH: macros/pack.rune
+// JOBS: 1
+// EXPECT-ERROR: cannot find 'undefinedName'
+//
+// A mistake after a macro has been expanded is still reported. Reading the
+// macro's output used to leave the thread's diagnostics switched off, so on
+// one thread everything after the first expansion went unreported — the
+// build "succeeded" and code generation then crashed on the unchecked code.
+import std::io
+
+fn main() -> i64 {
+    io::println(twice!(3))
+    io::println(undefinedName)
+    0
+}

@@ -1,0 +1,104 @@
+// Tasks under single ownership. A task owns what it captures; two tasks
+// share a value by borrowing a class, and change it through `mem::Checked`.
+// A future's result is cloned out to each awaiter, so the future keeps its
+// own and frees it exactly once — and a `Future` cloned into a `Vector`, or
+// read back out of one, is another handle to the same task rather than a
+// copy of what is behind it.
+// FLAGS: --memory zombie
+// EXPECT: a starts
+// EXPECT: b starts
+// EXPECT: a! b!
+// EXPECT: again a!
+// EXPECT: hits: 6
+// EXPECT: blocking 9
+// EXPECT: all: item 1 item 2 item 3
+// EXPECT: tortoise starts
+// EXPECT: hare starts
+// EXPECT: first: 1 hare!
+// EXPECT: tortoise starts
+// EXPECT: hare starts
+// EXPECT: race: hare!
+// EXPECT: shared: tortoise! tortoise!
+// EXPECT: loser starts
+// EXPECT: fast starts
+// EXPECT: cancelled: true
+// EXPECT: never starts
+// EXPECT: timeout: too slow
+// EXPECT: offload: 42
+import std::io
+import std::mem
+import std::task
+import std::time
+import std::collections::vector
+
+async fn touch(hits: &mem::Checked<i64>, times: i64) {
+    var i = 0
+    while i < times {
+        { var w = hits.borrowVar(); *w = *w + 1 }
+        task::yieldNow()
+        i += 1
+    }
+}
+
+async fn step(name: String, delay: i64) -> String {
+    io::println(name + " starts")
+    task::sleep(time::milliseconds(delay)).await
+    name + "!"
+}
+
+fn square(n: i64) -> i64 { n * n }
+
+async fn fetch(id: i64) -> String {
+    task::sleep(time::milliseconds(3 - id)).await
+    "item " + id.$str()
+}
+
+async fn main() -> i64 {
+    let a = step("a", 20)
+    let b = step("b", 5)
+    io::println(a.await + " " + b.await)
+    io::println("again " + a.await)
+    let hits = mem::Checked<i64>(0)
+    let t1 = touch(&hits, 3)
+    let t2 = touch(&hits, 3)
+    t1.await
+    t2.await
+    io::println("hits: " + (*hits.borrow()).$str())
+    io::println("blocking " + task::blocking(square, 3).await.$str())
+
+    // `all` iterates a `Vector<Future<T>>`: each read is a `$clone`, which
+    // for a future shares the task. The result is a `Vector`, cloned out of
+    // the future by `.await` — a vector of its own, not a second handle to
+    // one block.
+    let items = task::all(vec![fetch(1), fetch(2), fetch(3)]).await
+    var line = "all:"
+    for item in items { line += " " + item }
+    io::println(line)
+
+    let tortoise = step("tortoise", 30)
+    let hare = step("hare", 5)
+    let (which, winner) = task::first(vec![tortoise.$clone(), hare]).await
+    io::println("first: " + which.$str() + " " + winner.await)
+    io::println("race: " + task::race(vec![step("tortoise", 30), step("hare", 5)]).await)
+    // The loser keeps running; nothing cancels it. Give it time to finish so
+    // nothing is still parked when the program ends.
+    task::sleep(time::milliseconds(40)).await
+    let again = tortoise.$clone()
+    io::println("shared: " + tortoise.await + " " + again.await)
+
+    // `race` cancelled the loser; a cancelled task ends without a value.
+    let loser = step("loser", 30)
+    let (index, winner) = task::first(vec![loser.$clone(), step("fast", 1)]).await
+    loser.cancel()
+    io::println("cancelled: " + (match loser.outcome() {
+        task::Outcome::Done(v) => false,
+        task::Outcome::Cancelled => true,
+    }).$str())
+    match task::timeout(time::milliseconds(5), step("never", 50)).await {
+        Some(v) => io::println("timeout: got " + v),
+        None => io::println("timeout: too slow"),
+    }
+    let base = 40
+    io::println("offload: " + task::offload(||() -> i64 { base + 2 }).await.$str())
+    0
+}

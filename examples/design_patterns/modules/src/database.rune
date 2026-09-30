@@ -1,0 +1,12 @@
+import modules::structures
+
+enum Status {
+  Connected,
+  Interrupted
+}
+
+pub fn connectToDatabase() -> Status {
+  .Connected
+}
+
+pub fn login(creds: modules::structures::Credentials){}

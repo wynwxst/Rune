@@ -96,3 +96,23 @@ add_custom_command(
   DEPENDS runec runeruntime ${CMAKE_SOURCE_DIR}/tools/rune-doc.rune
   COMMENT "Building rune-doc")
 add_custom_target(rune_doc_tool ALL DEPENDS ${CMAKE_BINARY_DIR}/bin/rune-doc)
+
+# The editor tools — the linter, the formatter and the language server — are Rune programs
+# too, sharing the modules in tools/runetools/. `rune lint` and `rune lsp`
+# look for them beside `runec`. The standard library is compiled into each,
+# so a change to it rebuilds them.
+file(GLOB RUNE_TOOLS_SHARED CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/runetools/*.rune)
+file(GLOB_RECURSE RUNE_STDLIB_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/stdlib/std/*.rune)
+foreach(tool rune-lint rune-fmt rune-lsp)
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/bin/${tool}
+    COMMAND $<TARGET_FILE:runec> --stdlib ${CMAKE_SOURCE_DIR}/stdlib
+            --module runetools -O2 -o ${CMAKE_BINARY_DIR}/bin/${tool}
+            ${CMAKE_SOURCE_DIR}/tools/${tool}.rune ${RUNE_TOOLS_SHARED}
+    DEPENDS runec runeruntime ${CMAKE_SOURCE_DIR}/tools/${tool}.rune
+            ${RUNE_TOOLS_SHARED} ${RUNE_STDLIB_SOURCES}
+    COMMENT "Building ${tool}")
+endforeach()
+add_custom_target(rune_editor_tools ALL
+  DEPENDS ${CMAKE_BINARY_DIR}/bin/rune-lint ${CMAKE_BINARY_DIR}/bin/rune-fmt
+          ${CMAKE_BINARY_DIR}/bin/rune-lsp)

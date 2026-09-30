@@ -1,0 +1,100 @@
+// Cancellation. `cancel` marks a task; at its next suspension point — an
+// `.await`, a `sleep`, a `checkpoint` — the task leaves its body the way `?`
+// leaves a function: its `defer`s run, what it holds is released, and it
+// ends without a value. `race` and `timeout` cancel what they no longer need.
+// EXPECT: race:
+// EXPECT:   hare finished
+// EXPECT:   hare leaves
+// EXPECT:   tortoise leaves
+// EXPECT:   winner hare
+// EXPECT: cancel:
+// EXPECT:   cancelled leaves
+// EXPECT:   cancelled=true done=true
+// EXPECT: timeout:
+// EXPECT:   late leaves
+// EXPECT:   too slow
+// EXPECT:   early finished
+// EXPECT:   early leaves
+// EXPECT:   got early
+// EXPECT: checkpoint:
+// EXPECT:   cancelled after some steps: true
+// EXPECT: finished anyway:
+// EXPECT:   done quick
+import std::io
+import std::task
+import std::time
+import std::collections::vector
+
+async fn slow(name: String, ms: i64) -> String {
+    defer io::println("  " + name + " leaves")
+    task::sleep(time::milliseconds(ms)).await
+    io::println("  " + name + " finished")
+    name.$clone()
+}
+
+/// A loop with no `.await` in it notices a cancel only at a `checkpoint`.
+async fn counting(steps: i64, log: vector::Vector<i64>) -> i64 {
+    var i = 0
+    while i < steps {
+        task::checkpoint()
+        log.push(i)
+        task::yieldNow()
+        i += 1
+    }
+    i
+}
+
+async fn quick() -> String { "quick" }
+
+async fn main() -> i64 {
+    io::println("race:")
+    io::println("  winner " + task::race(vec![slow("tortoise", 40), slow("hare", 5)]).await)
+    // The tortoise left at its sleep: no "tortoise finished", but its
+    // `defer` ran. Give the runtime a turn so the order is settled.
+    task::sleep(time::milliseconds(50)).await
+
+    io::println("cancel:")
+    let t = slow("cancelled", 40)
+    task::sleep(time::milliseconds(5)).await
+    t.cancel()
+    match t.outcome() {
+        task::Outcome::Done(v) => io::println("  done " + v),
+        task::Outcome::Cancelled =>
+            io::println("  cancelled=" + t.isCancelled().$str() + " done=" + t.isDone().$str()),
+    }
+
+    io::println("timeout:")
+    match task::timeout(time::milliseconds(10), slow("late", 60)).await {
+        Some(v) => io::println("  got " + v),
+        None => io::println("  too slow"),
+    }
+    task::sleep(time::milliseconds(60)).await
+    match task::timeout(time::milliseconds(60), slow("early", 5)).await {
+        Some(v) => io::println("  got " + v),
+        None => io::println("  too slow"),
+    }
+
+    io::println("checkpoint:")
+    let log = vector::Vector<i64>()
+    let c = counting(1000000, log)
+    task::yieldNow()
+    task::yieldNow()
+    c.cancel()
+    let stopped = match c.outcome() {
+        task::Outcome::Done(n) => false,
+        task::Outcome::Cancelled => true,
+    }
+    io::println("  cancelled after some steps: " +
+                (stopped && log.length() > 0 && log.length() < 1000000).$str())
+
+    // A cancel asked of a task that never suspends again does nothing to
+    // its result: it finishes, and the value is there.
+    io::println("finished anyway:")
+    let q = quick()
+    q.cancel()
+    match q.outcome() {
+        task::Outcome::Done(v) => io::println("  done " + v),
+        task::Outcome::Cancelled => io::println("  cancelled"),
+    }
+    0
+}

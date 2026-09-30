@@ -45,28 +45,66 @@ pub enum Option<T> {
         !self.hasValue()
     }
 
-    /// True when a value is present and `keep` says yes to it.
+    /// True when a value is present and `keep` says yes to a copy of it.
     ///
     /// Where `hasValue` asks whether there is anything at all, this asks
     /// whether what is there is what you wanted — without unwrapping it.
     ///
     ///     if age.isSuchThat(||(n: i64) -> bool { n >= 18 }) { ... }
-    pub fn isSuchThat(&self, keep: @function(T) -> bool) -> bool {
+    pub fn isSuchThat(&self, keep: @function(T) -> bool) -> bool where T: mem::Clone {
         match self {
-            Option::Some(v) => keep(v),
+            Option::Some(v) => keep(v.$clone()),
             Option::None => false,
         }
     }
 
+    //=== Looking without taking ===========================================//
+    //
+    // An option owns its value. These borrow it, so they work for any `T` —
+    // a `Box`, a `File`, a `dyn Mark` — and the option keeps what it has.
+
+    /// The value, borrowed, or nothing.
+    ///
+    ///     if self.pending.peek() is Some(job) { job.describe() }
+    pub fn peek(&self) -> (&T from self)? {
+        match self {
+            Option::Some(ref v) => Some(v),
+            Option::None => nil,
+        }
+    }
+
+    /// The value, borrowed. Aborts when empty.
+    @safe("the runtime prints the location and aborts; it never returns")
+    pub fn look(&self) -> &T from self {
+        match self {
+            Option::Some(ref v) => v,
+            Option::None => rune_panic_unwrap("Option", "Option::look"),
+        }
+    }
+
+    /// The value, borrowed to write through. Aborts when empty.
+    @safe("the runtime prints the location and aborts; it never returns")
+    pub fn touch(&var self) -> &var T from self {
+        match self {
+            Option::Some(ref var v) => v,
+            Option::None => rune_panic_unwrap("Option", "Option::touch"),
+        }
+    }
+
     //=== Getting the value out ============================================//
+    //
+    // Each of these takes the option by value and hands its value over: no
+    // copy is made, so they work for any `T`. A named option is moved by
+    // them under single ownership, the way any value handed on is; borrow
+    // first with `peek`, or copy with `$clone()`, to keep it.
 
     /// The contained value, or `fallback` when empty.
     ///
     /// `fallback` is evaluated whether or not it is needed. Use `orElse` when
     /// producing it is expensive.
-    pub fn or(&self, fallback: T) -> T {
+    pub fn or(self, fallback: T) -> T {
         match self {
-            Option::Some(v) => v.$clone(),
+            Option::Some(v) => v,
             Option::None => fallback,
         }
     }
@@ -76,18 +114,18 @@ pub enum Option<T> {
     /// `produce` is called only when there is nothing here.
     ///
     ///     let name = cached.orElse(||() -> String { readFromDisk() })
-    pub fn orElse(&self, produce: @function() -> T) -> T {
+    pub fn orElse(self, produce: @function() -> T) -> T {
         match self {
-            Option::Some(v) => v.$clone(),
+            Option::Some(v) => v,
             Option::None => produce(),
         }
     }
 
     /// The contained value. Aborts when empty.
     @safe("the runtime prints the location and aborts; it never returns")
-    pub fn unwrap(&self) -> T {
+    pub fn unwrap(self) -> T {
         match self {
-            Option::Some(v) => v.$clone(),
+            Option::Some(v) => v,
             Option::None => rune_panic_unwrap("Option", "Option::unwrap"),
         }
     }
@@ -97,9 +135,9 @@ pub enum Option<T> {
     /// Prefer this to `unwrap` wherever the reason it should not be empty can
     /// be written down: the message is what the traceback leads with.
     @safe("the runtime prints the message and aborts; it never returns")
-    pub fn expect(&self, message: CString) -> T {
+    pub fn expect(self, message: CString) -> T {
         match self {
-            Option::Some(v) => v.$clone(),
+            Option::Some(v) => v,
             Option::None => rune_panic_unwrap(message, "Option::expect"),
         }
     }
@@ -112,9 +150,9 @@ pub enum Option<T> {
     /// these read as one calculation rather than four nil checks.
     ///
     ///     let width = header.map(||(h: Row) -> i64 { h.columns })
-    pub fn map<U>(&self, f: @function(T) -> U) -> Option<U> {
+    pub fn map<U>(self, f: @function(T) -> U) -> Option<U> {
         match self {
-            Option::Some(v) => Option::<U>::Some(f(v.$clone())),
+            Option::Some(v) => Option::<U>::Some(f(v)),
             Option::None => Option::<U>::None,
         }
     }
@@ -122,9 +160,9 @@ pub enum Option<T> {
     /// `f` applied to the value, or `fallback` when there is none.
     ///
     /// `map` followed by `or`, in one step.
-    pub fn mapOr<U>(&self, fallback: U, f: @function(T) -> U) -> U {
+    pub fn mapOr<U>(self, fallback: U, f: @function(T) -> U) -> U {
         match self {
-            Option::Some(v) => f(v.$clone()),
+            Option::Some(v) => f(v),
             Option::None => fallback,
         }
     }
@@ -135,18 +173,21 @@ pub enum Option<T> {
     /// what keeps a chain from nesting: `Option<Option<T>>` never appears.
     ///
     ///     let port = config.andThen(||(c: Config) -> i64? { c.port })
-    pub fn andThen<U>(&self, f: @function(T) -> Option<U>) -> Option<U> {
+    pub fn andThen<U>(self, f: @function(T) -> Option<U>) -> Option<U> {
         match self {
-            Option::Some(v) => f(v.$clone()),
+            Option::Some(v) => f(v),
             Option::None => Option::<U>::None,
         }
     }
 
-    /// The value, but only if `keep` says yes to it.
+    /// The value, but only if `keep` says yes to a copy of it.
     ///
     ///     let positive = count.filter(||(n: i64) -> bool { n > 0 })
-    pub fn filter(&self, keep: @function(T) -> bool) -> Option<T> {
-        if self.isSuchThat(keep) { self.$clone() } else { Option::<T>::None }
+    pub fn filter(self, keep: @function(T) -> bool) -> Option<T> where T: mem::Clone {
+        match self {
+            Option::Some(v) => if keep(v.$clone()) { Option::<T>::Some(v) } else { Option::<T>::None },
+            Option::None => Option::<T>::None,
+        }
     }
 
     /// This option if it holds a value, otherwise `other`.
@@ -155,9 +196,9 @@ pub enum Option<T> {
     /// can be tried in a row.
     ///
     ///     let found = fromFlag.otherwise(fromEnv).otherwise(fromFile)
-    pub fn otherwise(&self, other: Option<T>) -> Option<T> {
+    pub fn otherwise(self, other: Option<T>) -> Option<T> {
         match self {
-            Option::Some(v) => Option::<T>::Some(v.$clone()),
+            Option::Some(v) => Option::<T>::Some(v),
             Option::None => other,
         }
     }
@@ -168,10 +209,10 @@ pub enum Option<T> {
     ///         Option::Some(size) => area(size.0, size.1),
     ///         Option::None => 0,
     ///     }
-    pub fn zip<U>(&self, other: Option<U>) -> Option<(T, U)> {
+    pub fn zip<U>(self, other: Option<U>) -> Option<(T, U)> {
         match self {
             Option::Some(a) => match other {
-                Option::Some(b) => Option::<(T, U)>::Some((a.$clone(), b)),
+                Option::Some(b) => Option::<(T, U)>::Some((a, b)),
                 Option::None => Option::<(T, U)>::None,
             },
             Option::None => Option::<(T, U)>::None,

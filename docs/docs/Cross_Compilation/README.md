@@ -9,6 +9,6 @@ Building for a machine that is not the one you are on. The compiler already emit
 - [Where the output goes](where_the_output_goes.md)
 - [The runtime](the_runtime.md)
 - [Running what you built](running_what_you_built.md)
-- [C sources](c_sources.md)
+- [C and C++ sources](c_and_c_plus_plus_sources.md)
 - [What does not cross](what_does_not_cross.md)
 - [32-bit targets](32_bit_targets.md)

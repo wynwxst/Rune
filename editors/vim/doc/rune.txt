@@ -1,0 +1,66 @@
+*rune.txt*	Rune language support
+
+INTRODUCTION					*rune*
+
+Filetype detection, syntax highlighting, indentation and checking for Rune
+(`.rune` files). Neovim uses the language server, `rune lsp`; Vim runs the
+compiler and the linter in the background itself.
+
+The same information, and the other editors, are in `rune doc lsp`.
+
+CHECKING					*rune-check*
+
+Every error a build would report is shown: the lexer's and parser's, name and
+type errors, macro expansion, and under `--memory zombie` the borrow checker's
+(use after move, a borrow outliving its owner, and so on). Where an error
+points somewhere else too — where a value was moved — that place is marked as a
+hint.
+
+In Neovim the language server reports them as |vim.diagnostic| entries. In Vim
+each finding gets a sign, its range underlined, its message echoed while the
+cursor is on it, and a place in the |location-list| (|:lopen|). Unsaved changes
+are checked as they stand, once typing pauses.
+
+A file in a package — below a `Rune.toml` — is checked with `rune check` in the
+package's root, which uses the package's `[build] memory`. A file on its own is
+checked with `runec --check --memory` |g:rune_memory|.
+
+:RuneCheck					*:RuneCheck*
+	Check the current file now.
+
+:RuneClear					*:RuneClear*
+	Forget what the checker found in the current buffer.
+
+:make						*rune-make*
+	The `rune` |:compiler| is set for Rune buffers. `:make` checks the file
+	or its package and fills the |quickfix| list, notes included.
+
+SETTINGS					*rune-settings*
+
+Each may also be set per buffer, as `b:rune_...`.
+
+*g:rune_check*		1 (default) checks files as described above; 0 does
+			not. With ALE installed the checker stays off unless
+			this is 2, and ALE runs `rune lsp` instead.
+*g:rune_check_on_change*	1 (default) also checks when typing pauses.
+*g:rune_check_delay*	The pause, in milliseconds. Default 400.
+*g:rune_lint*		1 (default) includes `rune lint`'s findings.
+*g:rune_memory*		"arc" (default) or "zombie": the memory model files
+			outside a package are checked in.
+*g:rune_rune*		The `rune` program. Default: on 'path'.
+*g:rune_runec*		The `runec` program. Default: on 'path'.
+*g:rune_lsp*		Neovim: 0 stops `rune lsp` starting by itself.
+
+NEOVIM						*rune-nvim*
+
+On Neovim 0.11 and later the server is enabled with `vim.lsp.enable("rune")`
+from `lsp/rune.lua`, so it can be adjusted with `vim.lsp.config`: >lua
+
+	vim.lsp.config("rune", {
+	  init_options = { lint = { warn = { "missing-docs" } } },
+	})
+<
+`require("rune").config()` returns the whole configuration, for
+nvim-lspconfig or `vim.lsp.start`.
+
+ vim:tw=78:ts=8:noet:ft=help:norl:

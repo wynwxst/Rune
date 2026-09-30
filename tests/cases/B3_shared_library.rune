@@ -1,0 +1,46 @@
+// SHARED: greeter shared/greeter.rune
+// EXPECT: opened true
+// EXPECT: add 7
+// EXPECT: hello from a shared library
+// EXPECT: hello from a shared library
+// EXPECT: shout 4
+// EXPECT: next 1 2 3
+//
+// Rune builds a native shared library — a `.dylib`, a `.so`, a `.dll` —
+// with `--shared`, and anything the system's loader can open, a Rune program
+// can open too. Nothing here is special to Rune: `dlopen` and `dlsym` are
+// the C functions, declared the way any other foreign function is.
+//
+// `@export("name")` on the library's side is what makes a function findable:
+// it gives the function the symbol the outside world knows it by, rather
+// than the mangled one Rune uses among itself.
+import std::io
+import std::env
+
+extern "C" {
+    fn dlopen(path: CString, flags: i32) -> *var u8
+    fn dlsym(handle: *var u8, name: CString) -> *var u8
+    fn dlclose(handle: *var u8) -> i32
+}
+
+let RTLD_NOW: i32 = 2
+
+@unsafe fn main() -> i64 {
+    // The harness built the library beside this program and said where.
+    let path = env::getOr("RUNE_TEST_SHARED_GREETER", "")
+    let handle = dlopen(path.$cstr(), RTLD_NOW)
+    println!("opened {}", (handle as u64 != 0).$str())
+
+    let add = dlsym(handle, "greeter_add") as @cfunction(i64, i64) -> i64
+    println!("add {}", add(3, 4).$str())
+
+    let shout = dlsym(handle, "greeter_shout") as @cfunction(i64) -> i64
+    println!("shout {}", shout(2).$str())
+
+    // The library keeps its own state between calls.
+    let next = dlsym(handle, "greeter_next") as @cfunction() -> i64
+    println!("next {} {} {}", next().$str(), next().$str(), next().$str())
+
+    dlclose(handle)
+    0
+}

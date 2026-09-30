@@ -44,7 +44,15 @@ VarDecl *rootLocal(const Expr *e) {
       return v && !v->IsGlobal ? v : nullptr;
     }
     case NodeKind::Member: e = cast<MemberExpr>(e)->Base.get(); continue;
-    case NodeKind::Index:  e = cast<IndexExpr>(e)->Base.get(); continue;
+    case NodeKind::Index: {
+      // A slice is a view: its elements live in whatever buffer it looks
+      // at, not in the local holding the view.
+      const Expr *base = cast<IndexExpr>(e)->Base.get();
+      if (base->Ty && base->Ty->is(TypeKind::Slice))
+        return nullptr;
+      e = base;
+      continue;
+    }
     case NodeKind::Borrow: e = cast<BorrowExpr>(e)->Operand.get(); continue;
     case NodeKind::Deref:  e = cast<DerefExpr>(e)->Operand.get(); continue;
     default:

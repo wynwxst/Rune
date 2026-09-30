@@ -49,7 +49,7 @@ fn main() -> i64 {
 | `rune/`    | The package manager and build front end. Reads `Rune.toml`, resolves path dependencies, drives `runec`. |
 | `runetime/`| The memory core of the runtime, **written in Rune**: allocation, reference counting, the weak-reference table and raw memory. |
 | `runtime/` | The rest of the runtime, still C: the `String` object, panics, tracebacks and I/O primitives. |
-| `stdlib/`  | The standard library, written in Rune: `std::io` (console, files, byte buffers and streams), `std::net` (TCP), `std::thread`, `std::option`, `std::result`, `std::math`, `std::process`, `std::mem`, `std::any`, `std::iter`, `std::text`, `std::time` (durations, a clock, and a calendar), `std::atomic`, `std::dictionary`, `std::convert`, `std::collections` (`vector`, `slice`), and the everyday things a program wants from outside itself: `std::env`, `std::random`, `std::hash`, `std::json` and `std::cli`. |
+| `stdlib/`  | The standard library, written in Rune: `std::io` (console, files, byte buffers and streams), `std::net` (TCP), `std::thread`, `std::task` (`async fn` and `.await`), `std::option`, `std::result`, `std::math`, `std::process`, `std::mem`, `std::any`, `std::iter`, `std::text`, `std::time` (durations, a clock, and a calendar), `std::atomic`, `std::dictionary`, `std::convert`, `std::collections` (`vector`, `slice`), and the everyday things a program wants from outside itself: `std::env`, `std::random`, `std::hash`, `std::json` and `std::cli`. |
 | `examples/`| Sample programs: a full syntax tour, plus one per feature area and a two-package project. |
 | `tests/`   | End-to-end cases: compile, run, compare output. |
 | `tools/`   | `rune-doc`, the documentation generator — a Rune program — and the stylesheet and script the pages it writes are built from. |
@@ -143,6 +143,22 @@ geometry = { path = "../geometry" }
 Commands: `rune new`, `init`, `build`, `run`, `test`, `doc`, `check`, `clean`,
 each accepting `--release`. `rune run <name>` picks one executable,
 `rune run --all` runs every one.
+
+### Linting and editors
+
+`rune lint` finds likely mistakes and style problems — an unread variable, a
+`var` that could be `let`, an unused import, code after `return` — and `--fix`
+makes the changes that have a certain answer. `rune lsp` is a language server
+for any editor with an LSP client: compiler and lint diagnostics, completion,
+hover, go to definition, references and quick fixes. `editors/vscode/` is the
+VS Code extension, with syntax highlighting.
+
+Each has a book of its own, built and opened like any other documentation:
+
+```bash
+rune doc lint          # the rules, configuring them, fixes, output for tools
+rune doc lsp           # setting up an editor, what the server does, troubleshooting
+```
 
 ### Incremental and concurrent builds
 

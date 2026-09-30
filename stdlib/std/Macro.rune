@@ -1,0 +1,651 @@
+// std::Macro — macros written as code rather than as a pattern.
+//
+// Rune's `macro` is a rewrite chosen by pattern: good for a shape you can
+// write down, and no help at all when the expansion has to be *computed* —
+// one method per field, a table read off its own entries, a name derived
+// from another name. That is what this is for.
+//
+// A procedural macro is an ordinary function marked `@macro`, in a file that
+// says it is a macro package:
+//
+//     @type(Macros)
+//     import std::Macro
+//
+//     @macro
+//     pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
+//         let it = input.text()
+//         Macro::parse("((" + it + ") + (" + it + "))")
+//     }
+//
+// and then, anywhere in the program being built:
+//
+//     fn main() -> i64 { twice!(3) }        // 6
+//
+//===--------------------------------------------------------------------===//
+// How it runs
+//===--------------------------------------------------------------------===//
+//
+// A `@type(Macros)` file is a **package of its own**. The compiler builds it
+// first — for the machine doing the compiling, whatever the program is being
+// built for — and then runs it to expand each invocation.
+//
+// Two things follow from that, and they are the whole point:
+//
+//  * **Everything works.** A macro is ordinary compiled Rune: generics,
+//    marks, `std::collections`, `std::json`, files, whatever it needs. There
+//    is no subset.
+//  * **Nothing leaks.** What the macro package imports, declares and depends
+//    on is its own business. None of it reaches the program, which sees only
+//    the tokens the macro hands back.
+//
+// A cross build is no different: the macro package is built for the host and
+// run there, and the program is built for the target.
+//
+//===--------------------------------------------------------------------===//
+// What a macro is given
+//===--------------------------------------------------------------------===//
+//
+// Tokens, with their structure kept. A bracketed group is **one** token —
+// `block` for `{ ... }`, `parens` for `( ... )`, `brackets` for `[ ... ]` —
+// whose `text()` is the group exactly as written and whose `inner()` is what
+// is inside it. So a macro can take a body, look through it, and hand it
+// back untouched:
+//
+//     @macro
+//     pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
+//         let body = input.at(input.length() - 1)      // the `{ ... }`
+//         Macro::parse("{ io::println(\"in\"); " + body.inner().text() + " }")
+//     }
+//
+// which is also how a macro reaches `std::reflect`: whatever it writes into
+// the expansion is compiled in the *program*, so `reflect::typeName<T>()`
+// there answers about the program's types, not the macro's.
+
+import std::io
+import std::env
+import std::text
+import std::collections::vector
+
+//===--------------------------------------------------------------------===//
+// Tokens
+//===--------------------------------------------------------------------===//
+
+/// One token, or one bracketed group.
+///
+/// `kind` is one of `name`, `number`, `string`, `character`, `punctuation`,
+/// `keyword`, `block`, `parens`, `brackets` — or `nothing`, for a token that
+/// is not there.
+pub struct Token {
+    kind: String
+    body: String
+    children: vector::Vector<Token>
+}
+
+extend Token {
+    /// The token as it was written. A string literal gives its contents; a
+    /// group gives the whole group, brackets and all.
+    pub fn text(&self) -> String { self.body.$clone() }
+
+    /// One of `name`, `number`, `string`, `character`, `punctuation`,
+    /// `keyword`, `block`, `parens`, `brackets`, `nothing`.
+    pub fn kind(&self) -> String { self.kind.$clone() }
+
+    /// True when it is a token of that kind.
+    pub fn isA(&self, which: String) -> bool { self.kind == which }
+
+    /// True when it is a bracketed group of any sort.
+    pub fn isGroup(&self) -> bool {
+        self.kind == "block" || self.kind == "parens" || self.kind == "brackets"
+    }
+
+    /// What is inside a group, without its brackets. An empty run for
+    /// anything that is not one.
+    pub fn inner(&self) -> Tokens {
+        var out = vector::Vector<Token>()
+        var i = 0
+        while i < self.children.length() {
+            out.push(self.children.at(i).unwrap())
+            i += 1
+        }
+        Tokens { items: out }
+    }
+}
+
+/// A run of tokens: what a macro is given, and what it hands back.
+pub struct Tokens {
+    items: vector::Vector<Token>
+}
+
+extend Tokens {
+    /// How many tokens are in it. A group counts as one.
+    pub fn length(&self) -> i64 { self.items.length() }
+
+    /// True when there are none.
+    pub fn isEmpty(&self) -> bool { self.items.isEmpty() }
+
+    /// The token at `index`, or an empty one when there is no such token.
+    pub fn at(&self, index: i64) -> Token {
+        match self.items.at(index) {
+            Some(t) => t,
+            None => Token { kind: "nothing", body: "",
+                            children: vector::Vector<Token>() },
+        }
+    }
+
+    /// The tokens from `start` up to but not including `stop`.
+    pub fn slice(&self, start: i64, stop: i64) -> Tokens {
+        var out = vector::Vector<Token>()
+        var i = if start < 0 { 0 } else { start }
+        let end = if stop > self.items.length() { self.items.length() }
+                  else { stop }
+        while i < end {
+            out.push(self.items.at(i).unwrap())
+            i += 1
+        }
+        Tokens { items: out }
+    }
+
+    /// The run, as source.
+    ///
+    /// A run of one token gives *that token* — a string literal's contents,
+    /// a name's spelling, a group with its brackets. A longer run gives the
+    /// source it was written as, with a space between each part.
+    pub fn text(&self) -> String {
+        if self.items.length() == 1 {
+            return self.items.at(0).unwrap().body.$clone()
+        }
+        var out = ""
+        var i = 0
+        while i < self.items.length() {
+            if i > 0 { out += " " }
+            out += self.items.at(i).unwrap().body
+            i += 1
+        }
+        out
+    }
+
+    /// The kind of the one token this holds, `run` for a longer one, and
+    /// `nothing` for an empty one.
+    pub fn kind(&self) -> String {
+        if self.items.isEmpty() { return "nothing" }
+        if self.items.length() > 1 { return "run" }
+        self.items.at(0).unwrap().kind.$clone()
+    }
+
+    /// True when it holds exactly one token, of that kind.
+    pub fn isA(&self, which: String) -> bool { self.kind() == which }
+
+    /// Adds a token, or a whole run of them, to the end.
+    pub fn add(&var self, more: Tokens) {
+        var i = 0
+        while i < more.items.length() {
+            self.items.push(more.items.at(i).unwrap())
+            i += 1
+        }
+    }
+
+    /// The run split on a piece of punctuation written between the parts —
+    /// `,` for an argument list. A group is one token, so a comma inside
+    /// brackets does not split.
+    pub fn split(&self, separator: String) -> vector::Vector<Tokens> {
+        var parts = vector::Vector<Tokens>()
+        var current = vector::Vector<Token>()
+        var i = 0
+        while i < self.items.length() {
+            let t = self.items.at(i).unwrap()
+            if t.kind == "punctuation" && t.body == separator {
+                parts.push(Tokens { items: current })
+                current = vector::Vector<Token>()
+            } else {
+                current.push(t)
+            }
+            i += 1
+        }
+        if !current.isEmpty() || !parts.isEmpty() {
+            parts.push(Tokens { items: current })
+        }
+        parts
+    }
+
+    /// Where the first token spelled `spelling` is, at this level — inside
+    /// a group does not count — or -1. A string literal never matches, so
+    /// `"for"` in quotes is not the keyword.
+    pub fn find(&self, spelling: &String) -> i64 { self.findFrom(spelling, 0) }
+
+    /// The same, looking from `start` on.
+    pub fn findFrom(&self, spelling: &String, start: i64) -> i64 {
+        var i = if start < 0 { 0 } else { start }
+        while i < self.items.length() {
+            let t = self.items.at(i).unwrap()
+            if t.kind != "string" && t.body == spelling { return i }
+            i += 1
+        }
+        -1
+    }
+
+    /// True when a token spelled `spelling` is here, at this level.
+    pub fn contains(&self, spelling: &String) -> bool { self.find(spelling) >= 0 }
+
+    /// The tokens before the first `spelling` — all of them when there is
+    /// none.
+    pub fn before(&self, spelling: &String) -> Tokens {
+        let at = self.find(spelling)
+        if at < 0 { return self.slice(0, self.items.length()) }
+        self.slice(0, at)
+    }
+
+    /// The tokens after the first `spelling` — none when there is none.
+    pub fn after(&self, spelling: &String) -> Tokens {
+        let at = self.find(spelling)
+        if at < 0 { return tokens() }
+        self.slice(at + 1, self.items.length())
+    }
+
+    /// Takes the run apart by a pattern, naming the pieces.
+    ///
+    /// A pattern is words separated by spaces. `$name` captures one or more
+    /// tokens; any other word must be there as written; `[ ... ]` is a part
+    /// that may be missing:
+    ///
+    ///     let c = input.capture("$body for $item in $source [if $filter]")
+    ///     if !c.matched() { return Macro::fail(c.why()) }
+    ///     c.text("source")          // `xs`
+    ///     c.has("filter")           // whether `if ...` was written
+    ///
+    /// A capture takes as few tokens as it can, so `$body for` stops at the
+    /// first `for`. Groups are single tokens, so a `for` inside brackets is
+    /// never the one matched.
+    pub fn capture(&self, pattern: &String) -> Captures {
+        let parts = patternParts(pattern)
+        var names = vector::Vector<String>()
+        var values = vector::Vector<Tokens>()
+        if matchParts(&parts, 0, self, 0, &var names, &var values) {
+            return Captures { ok: true, reason: "", names: names, values: values }
+        }
+        Captures { ok: false,
+                   reason: "expected " + describePattern(&parts) + ", got `" + self.text() + "`",
+                   names: vector::Vector<String>(), values: vector::Vector<Tokens>() }
+    }
+
+    /// Every token, including what is inside each group, flattened.
+    pub fn flat(&self) -> Tokens {
+        var out = vector::Vector<Token>()
+        var i = 0
+        while i < self.items.length() {
+            let t = self.items.at(i).unwrap()
+            if t.isGroup() {
+                let inner = t.inner().flat()
+                var j = 0
+                while j < inner.items.length() {
+                    out.push(inner.items.at(j).unwrap())
+                    j += 1
+                }
+            } else {
+                out.push(t)
+            }
+            i += 1
+        }
+        Tokens { items: out }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Taking a run apart by a pattern
+//===--------------------------------------------------------------------===//
+
+/// What `Tokens.capture` found: each `$name` and the tokens it took.
+pub struct Captures {
+    ok: bool
+    reason: String
+    names: vector::Vector<String>
+    values: vector::Vector<Tokens>
+}
+
+extend Captures {
+    /// True when the run had the pattern's shape.
+    pub fn matched(&self) -> bool { self.ok }
+
+    /// Why it did not, in words fit for `Macro::fail`.
+    pub fn why(&self) -> String { self.reason.$clone() }
+
+    /// True when `$name` took something — false for one in a `[ ... ]` part
+    /// that was not written.
+    pub fn has(&self, name: &String) -> bool {
+        for n in self.names { if n == name { return true } }
+        false
+    }
+
+    /// The tokens `$name` took; an empty run when it took none.
+    pub fn get(&self, name: &String) -> Tokens {
+        var i = 0
+        while i < self.names.length() {
+            if self.names.at(i).unwrap() == name { return self.values.at(i).unwrap() }
+            i += 1
+        }
+        tokens()
+    }
+
+    /// The same, as source.
+    pub fn text(&self, name: &String) -> String { self.get(name).text() }
+}
+
+/// One word of a pattern: `word` to be matched as written, `capture` for a
+/// `$name`, and `open` / `close` around an optional part. `skip` is, for an
+/// `open`, where the part after its `close` begins.
+struct PatternPart {
+    kind: String
+    text: String
+    skip: i64
+}
+
+/// A pattern, as words. Brackets may touch the words they enclose:
+/// `[if $filter]` is `[`, `if`, `$filter`, `]`.
+fn patternParts(pattern: &String) -> vector::Vector<PatternPart> {
+    var words = vector::Vector<String>()
+    for raw in text::split(pattern, " ") {
+        var w = raw.$clone()
+        while w.$length() > 0 && w.$substring(0, 1) == "[" {
+            words.push("[")
+            w = w.$substring(1, w.$length())
+        }
+        var closes = 0
+        while w.$length() > 0 && w.$substring(w.$length() - 1, w.$length()) == "]" {
+            closes += 1
+            w = w.$substring(0, w.$length() - 1)
+        }
+        if !w.$isEmpty() { words.push(w) }
+        while closes > 0 { words.push("]"); closes -= 1 }
+    }
+    var parts = vector::Vector<PatternPart>()
+    var opens = vector::Vector<i64>()
+    for w in words {
+        if w == "[" {
+            opens.push(parts.length())
+            parts.push(PatternPart { kind: "open", text: "", skip: 0 })
+        } elif w == "]" {
+            parts.push(PatternPart { kind: "close", text: "", skip: 0 })
+            match opens.pop() {
+                Some(at) => { parts.touch(at).skip = parts.length() },
+                None => {},
+            }
+        } elif w.$length() > 1 && w.$substring(0, 1) == "$" {
+            parts.push(PatternPart { kind: "capture", text: w.$substring(1, w.$length()), skip: 0 })
+        } else {
+            parts.push(PatternPart { kind: "word", text: w.$clone(), skip: 0 })
+        }
+    }
+    parts
+}
+
+/// The pattern as a reader would write it, for a message.
+fn describePattern(parts: &vector::Vector<PatternPart>) -> String {
+    var out = ""
+    var glued = false           // straight after a `[`: no space
+    for p in parts {
+        if p.kind == "close" {
+            out += "]"
+            continue
+        }
+        if !out.$isEmpty() && !glued { out += " " }
+        glued = p.kind == "open"
+        if p.kind == "open" { out += "[" }
+        elif p.kind == "capture" { out += "<" + p.text + ">" }
+        else { out += "`" + p.text + "`" }
+    }
+    out
+}
+
+/// Whether `input` from token `at` matches `parts` from `pi` to the end,
+/// recording what each capture took. Tries the shortest capture first, and
+/// an optional part before going without it; on the way back from a dead
+/// end, what was recorded there is taken back out.
+fn matchParts(parts: &vector::Vector<PatternPart>, pi: i64, input: &Tokens, at: i64,
+              names: &var vector::Vector<String>, values: &var vector::Vector<Tokens>) -> bool {
+    if pi >= parts.length() { return at == input.length() }
+    let p = parts.at(pi).unwrap()
+    if p.kind == "close" { return matchParts(parts, pi + 1, input, at, names, values) }
+    if p.kind == "open" {
+        let kept = names.length()
+        if matchParts(parts, pi + 1, input, at, names, values) { return true }
+        while names.length() > kept { names.pop(); values.pop() }
+        return matchParts(parts, p.skip, input, at, names, values)
+    }
+    if p.kind == "word" {
+        if at >= input.length() { return false }
+        let t = input.at(at)
+        if t.kind == "string" || t.body != p.text { return false }
+        return matchParts(parts, pi + 1, input, at + 1, names, values)
+    }
+    // A capture: one token, then two, and so on.
+    var end = at + 1
+    while end <= input.length() {
+        let kept = names.length()
+        names.push(p.text.$clone())
+        values.push(input.slice(at, end))
+        if matchParts(parts, pi + 1, input, end, names, values) { return true }
+        while names.length() > kept { names.pop(); values.pop() }
+        end += 1
+    }
+    false
+}
+
+//===--------------------------------------------------------------------===//
+// Making tokens
+//===--------------------------------------------------------------------===//
+
+/// Rune source written with `$name` holes, filled from `captures`:
+///
+///     Macro::quote("$source.values().map(||($item) { $body })", c)
+///
+/// A `$name` that is not one of the captures is left as it is, so the
+/// intrinsics — `text.$length()` — can be written in a template unchanged;
+/// `$$` is a `$` for the rare case where a capture's name would be read.
+pub fn quote(template: &String, captures: &Captures) -> Tokens {
+    var out = ""
+    var i = 0
+    let n = template.$length()
+    while i < n {
+        let c = template.$substring(i, i + 1)
+        if c == "$" && i + 1 < n && template.$substring(i + 1, i + 2) == "$" {
+            out += "$"
+            i += 2
+            continue
+        }
+        if c == "$" {
+            var e = i + 1
+            while e < n && isNameByte(template.$byteAt(e) as i64) { e += 1 }
+            let name = template.$substring(i + 1, e)
+            if e > i + 1 && captures.has(name) {
+                out += captures.text(name)
+                i = e
+                continue
+            }
+        }
+        out += c
+        i += 1
+    }
+    parse(out)
+}
+
+fn isNameByte(b: i64) -> bool {
+    (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95
+}
+
+fn one(kind: String, body: String) -> Token {
+    Token { kind: kind, body: body, children: vector::Vector<Token>() }
+}
+
+/// Rune source, to stand where the invocation was.
+///
+/// This is the way to write an expansion: build the source as a string and
+/// hand it here. Whether it *parses* is decided where the expansion lands,
+/// and the error points there.
+pub fn parse(source: String) -> Tokens {
+    var items = vector::Vector<Token>()
+    items.push(one("source", source))
+    Tokens { items: items }
+}
+
+/// An empty run, to add to.
+pub fn tokens() -> Tokens {
+    Tokens { items: vector::Vector<Token>() }
+}
+
+/// A name, as one token.
+pub fn ident(name: String) -> Tokens {
+    var items = vector::Vector<Token>()
+    items.push(one("name", name))
+    Tokens { items: items }
+}
+
+/// A number, as one token. The text is taken as written.
+pub fn number(digits: String) -> Tokens {
+    var items = vector::Vector<Token>()
+    items.push(one("number", digits))
+    Tokens { items: items }
+}
+
+/// A string literal holding `contents`. The quoting is done here.
+pub fn string(contents: String) -> Tokens {
+    var out = "\""
+    var i = 0
+    while i < contents.$length() {
+        let c = contents.$at(i)
+        if c == '"' || c == '\\' { out += "\\" }
+        out += c.$str()
+        i += 1
+    }
+    out += "\""
+    parse(out)
+}
+
+/// Punctuation, as it is written.
+pub fn punct(spelling: String) -> Tokens {
+    var items = vector::Vector<Token>()
+    items.push(one("punctuation", spelling))
+    Tokens { items: items }
+}
+
+//===--------------------------------------------------------------------===//
+// Saying something went wrong
+//===--------------------------------------------------------------------===//
+
+global var failure: String = ""
+global var failed: bool = false
+
+/// Refuses what the macro was given. The message is reported against the
+/// invocation — the `name!(...)` somebody wrote — and the expansion stops.
+///
+///     if input.isEmpty() { Macro::error("needs at least one field") }
+pub fn error(message: String) {
+    if !failed {
+        failed = true
+        failure = message
+    }
+}
+
+/// `error`, as something to return: the macro refuses and stops in one line.
+///
+///     if !c.matched() { return Macro::fail(c.why()) }
+pub fn fail(message: String) -> Tokens {
+    error(message)
+    tokens()
+}
+
+//===--------------------------------------------------------------------===//
+// The part the compiler talks to
+//===--------------------------------------------------------------------===//
+//
+// A macro package is a program, and this is its `main`. The compiler writes
+// the request to a file, runs the program with that file and one to answer
+// in, and reads what comes back. Nothing here is meant to be called by hand
+// — but there is no harm in knowing what it does, and running a macro
+// package yourself is a perfectly good way to see what it produces.
+
+fn unescape(s: String) -> String {
+    var out = ""
+    var i = 0
+    while i < s.$length() {
+        let c = s.$at(i)
+        if c == '\\' && i + 1 < s.$length() {
+            let n = s.$at(i + 1)
+            if n == 'n' { out += "\n" }
+            else if n == 't' { out += "\t" }
+            else if n == 'r' { out += "\r" }
+            else { out += n.$str() }
+            i += 2
+            continue
+        }
+        out += c.$str()
+        i += 1
+    }
+    out
+}
+
+/// Reads one token and its children, and says how many lines it used.
+fn readToken(lines: &vector::Vector<String>, at: i64) -> (Token, i64) {
+    if at >= lines.length() {
+        return (one("nothing", ""), at + 1)
+    }
+    let parts = text::split(lines.at(at).unwrap(), "\t")
+    let kind = if parts.length() > 0 { parts.at(0).unwrap() } else { "nothing" }
+    let body = if parts.length() > 1 { unescape(parts.at(1).unwrap()) } else { "" }
+    let count = if parts.length() > 2 {
+        parts.at(2).unwrap().$toInt().or(0)
+    } else { 0 }
+
+    var kids = vector::Vector<Token>()
+    var next = at + 1
+    var k = 0
+    while k < count {
+        let read = readToken(lines, next)
+        kids.push(read.0)
+        next = read.1
+        k += 1
+    }
+    (Token { kind: kind, body: body, children: kids }, next)
+}
+
+/// Runs a macro package: reads the request, calls `dispatch`, writes the
+/// answer. The compiler hands the two file names on the command line.
+pub fn serve(dispatch: @function(String, Tokens) -> Tokens) -> i64 {
+    let requestPath = env::getOr("RUNE_MACRO_REQUEST", "")
+    let answerPath = env::getOr("RUNE_MACRO_ANSWER", "")
+    if requestPath.$isEmpty() || answerPath.$isEmpty() {
+        io::println("this is a Rune macro package; the compiler runs it")
+        return 2
+    }
+    let request = match io::readToString(&requestPath) {
+        Ok(body) => body,
+        Err(e) => return 3,
+    }
+    let lines = text::split(request, "\n")
+    let name = if lines.length() > 0 { lines.at(0).unwrap() } else { "" }
+
+    var items = vector::Vector<Token>()
+    var at = 1
+    while at < lines.length() {
+        if lines.at(at).unwrap().$isEmpty() {
+            at += 1
+            continue
+        }
+        let read = readToken(&lines, at)
+        items.push(read.0)
+        at = read.1
+    }
+
+    let answer = dispatch(name, Tokens { items: items })
+    let written = if failed { "error\n" + failure }
+                  else { "ok\n" + answer.text() }
+    match io::writeString(&answerPath, written) {
+        Ok(n) => 0,
+        Err(e) => 4,
+    }
+}
+
+/// What a dispatcher says when the compiler asks for a macro it does not
+/// have. The compiler checks its own table first, so this should not happen.
+pub fn unknown(name: String) -> Tokens {
+    error("this macro package has no macro named '" + name + "'")
+    tokens()
+}

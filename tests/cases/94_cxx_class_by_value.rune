@@ -1,0 +1,17 @@
+// EXPECT-ERROR: is never held by value
+//
+// A C++ class is opaque: Rune does not know how to copy, move or destroy one,
+// so it only ever travels as a pointer or a borrow.
+import std::io
+
+extern "C++" {
+    namespace demo {
+        @size(8)
+        class Counter {
+            fn peek(&self) -> c_int
+        }
+        fn copyOf(c: Counter) -> Counter
+    }
+}
+
+fn main() -> i64 { 0 }

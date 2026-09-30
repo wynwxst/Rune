@@ -1,0 +1,129 @@
+import std::{io,mem}
+import std::builder
+import std::collections::vector
+
+mark Node {
+    fn display(&self) -> String
+    fn push(&self, elem: dyn Node)
+}
+
+struct Elements {
+    objects: vector::Vector<dyn Node> = vector::Vector<dyn Node>()
+}
+
+bind Node to Elements {
+    fn display(&self) -> String {
+        std::process::panic("No.")
+    }
+    fn push(&var self, elem: dyn Node) {
+        self.objects.push(elem)
+    }
+}
+/* for any form of inheritance if the parent is bound to mark M, it should share the mark unless overriden, eg. further examples may only override display but not push*/
+
+macro generateTitle {
+    ($title_type: ident) => {
+        struct $title_type : Elements {
+            content: String
+        }
+
+        bind Node to $title_type {
+            fn display(&self) -> String {
+                var other_content: String = ""
+                for node in self.objects {
+                    other_content += node.display()
+                    if self.objects.length() > 1 {
+                        other_content += "\n"
+                    }
+                }
+                if self.objects.length() > 1 {
+                    other_content = "\n" + other_content
+                }
+                ("<" + stringify!($title_type) + ">" + other_content + "</" + stringify!($title_type) + ">").$clone() // clone to create a copy so whatever is done with the string is done
+            }
+            fn push(&var self, elem: dyn Node) {
+                self.objects.push(elem)
+            }
+        }
+    }
+}
+
+// H1 - H5
+generateTitle!(h1)
+generateTitle!(h2)
+generateTitle!(h3)
+generateTitle!(h4)
+generateTitle!(h5)
+generateTitle!(p)
+bind builder::Builder to p {
+    type Child = dyn Node
+    fn empty() -> Self {p {content: ""}}
+    fn add(&var self, child: dyn Node) {
+        self.objects.push(child)
+    }
+    /* add build function which is called after the add */
+}
+
+bind builder::Builder to h1 {
+    type Child = dyn Node
+    fn empty() -> Self {h1 {content: ""}}
+    fn add(&var self, child: dyn Node) {
+        self.objects.push(child)
+    }
+    /* add build function which is called after the last add */
+}
+
+struct Html : Elements {}
+
+bind builder::Builder to Html {
+    type Child = dyn Node
+    fn empty() -> Self {Html {}}
+    fn add(&var self, child: dyn Node) {
+        self.objects.push(child)
+    }
+    /* add build function which is called after the last add */
+}
+
+bind Node to Html {
+    fn display(&self) -> String {
+        var res = ""
+        for obj in self.objects {
+            res += obj.display() + "\n"
+        }
+        res
+    }
+    fn push(&self, elem: dyn Node) {
+        std::process::panic("Cannot contain children")
+    }
+}
+
+struct TextStruct{content: String}
+
+bind Node to TextStruct {
+    fn display(&self) -> String {
+        self.content.$clone()
+    }
+    fn push(&self, elem: dyn Node) {
+        std::process::panic("Cannot contain children")
+    }
+}
+
+pub fn Text(content: String) -> TextStruct {
+    TextStruct {
+        content: content
+    }
+}
+
+fn main() -> i64 {
+    println!("{}",h1{content: "Hello"}.display())
+
+    x = Html {
+        h1 { Text("Title") }
+        p {
+            Text("Hello\n World")
+        }
+    }.display()
+
+    println!("{}",x)
+    0
+}

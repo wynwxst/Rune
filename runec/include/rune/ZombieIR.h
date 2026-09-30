@@ -131,6 +131,11 @@ struct Local {
   OriginId Origin = kNone;
   /// True when the value needs destroying at the end of its scope.
   bool Owned = false;
+  /// The temporary a string literal is written into. What it holds is
+  /// immortal — literals are interned once and never freed — so a borrow of
+  /// it outlives every place, like a borrow of a global: it satisfies any
+  /// `from` clause, and the temporary going out of scope leaves it whole.
+  bool Immortal = false;
   /// Parameter index, for `Param`; capture index, for `Capture`.
   unsigned Index = 0;
 };

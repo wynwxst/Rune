@@ -1,0 +1,13 @@
+// Waiting on a future that nothing will ever finish is reported rather than
+// hung: with no task ready, no timer pending and no thread working, the
+// executor knows the wait would never end.
+// EXPECT: waiting
+// EXPECT-PANIC: deadlock: waiting on a future that nothing will finish
+import std::io
+import std::task
+
+async fn main() -> i64 {
+    let never = task::pending<i64>()
+    io::println("waiting")
+    never.await
+}

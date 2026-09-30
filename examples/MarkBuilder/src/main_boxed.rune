@@ -1,0 +1,46 @@
+import std::{io,mem}
+import std::builder
+import std::collections::vector
+
+var objects: vector::Vector<mem::Box<dyn Node>> = vector::Vector<mem::Box<dyn Node>>()
+
+mark Node {
+    fn display(&self) -> String
+}
+
+fn push(elem: dyn Node) {
+    unsafe {
+        objects.push(mem::boxed(elem))
+    }
+}
+
+
+/* for any form of inheritance if the parent is bound to mark M, it should share the mark unless overriden, eg. further examples may only override display but not push*/
+
+macro generateTitle {
+    ($title_type: ident) => {
+        struct $title_type {
+            content: String
+        }
+
+        bind Node to $title_type {
+            fn display(&self) -> String {
+                ("<" + stringify!($title_type) + ">" + self.content + "</" + stringify!($title_type) + ">").$clone() // clone to create a copy so whatever is done with the string is done
+            }
+        }
+    }
+}
+
+// H1 - H5
+generateTitle!(h1)
+generateTitle!(h2)
+generateTitle!(h3)
+generateTitle!(h4)
+generateTitle!(h5)
+
+//bind builder::Builder to 
+
+fn main() -> i64 {
+    println!("{}",h1{content: "Hello"}.display())
+    0
+}

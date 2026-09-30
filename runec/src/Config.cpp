@@ -120,20 +120,70 @@ void suggest(DiagBuilder &d, const std::string &name, const ConfigSet &cfg) {
 /// The left side names something about the build and the right side is what it
 /// might be. Written the other way round it reads backwards, so both orders
 /// are accepted and mean the same thing.
-bool evalComparison(const BinaryExpr *b, const ConfigSet &cfg,
-                    DiagnosticEngine &diags, bool &ok) {
-  const auto *lhsName = dyn_cast<DeclRefExpr>(b->LHS.get());
-  const auto *rhsName = dyn_cast<DeclRefExpr>(b->RHS.get());
-  const auto *lhsStr = dyn_cast<StringLitExpr>(b->LHS.get());
-  const auto *rhsStr = dyn_cast<StringLitExpr>(b->RHS.get());
+/// The text a `@Config` comparison's right-hand side stands for, or "" when
+/// the expression is not one a condition may compare against.
+///
+/// A manifest's `[config]` values are strings, numbers and booleans, so all
+/// three are written the way they were written there — and a bare word is
+/// accepted too, because `backend == vulkan` is what people write and there
+/// is nothing else it could mean.
+bool configValueText(const Expr *e, std::string &out) {
+  if (const auto *s = dyn_cast<StringLitExpr>(e)) {
+    out = s->Value;
+    return true;
+  }
+  if (const auto *i = dyn_cast<IntLitExpr>(e)) {
+    out = std::to_string(i->Value);
+    if (i->IsNegated)
+      out = "-" + out;
+    return true;
+  }
+  if (const auto *b = dyn_cast<BoolLitExpr>(e)) {
+    out = b->Value ? "true" : "false";
+    return true;
+  }
+  if (const auto *r = dyn_cast<DeclRefExpr>(e)) {
+    out = r->joined();
+    return true;
+  }
+  return false;
+}
 
-  const DeclRefExpr *key = lhsName ? lhsName : rhsName;
-  const StringLitExpr *lit = rhsStr ? rhsStr : lhsStr;
-  if (!key || !lit) {
-    auto d = diags.error(b->Range,
+/// One `key == value` or `key != value`, in either order.
+///
+/// The left side names something about the build and the right side is what
+/// it might be. Written the other way round it reads backwards, so both
+/// orders are accepted and mean the same thing.
+bool evalComparison(const Expr *lhs, const Expr *rhs, bool wantEqual,
+                    SourceRange range, const ConfigSet &cfg,
+                    DiagnosticEngine &diags, bool &ok) {
+  const auto *lhsName = dyn_cast<DeclRefExpr>(lhs);
+  const auto *rhsName = dyn_cast<DeclRefExpr>(rhs);
+
+  // Whichever side names a key this build knows is the key; the other is the
+  // value. When neither does, the left is reported as the key it was meant
+  // to be, which is where the mistake is.
+  const DeclRefExpr *key = nullptr;
+  const Expr *valueExpr = nullptr;
+  if (lhsName && cfg.isKey(lhsName->joined())) {
+    key = lhsName;
+    valueExpr = rhs;
+  } else if (rhsName && cfg.isKey(rhsName->joined())) {
+    key = rhsName;
+    valueExpr = lhs;
+  } else {
+    key = lhsName ? lhsName : rhsName;
+    valueExpr = lhsName ? rhs : lhs;
+  }
+
+  std::string text;
+  if (!key || !valueExpr || !configValueText(valueExpr, text)) {
+    auto d = diags.error(range,
                          "a `@Config` comparison needs a name on one side and "
-                         "a string on the other");
-    d.note("for example `os == \"windows\"` or `arch != \"x86\"`").code(112);
+                         "a value on the other");
+    d.note("for example `os == \"windows\"`, `backend == vulkan` or "
+           "`api_level == 3`")
+        .code(112);
     ok = false;
     return true;
   }
@@ -143,7 +193,8 @@ bool evalComparison(const BinaryExpr *b, const ConfigSet &cfg,
     auto d = diags.error(key->Range, "`{}` is not something `@Config` can "
                                      "compare", name);
     d.note("comparable keys are os, arch, family, pointer_width, endian, "
-           "target, safety, memory, opt_level and overflow_checks");
+           "target, safety, memory, opt_level and overflow_checks, plus "
+           "whatever `[config]` in the manifest names");
     d.note("a name set with `--cfg` is written on its own, not compared");
     suggest(d, name, cfg);
     d.code(112);
@@ -151,8 +202,8 @@ bool evalComparison(const BinaryExpr *b, const ConfigSet &cfg,
     return true;
   }
 
-  const bool equal = cfg.value(name) == lit->Value;
-  return b->Op == BinaryOp::Eq ? equal : !equal;
+  const bool equal = cfg.value(name) == text;
+  return wantEqual ? equal : !equal;
 }
 
 bool eval(const Expr *e, const ConfigSet &cfg, DiagnosticEngine &diags,
@@ -206,17 +257,22 @@ bool eval(const Expr *e, const ConfigSet &cfg, DiagnosticEngine &diags,
     }
     case BinaryOp::Eq:
     case BinaryOp::Ne:
-      return evalComparison(bin, cfg, diags, ok);
+      return evalComparison(bin->LHS.get(), bin->RHS.get(),
+                            bin->Op == BinaryOp::Eq, bin->Range, cfg, diags,
+                            ok);
     default:
       break;
     }
   }
 
+  // A condition never assigns, so `backend = vulkan` can only mean the
+  // comparison — and it is what people write, so it is what it means.
+  if (const auto *as = dyn_cast<AssignExpr>(e))
+    if (as->Op == AssignOp::Assign)
+      return evalComparison(as->LHS.get(), as->RHS.get(), /*wantEqual=*/true,
+                            as->Range, cfg, diags, ok);
+
   auto d = diags.error(e->Range, "this is not something `@Config` can answer");
-  // `=` for `==` is the one mistake worth naming: it parses, so the generic
-  // message would leave someone staring at a condition that looks right.
-  if (isa<AssignExpr>(e))
-    d.note("`=` assigns; a comparison is written `==`");
   d.note("a condition is a key compared with a string, a name set with "
          "`--cfg`, or those joined by `&&`, `||` and `!`");
   d.code(112);
@@ -243,11 +299,22 @@ ConfigSet ConfigSet::forOptions(const CompilerOptions &opts) {
   cfg.Values["memory"] = memoryModeName(opts.Memory);
   cfg.Values["opt_level"] = std::to_string(opts.OptLevel);
   cfg.Values["overflow_checks"] = opts.overflowChecksEnabled() ? "on" : "off";
+  for (const auto &kv : cfg.Values)
+    cfg.Builtin.insert(kv.first);
 
   if (opts.DebugInfo)
     cfg.Flags.insert("debug");
   for (const std::string &name : opts.ConfigFlags)
     cfg.Flags.insert(name);
+  // A package's own keys, from `[config]` in its manifest or `--cfg k=v` on
+  // the command line. They are compared exactly as `os` and `arch` are; the
+  // builtin ones are what the target says and are not open to being told
+  // otherwise, so those are kept.
+  for (const auto &kv : opts.ConfigValues) {
+    if (cfg.Builtin.count(kv.first))
+      continue;
+    cfg.Values[kv.first] = kv.second;
+  }
   return cfg;
 }
 

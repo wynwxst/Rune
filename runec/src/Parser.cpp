@@ -1,6 +1,7 @@
 //===- Parser.cpp - Recursive-descent parser for Rune ----------*- C++ -*-===//
 
 #include "rune/Parser.h"
+#include "rune/ASTClone.h"
 
 #include "rune/Macro.h"
 
@@ -199,6 +200,7 @@ bool startsExpression(Tok k) {
   case Tok::KwIf: case Tok::KwMatch: case Tok::KwLoop: case Tok::KwWhile:
   case Tok::KwFor: case Tok::KwReturn: case Tok::KwBreak:
   case Tok::KwContinue: case Tok::KwUnsafe: case Tok::KwMut:
+  case Tok::KwAsync:
     return true;
   default:
     return false;
@@ -230,25 +232,36 @@ template <typename T> std::unique_ptr<T> makeNode(SourceRange r) {
 //===----------------------------------------------------------------------===//
 
 Parser::Parser(const SourceManager &sm, DiagnosticEngine &diags, unsigned fileID,
-               std::string moduleName, const MacroTable *macros)
+               std::string moduleName, const MacroTable *macros,
+               const MacroPackage *procs)
     : Parser(sm, diags, fileID, std::move(moduleName),
-             Lexer(sm, diags, fileID).tokenize(), macros) {}
+             Lexer(sm, diags, fileID).tokenize(), macros, procs) {}
 
 Parser::Parser(const SourceManager &sm, DiagnosticEngine &diags, unsigned fileID,
                std::string moduleName, std::vector<Token> tokens,
-               const MacroTable *macros)
+               const MacroTable *macros, const MacroPackage *procs)
     : SM(sm), Diags(diags), FileID(fileID), ModuleName(std::move(moduleName)),
       Toks(std::move(tokens)) {
   // Macros are a rewrite over tokens, done before anything is parsed: by the
   // time the grammar sees the stream there are none left in it.
   if (macros) {
+    // The tables already hold this file's definitions, gathered along with
+    // every other file's, so here they are only taken out of the way.
+    // Whether a `@macro fn` belongs here is decided by the compilation, not
+    // by the file: inside a macro package it is the whole point, and outside
+    // one it is a mistake. So that check is made where the difference is
+    // known, before this runs.
+    //
     // The table already holds this file's definitions, gathered along with
     // every other file's, so here they are only taken out of the way.
     MacroTable ignored;
     collectMacros(Toks, diags, ignored, /*record=*/false);
-    expandMacros(Toks, diags, *macros, ModuleName);
+    expandMacros(Toks, diags, *macros, ModuleName, 128, procs);
   } else {
-    expandMacros(Toks, diags);
+    rejectProcMacros(Toks, diags);
+    MacroTable own;
+    collectMacros(Toks, diags, own, /*record=*/true, ModuleName);
+    expandMacros(Toks, diags, own, ModuleName, 128, procs);
   }
 }
 
@@ -366,6 +379,19 @@ void Parser::parseFileDirectives(Module &mod) {
       return;
     std::string name =
         peek(1).is(Tok::KwType) ? std::string("type") : peek(1).Text;
+    // `@lint(...)` at the top belongs to the file when nothing but other
+    // directives, imports or the end of the file follow it. Before a
+    // declaration it is that declaration's, and is left for it.
+    if (name == "lint") {
+      if (!lintIsFileDirective())
+        return;
+      advance(); // @
+      advance(); // lint
+      if (check(Tok::LParen))
+        skipBalanced();
+      skipSeparators();
+      continue;
+    }
     if (name != "link" && name != "linkpath" && name != "type")
       return;
     if (name == "type") {
@@ -449,6 +475,11 @@ std::unique_ptr<Module> Parser::parseModule() {
       d->ModulePath = ModuleName;
       mod->Decls.push_back(std::move(d));
     }
+    for (DeclPtr &h : Hoisted) {
+      h->ModulePath = ModuleName;
+      mod->Decls.push_back(std::move(h));
+    }
+    Hoisted.clear();
     skipSeparators();
     if (Pos == before) { // no progress: force forward motion
       advance();
@@ -537,6 +568,7 @@ DeclPtr Parser::parseTopLevelDecl() {
 DeclPtr Parser::parseDecl(std::vector<Attribute> attrs, bool isPublic) {
   switch (cur().Kind) {
   case Tok::KwFn:
+  case Tok::KwAsync:
     return parseFunction(std::move(attrs), isPublic, /*allowNoBody=*/false);
   case Tok::KwStruct:
     return parseStruct(std::move(attrs), isPublic);
@@ -765,7 +797,7 @@ std::unique_ptr<OriginClause> Parser::parseOriginClause() {
 }
 
 bool Parser::parseParamList(std::vector<Param> &out, bool allowSelf,
-                            bool &isVariadic) {
+                            bool &isVariadic, bool allowUntyped) {
   isVariadic = false;
   if (!expect(Tok::LParen, "a parameter list"))
     return false;
@@ -834,8 +866,13 @@ bool Parser::parseParamList(std::vector<Param> &out, bool allowSelf,
       synchronize();
       break;
     }
-    if (expect(Tok::Colon, "a parameter declaration"))
+    // A closure may leave the type out — `||(item) { ... }` — when the place
+    // it is going already says what it is.
+    if (allowUntyped && !check(Tok::Colon)) {
+      // nothing written: the type comes from the context
+    } else if (expect(Tok::Colon, "a parameter declaration")) {
       p.TypeAnnotation = parseType();
+    }
     parseView(p);
     if (match(Tok::Eq))
       p.DefaultValue = parseExpr();
@@ -856,12 +893,20 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(std::vector<Attribute> attrs
                                                     bool allowNoBody,
                                                     bool implicitFnKeyword) {
   size_t start = Pos;
+  bool isAsync = false;
+  SourceRange asyncRange;
+  if (check(Tok::KwAsync)) {
+    isAsync = true;
+    asyncRange = here();
+    advance();
+  }
   if (!implicitFnKeyword)
     expect(Tok::KwFn, "a function declaration");
 
   auto fn = makeNode<FunctionDecl>(here());
   fn->Attrs = std::move(attrs);
   fn->IsPublic = isPublic;
+  fn->IsAsync = isAsync;
 
   if (check(Tok::Identifier)) {
     fn->Name = cur().Text;
@@ -915,7 +960,9 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(std::vector<Attribute> attrs
 
   skipNewlines(); // allow the brace on its own line
   if (check(Tok::LBrace)) {
-    fn->Body = parseBlock("a function body");
+    // A nested `fn` is a function of its own: `.await` inside it needs its
+    // own `async`, whatever surrounds it.
+    fn->Body = parseBodyInAsync("a function body", isAsync);
   } else if (!allowNoBody && !fn->hasAttr("intrinsic")) {
     Diags.error(cur().Range, "Expected '{}' — Got: '{}'", "{",
                 cur().Text.empty() ? tokenSpelling(cur().Kind) : cur().Text)
@@ -925,7 +972,99 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(std::vector<Attribute> attrs
   }
 
   fn->Range = rangeFrom(start);
+
+  if (isAsync) {
+    // What was written, kept for diagnostics and documentation.
+    fn->AsyncResult = cloneTypeRepr(fn->ReturnType.get());
+    if (fn->Flavour == FunctionFlavour::Initialiser ||
+        fn->Flavour == FunctionFlavour::Deinitialiser) {
+      Diags.error(asyncRange, "`{}` cannot be `async`", fn->Name)
+          .note("an initialiser has to finish before the object exists, and "
+                "a `deinit` before it is gone; start a task from inside one "
+                "with `task::spawn` instead")
+          .code(287);
+    } else if (fn->IsVariadic) {
+      Diags.error(asyncRange, "a variadic function cannot be `async`")
+          .note("`...` is for foreign declarations, which have no body to "
+                "run as a task")
+          .code(287);
+    } else if (fn->Body) {
+      // The rewrite: the result becomes a future of it, and the body a task.
+      SourceRange bodyRange = fn->Body->Range;
+      TypeReprPtr written = std::move(fn->ReturnType);
+      bool isMain = fn->Name == "main" && fn->Flavour == FunctionFlavour::Free;
+      if (!isMain)
+        fn->ReturnType = futureTypeReprFor(cloneTypeRepr(written.get()),
+                                           fn->NameRange);
+      else
+        fn->ReturnType = cloneTypeRepr(written.get());
+      auto body = makeNode<BlockExpr>(bodyRange);
+      ExprPtr task = spawnExprFor(std::move(fn->Body), std::move(written),
+                                  bodyRange);
+      if (isMain) {
+        // `async fn main` is the program: the task runs to the end and its
+        // result is the exit code, so `main` itself waits for it.
+        //
+        //     fn main() -> i64 { std::task::spawn(move ||() -> i64 { body }).wait() }
+        auto member = makeNode<MemberExpr>(bodyRange);
+        member->Base = std::move(task);
+        member->Name = "wait";
+        member->NameRange = fn->NameRange;
+        auto call = makeNode<CallExpr>(bodyRange);
+        call->ParenRange = fn->NameRange;
+        call->Callee = std::move(member);
+        call->IsMethodCall = true;
+        task = std::move(call);
+      }
+      body->Tail = std::move(task);
+      fn->Body = std::move(body);
+    } else {
+      // A requirement or a foreign declaration: only the type changes. A
+      // `bind` that supplies it writes `async fn` too, and gets the body.
+      fn->ReturnType = futureTypeReprFor(std::move(fn->ReturnType),
+                                         fn->NameRange);
+    }
+  }
   return fn;
+}
+
+std::unique_ptr<BlockExpr> Parser::parseBodyInAsync(const char *context,
+                                                    bool async) {
+  bool saved = InAsyncBody;
+  InAsyncBody = async;
+  auto body = parseBlock(context);
+  InAsyncBody = saved;
+  return body;
+}
+
+TypeReprPtr Parser::futureTypeReprFor(TypeReprPtr result, SourceRange at) {
+  auto future = makeNode<NamedTypeRepr>(at);
+  future->Path = {"std", "task", "Future"};
+  future->NameRange = at;
+  if (!result)
+    result = makeNode<TupleTypeRepr>(at);   // `()`
+  future->GenericArgs.push_back(std::move(result));
+  return future;
+}
+
+ExprPtr Parser::spawnExprFor(std::unique_ptr<BlockExpr> body,
+                             TypeReprPtr result, SourceRange at) {
+  auto closure = makeNode<ClosureExpr>(at);
+  closure->IsMove = true;
+  closure->IsAsyncBody = true;
+  closure->ReturnType = std::move(result);
+  closure->Body = std::move(body);
+
+  auto callee = makeNode<DeclRefExpr>(at);
+  callee->Path = {"std", "task", "spawn"};
+
+  auto call = makeNode<CallExpr>(at);
+  call->ParenRange = at;
+  call->Callee = std::move(callee);
+  Argument arg;
+  arg.Value = std::move(closure);
+  call->Args.push_back(std::move(arg));
+  return call;
 }
 
 std::unique_ptr<FieldDecl> Parser::parseField(bool isPublic) {
@@ -971,6 +1110,9 @@ std::unique_ptr<StructDecl> Parser::parseStruct(std::vector<Attribute> attrs,
     expect(Tok::Identifier, "a struct name");
   }
   s->Generics = parseGenericParams();
+  // `struct Derived : Base` — the parent's fields come first.
+  if (match(Tok::Colon))
+    s->Inherits = parseType();
   s->WhereClauses = parseWhereClauses();
   skipNewlines();
   if (!expect(Tok::LBrace, "a struct body")) {
@@ -983,7 +1125,7 @@ std::unique_ptr<StructDecl> Parser::parseStruct(std::vector<Attribute> attrs,
     std::string memberDoc = cur().Doc;
     auto memberAttrs = parseAttributes();
     bool fieldPublic = match(Tok::KwPub);
-    if (check(Tok::KwFn)) {
+    if (atFunctionStart()) {
       auto m = parseFunction(std::move(memberAttrs), fieldPublic, false);
       m->Parent = s.get();
       if (!memberDoc.empty() && m->Doc.empty()) m->Doc = memberDoc;
@@ -1021,6 +1163,9 @@ std::unique_ptr<EnumDecl> Parser::parseEnum(std::vector<Attribute> attrs,
     expect(Tok::Identifier, "an enum name");
   }
   e->Generics = parseGenericParams();
+  // `enum Derived : Base` — the parent's variants come first.
+  if (match(Tok::Colon))
+    e->Inherits = parseType();
   e->WhereClauses = parseWhereClauses();
   skipNewlines();
   if (!expect(Tok::LBrace, "an enum body")) {
@@ -1031,7 +1176,7 @@ std::unique_ptr<EnumDecl> Parser::parseEnum(std::vector<Attribute> attrs,
   unsigned index = 0;
   while (!check(Tok::RBrace) && !atEnd()) {
     auto memberAttrs = parseAttributes();
-    if (check(Tok::KwFn) || (check(Tok::KwPub) && peek(1).is(Tok::KwFn))) {
+    if (atFunctionStart() || (check(Tok::KwPub) && atFunctionStart(1))) {
       bool mPub = match(Tok::KwPub);
       auto m = parseFunction(std::move(memberAttrs), mPub, false);
       m->Parent = e.get();
@@ -1129,7 +1274,7 @@ std::unique_ptr<ClassDecl> Parser::parseClass(std::vector<Attribute> attrs,
     std::string memberDoc = cur().Doc;
     auto memberAttrs = parseAttributes();
     bool memberPublic = match(Tok::KwPub);
-    if (check(Tok::KwFn)) {
+    if (atFunctionStart()) {
       auto m = parseFunction(std::move(memberAttrs), memberPublic, false);
       m->Parent = c.get();
       if (!memberDoc.empty()) m->Doc = memberDoc;
@@ -1184,7 +1329,7 @@ std::unique_ptr<MarkDecl> Parser::parseMark(std::vector<Attribute> attrs,
   while (!check(Tok::RBrace) && !atEnd()) {
     auto memberAttrs = parseAttributes();
     bool memberPublic = match(Tok::KwPub);
-    if (check(Tok::KwFn)) {
+    if (atFunctionStart()) {
       auto f = parseFunction(std::move(memberAttrs), memberPublic,
                              /*allowNoBody=*/true);
       if (!f->Body)
@@ -1247,6 +1392,28 @@ std::unique_ptr<BindDecl> Parser::parseBind(std::vector<Attribute> attrs,
   b->Generics = parseGenericParams();
 
   size_t markStart = Pos;
+
+  // `bind (f64, f64) into CGPoint` — a conversion out of a type that has no
+  // name to read as a mark path. A mark is always named, so a type that is
+  // not one can only be the source of an `into`.
+  if (!check(Tok::KwOperator) && !check(Tok::Identifier) &&
+      !check(Tok::KwSelfType)) {
+    TypeReprPtr src = parseType();
+    b->MarkRange = rangeFrom(markStart);
+    if (expect(Tok::KwInto, "a conversion binding")) {
+      TypeReprPtr dest = parseType();
+      b->TargetType = std::move(src);
+      b->MarkPath = {"As"};
+      b->Name = "As";
+      if (dest) {
+        if (dest->Range.isValid())
+          b->MarkRange = dest->Range;
+        b->MarkGenericArgs.push_back(std::move(dest));
+      }
+    }
+    return parseBindBody(std::move(b), start);
+  }
+
   if (check(Tok::KwOperator)) {
     b->IsOperatorBinding = true;
     b->MarkPath.push_back("operator");
@@ -1313,6 +1480,11 @@ std::unique_ptr<BindDecl> Parser::parseBind(std::vector<Attribute> attrs,
     }
     b->TargetType = parseType();
   }
+  return parseBindBody(std::move(b), start);
+}
+
+std::unique_ptr<BindDecl> Parser::parseBindBody(std::unique_ptr<BindDecl> b,
+                                                size_t start) {
   b->WhereClauses = parseWhereClauses();
   skipNewlines();
   if (!expect(Tok::LBrace, "a bind body")) {
@@ -1323,7 +1495,7 @@ std::unique_ptr<BindDecl> Parser::parseBind(std::vector<Attribute> attrs,
   while (!check(Tok::RBrace) && !atEnd()) {
     auto memberAttrs = parseAttributes();
     bool memberPublic = match(Tok::KwPub);
-    if (check(Tok::KwFn)) {
+    if (atFunctionStart()) {
       auto f = parseFunction(std::move(memberAttrs), memberPublic, false);
       f->Parent = b.get();
       b->Methods.push_back(std::move(f));
@@ -1387,7 +1559,7 @@ std::unique_ptr<ExtendDecl> Parser::parseExtend(std::vector<Attribute> attrs,
     std::string memberDoc = cur().Doc;
     auto memberAttrs = parseAttributes();
     bool memberPublic = match(Tok::KwPub);
-    if (check(Tok::KwFn)) {
+    if (atFunctionStart()) {
       auto f = parseFunction(std::move(memberAttrs), memberPublic, false);
       f->Parent = e.get();
       if (!memberDoc.empty() && f->Doc.empty()) f->Doc = memberDoc;
@@ -1494,6 +1666,48 @@ void applyForeignRename(ValueDecl *d, DiagnosticEngine &diags) {
   d->LinkName = d->Name;
   d->Name = lit->Value;
 }
+
+/// `@operator("new")` on an `extern "C++"` member names the C++ operator the
+/// declaration stands for. The Rune name is whatever was written after `fn`;
+/// only the symbol changes.
+void applyCxxOperator(FunctionDecl *f, DiagnosticEngine &diags) {
+  const Attribute *a = f->findAttr("operator");
+  if (!a)
+    return;
+  const auto *lit = a->Args.size() == 1
+                        ? dyn_cast<StringLitExpr>(a->Args[0].get())
+                        : nullptr;
+  if (!lit || lit->Value.empty()) {
+    diags.error(a->Range, "`@operator` takes one string — the C++ operator")
+        .note("write `@operator(\"new\")` or `@operator(\"[]\")` above the "
+              "declaration")
+        .code(234);
+    return;
+  }
+  f->CxxOperator = lit->Value;
+}
+
+/// `@size(N)` / `@align(N)` on an `extern "C++"` type: how much room an
+/// instance takes, which is what lets Rune allocate one.
+bool readLayoutAttr(const Decl *d, const char *name, uint64_t &out,
+                    DiagnosticEngine &diags) {
+  const Attribute *a = d->findAttr(name);
+  if (!a)
+    return false;
+  const auto *lit = a->Args.size() == 1
+                        ? dyn_cast<IntLitExpr>(a->Args[0].get())
+                        : nullptr;
+  if (!lit || lit->Value == 0) {
+    diags.error(a->Range, "`@{}` takes one positive integer literal", name)
+        .note("write `@{}(1048)` — `sizeof` on the C++ side is where the "
+              "number comes from",
+              name)
+        .code(234);
+    return false;
+  }
+  out = lit->Value;
+  return true;
+}
 } // namespace
 
 std::unique_ptr<ExternDecl> Parser::parseExtern(std::vector<Attribute> attrs,
@@ -1515,6 +1729,13 @@ std::unique_ptr<ExternDecl> Parser::parseExtern(std::vector<Attribute> attrs,
     return ext;
   }
   skipSeparators();
+  if (ext->ABI == "C++") {
+    std::vector<std::string> scope;
+    parseCxxItems(*ext, scope, isPublic);
+    expect(Tok::RBrace, "an extern block");
+    ext->Range = rangeFrom(start);
+    return ext;
+  }
   while (!check(Tok::RBrace) && !atEnd()) {
     auto memberAttrs = parseAttributes();
     bool memberPublic = match(Tok::KwPub);
@@ -1562,6 +1783,210 @@ std::unique_ptr<ExternDecl> Parser::parseExtern(std::vector<Attribute> attrs,
   expect(Tok::RBrace, "an extern block");
   ext->Range = rangeFrom(start);
   return ext;
+}
+
+//===----------------------------------------------------------------------===//
+// extern "C++"
+//
+// The block reads like a header. `namespace` nests and only affects the
+// symbols; `class` declares an opaque type reached through pointers, `struct`
+// one Rune lays out itself, `enum` one that is an `int` on the other side.
+// Functions and variables are declared as in an `extern "C"` block, and
+// inside a class a function is a member: `&self` makes it a const method,
+// `&var self` a method, no `self` a static one, and `init`/`deinit` the
+// constructor and destructor.
+//===----------------------------------------------------------------------===//
+
+void Parser::parseCxxItems(ExternDecl &ext, std::vector<std::string> &scope,
+                           bool isPublic) {
+  while (!check(Tok::RBrace) && !atEnd()) {
+    auto memberAttrs = parseAttributes();
+    bool memberPublic = match(Tok::KwPub) || isPublic;
+
+    // `namespace llvm { ... }` — a contextual keyword: nothing else in an
+    // extern block starts with an identifier followed by one and a brace.
+    if (check(Tok::Identifier) && cur().Text == "namespace" &&
+        peek(1).is(Tok::Identifier)) {
+      advance();
+      scope.push_back(cur().Text);
+      advance();
+      skipNewlines();
+      if (expect(Tok::LBrace, "a namespace")) {
+        skipSeparators();
+        parseCxxItems(ext, scope, memberPublic);
+        expect(Tok::RBrace, "a namespace");
+      }
+      scope.pop_back();
+      skipSeparators();
+      continue;
+    }
+    if (check(Tok::KwClass) || check(Tok::KwStruct)) {
+      parseCxxType(ext, scope, std::move(memberAttrs), memberPublic);
+      skipSeparators();
+      continue;
+    }
+    if (check(Tok::KwEnum)) {
+      auto e = parseEnum(std::move(memberAttrs), memberPublic);
+      e->Cxx = std::make_unique<CxxDeclInfo>();
+      e->Cxx->Scope = scope;
+      Hoisted.push_back(std::move(e));
+      skipSeparators();
+      continue;
+    }
+
+    bool isVarDecl = check(Tok::KwVar) || check(Tok::KwMut);
+    bool implicitFn = check(Tok::Identifier) && peek(1).is(Tok::LParen);
+    if (check(Tok::KwFn) || implicitFn) {
+      auto f = parseFunction(std::move(memberAttrs), memberPublic,
+                             /*allowNoBody=*/true, /*implicitFnKeyword=*/implicitFn);
+      f->IsExtern = true;
+      f->ExternABI = ext.ABI;
+      f->CxxScope = scope;
+      f->Parent = &ext;
+      applyForeignRename(f.get(), Diags);
+      applyCxxOperator(f.get(), Diags);
+      ext.Functions.push_back(std::move(f));
+    } else if (isVarDecl || check(Tok::Identifier)) {
+      size_t vstart = Pos;
+      auto g = makeNode<GlobalVarDecl>(here());
+      g->Attrs = std::move(memberAttrs);
+      g->IsPublic = memberPublic;
+      if (isVarDecl) {
+        g->IsMutable = true;
+        advance();
+      }
+      if (check(Tok::Identifier)) {
+        g->Name = cur().Text;
+        g->NameRange = cur().Range;
+        advance();
+      }
+      if (expect(Tok::Colon, "an extern variable"))
+        g->TypeAnnotation = parseType();
+      g->Range = rangeFrom(vstart);
+      g->Parent = &ext;
+      g->CxxScope = scope;
+      applyForeignRename(g.get(), Diags);
+      ext.Globals.push_back(std::move(g));
+    } else {
+      Diags.error(cur().Range, "Expected '{}' — Got: '{}'", "a declaration",
+                  cur().Text.empty() ? tokenSpelling(cur().Kind) : cur().Text)
+          .note("an `extern \"C++\"` block declares namespaces, classes, "
+                "structs, enums, functions and variables")
+          .code(110);
+      synchronize();
+    }
+    skipSeparators();
+  }
+}
+
+void Parser::parseCxxType(ExternDecl &ext, const std::vector<std::string> &scope,
+                          std::vector<Attribute> attrs, bool isPublic) {
+  size_t start = Pos;
+  const bool isClass = check(Tok::KwClass);
+  advance(); // class / struct
+  auto s = makeNode<StructDecl>(here());
+  s->Attrs = std::move(attrs);
+  s->IsPublic = isPublic;
+  s->Cxx = std::make_unique<CxxDeclInfo>();
+  s->Cxx->Scope = scope;
+  s->Cxx->IsClass = isClass;
+  if (check(Tok::Identifier)) {
+    s->Name = cur().Text;
+    s->NameRange = cur().Range;
+    advance();
+  } else {
+    expect(Tok::Identifier, isClass ? "a class name" : "a struct name");
+  }
+  s->Generics = parseGenericParams();
+  if (match(Tok::Colon)) {
+    if (check(Tok::Identifier)) {
+      s->Cxx->BaseName = cur().Text;
+      s->Cxx->BaseRange = cur().Range;
+      advance();
+    } else {
+      expect(Tok::Identifier, "a base class name");
+    }
+  }
+  uint64_t n = 0;
+  if (readLayoutAttr(s.get(), "size", n, Diags))
+    s->Cxx->Size = n;
+  if (readLayoutAttr(s.get(), "align", n, Diags))
+    s->Cxx->Align = static_cast<unsigned>(n);
+
+  skipNewlines();
+  if (!expect(Tok::LBrace, isClass ? "a class body" : "a struct body")) {
+    s->Range = rangeFrom(start);
+    Hoisted.push_back(std::move(s));
+    return;
+  }
+  std::vector<std::string> inner = scope;
+  inner.push_back(s->Name);
+  skipSeparators();
+  unsigned index = 0;
+  while (!check(Tok::RBrace) && !atEnd()) {
+    std::string memberDoc = cur().Doc;
+    auto memberAttrs = parseAttributes();
+    bool memberPublic = match(Tok::KwPub) || isPublic;
+    // A type declared inside the class: C++ nests it, Rune sees it at the
+    // top of the module under its own name, mangled with the class's.
+    if (check(Tok::KwClass) || check(Tok::KwStruct)) {
+      parseCxxType(ext, inner, std::move(memberAttrs), memberPublic);
+      skipSeparators();
+      continue;
+    }
+    if (check(Tok::KwEnum)) {
+      auto e = parseEnum(std::move(memberAttrs), memberPublic);
+      e->Cxx = std::make_unique<CxxDeclInfo>();
+      e->Cxx->Scope = inner;
+      Hoisted.push_back(std::move(e));
+      skipSeparators();
+      continue;
+    }
+    bool implicitFn = check(Tok::Identifier) && peek(1).is(Tok::LParen);
+    if (check(Tok::KwFn) || implicitFn) {
+      auto m = parseFunction(std::move(memberAttrs), memberPublic,
+                             /*allowNoBody=*/true, /*implicitFnKeyword=*/implicitFn);
+      if (!memberDoc.empty() && m->Doc.empty()) m->Doc = memberDoc;
+      m->IsExtern = true;
+      m->ExternABI = ext.ABI;
+      m->Parent = s.get();
+      applyForeignRename(m.get(), Diags);
+      applyCxxOperator(m.get(), Diags);
+      if (m->Body) {
+        Diags.error(m->Body->Range, "a C++ member is declared, not defined")
+            .note("the body lives in the C++ library; only the signature is "
+                  "written here")
+            .code(110);
+        m->Body = nullptr;
+      }
+      s->Methods.push_back(std::move(m));
+    } else if (auto f = parseField(memberPublic)) {
+      if (!memberDoc.empty() && f->Doc.empty()) f->Doc = memberDoc;
+      f->Attrs = std::move(memberAttrs);
+      f->Index = index++;
+      f->Parent = s.get();
+      if (isClass) {
+        // Reported, and the field dropped — but the tokens it was written
+        // with are consumed, so the loop carries on from the next member
+        // rather than reading this one a second time.
+        Diags.error(f->Range, "a C++ `class` is opaque to Rune, so it has no "
+                              "fields here")
+            .note("declare it as a `struct` when Rune should know the "
+                  "layout, or reach the field through a member function")
+            .code(110);
+      } else {
+        s->Fields.push_back(std::move(f));
+      }
+    } else {
+      synchronize();
+    }
+    skipSeparators();
+    if (match(Tok::Comma))
+      skipSeparators();
+  }
+  expect(Tok::RBrace, isClass ? "a class body" : "a struct body");
+  s->Range = rangeFrom(start);
+  Hoisted.push_back(std::move(s));
 }
 
 std::unique_ptr<TypeAliasDecl> Parser::parseTypeAlias(std::vector<Attribute> attrs,
@@ -1724,6 +2149,40 @@ TypeReprPtr Parser::parseTypeNoSuffix() {
     o->MarkType = parseTypeNoSuffix();
     o->Range = rangeFrom(start);
     return o;
+  }
+
+  // `typeof(value)` — the type the expression has, worked out but never run.
+  // Not a keyword: a function or a variable called `typeof` goes on meaning
+  // what it did, since only `typeof(` in a *type* position is read this way.
+  if (check(Tok::Identifier) && cur().Text == "typeof" &&
+      peek(1).is(Tok::LParen)) {
+    advance();
+    advance();
+    auto t = makeNode<TypeOfRepr>(here());
+    bool savedNoStruct = NoStructLiteral;
+    NoStructLiteral = false;
+    t->Operand = parseExpr();
+    NoStructLiteral = savedNoStruct;
+    expect(Tok::RParen, "a `typeof`");
+    t->Range = rangeFrom(start);
+    return t;
+  }
+
+  // `&&T` is a borrow of a borrow; the lexer reads `&&` as one token.
+  if (check(Tok::AmpAmp)) {
+    advance();
+    auto outer = makeNode<PointerTypeRepr>(here());
+    auto inner = makeNode<PointerTypeRepr>(here());
+    if (check(Tok::KwVar) || check(Tok::KwMut)) {
+      inner->IsMutable = true;
+      advance();
+    }
+    inner->Pointee = parseType();
+    inner->Origin = parseOriginClause();
+    inner->Range = rangeFrom(start);
+    outer->Pointee = std::move(inner);
+    outer->Range = rangeFrom(start);
+    return outer;
   }
 
   if (check(Tok::Amp) || check(Tok::Star)) {
@@ -1903,6 +2362,18 @@ PatternPtr Parser::parsePatternNoOr() {
 PatternPtr Parser::parsePatternPrimary() {
   size_t start = Pos;
 
+  // `.Red` means the same here as in an expression: something on the type
+  // being matched. A bare name already resolves that way when it names a
+  // variant, so the leading `.` only makes it explicit — and a name written
+  // this way is never a binding.
+  if (check(Tok::Dot) && peek(1).is(Tok::Identifier)) {
+    advance();
+    auto p = parsePatternPrimary();
+    if (auto *b = dyn_cast<BindingPattern>(p.get()))
+      b->MustBeVariant = true;
+    return p;
+  }
+
   if (check(Tok::Underscore)) {
     advance();
     return makeNode<WildcardPattern>(rangeFrom(start));
@@ -1989,6 +2460,30 @@ PatternPtr Parser::parsePatternPrimary() {
     expect(Tok::RBracket, "a slice pattern");
     sp->Range = rangeFrom(start);
     return sp;
+  }
+
+  // `ref name` / `ref var name`: a binding that borrows the part it matched,
+  // where it is, instead of taking or copying it — the way to hand out a
+  // reference into an enum's payload. The word is contextual: only `ref`
+  // followed by a name or `var` is read this way, so `ref` is still a name.
+  if (check(Tok::Identifier) && cur().Text == "ref" &&
+      (peek(1).is(Tok::Identifier) || peek(1).is(Tok::KwVar) ||
+       peek(1).is(Tok::KwMut))) {
+    advance();
+    auto b = makeNode<BindingPattern>(here());
+    b->ByRef = true;
+    if (check(Tok::KwVar) || check(Tok::KwMut)) {
+      b->IsMutable = true; // `ref var`: the borrow may write
+      advance();
+    }
+    if (check(Tok::Identifier)) {
+      b->Name = cur().Text;
+      advance();
+    } else {
+      expect(Tok::Identifier, "a pattern binding");
+    }
+    b->Range = rangeFrom(start);
+    return b;
   }
 
   if (check(Tok::KwVar) || check(Tok::KwMut)) {
@@ -2079,8 +2574,12 @@ PatternPtr Parser::parsePatternPrimary() {
     if (path.size() == 1) {
       auto b = makeNode<BindingPattern>(here());
       b->Name = path[0];
+      // `v @ 1..=5` — the name binds whatever the sub-pattern matched, so
+      // the sub-pattern is read at the level that includes ranges. `|` binds
+      // looser than `@`, so `v @ 1 | 2` is two alternatives, not one
+      // binding of an alternation.
       if (match(Tok::At))
-        b->Sub = parsePatternPrimary();
+        b->Sub = parsePatternNoOr();
       b->Range = rangeFrom(start);
       return b;
     }
@@ -2097,6 +2596,153 @@ PatternPtr Parser::parsePatternPrimary() {
       .code(112);
   advance();
   return makeNode<WildcardPattern>(rangeFrom(start));
+}
+
+
+//===----------------------------------------------------------------------===//
+// Builder blocks
+//===----------------------------------------------------------------------===//
+
+/// `[k1: v1, k2: v2]` stands for `std::dictionary::mapOf([k1, k2], [v1, v2])`,
+/// whose type arguments the call infers from the two arrays. The keys and the
+/// values are gathered in the order they were written, so a key is evaluated
+/// before its own value and both before the next pair.
+ExprPtr Parser::parseMapLiteral(ExprPtr firstKey, size_t start) {
+  auto keys = makeNode<ArrayLitExpr>(firstKey->Range);
+  auto values = makeNode<ArrayLitExpr>(firstKey->Range);
+  keys->Elements.push_back(std::move(firstKey));
+  expect(Tok::Colon, "a map literal");
+  skipNewlines();
+  values->Elements.push_back(parseExpr());
+  skipNewlines();
+  while (match(Tok::Comma) || check(Tok::Newline)) {
+    skipNewlines();
+    if (check(Tok::RBracket))
+      break;
+    keys->Elements.push_back(parseExpr());
+    skipNewlines();
+    expect(Tok::Colon, "a map literal");
+    skipNewlines();
+    values->Elements.push_back(parseExpr());
+    skipNewlines();
+  }
+  expect(Tok::RBracket, "a map literal");
+  keys->Range = rangeFrom(start);
+  values->Range = rangeFrom(start);
+
+  auto callee = makeNode<DeclRefExpr>(rangeFrom(start));
+  callee->Path = {"std", "dictionary", "mapOf"};
+  auto call = makeNode<CallExpr>(rangeFrom(start));
+  call->Callee = std::move(callee);
+  call->ParenRange = rangeFrom(start);
+  Argument k;
+  k.Value = std::move(keys);
+  call->Args.push_back(std::move(k));
+  Argument v;
+  v.Value = std::move(values);
+  call->Args.push_back(std::move(v));
+  call->Range = rangeFrom(start);
+  return call;
+}
+
+/// `[:]` stands for `std::dictionary::emptyMap()`, whose type arguments come
+/// from wherever the value is going.
+ExprPtr Parser::makeEmptyMapLiteral(SourceRange range) {
+  auto callee = makeNode<DeclRefExpr>(range);
+  callee->Path = {"std", "dictionary", "emptyMap"};
+  auto call = makeNode<CallExpr>(range);
+  call->Callee = std::move(callee);
+  call->ParenRange = range;
+  call->Range = range;
+  return call;
+}
+
+bool Parser::atStructLiteralField() const {
+  if (!check(Tok::Identifier))
+    return false;
+  // A field may be `name: value`, `name,` (shorthand followed by another) or
+  // `name }` (the last shorthand). Newlines in between are separators.
+  size_t n = 1;
+  while (peek(n).is(Tok::Newline))
+    ++n;
+  return peek(n).is(Tok::Colon) || peek(n).is(Tok::Comma) ||
+         peek(n).is(Tok::RBrace);
+}
+
+/// `Body { Text("hi"); Button {} }` stands for
+///
+///     { var «b» = Body::empty()
+///       «b».add(Text("hi"))
+///       «b».add(Button {})
+///       «b» }
+///
+/// so everything after this point is ordinary code: an `empty` and an `add`
+/// the `Builder` mark asks for, and a block whose value is what was built.
+ExprPtr Parser::parseBuilderBlock(std::vector<std::string> path,
+                                  SourceRange pathRange,
+                                  std::vector<TypeReprPtr> generics,
+                                  size_t start) {
+  const std::string name = "builder$" + std::to_string(BuilderDepth++);
+  auto block = makeNode<BlockExpr>(here());
+
+  // var «b» = Path::empty()
+  {
+    std::vector<std::string> seedPath = path;
+    seedPath.push_back("empty");
+    auto callee = makeNode<DeclRefExpr>(pathRange);
+    callee->Path = std::move(seedPath);
+    callee->GenericArgs = std::move(generics);
+    auto seed = makeNode<CallExpr>(pathRange);
+    seed->Callee = std::move(callee);
+    seed->ParenRange = pathRange;
+    seed->BuilderSeed = true;
+
+    auto binding = makeNode<BindingPattern>(pathRange);
+    binding->Name = name;
+    binding->IsMutable = true;
+    auto decl = makeNode<VarStmtNode>(pathRange);
+    decl->Binding = std::move(binding);
+    decl->Init = std::move(seed);
+    decl->IsMutable = true;
+    block->Stmts.push_back(std::move(decl));
+  }
+
+  // One `add` per item, in the order they were written.
+  while (!check(Tok::RBrace) && !atEnd()) {
+    size_t before = Pos;
+    ExprPtr item = parseExpr();
+    auto receiver = makeNode<DeclRefExpr>(item->Range);
+    receiver->Path.push_back(name);
+    auto member = makeNode<MemberExpr>(item->Range);
+    member->Base = std::move(receiver);
+    member->Name = "add";
+    member->NameRange = item->Range;
+    auto call = makeNode<CallExpr>(item->Range);
+    call->ParenRange = item->Range;
+    call->Callee = std::move(member);
+    Argument arg;
+    arg.Value = std::move(item);
+    call->Args.push_back(std::move(arg));
+    auto stmt = makeNode<ExprStmt>(call->Range);
+    stmt->Value = std::move(call);
+    block->Stmts.push_back(std::move(stmt));
+
+    // Items are separated by `;`, a line break, or a comma.
+    if (!check(Tok::Semi) && !check(Tok::Newline) && !check(Tok::Comma))
+      break;
+    while (check(Tok::Semi) || check(Tok::Newline) || check(Tok::Comma))
+      advance();
+    if (Pos == before)          // nothing consumed: stop rather than loop
+      break;
+  }
+  expect(Tok::RBrace, "a builder block");
+
+  auto value = makeNode<DeclRefExpr>(here());
+  value->Path.push_back(name);
+  block->Tail = std::move(value);
+  block->Range = rangeFrom(start);
+  --BuilderDepth;
+  return block;
 }
 
 //===----------------------------------------------------------------------===//
@@ -2193,10 +2839,11 @@ StmtPtr Parser::parseStatement() {
   size_t start = Pos;
 
   // Nested declarations keep their decorators.
-  if (check(Tok::At) || check(Tok::KwPub) || startsDecl(cur().Kind)) {
+  if (check(Tok::At) || check(Tok::KwPub) || startsDecl(cur().Kind) ||
+      atFunctionStart()) {
     std::vector<Attribute> attrs = parseAttributes();
     bool isPublic = match(Tok::KwPub);
-    if (startsDecl(cur().Kind) || check(Tok::KwFn)) {
+    if (startsDecl(cur().Kind) || atFunctionStart()) {
       auto d = parseDecl(std::move(attrs), isPublic);
       if (!d)
         return nullptr;
@@ -2207,12 +2854,24 @@ StmtPtr Parser::parseStatement() {
       return ds;
     }
     // Decorators on an expression statement are not meaningful; fall through
-    // with them dropped after reporting.
-    if (!attrs.empty())
+    // with them dropped after reporting. `@lint` is the exception: it is the
+    // linter's, and a statement is exactly what it may cover.
+    bool onlyLint = !attrs.empty();
+    for (const Attribute &a : attrs)
+      if (a.Name != "lint")
+        onlyLint = false;
+    if (!attrs.empty() && !onlyLint)
       Diags.error(attrs.front().Range, "decorators may only precede declarations")
           .note("move the `@{}` decorator onto a `fn`, `class`, `struct` or "
                 "`enum`", attrs.front().Name)
           .code(113);
+    if (onlyLint && (check(Tok::RBrace) || atEnd())) {
+      Diags.error(attrs.back().Range, "`@lint` has nothing after it to apply to")
+          .note("put it on the line before the declaration or statement it "
+                "is about")
+          .code(113);
+      return nullptr;
+    }
   }
 
   if (check(Tok::KwGlobal))
@@ -2467,6 +3126,36 @@ ExprPtr Parser::parsePostfixExpr(ExprPtr base) {
       base = std::move(ix);
       continue;
     }
+    if (check(Tok::Dot) && peek(1).is(Tok::KwAwait)) {
+      // `value.await`: the result of a future, once it is there. It becomes
+      // a call of the `await` method `std::task::Future` declares, which is
+      // what parks the task; the flag is for the message a value that is
+      // not a future gets.
+      advance();
+      SourceRange kwRange = here();
+      advance();
+      if (!InAsyncBody) {
+        Diags.error(kwRange, "`.await` is only allowed inside an `async` "
+                             "function, closure or block")
+            .note("make the enclosing function `async fn` — or the "
+                  "closure `async ||` — or call `.wait()`, which blocks "
+                  "this thread until the future is done")
+            .code(117);
+      }
+      auto m = makeNode<MemberExpr>(base->Range);
+      m->Base = std::move(base);
+      m->Name = "await";
+      m->NameRange = kwRange;
+      m->IsAwait = true;
+      m->Range = m->Base->Range.merge(rangeFrom(start));
+      auto c = makeNode<CallExpr>(m->Range);
+      c->ParenRange = kwRange;
+      c->Callee = std::move(m);
+      c->IsMethodCall = true;
+      c->Range = c->Callee->Range;
+      base = std::move(c);
+      continue;
+    }
     if (check(Tok::Dot)) {
       advance();
       auto m = makeNode<MemberExpr>(base->Range);
@@ -2552,16 +3241,80 @@ ExprPtr Parser::parseClosure() {
   c->IsMove = isMove;
   bool variadic = false;
   if (check(Tok::LParen))
-    parseParamList(c->Params, /*allowSelf=*/false, variadic);
+    parseParamList(c->Params, /*allowSelf=*/false, variadic,
+                   /*allowUntyped=*/true);
   if (match(Tok::Arrow))
     c->ReturnType = parseType();
   skipNewlines();
   bool savedNoStruct = NoStructLiteral;
   NoStructLiteral = false;
-  c->Body = parseBlock("a closure body");
+  // A closure is a function of its own, called from wherever it ends up:
+  // `.await` inside one needs it to be `async ||` itself.
+  c->Body = parseBodyInAsync("a closure body", /*async=*/false);
   NoStructLiteral = savedNoStruct;
   c->Range = rangeFrom(start);
   return c;
+}
+
+ExprPtr Parser::parseAsyncExpr() {
+  size_t start = Pos;
+  SourceRange kwRange = here();
+  expect(Tok::KwAsync, "an async expression");
+  skipNewlines();
+  bool savedNoStruct = NoStructLiteral;
+  NoStructLiteral = false;
+
+  if (check(Tok::LBrace)) {
+    // `async { body }`: a task started here, whose future is the value.
+    auto body = parseBodyInAsync("an async block", /*async=*/true);
+    NoStructLiteral = savedNoStruct;
+    SourceRange range = rangeFrom(start);
+    ExprPtr spawn = spawnExprFor(std::move(body), nullptr, range);
+    spawn->Range = range;
+    return spawn;
+  }
+
+  if (check(Tok::PipePipe) ||
+      (check(Tok::KwMove) && peek(1).is(Tok::PipePipe))) {
+    // `async ||(a: A) -> T { body }`: a closure that starts a task each time
+    // it is called, and hands back the future.
+    //
+    //     ||(a: A) -> std::task::Future<T> {
+    //         std::task::spawn(move ||() -> T { body })
+    //     }
+    bool isMove = match(Tok::KwMove);
+    expect(Tok::PipePipe, "a closure");
+    auto outer = makeNode<ClosureExpr>(here());
+    outer->IsMove = isMove;
+    bool variadic = false;
+    if (check(Tok::LParen))
+      parseParamList(outer->Params, /*allowSelf=*/false, variadic);
+    TypeReprPtr written;
+    if (match(Tok::Arrow))
+      written = parseType();
+    skipNewlines();
+    auto body = parseBodyInAsync("a closure body", /*async=*/true);
+    NoStructLiteral = savedNoStruct;
+    SourceRange range = rangeFrom(start);
+    // A written result names the future's type outright; an inferred one is
+    // left for the inner closure's body to decide, and the outer closure
+    // takes its type from the `spawn` it returns.
+    if (written)
+      outer->ReturnType = futureTypeReprFor(cloneTypeRepr(written.get()),
+                                            kwRange);
+    auto outerBody = makeNode<BlockExpr>(body->Range);
+    outerBody->Tail = spawnExprFor(std::move(body), std::move(written), range);
+    outer->Body = std::move(outerBody);
+    outer->Range = range;
+    return outer;
+  }
+
+  NoStructLiteral = savedNoStruct;
+  Diags.error(kwRange, "`async` goes before `fn`, a closure, or a block")
+      .note("write `async fn name(...)`, `async ||(...) { ... }` or "
+            "`async { ... }`")
+      .code(118);
+  return makeNode<ErrorExpr>(rangeFrom(start));
 }
 
 ExprPtr Parser::parseCondition(PatternPtr &binding) {
@@ -2701,6 +3454,31 @@ ExprPtr Parser::parseMatch() {
 }
 
 ExprPtr Parser::parsePrimaryExpr() {
+  // `.Red` names something on the type the context is expecting: a variant,
+  // a static method, anything reachable through the type's own name. Writing
+  // the type out is always allowed; this is for where it has already been
+  // said once and saying it again adds nothing.
+  //
+  // Only `.`, never `::`. A leading `::` would read as a path with an empty
+  // first segment, which is how several languages spell "the outermost
+  // scope"; keeping it free costs nothing and one spelling is easier to read
+  // than two.
+  if (check(Tok::Dot) && peek(1).is(Tok::Identifier)) {
+    size_t start = Pos;
+    advance();
+    auto ref = makeNode<DeclRefExpr>(here());
+    ref->FromInferredType = true;
+    ref->Path.push_back(cur().Text);
+    advance();
+    // `::<i64>` after it, for the rare case where the member is generic.
+    if (check(Tok::ColonColon) && peek(1).is(Tok::Lt)) {
+      advance();
+      ref->GenericArgs = parseGenericArgs();
+    }
+    ref->Range = rangeFrom(start);
+    return ref;
+  }
+
   // `move ||(...)` is a closure that copies its captures; `move value` hands
   // on a `uniq` reference. The token after it tells the two apart.
   if (check(Tok::KwMove)) {
@@ -2768,6 +3546,8 @@ ExprPtr Parser::parsePrimaryExpr() {
   }
   case Tok::PipePipe:
     return parseClosure();
+  case Tok::KwAsync:
+    return parseAsyncExpr();
   case Tok::KwIf:
     return parseIf();
   case Tok::KwMatch:
@@ -2875,10 +3655,24 @@ ExprPtr Parser::parsePrimaryExpr() {
     skipNewlines();
     bool saved = NoStructLiteral;
     NoStructLiteral = false;
+    // `[key: value, ...]` builds a map. `[:]` is the empty one, which needs
+    // its type from the context the way `nil` does.
+    if (check(Tok::Colon) && peek(1).is(Tok::RBracket)) {
+      advance();
+      advance();
+      NoStructLiteral = saved;
+      return makeEmptyMapLiteral(rangeFrom(start));
+    }
     auto a = makeNode<ArrayLitExpr>(here());
     if (!check(Tok::RBracket)) {
       a->Elements.push_back(parseExpr());
       skipNewlines();
+      if (check(Tok::Colon)) {     // `[key: value, ...]`
+        ExprPtr firstKey = std::move(a->Elements.back());
+        a->Elements.pop_back();
+        NoStructLiteral = saved;
+        return parseMapLiteral(std::move(firstKey), start);
+      }
       if (check(Tok::Semi)) { // `[value; count]`
         advance();
         skipNewlines();
@@ -2934,6 +3728,16 @@ ExprPtr Parser::parsePrimaryExpr() {
     if (!NoStructLiteral && check(Tok::LBrace)) {
       advance();
       skipNewlines();
+      // `Body { Text("hi"); Button {}.style("wide") }` is a *builder* block:
+      // its contents are values to put in rather than fields to set. What
+      // tells the two apart is the shape of the first item — a field is a
+      // name followed by `:`, `,` or the closing brace, and anything else is
+      // a value. (`Body { child; }` is therefore how a builder block holding
+      // one bare name is written, since `Body { child }` is a field.)
+      if (!check(Tok::RBrace) && !check(Tok::DotDot) &&
+          !atStructLiteralField())
+        return parseBuilderBlock(std::move(path), pathRange,
+                                 std::move(generics), start);
       auto lit = makeNode<StructLitExpr>(here());
       lit->Path = std::move(path);
       lit->PathRange = pathRange;

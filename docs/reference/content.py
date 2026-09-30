@@ -352,13 +352,13 @@ fn main() -> i64 {
           label="Resolution order"),
 
         H("Reserved words"),
-        P("These 37 words are keywords and cannot be used as identifiers."),
+        P("These 39 words are keywords and cannot be used as identifiers."),
         T(["Group", "Words"],
           [["Declarations", "`fn` `struct` `enum` `class` `mark` `bind` `to` "
             "`extend` `import` `extern` `type` `pub` `global`"],
            ["Bindings", "`let` `var` `mut`"],
            ["Control flow", "`if` `elif` `else` `while` `loop` `for` `in` "
-            "`match` `return` `break` `continue` `defer`"],
+            "`match` `return` `break` `continue` `defer` `async` `await`"],
            ["Types and values", "`self` `Self` `super` `dyn` `weak` `true` "
             "`false` `nil`"],
            ["Other", "`as` `is` `where` `unsafe` `operator`"]]),
@@ -640,6 +640,99 @@ type Maybe = i64?
 
 fn first(p: Pair) -> i64 { p.0 }
 fn size(g: Grid) -> i64 { g.$length() }"""),
+        P("An alias may take parameters of its own, and then it stands for a "
+          "different type at each use: `Row<i64>` is a slice of integers and "
+          "`Row<String>` a slice of strings, exactly as if each had been "
+          "written out."),
+        S('''import std::io
+import std::collections::vector
+
+type Row<T> = [T]
+type Pairing<A, B> = (A, B)
+type Table<T> = vector::Vector<T>
+
+fn total(values: Row<i64>) -> i64 {
+    var t = 0
+    for v in values { t += v }
+    t
+}
+
+fn joined(words: Row<String>) -> String {
+    var s = ""
+    for w in words { s += w }
+    s
+}
+
+fn main() -> i64 {
+    let ns: [3:i64] = [1, 2, 3]
+    let ws: [2:String] = ["a", "b"]
+    io::println(total(ns).$str())
+    io::println(joined(ws))
+
+    let both: Pairing<i64, String> = (7, "seven")
+    io::println(both.1 + " " + both.0.$str())
+
+    // Built through the alias, as the type it stands for.
+    var t = Table<i64>()
+    t.push(9)
+    io::println(t.at(0).or(0).$str())
+    0
+}''', mode="run", title="An alias with parameters of its own"),
+        N("The arguments have to match what the alias declares: `Row` takes "
+          "one, `Pairing` two. An alias that declares none takes none.",
+          label="One for one"),
+
+        H("`typeof`: the type an expression has"),
+        P("`typeof(expr)` is whatever type the expression would have. The "
+          "expression is checked and **never run** — it is there to be "
+          "asked about, not evaluated — so `typeof(boom())` costs nothing "
+          "and calls nothing."),
+        S("""import std::io
+
+struct Point { x: f64, y: f64 }
+
+fn boom() -> i64 { io::println("never printed"); 0 }
+
+fn main() -> i64 {
+    let a = 7
+    let b: typeof(a) = 9
+    var p: typeof(Point { x: 0.0, y: 0.0 }) = Point { x: 3.0, y: 4.0 }
+    let c: typeof(boom()) = 5
+
+    io::println(b.$str())
+    io::println(p.x.$str())
+    io::println(c.$str())
+    0
+}""", mode="run", title="A type read off a value"),
+        P("What it is really for is a macro that has to write a signature out "
+          "of the values it was handed. Without it the caller spells every "
+          "type a second time and keeps the two in step by hand; with it the "
+          "signature is built from the call itself."),
+        S("""macro send {
+    ($fn: expr, $recv: expr $(, $item: expr)*) => {
+        ($fn as @cfunction(*var u8 $(, typeof($item))*) -> *var u8)(
+            $recv $(, $item)*)
+    }
+}
+
+extern "C" {
+    fn objc_msgSend(id: *var u8, ...) -> *var u8
+}
+
+struct Rect { x: f64, y: f64, w: f64, h: f64 }
+
+@unsafe fn main() -> i64 {
+    let obj = 0 as *var u8
+    let r = Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 }
+    // Stands for a call through
+    //   @cfunction(*var u8, Rect, u64, bool) -> *var u8
+    let _ = send!(objc_msgSend, obj, r, 7u64, false)
+    0
+}""", mode="frag", title="A signature built from the arguments"),
+        N("`typeof` is not a keyword. It is read this way only in a type "
+          "position followed by `(`, so a function or a variable called "
+          "`typeof` goes on meaning what it did.",
+          label="Contextual, not reserved"),
 
         H("Conversions that happen on their own"),
         P("Widening that cannot lose information is implicit. Everything else "
@@ -655,8 +748,17 @@ fn size(g: Grid) -> i64 { g.$length() }"""),
            ["`T`", "`dyn Mark`", "when `T` is bound to that mark"],
            ["`some Mark`", "`dyn Mark`", "the hidden type is bound, so it boxes"],
            ["`T`", "`Any`", "anything with a run-time representation"],
+           ["`bool`", "any integer", "`false` is 0 and `true` is 1"],
+           ["`T`", "`U`", "where the destination is written down and "
+            "`bind T into U` says how"],
            ["`Never`", "anything", "the expression never produced a value"]],
           caption="Implicit conversions"),
+        N("A boolean converts to a number because it is one of two values and "
+          "every integer type has room for both — which is what lets a "
+          "foreign `BOOL` parameter take `false` rather than a hand-written "
+          "`NO: i8 = 0`. The reverse is not a conversion: which integers count "
+          "as true is a question with no one answer, so `n != 0` is how the "
+          "program says which one it means.", label="Booleans go one way"),
         S("""import std::io
 
 fn wide(n: i64) -> i64 { n }
@@ -758,6 +860,71 @@ fn main() -> i64 {
     let b = a into B
     b.v
 }""", mode="diag", title="No conversion defined"),
+        H("Where a conversion you wrote happens on its own"),
+        P("A conversion is put in for you wherever the destination type is "
+          "**written down**: an argument, an annotated binding, a field of a "
+          "struct literal, a declared result, a `return`, an assignment into "
+          "a typed place. Nowhere else. Nothing converts between two types "
+          "that never said they convert, and `bind T into U` is the saying — "
+          "so a conversion can always be found by searching for the binding "
+          "that allows it."),
+        S("""import std::io
+
+struct Celsius { v: f64 }
+struct Fahrenheit { v: f64 }
+
+bind Celsius into Fahrenheit {
+    fn convert(&self) -> Fahrenheit { Fahrenheit { v: self.v * 1.8 + 32.0 } }
+}
+
+struct Reading { at: Fahrenheit }
+
+fn warmer(t: Fahrenheit) -> Fahrenheit { Fahrenheit { v: t.v + 1.0 } }
+fn boiling() -> Fahrenheit { return Celsius { v: 100.0 } }
+
+fn main() -> i64 {
+    let annotated: Fahrenheit = Celsius { v: 100.0 }
+    let argument = warmer(Celsius { v: 0.0 })
+    let field = Reading { at: Celsius { v: 20.0 } }
+    var place: Fahrenheit = Fahrenheit { v: 0.0 }
+    place = Celsius { v: 10.0 }
+
+    io::println(annotated.v.$str())
+    io::println(argument.v.$str())
+    io::println(field.at.v.$str())
+    io::println(place.v.$str())
+    io::println(boiling().v.$str())
+    0
+}""", mode="run", title="Five places the destination is written down"),
+        P("The source does not have to be a type with a name. A tuple is a "
+          "perfectly good thing to convert out of, which is how `(x, y)` "
+          "comes to mean a point at every call site that takes one."),
+        S("""import std::io
+
+struct CGPoint { x: f64, y: f64 }
+struct CGSize { width: f64, height: f64 }
+struct CGRect { origin: CGPoint, size: CGSize }
+
+bind (f64, f64) into CGPoint {
+    fn convert(&self) -> CGPoint { CGPoint { x: self.0, y: self.1 } }
+}
+bind (f64, f64) into CGSize {
+    fn convert(&self) -> CGSize { CGSize { width: self.0, height: self.1 } }
+}
+
+fn area(s: CGSize) -> f64 { s.width * s.height }
+
+fn main() -> i64 {
+    let r = CGRect { origin: (100.0, 100.0), size: (500.0, 300.0) }
+    io::println(r.size.width.$str())
+    io::println(area((2.0, 3.0)).$str())
+    0
+}""", mode="run", title="Converting out of a tuple"),
+        N("A mark is always named, so a `bind` whose first type is not a name "
+          "can only be the `into` form — there is nothing else it could "
+          "mean. `bind` on a named type still reads as a mark, as it always "
+          "did.", label="Why only `into` takes an unnamed source"),
+
         N("`As` is in scope everywhere — the prelude puts it there alongside "
           "`Option` and `Result`, so a binding never needs an import. It is "
           "declared in `std::convert`.", label="No import needed"),
@@ -821,7 +988,7 @@ SECTIONS.append(Sec(
           "right, except `??`, which associates right, and assignment, which "
           "associates right."),
         T(["Level", "Operators", "Kind"],
-          [["tightest", "`f(x)` &nbsp; `a[i]` &nbsp; `a.b` &nbsp; `a?`", "postfix"],
+          [["tightest", "`f(x)` &nbsp; `a[i]` &nbsp; `a.b` &nbsp; `a?` &nbsp; `a.await`", "postfix"],
            ["", "`-a` &nbsp; `!a` &nbsp; `~a` &nbsp; `&a` &nbsp; `&var a` &nbsp; `*a`", "prefix"],
            ["", "`a as T` &nbsp; `a is T`", "cast and type test"],
            ["10", "`*` &nbsp; `/` &nbsp; `%`", "multiplicative"],
@@ -1611,8 +1778,8 @@ fn main() -> i64 {
     people.push(Person { name: "tom", age: 11 })
     people.push(Person { name: "grace", age: 45 })
 
-    for name in people.filter(||(p: Person) -> bool { p.age >= 18 })
-                      .map(||(p: Person) -> String { p.name }) {
+    for name in people.filter(||(p: &Person) -> bool { p.age >= 18 })
+                      .map(||(p: &Person) -> String { p.name.$clone() }) {
         io::println(name)
     }
     0
@@ -1860,12 +2027,12 @@ import std::collections::vector
 
 fn main() -> i64 {
     let rows = vec!(vec!(1, 2), vec!(3), vec!())
-    let flat = rows.flatMap(||(r: vector::Vector<i64>) -> vector::VectorIter<i64> { r.as_iter() })
+    let flat = rows.flatMap(||(r: &vector::Vector<i64>) -> vector::VectorIter<i64> { r.as_iter() })
     io::println(flat.fold(0, ||(acc: i64, x: i64) -> i64 { acc + x }))
 
     let names = vec!("ab", "cd")
     var letters = ""
-    for c in names.flatMap(||(n: String) -> text::Chars { text::chars(n) }) {
+    for c in names.flatMap(||(n: &String) -> text::Chars { text::chars(n.$clone()) }) {
         letters += c.$str()
     }
     io::println(letters)
@@ -2384,8 +2551,9 @@ fn main() -> i64 {
 # ===========================================================================
 SECTIONS.append(Sec(
     "closures", "declarations", "Closures and function values",
-    "A closure is written `||(params) -> Result { ... }`. It captures by value, "
-    "and a named function converts to a function value on its own.",
+    "A closure is written `||(params) -> Result { ... }`. It captures by "
+    "value, a named function converts to a function value on its own, and "
+    "the types may be left out wherever the context already says them.",
     keywords=["closure", "lambda", "capture", "function value", "callback",
               "higher order"],
     items=[
@@ -2404,6 +2572,43 @@ fn main() -> i64 {
     tick()
     0
 }""", mode="run", title="Closures of several shapes"),
+
+        H("Leaving the types out"),
+        P("Where the closure is going already says what it takes, it need not "
+          "be said again: a parameter may be written as a bare name, and the "
+          "result follows from the body."),
+        S("""import std::io
+import std::iter
+import std::collections::vector
+
+fn applyTwice(f: @function(i64) -> i64, n: i64) -> i64 { f(f(n)) }
+
+fn main() -> i64 {
+    // The parameter's type comes from what `applyTwice` says it takes.
+    io::println(applyTwice(||(n) { n + 5 }, 2))
+
+    // And from an annotated binding.
+    let double: @function(i64) -> i64 = ||(n) { n * 2 }
+    io::println(double(21))
+
+    // And through a call still being inferred: `map` says what the closure
+    // is handed while what it hands back is the thing being worked out.
+    for n in vec![1, 2, 3].map(||(n) { n * 100 }) {
+        io::println(n)
+    }
+    0
+}""", mode="run", title="Written short"),
+        P("Nothing about this is special to a particular function. Any place "
+          "with a written-down function type — an argument, an annotated "
+          "binding, a declared result — supplies the parameters, and a place "
+          "that says nothing does not:"),
+        S("""fn main() -> i64 {
+    let orphan = ||(n) { n + 1 }
+    0
+}""", mode="diag", title="Nothing here says what `n` is"),
+        N("The types may always be written, and mixing the two is fine: "
+          "`||(n: i64) { n + 1 }` leaves only the result to be worked out.",
+          label="Still allowed"),
 
         H("Captures"),
         P("A closure copies whatever it uses from the enclosing scope at the "
@@ -2812,6 +3017,52 @@ fn main() -> i64 { let s = Socket { fd: 3, port: 80 }; 0 }""",
         N("An enum may declare a `deinit` in exactly the same way, and a "
           "`mark` may require one — `std::net`'s `TcpStream` and "
           "`TcpListener` are both structs that own a descriptor this way."),
+
+        H("One struct extending another"),
+        P("`struct Derived : Base` puts the parent's fields at the **front** "
+          "of the child's. So a `Derived` is a `Base` with more on the end, "
+          "and the bytes a `Base` occupies are the first bytes of one: the "
+          "parent's methods work on the child, and the child reads as a "
+          "`Base` wherever one is wanted."),
+        S("""import std::io
+
+struct Base { pub id: i64 = 0, pub name: String = "" }
+
+extend Base {
+    fn label(&self) -> String { self.name + "#" + self.id.$str() }
+    fn bump(&var self) { self.id += 1 }
+}
+
+struct Derived : Base { pub extra: i64 = 0 }
+struct Deeper : Derived { pub more: String = "" }
+
+fn describe(b: Base) -> String { b.label() }
+
+fn main() -> i64 {
+    var d = Derived { id: 7, name: "seven", extra: 3 }
+    io::println(d.label())          // the parent's method
+    d.bump()                        // including one that writes
+    io::println(describe(d.$clone()))   // read as a `Base`
+
+    let deep = Deeper { id: 1, name: "one", extra: 2, more: "yes" }
+    io::println(deep.label())
+    0
+}""", mode="run", title="Fields first, methods along with them"),
+        T(["", "Struct", "Class"],
+          [["written", "`struct D : B`", "`class D : B`"],
+           ["fields", "spliced in, the parent's first",
+            "kept in the parent, reached through it"],
+           ["reading as the parent", "a copy of the prefix",
+            "the same object"],
+           ["how deep", "as many levels as you like, either way",
+            "as many levels as you like, either way"]],
+          caption="A value has no indirection to walk, so its parent's fields "
+                  "are spliced in once and everything downstream sees one "
+                  "flat type."),
+        N("A child may add fields, not redefine the parent's, and the parent "
+          "may not be generic — its members are spliced in as they are "
+          "written, and nothing would say what its parameters were.",
+          label="Two limits"),
     ]))
 
 # ===========================================================================
@@ -3052,6 +3303,86 @@ fn main() -> i64 {
           "`Ok` and `Err` are too — but only as the lowest tier. A module "
           "that declares an enum with a `Some` of its own wins outright, and "
           "is not made ambiguous by the prelude's."),
+
+        H("A leading dot: whatever type is wanted here"),
+        P("Where the type is already known — an annotation, an argument, a "
+          "`match` on a value — saying it again adds nothing. A leading `.` "
+          "names something on that type: a variant, a static method, anything "
+          "the type owns."),
+        S("""import std::io
+
+enum Colour { Red, Green, Blue }
+enum Shape { Circle(f64), Rect(f64, f64) }
+
+struct Duration { ms: i64 }
+extend Duration {
+    fn seconds(n: i64) -> Duration { Duration { ms: n * 1000 } }
+    fn zero() -> Duration { Duration { ms: 0 } }
+}
+
+fn paint(c: Colour) -> i64 { c as i64 }
+fn wait(d: Duration) -> i64 { d.ms }
+
+fn area(s: Shape) -> f64 {
+    match s { .Circle(r) => r * r * 3.0, .Rect(w, h) => w * h }
+}
+
+fn main() -> i64 {
+    let c: Colour = .Blue               // a variant
+    let d: Duration = .seconds(5)       // a static method
+    let list: [3:Colour] = [.Red, .Green, .Blue]
+
+    io::println(paint(c))
+    io::println(wait(.zero()))
+    io::println(area(.Rect(2.0, 3.0)))
+    io::println(paint(list[1]))
+    0
+}""", mode="run", title="`.Name`, wherever the type is already said"),
+        P("It works in a pattern too, where it also says the name is a "
+          "variant rather than a new binding — so `.Purple` on a `Colour` is "
+          "a mistake, where a bare `Purple` would quietly have bound the "
+          "value."),
+        S("""enum Colour { Red, Green, Blue }
+
+fn name(c: Colour) -> String {
+    match c { .Red => "red", .Green => "green", .Purple => "?" }
+}
+
+fn main() -> i64 { 0 }""", mode="diag", title="No such variant"),
+        N("Only `.`, never `::`. A leading `::` reads as a path with an empty "
+          "first segment, which several languages spell that way; keeping it "
+          "free costs nothing, and one spelling is easier to read than two.",
+          label="Why not `::Name`"),
+
+        H("One enum extending another"),
+        P("`enum Derived : Base` puts the parent's variants **first**, with "
+          "the numbers they had. So every `Base` is a `Derived`, and a "
+          "`match` over the child covers the parent's variants by name."),
+        S("""import std::io
+
+enum Level { Low, High }
+enum Extended : Level { Critical }
+
+fn urgency(e: Extended) -> i64 { e as i64 }
+
+fn main() -> i64 {
+    let l: Level = .High
+    io::println(urgency(l))          // a `Level` widens into an `Extended`
+
+    let e: Extended = .Critical
+    io::println(urgency(e))
+    io::println(match e {
+        .Low => "low",
+        .High => "high",
+        .Critical => "critical",
+    })
+    0
+}""", mode="run", title="The parent's variants, and one more"),
+        N("A struct goes the other way: a `Derived` struct reads as its "
+          "`Base` because the parent's *fields* come first, while a `Base` "
+          "enum reads as its `Derived` because the parent's *variants* do. "
+          "Both follow from putting the parent first.",
+          label="Why the direction differs"),
     ]))
 
 # ===========================================================================
@@ -3272,7 +3603,8 @@ SECTIONS.append(Sec(
     keywords=["mark", "trait", "bind", "default method", "super-mark", "extend",
               "interface", "conformance", "protocol", "associated type",
               "Self::Item", "type Item", "where clause", "requirement",
-              "some", "opaque", "dyn"],
+              "some", "opaque", "dyn", "auto", "automatic mark", "@auto",
+              "@never", "autotrait", "Clone", "Send", "Sync"],
     items=[
         H("Declaring a mark"),
         P("A method with no body is a requirement. A method with a body is a "
@@ -3807,6 +4139,41 @@ fn main() -> i64 {
     io::println("hey".shout())
     0
 }""", mode="run", title="Extending your types and the builtins"),
+        P("A generic type is extended the same way. Written without "
+          "arguments, `extend` uses the names the type declares; written with "
+          "them, it names them itself. Either way the methods belong to the "
+          "type, so every instantiation has them — and two blocks may both "
+          "add to one type."),
+        S('''import std::io
+
+struct Pair<A, B> { first: A, second: B }
+
+extend Pair {
+    /// `A` and `B` are the type's own parameters.
+    fn swapped(&self) -> Pair<B, A> {
+        Pair<B, A> { first: self.second.$clone(), second: self.first.$clone() }
+    }
+}
+
+extend<X, Y> Pair<X, Y> {
+    /// The same thing, with names of this block's choosing.
+    fn describe(&self) -> String where X: io::Display, Y: io::Display {
+        self.first.display() + "|" + self.second.display()
+    }
+}
+
+fn main() -> i64 {
+    let p = Pair<i64, String> { first: 3, second: "three" }
+    io::println(p.describe())
+    let q = p.swapped()
+    io::println(q.first + " " + q.second.$str())
+    0
+}''', mode="run", title="Extending a generic type"),
+        N("The parameters line up one for one: `extend<A, B> Pair<A, B>`. "
+          "Naming a shape instead — `extend<A> Pair<A, i64>` — would be a "
+          "partial specialisation, methods on some instantiations and not "
+          "others, which this language does not have.",
+          label="All of them, in order", tone="warn"),
 
         H("Mark objects: `dyn Mark`"),
         P("A generic parameter with a mark bound is resolved at compile time. "
@@ -4714,6 +5081,66 @@ fn main() -> i64 { 0 }""", mode="diag", title="Redefining `String + String`"),
         P("`&&`, `||` and `??` cannot be overloaded: they short-circuit, so "
           "they never evaluate their right side unconditionally, and a method "
           "call would have to."),
+        H("Automatic marks"),
+        P("Some marks are not promises a type makes but facts about it: it "
+          "holds nothing that has to be destroyed, everything in it can be "
+          "copied, nothing in it stops it crossing to another thread. "
+          "`@auto` says so, and the compiler answers for every type: a type "
+          "has an automatic mark when **every part of it** has it."),
+        S('''import std::io
+
+/// A claim about a type, not a promise it makes: it holds plain values.
+@auto
+mark Plain {}
+
+struct Point { x: i64, y: i64 }        // has it: two integers
+struct Pair { first: Point, at: (i64, bool) }   // has it: so do its parts
+
+fn describe<T: Plain>(value: &T) -> String { "plain" }
+
+fn main() -> i64 {
+    let p = Point { x: 1, y: 2 }
+    io::println(describe(&p))
+    0
+}''', mode="run", title="A mark the compiler answers for"),
+        P("An automatic mark carries no requirements — there is nobody to "
+          "implement them, since nobody writes the binding. What it carries "
+          "is the rule, and two ways to override it where the structure has "
+          "nothing to say."),
+        T(["Written", "Means"],
+          [["`@auto mark M {}`", "M is automatic: every part decides"],
+           ["`bind M to T {}`", "T has it, whatever its parts say"],
+           ["`@never(M)` on `T`", "T does not have it, whatever its parts say"],
+           ["`reflect::conforms<T, M>()`", "the answer, at compile time"]]),
+        P("Three things never have one on their own. A type that runs a "
+          "`deinit` — a destructor is a promise the compiler cannot read. "
+          "Anything it cannot look into: a closure and its captures, an "
+          "`Any`, a `dyn Mark`, a raw or `weak` pointer. And a type that "
+          "refuses it with `@never`, along with everything holding one."),
+        S('''@auto
+mark Plain {}
+
+struct Descriptor { fd: i32 }
+extend Descriptor {
+    fn deinit(&var self) { }
+}
+
+fn describe<T: Plain>(value: &T) -> String { "plain" }
+
+fn main() -> i64 {
+    let d = Descriptor { fd: 3 }
+    describe(&d)
+    0
+}''', mode="diag", title="What a `deinit` costs"),
+        N("`bind M to T {}` is the escape hatch, and it is deliberately a "
+          "line of code: claiming that a type has a mark its parts do not is "
+          "exactly the kind of thing that should be written down. It is how "
+          "`String` comes by `mem::Clone` — a string's contents never change, "
+          "so a copy of one is a copy.", label="Claiming one"),
+        P("`std::mem::Clone` is the automatic mark the standard library "
+          "ships. `std::thread::Send` and `std::thread::Sync` answer the same "
+          "way, with rules of their own about references and shared mutable "
+          "objects — see *Threads and sharing*."),
     ]))
 
 # ===========================================================================
@@ -5666,7 +6093,8 @@ fn main() -> i64 {
     io::println(text.$find("wörld"))   // byte offset, or -1
     io::println(text.$find("absent"))
 
-    io::println(text.$at(0))           // the Character at a byte offset
+    io::println(text.$at(1))           // the second character: é
+    io::println(text[1])               // the same, as a subscript
     io::println(text.$byteAt(0))       // the raw byte
     io::println(text.$hash() != 0)
     0
@@ -5675,7 +6103,8 @@ fn main() -> i64 {
           [["`length()`", "`i64`", "bytes, not characters"],
            ["`charCount()`", "`i64`", "Unicode scalars"],
            ["`isEmpty()`", "`bool`", ""],
-           ["`at(i)`", "`Character`", "the scalar starting at byte `i`"],
+           ["`at(i)`", "`Character`", "the i-th character, counted from the "
+            "start; `text[i]` is the same read"],
            ["`byteAt(i)`", "`u8`", "one raw byte"],
            ["`substring(a, b)`", "`String`", "bytes `a` up to `b`"],
            ["`find(needle)`", "`i64`", "byte offset, or `-1`"],
@@ -5686,16 +6115,49 @@ fn main() -> i64 {
            ["`hash()`", "`u64`", "FNV-1a over the bytes"],
            ["`str()`", "`String`", "itself; every type has it"]],
           caption="Every String method"),
-        N("A `String` cannot be indexed with `[]`. UTF-8 is variable width, so "
-          "the operation would be misleading — use `at(i)` for a `Character` or "
-          "`byteAt(i)` for a byte.", label="No `[]` on String", tone="warn"),
+        H("Characters: `text[i]` and `for c in text`"),
+        P("`text[i]` is the i-th *character*, however wide the ones before it "
+          "were — the read `text.$at(i)` makes, spelled as a subscript. It is "
+          "a value: a String's characters are not slots, so `text[i] = c` is "
+          "refused, and so is `&text[i]`. Each subscript counts from the start "
+          "of the UTF-8, so a loop over the characters is written as a loop, "
+          "which decodes each one once:"),
         S("""import std::io
 
+fn first_word(text: &String) -> String {
+    var word = ""
+    for c in text {
+        if c == ' ' { break }
+        word += c
+    }
+    word
+}
+
 fn main() -> i64 {
-    let text = "abc"
-    io::println(text[0])
+    let text = "héllo wörld"
+    io::println(first_word(&text))
+    io::println(text[1].$str() + text[7].$str())    // éö
+
+    var count = 0
+    for c in text { count += 1 }
+    io::println(count.$str() + " characters in " + text.$length().$str() + " bytes")
+
+    var reversed = ""
+    for c in "abc" { reversed = c.$str() + reversed }
+    io::println(reversed)
     0
-}""", mode="diag", title="Indexing a String"),
+}""", mode="run", title="Reading characters"),
+        P("A `String` is a `Sequence` whose items are `Character`s, so the "
+          "iterator adaptors apply to it as they do to a `Vector`: "
+          "`text.iterate().map(...)`, `.filter(...)`, `.count()`. Slicing "
+          "with `[a..b]` is not offered — a range of *bytes* would cut a "
+          "character in half, and a range of characters would have to count "
+          "its way in — `$substring(a, b)` takes byte offsets and says so."),
+        S("""fn main() -> i64 {
+    var text = "abc"
+    text[0] = 'x'
+    0
+}""", mode="diag", title="Not a slot"),
 
         H("Parsing"),
         S("""import std::io
@@ -5841,7 +6303,16 @@ fn main() -> i64 {
            ["`join`", "`(Vector<String>, String) -> String`",
             "the other half of `split`"],
            ["`padStart` / `padEnd`", "`(String, i64, Character) -> String`",
-            "to a width; longer text is returned rather than cut"]]),
+            "to a width; longer text is returned rather than cut"],
+           ["`lower` / `upper`", "`(String) -> String`",
+            "case, **ASCII only** — every other byte is left as it is"]]),
+        N("`lower` and `upper` deliberately stop at ASCII. Real case mapping "
+          "depends on the language (Turkish dotless ı, German ß, Greek "
+          "final sigma) and can change a string's length, so a function that "
+          "quietly did the wrong thing for those would be worse than one that "
+          "says what it does. Use them for keywords, extensions and protocol "
+          "tokens; for anything a person reads, normalise first.",
+          label="Why only ASCII"),
         S("""import std::io
 import std::text
 
@@ -6509,6 +6980,10 @@ fn main() -> i64 {
     0
 }""", mode="leak", title="A strong cycle is reported at exit",
           safety="minimal"),
+        N("`process::liveObjectCount()` is the same counter the leak report "
+          "uses. It is a legitimate way to assert in a test that a data "
+          "structure released everything it should.",
+          label="Checking it yourself"),
 
         H("Where the counting happens"),
         P("The convention is worth knowing even though you never write it. A "
@@ -6523,14 +6998,119 @@ fn main() -> i64 {
           "this scheme — it is a class, so a handle is counted like anything "
           "else, and the value goes when the last handle does. Reach for it "
           "rather than an allocator.", label="One value on the heap"),
-        N("`process::liveObjectCount()` is the same counter the leak report "
-          "uses. It is a legitimate way to assert in a test that a data "
-          "structure released everything it should.",
-          label="Checking it yourself"),
+
+        H("Three owning pointers, and what tells them apart"),
+        P("`std::mem` offers three. They differ in one thing only — how many "
+          "places may own the value — and that decides everything else about "
+          "them."),
+        T(["Type", "Owners", "Costs", "Made by"],
+          [["`Handle<T>`", "as many as share the handle", "a class, so a "
+            "reference count", "`mem::of(v)`"],
+           ["`Box<T>`", "exactly one", "one machine word, no bookkeeping",
+            "`mem::boxed(v)`"],
+           ["`Rc<T>`", "as many as ask, each by cloning", "two counts in the "
+            "block it allocates", "`mem::shared(v)`"],
+           ["`Weak<T>`", "none — it watches", "a share of the same block",
+            "`rc.downgrade()`"]],
+          caption="A `Box` is a value with a destructor, so it is moved "
+                  "rather than copied, and the one place holding it frees it."),
+        P("`Rc` keeps its counts in fields of its own rather than leaving them "
+          "to the compiler, which is what makes it mean the same thing under "
+          "`--memory zombie`, where nothing is counted for you. It is the way "
+          "two places share a value there."),
+        S("""import std::io
+import std::mem
+
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 {
+    // One owner, moved rather than copied.
+    var b = mem::boxed(Point { x: 1, y: 2 })
+    b.x = 10
+    io::println(b.x.$str())
+
+    // As many owners as ask, each by cloning.
+    let a = mem::shared("hello")
+    let second = a.$clone()
+    io::println(a.strongCount().$str())     // 2
+    io::println(*second)
+
+    // A watcher that does not keep it alive.
+    var watcher: mem::Weak<String>
+    {
+        let held = mem::shared("gone soon")
+        watcher = held.downgrade()
+        io::println(watcher.isAlive().$str())
+    }
+    io::println(watcher.isAlive().$str())
+    0
+}""", mode="run", title="One owner, several owners, and a watcher"),
+
+        H("Reaching through a stand-in"),
+        P("A pointer that held its value at arm's length would be tedious to "
+          "use, so `.` reaches through it. What makes a type one of these is "
+          "that it **lends**: a `look(&self) -> &T from self` to read the "
+          "value where it lies, and a `touch(&var self) -> &var T from self` "
+          "to write it. `Handle`, `Box`, `Rc` and the borrows `Checked` hands "
+          "out all have them, and so may anything you write."),
+        S("""import std::io
+import std::mem
+import std::collections::vector
+
+struct Point { x: i64, y: i64 }
+
+extend Point {
+    fn sum(&self) -> i64 { self.x + self.y }
+    fn shift(&var self, by: i64) { self.x += by; self.y += by }
+}
+
+fn main() -> i64 {
+    var b = mem::boxed(Point { x: 1, y: 2 })
+    io::println(b.x.$str())         // through `look`
+    io::println(b.sum().$str())     // through `look`
+    b.x = 10                        // through `touch`
+    b.shift(5)                      // through `touch`: `shift` takes `&var self`
+    io::println(b.y.$str())
+
+    // Whatever is inside keeps its own methods, however deep.
+    var v = mem::boxed(vector::Vector<i64>())
+    v.push(1)
+    v.push(2)
+    io::println(v.length().$str())
+    0
+}""", mode="run", title="`.` goes through to the value"),
+        N("It can never hide anything. The reach-through only happens once a "
+          "member has *not* been found on the stand-in itself, so "
+          "`b.duplicate()` is still the box's own and only a name the box does "
+          "not have goes through.", label="It cannot shadow"),
+        S("""import std::mem
+
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 {
+    var shared = mem::shared(Point { x: 1, y: 2 })
+    shared.x = 5
+    0
+}""", mode="diag", title="An `Rc` lends for reading only"),
+        P("An `Rc` has no `touch`, because several owners writing at once is "
+          "the thing it exists to make impossible. A shared value that has to "
+          "change keeps a `mem::Checked<T>` inside, which decides at run time "
+          "that a write is the only one out."),
+        S("""import std::io
+import std::mem
+
+fn main() -> i64 {
+    let cell = mem::shared(mem::Checked<i64>(0))
+    let alias = cell.$clone()
+    { var w = alias.look().borrowVar(); *w = 42 }
+    io::println((*cell.look().borrow()).$str())
+    0
+}""", mode="run", title="Changing what is shared"),
     ],
     keywords=["arc", "retain", "release", "weak", "cycle", "deinit", "leak",
               "reference counting", "memory", "strong cycle", "E0235",
-              "no leaks"]))
+              "no leaks", "Box", "Rc", "Weak", "Handle", "smart pointer",
+              "boxed", "shared", "downgrade", "upgrade", "look", "touch"]))
 
 
 # ===========================================================================
@@ -7076,6 +7656,53 @@ fn main() -> i64 {
     io::println(a.v.$str() + " " + b.v.$str())   // 7 8
     0
 }''', mode="run", memory="zombie", title="An explicit copy"),
+        P("`$clone()` is what a type's own `clone` is reached through, "
+          "wherever that method is written — in the body, in an `extend`, or "
+          "supplied by a `bind` — and however deep in the value it sits: a "
+          "struct holding a `Vector` is cloned by cloning the vector, which "
+          "copies its storage rather than handing out a second holder of the "
+          "same block."),
+        S('''import std::io
+import std::collections::vector
+
+struct Tally { counts: vector::Vector<i64>, name: String }
+
+fn main() -> i64 {
+    var one = Tally { counts: vector::Vector<i64>(), name: "first" }
+    one.counts.push(1)
+
+    var two = one.$clone()      // the vector is copied, not shared
+    two.counts.push(2)
+
+    io::println(one.counts.length().$str() + " and " +
+                two.counts.length().$str())
+    0
+}''', mode="run", title="A clone that reaches the parts"),
+        P("What the compiler will **not** do is copy a value that owns "
+          "something: a copy made field by field would hand one obligation to "
+          "two values, and the second to go would close the same descriptor, "
+          "or free the same block, a second time. Such a type says what a "
+          "copy of it means by writing `clone` itself."),
+        S('''struct Descriptor { @resource fd: i32 = -1 }
+
+extend Descriptor {
+    @safe("the descriptor is ours, and the flag stops a second close")
+    fn deinit(&var self) {
+        if self.fd >= 0 { self.fd = -1 }
+    }
+}
+
+fn main() -> i64 {
+    let one = Descriptor { fd: 7 }
+    let two = one.$clone()
+    0
+}''', mode="diag", title="What the compiler will not copy"),
+        N("`std::mem::Clone` is the mark that stands behind all of this, and "
+          "it is automatic: a type has it when every part of it has it, and a "
+          "type that owns something claims it — `bind mem::Clone to T {}` — "
+          "once it has written `clone`. Write `T: mem::Clone` as a bound when "
+          "a function of your own has to copy what it is given. See "
+          "*Marks → Automatic marks*.", label="The mark behind `$clone`"),
 
         H("The checker is precise"),
         P("A borrow lasts until its last use, not to the end of the block, so a "
@@ -7204,13 +7831,22 @@ fn head(list: &List) -> &Item from list {
           "global, and an argument required `from list` may be one. The caller "
           "keeps the named place alive, which is more than a `'static` borrow "
           "ever needs — the place-based reading of `&'static T` fitting where "
-          "`&'a T` was asked for."),
+          "`&'a T` was asked for. A string literal is the same case: it is "
+          "interned once and never freed, so `&\"text\"` may be taken "
+          "outright and goes wherever a borrow of a global goes."),
         S('''global BANNER: String = "welcome"
 // Promises to borrow from `a`; returning the global is accepted, because a
-// global outlives `a`.
+// global outlives `a` — and so is a literal.
 fn label(a: &String) -> &String from a {
     if a.$isEmpty() { &BANNER } else { a }
+}
+fn labelOr(a: &String) -> &String from a {
+    if a.$isEmpty() { &"(none)" } else { a }
 }''', mode="decls", memory="zombie", title="A longer lifetime coerces to a shorter"),
+        N("The coercion is for what is immortal, not for what happens to hold "
+          "it: `let h = \"Hello\"` is a local, which can be reassigned, so "
+          "`&h` is a borrow of `h` and no more.",
+          label="A local is still a local"),
 
         H("Views: which fields a method touches"),
         P("A `&var self` method that only touches some of the object's fields "
@@ -7565,6 +8201,59 @@ $ runec -o report src/main.rune -I . -l statistics"""),
         N("`rune build` does all of this for you, including building path "
           "dependencies first and passing their `link` entries down to whatever "
           "depends on them.", label="Usually you do not do this by hand"),
+
+        H("What is in a `.rul`"),
+        P("A small container, and no more than it has to be. Every integer is "
+          "little-endian, every string is a `u32` length followed by that "
+          "many bytes of UTF-8, and there is no alignment or padding "
+          "anywhere."),
+        G("""magic       8 bytes  "RUNELIB\\1"
+version     u32      the container's own version; 3 today
+memory      u32      0 = reference counting, 1 = Zombie
+name        string   the library's module name
+
+flagCount   u32      `@Config` names set when this was built
+  flag      string
+valueCount  u32      `@Config` keys that had values
+  key       string
+  value     string
+
+unitCount   u32      one per module compiled into the library
+  path      string   the dotted module path, e.g. "geometry::shapes"
+  source    string   its public interface, as Rune source
+
+objectLen   u64
+object      bytes    a native object file for one target"""),
+        P("Three things about it are worth knowing."),
+        T(["", "Why"],
+          [["The interface is **source**, not a symbol table",
+            "an importer re-parses it, so it gets the declarations exactly as "
+            "they were written — including generic bodies, which "
+            "monomorphisation needs, and `pub macro` definitions, which "
+            "expansion needs. Everything not `pub` is stripped on the way in"],
+           ["The **conditions** travel with it",
+            "the interface is source, so its `@Config` conditions are "
+            "answered again on import — and have to be answered the way they "
+            "were when the object code was made, not the way the importer's "
+            "own build would answer them"],
+           ["One target, one memory model",
+            "the object code bakes in retains and releases, or their absence "
+            "and the moved-in argument convention. Importing a library built "
+            "the other way is refused rather than linked, and there is no fat "
+            "`.rul`: cross-compiling means building the dependency for that "
+            "target too"]]),
+        N("The version is checked exactly rather than for a range. A mismatch "
+          "says \"built by a different compiler version\" and stops, because "
+          "the format is small enough that rebuilding is always the right "
+          "answer.", label="No forward compatibility"),
+        P("What a library may export is everything a module may declare: "
+          "types, generic types, enums, classes and their subclasses, marks "
+          "with associated types and defaults, binds (including operators and "
+          "`into` conversions), `extend` blocks, functions, globals, aliases "
+          "and `pub macro`s. And what an importer may do with them is "
+          "everything it could do with its own: name them, construct them, "
+          "match them, **extend** them with methods of its own, and **bind** "
+          "its own marks to them."),
     ],
     keywords=["module", "import", "pub", "visibility", "package", "rul",
               "header", "prelude"]))
@@ -7794,9 +8483,13 @@ fn main() -> i64 {
         T(["Written", "Produces"],
           [["`@type(Executable)`", "a linked program"],
            ["`@type(Library)`", "a `.rul` — object code plus the interface"],
+           ["`@type(Shared)`", "a native shared library — `.dylib`, `.so` "
+            "or `.dll`, for anything that can load one"],
            ["`@type(Object)`", "a `.o` and nothing else"],
            ["`@type(Assembly)`", "target assembly"],
-           ["`@type(LLVM)`", "textual LLVM IR"]],
+           ["`@type(LLVM)`", "textual LLVM IR"],
+           ["`@type(Macros)`", "nothing on its own — the file holds "
+            "procedural macros, built and run while the *program* compiles"]],
           caption="A flag on the command line still wins: a build script has "
                   "the last word over a file's preference."),
         S("""@type(Object)
@@ -7850,6 +8543,7 @@ fn main() -> i64 { 0 }""", mode="diag", title="Too late to be a file directive")
 @export("rune_add")
 pub fn add(a: i64, b: i64) -> i64 { a + b }""",
           mode="decls", title="A stable symbol name"),
+        H("Spelling and placement"),
         S("""@notarealdecorator
 fn f() -> i64 { 0 }""", mode="diag", title="An unrecognised decorator"),
         N("Decorators sit on their own line above the declaration, or inline "
@@ -8180,9 +8874,341 @@ $ cc host.c stats.o -lruneruntime -lm -o host"""),
           "collide rather than silently merging — which is what you want from "
           "something whose whole purpose is to answer to one exact name.",
           label="Exported names are unique"),
+        P("`--shared` produces a loadable library instead of an object: a "
+          "`.dylib`, a `.so` or a `.dll`, with the runtime already inside it. "
+          "That is the form anything which loads code at run time wants — "
+          "`dlopen`, Python's `ctypes`, a plugin host — and it needs no link "
+          "line of its own."),
+        SH("""$ runec --shared -o libstats.dylib src/lib.rune
+$ python3 -c 'import ctypes; print(ctypes.CDLL("./libstats.dylib").stats_scale)'"""),
+        P("What the library answers to is exactly what `@export` named. "
+          "Everything else keeps its module-qualified symbol, which is the "
+          "point: a shared library's surface is the list of `@export`s, "
+          "written down in one place."),
+        N("`@type(Shared)` says the same thing inside the file, for a source "
+          "tree where the answer belongs with the code rather than in a build "
+          "script. A flag on the command line still wins.",
+          label="Or say it in the file"),
+
+        H("C++ is its own block"),
+        P("`extern \"C++\"` declares a C++ library directly — namespaces, "
+          "classes, constructors, templates and all — with the compiler "
+          "spelling each symbol the way the Itanium ABI spells it and passing "
+          "each argument the way that target's C++ ABI passes it. See "
+          "*Calling C++*."),
     ],
     keywords=["ffi", "extern", "c", "interop", "cstring", "link", "export",
               "variadic"]))
+
+
+# ===========================================================================
+# Calling C++
+# ===========================================================================
+SECTIONS.append(Sec(
+    "cxx", "interop", "Calling C++",
+    "An `extern \"C++\"` block declares what a C++ library exports. The "
+    "compiler then does what a C++ compiler does at the call: spells the "
+    "symbol the way the Itanium ABI spells it, and passes each argument the "
+    "way that target's C++ ABI passes it. No `extern \"C\"` shim, no "
+    "generated bindings.",
+    [
+        P("The difference from `extern \"C\"` is not the syntax but what the "
+          "compiler has to know. A C symbol is its own name; a C++ symbol "
+          "folds in the namespace, the class, the const-ness of the member "
+          "and every parameter type. A C struct crosses by pointer because "
+          "the ABIs agree about pointers; a C++ struct crosses **by value** "
+          "here, because the compiler knows how this target passes that "
+          "particular struct — in two registers, packed into one, or through "
+          "memory with the result written back through a hidden pointer."),
+        S('''extern "C++" {
+    namespace geometry {
+        struct Vec2 { x: f64, y: f64 }
+
+        fn lengthSq(v: Vec2) -> f64
+        fn scaled(v: Vec2, k: f64) -> Vec2
+    }
+}''', mode="decls", title="A namespace, a struct and two functions"),
+        P("`namespace` nests as it does in C++ and affects the symbols only: "
+          "the names it holds arrive in the module that wrote the block, so "
+          "`lengthSq` above is called `lengthSq`, not `geometry::lengthSq`."),
+        N("The mangling this compiler speaks is the Itanium C++ ABI, which is "
+          "what Clang and GCC use on Linux, macOS, the BSDs and MinGW. A "
+          "`-windows-msvc` target uses a different scheme, and an "
+          "`extern \"C++\"` block for one is refused rather than "
+          "mis-mangled.", label="Which C++ ABI", tone="warn"),
+
+        H("C++'s own scalar names"),
+        P("`long` is 64 bits on Linux and 32 on Windows, and `int64_t` is "
+          "`long` on one and `long long` on the other — a distinction Rune's "
+          "`i64` cannot make, and one the symbol depends on. So the C++ "
+          "spellings exist as names of their own. Each is the Rune type it is "
+          "on the target being built for, and in an `extern \"C++\"` "
+          "signature it also fixes how the parameter mangles."),
+        T(["Written", "C++", "Is, on a 64-bit Linux target"],
+          [["`c_char`", "`char`", "`i8` — `u8` where `char` is unsigned"],
+           ["`c_schar` / `c_uchar`", "`signed char` / `unsigned char`", "`i8` / `u8`"],
+           ["`c_short` / `c_ushort`", "`short` / `unsigned short`", "`i16` / `u16`"],
+           ["`c_int` / `c_uint`", "`int` / `unsigned`", "`i32` / `u32`"],
+           ["`c_long` / `c_ulong`", "`long` / `unsigned long`", "`i64` / `u64`"],
+           ["`c_longlong` / `c_ulonglong`", "`long long` / `unsigned long long`", "`i64` / `u64`"],
+           ["`c_float` / `c_double`", "`float` / `double`", "`f32` / `f64`"],
+           ["`c_bool`", "`bool`", "`bool`"],
+           ["`c_size_t` / `c_ssize_t`", "`size_t` / `ssize_t`", "`u64` / `i64`"],
+           ["`c_ptrdiff_t`", "`ptrdiff_t`", "`i64`"],
+           ["`c_intptr_t` / `c_uintptr_t`", "`intptr_t` / `uintptr_t`", "`i64` / `u64`"],
+           ["`c_int8_t` … `c_int64_t`", "`int8_t` … `int64_t`", "`i8` … `i64`"],
+           ["`c_uint8_t` … `c_uint64_t`", "`uint8_t` … `uint64_t`", "`u8` … `u64`"],
+           ["`c_wchar_t`", "`wchar_t`", "`i32` — `u16` on Windows"],
+           ["`c_void`", "`void`", "`u8`; only useful behind a pointer"]],
+          caption="Rune's own `i8`…`i64`, `u8`…`u64`, `f32`, `f64` and `bool` "
+                  "are accepted too, and mangle as the target's `intN_t` "
+                  "family — which is what a header that uses those means."),
+
+        H("What crosses"),
+        T(["Rune", "C++", "Notes"],
+          [["`i8` … `i64`, `u8` … `u64`", "`int8_t` … `uint64_t`", "or the `c_` names above"],
+           ["`f32` / `f64`", "`float` / `double`", ""],
+           ["`bool`", "`bool`", ""],
+           ["`CString`", "`const char *`", "borrowed, NUL terminated"],
+           ["`*T` / `*var T`", "`const T *` / `T *`", "unchecked"],
+           ["`&T` / `&var T`", "`const T &` / `T &`", "a reference **is** a pointer"],
+           ["`struct` in the block", "the same struct", "**by value**, by the target's rules"],
+           ["`struct<T>` in the block", "a class template", "one symbol per instantiation"],
+           ["`enum` in the block", "the same enum", "an `int`"],
+           ["`class` in the block", "the class", "only ever behind a pointer"],
+           ["`@cfunction(A) -> B`", "`B (*)(A)`", "a bare function pointer"],
+           ["`String`", "—", "not a C++ type; use `.$cstr()`"],
+           ["`@function(A) -> B`", "—", "a closure; use `@cfunction`"],
+           ["a Rune `struct` or `class`", "—", "declare the C++ one in the block"]]),
+
+        H("Structs, by value"),
+        P("A `struct` written inside the block is a C++ struct: Rune lays it "
+          "out identically and hands it over the way C++ would. Three shapes "
+          "that are passed three different ways on one machine, and "
+          "differently again on the next, are written the same here."),
+        S('''extern "C++" {
+    namespace shim {
+        struct Pair { a: c_int, b: c_int }              // one register
+        struct Vec2 { x: f64, y: f64 }                  // two, or an HFA
+        struct Wide { a: c_long, b: c_long, c: c_long } // through memory
+
+        fn swapped(p: Pair) -> Pair
+        fn scaled(v: Vec2, k: f64) -> Vec2
+        fn tripled(w: Wide) -> Wide
+    }
+}''', mode="decls", title="Three shapes, one spelling"),
+        N("This is the opposite of the advice for C, where a struct crosses "
+          "by pointer because nothing tells the compiler which convention the "
+          "other side used. Inside an `extern \"C++\"` block there is no such "
+          "doubt: the C++ ABI for the target is what both sides follow.",
+          label="Why by value here"),
+
+        H("References and out-parameters"),
+        P("A C++ reference is a pointer that is not written with a star. "
+          "`&T` is `const T &` and `&var T` is `T &`, and a raw `*T` or "
+          "`*var T` is accepted where one is wanted — it is the same address "
+          "either way."),
+        S('''extern "C++" {
+    namespace shim {
+        struct Pair { a: c_int, b: c_int }
+        fn sumRef(p: &Pair) -> c_int      // int sumRef(const Pair &)
+        fn bump(x: &var c_int, by: c_int) // void bump(int &, int)
+    }
+}
+
+/// The borrows live for the call, which is all a reference needs.
+@safe("both borrows name locals that outlive the call")
+pub fn bumped(start: i64, by: i64) -> i64 {
+    var x = start as c_int
+    bump(&var x, by as c_int)
+    x as i64
+}''', mode="frag", title="Reference parameters, kept inside a wrapper"),
+
+        H("Classes"),
+        P("A C++ `class` is **opaque**: Rune never holds one by value, "
+          "copies one, or destroys one, because only C++ knows how. It exists "
+          "behind a pointer, and its members are reached through that. How "
+          "the members are written says what they are:"),
+        T(["Written", "Is"],
+          [["`fn init(&var self, ...)`", "a constructor"],
+           ["`fn deinit(&var self)`", "the destructor"],
+           ["`fn name(&self) -> T`", "a `const` member function"],
+           ["`fn name(&var self) -> T`", "a non-const member function"],
+           ["`fn name(args) -> T`", "a `static` member function"],
+           ["`@operator(\"[]\") fn at(&self, ...)`", "`operator[]`"],
+           ["`class D : B`", "single, non-virtual inheritance"],
+           ["`@size(N)`", "`sizeof` on the C++ side; what `cxx::alloc` needs"]]),
+        S('''extern "C++" {
+    namespace shim {
+        struct Pair { a: c_int, b: c_int }
+
+        @size(8)
+        class Counter {
+            fn init(&var self, start: c_int)
+            fn deinit(&var self)
+            fn next(&var self) -> c_int
+            fn peek(&self) -> c_int
+            fn setStep(&var self, step: c_int)
+            fn state(&self) -> Pair
+            fn make(start: c_int) -> *var Counter
+            fn destroy(c: *var Counter)
+        }
+
+        /// `this` is one address for both halves, so the base's members are
+        /// reached through a pointer to the derived class unchanged.
+        @size(8)
+        class Stepper : Counter {
+            fn init(&var self, start: c_int, step: c_int)
+            fn twice(&var self) -> c_int
+        }
+    }
+}''', mode="decls", title="A class, its destructor, and a class derived from it"),
+
+        H("Making one: `std::cxx`"),
+        P("A C++ object lives where C++ can destroy it, so its storage comes "
+          "from `operator new` and goes back to `operator delete` — never "
+          "from Rune's allocator. `cxx::alloc<T>()` is the first half and "
+          "`cxx::free` the second, with the constructor and destructor "
+          "written out between them, exactly as placement new and an explicit "
+          "destructor call are in C++."),
+        S('''import std::cxx
+
+@safe("the storage is ours from `alloc` until `free`, and nothing else holds it")
+fn counting() -> i64 {
+    let c = cxx::alloc<Counter>()   // @size(8) bytes from `operator new`
+    c.init(10)                      // Counter::Counter(10), on that storage
+    c.setStep(5)
+    let first = c.next()
+    c.deinit()                      // ~Counter()
+    cxx::free(c)                    // back to `operator delete`
+    first as i64
+}''', mode="frag", title="The two halves of an object's life"),
+        N("A library that hands objects out and takes them back — "
+          "`Counter::make` and `Counter::destroy` above — is simpler still: "
+          "call those and let it do both halves. `cxx::alloc` is for the "
+          "classes that have no such pair.", label="Or let C++ do it"),
+        T(["`std::cxx`", "Is"],
+          [["`alloc<T>() -> *var T`", "`operator new(sizeof(T))`, uninitialised"],
+           ["`free<T>(p: *var T)`", "`operator delete(p)`"],
+           ["`null<T>() -> *var T`", "`nullptr`"],
+           ["`isNull<T>(p) -> bool`", "`p == nullptr`"]]),
+
+        H("Templates"),
+        P("A generic `struct` in the block is a class template. Each "
+          "instantiation is a different C++ type and gets the symbol that "
+          "type gives it, so one declaration serves every element type the "
+          "library was compiled for."),
+        S('''extern "C++" {
+    namespace shim {
+        struct Span<T> { data: *T, len: c_ulong }
+
+        fn total(s: Span<c_long>) -> c_long     // shim::total(shim::Span<long>)
+        fn totalD(s: Span<f64>) -> f64          // shim::totalD(shim::Span<double>)
+    }
+}
+
+/// A slice's two halves are exactly what a span holds.
+@safe("the pointer and the count come from one slice, so the extent is right")
+pub fn totalOf(values: [c_long]) -> i64 {
+    if values.$isEmpty() { return 0 }
+    total(Span<c_long> { data: &values[0] as *c_long,
+                         len: values.$length() as c_ulong }) as i64
+}''', mode="frag", title="A span, twice over"),
+
+        H("Enums and variables"),
+        S('''extern "C++" {
+    namespace shim {
+        enum Colour { Red = 1, Green = 2, Blue = 4 }
+        fn brighter(c: Colour) -> Colour
+        /// A namespaced variable has a mangled symbol too.
+        var liveCounters: c_int
+    }
+}''', mode="decls", title="An enum and a variable"),
+
+        H("Renaming, and operators"),
+        P("`@as` renames a declaration for Rune's side only, exactly as it "
+          "does in an `extern \"C\"` block — which is also how two overloads "
+          "of one C++ name are told apart, since Rune has one name per "
+          "declaration. `@operator` says which C++ operator a member is."),
+        S('''extern "C++" {
+    namespace llvm {
+        class Type {}
+        class FunctionType : Type {
+            // One of the overloads of `FunctionType::get`, under a Rune name
+            // of its own.
+            @as("functionType")
+            fn get(result: *var Type, isVarArg: bool) -> *var FunctionType
+        }
+        @size(8)
+        class Counter {
+            @operator("[]")
+            fn at(&self, i: c_int) -> c_int
+            @operator("new")
+            fn allocate(n: c_size_t, tag: c_int) -> *var c_void
+        }
+    }
+}''', mode="decls", title="`@as` and `@operator`"),
+        P("`@operator` takes the operator as C++ writes it after the "
+          "keyword: `\"new\"`, `\"delete\"`, `\"[]\"`, `\"()\"`, `\"+\"`, "
+          "`\"==\"`, `\"<=>\"` and the rest."),
+
+        H("Linking"),
+        P("A file with an `extern \"C++\"` block links the target's C++ "
+          "runtime automatically — libc++ where Apple ships it, libstdc++ "
+          "where GCC does, and statically on MinGW so the executable carries "
+          "no `libstdc++-6.dll`. Pass `--link-cxx` by hand for a program "
+          "whose C++ only arrives through objects it links."),
+        SH('''$ runec -o demo src/main.rune -L /usr/local/lib -l mylib'''),
+        P("A package that ships C++ alongside its Rune lists it, and `rune` "
+          "compiles it with the C++ driver that goes with the build's `cc` — "
+          "so a package with a C++ half cross-compiles like any other."),
+        S('''[package]
+name = "ffi"
+version = "0.1.0"
+
+[build]
+cxx-sources = ["cxx/shim.cpp"]
+cxx-flags = ["-Wall", "-Wextra", "-fno-exceptions", "-fno-rtti"]
+cxx-standard = "c++17"          # the default
+
+[target.mingw]
+triple = "x86_64-w64-mingw32"
+cc = "x86_64-w64-mingw32-gcc"
+cxx = "x86_64-w64-mingw32-g++"  # derived from `cc` when not given
+runner = "wine"''', mode="frag", title="Rune.toml for a package with a C++ half"),
+        P("`examples/project/ffi` is that package: a C shim, a C++ shim, both "
+          "declared and both tested, built for the host and cross-compiled to "
+          "Windows. `tests/cases/95_cxx_llvm.rune` goes further and drives "
+          "LLVM's own C++ API — a context, a module, a function, an `add` and "
+          "a `ret`, then the verifier — with no wrapper of any kind."),
+        SH('''$ cd examples/project/ffi
+$ rune test                       # host
+$ rune test --target mingw        # built for Windows, run under wine'''),
+
+        H("What does not cross"),
+        T(["Not supported", "Instead"],
+          [["virtual dispatch", "declare the member and call it on the exact "
+            "type, or wrap the call in C++"],
+           ["exceptions", "a library that throws must not throw across the "
+            "boundary; build it `-fno-exceptions`, or catch inside"],
+           ["`std::string`, `std::vector` and friends", "pass their "
+            "`data()` and `size()`, or wrap in C++"],
+           ["multiple or virtual inheritance", "single, non-virtual bases "
+            "only — `this` has to be one address"],
+           ["MSVC targets", "the Itanium ABI only: Clang, GCC, MinGW"],
+           ["a Rune `String`, closure or class", "`CString`, `@cfunction`, or "
+            "a C++ type declared in the block"]]),
+        N("A member declared here is called **non-virtually**, by its own "
+          "symbol. For a `virtual` function that is only right when the "
+          "object's dynamic type is the one declaring it — which it is for a "
+          "class you construct yourself, and is not for one handed to you "
+          "through a base pointer. When in doubt, put a small non-virtual "
+          "function in the C++ half and declare that.",
+          label="Virtual functions", tone="warn"),
+    ],
+    keywords=["c++", "cxx", "extern c++", "interop", "itanium", "mangling",
+              "namespace", "class", "constructor", "destructor", "template",
+              "llvm", "operator new", "cxx-sources", "link-cxx"]))
 
 
 # ===========================================================================
@@ -8196,7 +9222,8 @@ SECTIONS.append(Sec(
     "manage its own storage, `iter` is what `for` dispatches through, `any` "
     "is what a value of unknown type is asked about, `reflect` is what the "
     "compiler is asked about a type, `thread` is how a program does more "
-    "than one thing at once, `net` is TCP in the shape `io`'s stream marks "
+    "than one thing at once and `task` how one thread keeps several things "
+    "in progress, `net` is TCP in the shape `io`'s stream marks "
     "already describe, `fmt` is what a format "
     "string expands into, and `testing` is what a "
     "file under `tests/` reports through. `env`, `random`, `hash`, `json` "
@@ -8232,6 +9259,64 @@ SECTIONS.append(Sec(
            ["`yieldNow`", "`()`", "offer the rest of this turn"]],
           caption="See **Threads and sharing**. Nothing crosses a thread "
                   "boundary that the compiler cannot vouch for."),
+
+        H("std::task"),
+        T(["Name", "Signature", "Does"],
+          [["`Future<T>`", "`class`", "work that will produce a `T`; what "
+            "calling an `async fn` hands back"],
+           ["`Future::await`", "`(&self) -> T`", "the result, parking the "
+            "task until it is there — written `f.await`"],
+           ["`Future::wait`", "`(&self) -> T`", "the same from code that is "
+            "not `async`: blocks the thread, running the other tasks"],
+           ["`Future::isDone`", "`(&self) -> bool`", "whether the result is "
+            "there"],
+           ["`Future::complete`", "`(&var self, value: T)`",
+            "hands a `pending` future its value"],
+           ["`spawn`", "`<T>(body: @function() -> T) -> Future<T>`",
+            "starts `body` as a task; what `async { }` is"],
+           ["`sleep`", "`(duration: time::Time) -> Future<()>`",
+            "done once the time has passed"],
+           ["`pending`", "`<T>() -> Future<T>`",
+            "a future somebody will `complete`"],
+           ["`blocking`", "`<A: Send, R: Send>(entry: @cfunction(A) -> R, "
+            "argument: A) -> Future<R>`",
+            "runs `entry` on a thread of its own"],
+           ["`all`", "`<T>(futures: Vector<Future<T>>) -> Future<Vector<T>>`",
+            "every result, in order"],
+           ["`first`", "`<T>(futures: Vector<Future<T>>) -> Future<(i64, Future<T>)>`",
+            "the first to finish: its index, and the future itself"],
+           ["`race`", "`<T>(futures: Vector<Future<T>>) -> Future<T>`",
+            "the value of the first to finish; the rest are cancelled"],
+           ["`timeout`", "`<T>(limit: time::Time, future: Future<T>) -> Future<T?>`",
+            "the value within `limit`, or `nil` and the task cancelled"],
+           ["`Future::cancel`", "`(&self)`", "asks the task to stop at its "
+            "next suspension point"],
+           ["`Future::outcome`", "`(&self) -> Outcome<T>`",
+            "waits; `Done(value)` or `Cancelled`"],
+           ["`Future::isCancelled`", "`(&self) -> bool`",
+            "whether a cancel has been asked for"],
+           ["`Outcome<T>`", "`enum`", "`Done(T)` or `Cancelled`"],
+           ["`checkpoint`", "`()`", "leaves the task here if cancelled"],
+           ["`offload`", "`<R: Send>(body: @function() -> R) -> Future<R>`",
+            "a closure on a worker thread; captures must be `Send`"],
+           ["`offloadAsync`", "`<R: Send>(body: @function() -> Future<R>) -> Future<R>`",
+            "an `async` closure on a worker thread's executor"],
+           ["`workers`", "`() -> i64`", "how many worker threads the pool "
+            "may run"],
+           ["`readable` / `writable`", "`(descriptor: i64) -> Future<()>`",
+            "done when the socket is ready"],
+           ["`Future::clone`", "`(&self) -> Self`",
+            "another handle to the same task; what `$clone()` does"],
+           ["`run`", "`<T>(future: Future<T>) -> T`",
+            "`wait()`, spelled for a `main`"],
+           ["`yieldNow`", "`()`", "let every ready task run first"],
+           ["`inTask`", "`() -> bool`", "inside a task, or on the thread's "
+            "own stack"],
+           ["`stackSize` / `setStackSize`", "`() -> i64` / `(bytes: i64)`",
+            "the stack each new task is given"]],
+          caption="See **Tasks and futures**. Tasks on one thread take "
+                  "turns, so nothing here asks for `Send` — except "
+                  "`blocking`, which is a thread."),
 
         H("std::atomic"),
         T(["Name", "Signature", "Does"],
@@ -8362,7 +9447,7 @@ fn main() -> i64 {
           [["`show`", "`<T: Display>(value: T) -> String`", "what `{}` does"],
            ["`fixed`", "`(value: f64, places: i64) -> String`",
             "`{:.N}` — that many places, rounded"],
-           ["`radix`", "`(value: i64, base: i64, upper: bool, prefix: bool) "
+           ["`radix`", "`<T>(value: T, base: i64, upper: bool, prefix: bool) "
             "-> String`", "`{:x}`, `{:b}`, `{:o}`"],
            ["`plus`", "`(text: String) -> String`",
             "`{:+}` — a leading `+` where there is no sign"],
@@ -8715,11 +9800,24 @@ fn main() -> i64 {
             "`Read`, `Write` or `Both`"],
            ["`close`", "`(&var self)`", "now rather than later"],
            ["`release` / `adopt`", "`(&var self) -> i64` / `(i64) -> TcpStream`",
-            "hand the descriptor over, and take one"]],
+            "hand the descriptor over, and take one"],
+           ["`clone`", "`(&self) -> Self`", "a second descriptor for the "
+            "same socket; what `$clone()` does"],
+           ["`AsyncStream` / `AsyncListener`", "`class`",
+            "the same sockets for tasks: `read`, `write`, `writeText`, "
+            "`readAll` and `accept` are `async fn`s that park the task on "
+            "the socket"],
+           ["`listenAsync`", "`(address: String, port: i32) -> Result<AsyncListener, NetError>`",
+            "listen, for tasks"],
+           ["`connectAsync`", "`(host: String, port: i32) -> Future<Result<AsyncStream, NetError>>`",
+            "connect without holding the thread"],
+           ["`wrap`", "`(stream: TcpStream) -> AsyncStream`",
+            "drive an existing connection with tasks"]],
           caption="`NetError` is `Refused`, `AddressInUse`, `Unreachable`, "
                   "`WouldBlock`, `Interrupted`, `TimedOut`, `Reset`, "
                   "`PermissionDenied`, `NotFound`, `Closed` or `Failed`; "
-                  "`describe` puts it in words."),
+                  "`describe` puts it in words. See **Tasks and futures** "
+                  "for the `Async` pair."),
         P("Both types own their descriptor the way [Structs](#structs) "
           "describes: the field is `@resource`, the `deinit` closes it, and "
           "handing one on is a move. So a connection closes itself when the "
@@ -9002,7 +10100,7 @@ fn main() -> i64 {
 
     // `reduce` seeds itself from the first value, so an empty chain has an
     // answer — `nil` — rather than needing one invented.
-    io::println((scores.as_iter().reduce(||(a: i64, b: i64) -> i64 {
+    io::println((scores.values().reduce(||(a: i64, b: i64) -> i64 {
         if a > b { a } else { b }
     }) ?? -1).$str())
 
@@ -9164,6 +10262,65 @@ fn main() -> i64 {
     io::println(env::has("PATH"))
     0
 }""", mode="run", title="Reading and writing the environment"),
+
+        H("std::arch"),
+        P("What the machine being built **for** is like. Everything here is "
+          "settled while compiling, out of the target triple: a type alias is "
+          "the type it names, and a number is in the object file as that "
+          "number. `arch::bits` is the constant `64` on a 64-bit target, not "
+          "something worked out at startup, so `if arch::is32Bit { ... }` "
+          "folds away entirely on the other one."),
+        P("A cross build answers for the target, never for the machine doing "
+          "the compiling — which is the whole reason to ask here rather than "
+          "at run time."),
+        T(["Name", "Is", "On a 64-bit target"],
+          [["`size`", "`type`", "`i64` — signed, pointer-sized: an offset, "
+            "a difference, an index"],
+           ["`usize`", "`type`", "`u64` — unsigned, pointer-sized: a length "
+            "or a count, and what `mem::size_of` hands back"],
+           ["`float`", "`type`", "`f64` — a *size* rule, not a speed one"],
+           ["`bits`", "`i64`", "`64`"],
+           ["`pointerSize`", "`i64`", "`8`"],
+           ["`is64Bit` / `is32Bit`", "`bool`", "`true` / `false`"],
+           ["`endian`", "`String`", "`\"little\"` or `\"big\"`"],
+           ["`littleEndian` / `bigEndian`", "`bool`", "the same, to branch on"],
+           ["`name`", "`String`", "`aarch64`, `x86_64`, `x86`, `arm`, "
+            "`riscv32`, `riscv64`, `wasm32`, `wasm64`, `powerpc64`, or "
+            "`unknown`"],
+           ["`os`", "`String`", "`macos`, `windows`, `linux`, `ios`, "
+            "`android`, `freebsd`, `openbsd`, `netbsd`, `solaris`, `wasi`, or "
+            "`unknown`"],
+           ["`family`", "`String`", "`unix`, `windows` or `wasm`"],
+           ["`triple()`", "`fn -> String`", "the whole triple as LLVM "
+            "normalised it — `arm64-apple-macosx15.0.0`, "
+            "`x86_64-w64-windows-gnu`"]]),
+        S("""import std::io
+import std::arch
+
+fn main() -> i64 {
+    // A type alias *is* the type, so this is the machine word.
+    let index: arch::size = 3
+    let count: arch::usize = 10 as arch::usize
+    io::println((index + 1).$str())
+    io::println(count.$str())
+
+    io::println(arch::bits.$str() + "-bit " + arch::name)
+    io::println(arch::os + " (" + arch::family + ")")
+    io::println(arch::endian + "-endian")
+
+    // Folded to one branch: the other is not in the binary at all.
+    if arch::is64Bit { io::println("wide pointers") }
+    else { io::println("narrow pointers") }
+    0
+}""", mode="run", title="Asking about the target"),
+        P("`triple()` is the one answer that is not a fixed list, so it is the "
+          "compiler's own rather than a `@Config` branch. It still costs "
+          "nothing: the string is in the object file."),
+        N("These are the same answers `@Config` gives, in a form you can "
+          "compute with. Reach for `@Config` when a declaration should not "
+          "**exist** on a target — a function that calls something only "
+          "Windows has — and for `std::arch` when a value or a type "
+          "depends on it.", label="`@Config` or `std::arch`?"),
 
         H("std::random"),
         P("A `Random` is a generator with its own state. Seeded from a number "
@@ -9407,8 +10564,21 @@ fn main() -> i64 {
            ["`equals`", "`<T>(a: T, b: T) -> bool`", "structural equality, "
             "consistent with `hash`"],
            ["`Handle<T>`", "`class`", "one `T` on the heap, reference counted; "
-            "`*h` reads it, `*h = v` writes it"],
+            "`*h` reads it, `*h = v` writes it, `look()`/`touch()` borrow it"],
            ["`of`", "`<T>(value: T) -> Handle<T>`", "a handle, type inferred"],
+           ["`Box<T>`", "`class`", "one `T` on the heap with a single owner "
+            "— the same reach-through, no sharing"],
+           ["`boxed`", "`<T>(value: T) -> Box<T>`", "a box, type inferred"],
+           ["`Rc<T>` / `Weak<T>`", "`class`", "a counted value and a "
+            "reference that does not keep it alive; `w.get()` answers "
+            "`Rc<T>?`"],
+           ["`shared`", "`<T>(value: T) -> Rc<T>`", "an `Rc`, type inferred"],
+           ["`replace`", "`<T>(place: &var T, value: T) -> T`", "puts `value` "
+            "there and hands back what was there"],
+           ["`take`", "`<T>(place: &var T) -> T`", "the same, leaving the "
+            "type's default behind"],
+           ["`store`", "`<T>(place: &var T, value: T)`", "writes, destroying "
+            "what was there"],
            ["`Allocator`", "`mark`", "`allocate`, `deallocate`, `reallocate`"],
            ["`allocator`", "`SystemAllocator`", "the process heap"],
            ["`noBlock`", "`() -> *var u8`", "a block pointer to nothing"],
@@ -9418,7 +10588,10 @@ fn main() -> i64 {
             "by hand, for storage the compiler cannot see"],
            ["`slice_of`", "`<T>(block: *var T, count: usize) -> [T]`", "**unsafe** — "
             "`count` elements at `block` as a slice; no copy, and the block's "
-            "extent is the caller's promise"]]),
+            "extent is the caller's promise"],
+           ["`slice_data`", "`<T>(values: [T]) -> *var T`", "**unsafe** — "
+            "the other direction: where a slice's elements actually are, so "
+            "they can be moved out one by one rather than copied"]]),
         S("""import std::io
 import std::mem
 
@@ -9454,6 +10627,69 @@ fn main() -> i64 {
     io::println(shared.get())
     0
 }""", mode="run", title="A handle"),
+        P("`look` and `touch` are how a structure built out of handles is "
+          "walked. `*h` and `get()` both hand back a **copy** of what the "
+          "handle owns — under single ownership that means cloning everything "
+          "below it, which for a list is the rest of the list, at every step. "
+          "A borrow reads the one that is there."),
+        S('''import std::io
+import std::mem
+import std::mem::{Handle}
+
+enum Link<T> { Empty, More(Handle<Node<T>>) }
+struct Node<T> { elem: T, next: Link<T> }
+struct List<T> { head: Link<T> }
+
+extend List {
+    fn push(&var self, value: T) {
+        self.head = Link::More(Handle<Node<T>>(Node<T> {
+            elem: value, next: mem::replace(&var self.head, Link::Empty)
+        }))
+    }
+
+    /// A walk that reads: one borrow at a time, nothing copied.
+    fn length(&self) -> i64 {
+        var n = 0
+        var cur = &self.head
+        while cur is Link::More(node) { n += 1; cur = &node.look().next }
+        n
+    }
+
+    /// A walk that writes: the cursor is a `&var` the whole way.
+    fn doubleAll(&var self) {
+        var cur = &var self.head
+        loop {
+            match cur {
+                Link::Empty => break,
+                Link::More(node) => {
+                    node.touch().elem = node.look().elem * 2
+                    cur = &var node.touch().next
+                }
+            }
+        }
+    }
+}
+
+fn main() -> i64 {
+    var list = List<i64> { head: Link::Empty }
+    list.push(1)
+    list.push(2)
+    io::println("length " + list.length().$str())
+    list.doubleAll()
+    io::println("head " + (if list.head is Link::More(n) { n.look().elem } else { 0 }).$str())
+    0
+}''', mode="run", title="Walking a list of handles"),
+        T(["`Handle<T>`", "Hands back"],
+          [["`get()`", "a copy of the value — a share under counting, a clone "
+            "under single ownership"],
+           ["`*h`", "the same, as an operator"],
+           ["`look()`", "`&T from self` — the value where it lies"],
+           ["`touch()`", "`&var T from self` — the same, to write through"],
+           ["`set(v)`", "replaces the value"]]),
+        N("However long the structure is, giving it back costs no stack: a "
+          "destruction reached from inside another one is queued and run "
+          "after it, so a list of a million links is freed in a loop rather "
+          "than a million nested calls.", label="Long chains"),
         P("The allocator underneath is a mark, so a program can supply its "
           "own. Blocks come back untyped and uninitialised, every one must go "
           "back exactly once, and reading through the pointer is unsafe — "
@@ -9488,7 +10724,7 @@ fn main() -> i64 {
           "needs an unsafe context, and `*var T` to be written through.",
           label="Raw indexing", tone="warn"),
 
-        H("std::mem"),
+        H("std::mem: Buffer"),
         P("A fixed-size run of values on the heap, checked on every access. An "
           "array's length is part of its type, so it cannot be decided at run "
           "time; a `Buffer` can. Reading and writing both go through `[]`."),
@@ -9628,6 +10864,35 @@ fn main() -> i64 {
           "what a set is — so there is one probing implementation rather than "
           "two. `dictionary::setOf(values)` and `dictionary::mapOf(keys, "
           "values)` build one from a slice."),
+        P("A map is common enough to be worth writing short. `[K:V]` is the "
+          "type and `[key: value, ...]` is the value, with `[:]` for the "
+          "empty one:"),
+        S("""import std::io
+
+fn count(m: [String:i64]) -> i64 { m.length() }
+
+fn main() -> i64 {
+    let ages: [String:i64] = ["ada": 36, "bob": 41]
+    io::println(ages.at("ada").or(0))
+    io::println(count(ages))
+
+    // Pairs may go on their own lines.
+    let words = [
+        "one": 1,
+        "two": 2,
+    ]
+    io::println(words.at("two").or(0))
+
+    // `[:]` takes its types from where it is going.
+    let empty: [String:i64] = [:]
+    io::println(empty.length())
+    0
+}""", mode="run", title="Written short"),
+        N("`[3:i64]` is an array of three and `[String:i64]` is a map: an "
+          "array's length is a **number** and a map's key is a **type**, so "
+          "what was meant is decided by what the name means rather than by "
+          "the punctuation. `[SIZE:i64]` with `SIZE` a constant is still an "
+          "array.", label="How it is told from an array"),
 
         H("std::collections"),
         P("Three ways to hold a run of values, and one module each. An "
@@ -9726,7 +10991,11 @@ fn main() -> i64 {
            ["`v[i]` / `v[i] = x`", "", "the direct forms — **abort** out of "
             "range, where `at` and `set` answer"],
            ["`from`", "`<T>(values: [T]) -> Vector<T>`", "builds one from an "
-            "array or slice"]]),
+            "array or slice — every element is copied, so `T` must be "
+            "copyable"],
+           ["`drain`", "`<T>(values: [T]) -> Vector<T>`", "the same, by "
+            "**moving** each element out of `values`; this is what `vec!` "
+            "expands to, and it is why a `vec!` of owning values works"]]),
         S("""import std::io
 import std::collections::vector
 
@@ -10167,6 +11436,153 @@ SECTIONS.append(Sec(
     keywords=["doc", "docs", "documentation", "@Doc", "///", "rune doc",
               "guide", "index.md", "generated", "sidebar", "search"]))
 
+# ===========================================================================
+# Builders
+# ===========================================================================
+SECTIONS.append(Sec(
+    "builders", "abstraction", "Builders",
+    "A tree of things is awkward to write as nested calls: the punctuation "
+    "piles up at the end and the shape of the thing is lost in it. A builder "
+    "block gives the shape back — and it is not special syntax for one "
+    "type, but a rewrite anything can opt into.",
+    [
+        H("The block form"),
+        P("`Name { ... }` whose contents are **values** rather than "
+          "`field: value` pairs is a builder block. It stands for"),
+        G("""{ var b = Name::empty()
+  b.add(<first>)
+  b.add(<second>)
+  b }"""),
+        P("so what a builder does is entirely up to the `add` it writes. "
+          "Items are separated by a line break, a `;` or a `,`."),
+        S("""import std::io
+import std::builder
+import std::collections::vector
+
+struct Node { tag: String, text: String, style: String = "" }
+
+extend Node {
+    fn style(self, s: String) -> Node {
+        Node { tag: self.tag, text: self.text, style: s }
+    }
+}
+
+fn Text(t: String) -> Node { Node { tag: "text", text: t } }
+
+struct Button { label: String = "ok" }
+
+extend Button {
+    fn style(self, s: String) -> Node {
+        Node { tag: "button", text: self.label, style: s }
+    }
+}
+
+struct Body { children: vector::Vector<Node> }
+
+bind builder::Builder to Body {
+    type Child = Node
+    fn empty() -> Self { Body { children: vector::Vector<Node>() } }
+    fn add(&var self, child: Node) { self.children.push(child) }
+}
+
+fn main() -> i64 {
+    let page = Body {
+        Text("Hello")
+        Button {}.style("wide")
+        Text("Bye").style("small")
+    }
+    var i = 0
+    while i < page.children.length() {
+        let c = page.children.at(i).unwrap()
+        io::println(c.tag + " " + c.text + " [" + c.style + "]")
+        i += 1
+    }
+    0
+}""", mode="run", title="A page written as its own shape"),
+
+        H("The mark"),
+        P("`std::builder::Builder` is what a type binds to become one. Three "
+          "things: what goes in, the empty one a block starts from, and how "
+          "to take one more."),
+        S("""pub mark Builder {
+    /// What goes in.
+    type Child
+
+    /// The empty one, which a block starts from.
+    fn empty() -> Self
+
+    /// Takes one more. Called once per item, in the order they were written.
+    fn add(&var self, child: Self::Child)
+}""", mode="decls", title="std::builder"),
+        N("`empty()` rather than a default value, because a builder may be a "
+          "struct or a class and the two are built differently. One line says "
+          "what an empty one is, and the block never has to know.",
+          label="Why `empty`"),
+
+        H("Telling it from a struct literal"),
+        P("The first item decides. A **field** is a name followed by `:`, `,` "
+          "or the closing brace; anything else is a **value**. So a single "
+          "bare name is read as a field shorthand, and a trailing `;` is how "
+          "a block holding one variable is written."),
+        T(["Written", "Read as"],
+          [["`Body { children: v }`", "a struct literal, one field"],
+           ["`Body { child }`", "a struct literal, shorthand for "
+            "`child: child`"],
+           ["`Body { child; }`", "a builder block, one item"],
+           ["`Body { Text(\"hi\") }`", "a builder block: `Text(\"hi\")` is "
+            "not a field name"],
+           ["`Body { }`", "a struct literal with no fields"],
+           ["`Body { ..other }`", "a struct literal with a base"]]),
+        S("""struct Point { x: i64, y: i64 }
+
+fn main() -> i64 {
+    let p = Point { 1; 2 }
+    p.x
+}""", mode="diag", title="A block of values on something that is not a builder"),
+
+        H("Builders nest"),
+        P("An item is an ordinary expression, so it may itself be a block. "
+          "Nothing about the outer one has to know."),
+        S("""import std::io
+import std::builder
+import std::collections::vector
+
+struct Node { text: String }
+fn Text(t: String) -> Node { Node { text: t } }
+
+struct Body { children: vector::Vector<Node> }
+bind builder::Builder to Body {
+    type Child = Node
+    fn empty() -> Self { Body { children: vector::Vector<Node>() } }
+    fn add(&var self, child: Node) { self.children.push(child) }
+}
+
+struct Panel { parts: vector::Vector<Body> }
+bind builder::Builder to Panel {
+    type Child = Body
+    fn empty() -> Self { Panel { parts: vector::Vector<Body>() } }
+    fn add(&var self, child: Body) { self.parts.push(child) }
+}
+
+fn main() -> i64 {
+    let panel = Panel {
+        Body { Text("one") }
+        Body { Text("two"); Text("three") }
+    }
+    io::println(panel.parts.length().$str())
+    0
+}""", mode="run", title="A builder whose children are built"),
+        N("The rewrite happens in the parser, before anything is checked. "
+          "Everything after that point — type checking, the borrow "
+          "checker, code generation — sees a block, a local and a run of "
+          "calls, which is why a builder behaves the same under either memory "
+          "model and costs nothing a hand-written loop would not.",
+          label="It is a rewrite, not a feature"),
+    ],
+    keywords=["builder", "Builder", "block", "add", "empty", "Child",
+              "declarative", "tree", "DSL", "E0367"]))
+
+
 SECTIONS.append(Sec(
     "macros", "abstraction", "Macros",
     "A macro is a rewrite from one run of tokens to another, chosen by "
@@ -10416,9 +11832,133 @@ fn main() -> i64 {
             "rule"]]),
         N("Errors inside an expansion point at the invocation, which is the "
           "only place the reader wrote anything.", label="Where an error lands"),
+
+        H("When a pattern is not enough"),
+        P("A pattern matches a shape. It cannot *compute* one: it has no way "
+          "to count what it was given, read a name and derive another from "
+          "it, or build a table out of its own entries. A macro that has to "
+          "do any of that is written as **code** — an ordinary Rune function "
+          "marked `@macro`, in a file that says it is a macro package."),
+        S("""@type(Macros)
+
+import std::Macro
+import std::collections::vector
+
+@macro
+pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
+    let it = input.text()
+    Macro::parse("((" + it + ") + (" + it + "))")
+}""", mode="frag", title="macros.rune"),
+        S("""fn main() -> i64 { twice!(3) }        // 6""",
+          mode="frag", title="anywhere in the program"),
+        P("A `@type(Macros)` file is a package of its own. The compiler builds "
+          "it **first** — for the machine doing the compiling, whatever the "
+          "program is being built for — and then runs it to expand each "
+          "invocation. Two things follow, and they are why it is done this "
+          "way:"),
+        T(["", "Because it is compiled"],
+          [["Everything works", "a macro is ordinary Rune. Generics, marks, "
+            "`std::collections`, files — whatever it needs. There is no "
+            "subset of the language to learn"],
+           ["Nothing leaks", "what the package imports and declares is its "
+            "own business. The program sees only the tokens that come back"],
+           ["A crash is contained", "the package is a separate program, so a "
+            "macro that fails is a failed expansion rather than a failed "
+            "compiler"],
+           ["It can be run by hand", "set `RUNE_MACRO_REQUEST` and "
+            "`RUNE_MACRO_ANSWER` and run the package, and you can see "
+            "exactly what it produces"]]),
+        N("A cross build is no different: the macro package is built for the "
+          "host and run there, and the program is built for the target.",
+          label="Cross builds"),
+
+        H("What a macro is given"),
+        P("Tokens, with their structure kept. A bracketed group is **one** "
+          "token — `block` for `{ ... }`, `parens` for `( ... )`, "
+          "`brackets` for `[ ... ]` — whose `text()` is the group exactly as "
+          "written and whose `inner()` is what is inside it."),
+        T(["On a `Tokens`", "Is"],
+          [["`length()`, `isEmpty()`", "how many tokens, counting a group as "
+            "one"],
+           ["`at(i)`", "the token there, or an empty one"],
+           ["`slice(start, stop)`", "part of the run"],
+           ["`text()`", "the run as source — or, for a run of one token, "
+            "that token: a string literal's contents, a name's spelling"],
+           ["`kind()`, `isA(kind)`", "`name`, `number`, `string`, "
+            "`character`, `punctuation`, `keyword`, `block`, `parens`, "
+            "`brackets`, or `run` for several"],
+           ["`split(sep)`", "the parts between a piece of punctuation. A "
+            "group is one token, so a comma inside brackets does not split"],
+           ["`add(more)`", "append"],
+           ["`flat()`", "every token, groups opened out"]],
+          caption="`Macro::parse`, `ident`, `number`, `string`, `punct` and "
+                  "`tokens` build them; `Macro::error` refuses."),
+        S("""@type(Macros)
+
+import std::Macro
+import std::collections::vector
+import std::text
+
+/// One accessor per name given. A pattern could not: it has no way to make
+/// `getX` out of `x`.
+@macro
+pub fn getters(input: Macro::Tokens) -> Macro::Tokens {
+    var lines = vector::Vector<String>()
+    for field in input.split(",") {
+        let name = field.text()
+        let capital = text::upper(name.$substring(0, 1)) +
+                      name.$substring(1, name.$length())
+        lines.push("extend Point { fn get" + capital +
+                   "(&self) -> i64 { self." + name + " } }")
+    }
+    Macro::parse(text::join(lines, "\\n"))
+}
+
+/// Refuses what it cannot use. The message is reported against the
+/// invocation, with an arrow back at this line.
+@macro
+pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
+    if input.isEmpty() { Macro::error("firstWord! needs a word") }
+    if !input.at(0).isA("name") {
+        Macro::error("firstWord! wants a name, and this is a " +
+                     input.at(0).kind())
+    }
+    Macro::string(input.at(0).text())
+}
+
+/// A block goes in as one token and comes back as written.
+@macro
+pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
+    let label = input.at(0).text()
+    let body = input.at(input.length() - 1)
+    if !body.isA("block") {
+        Macro::error("traced! wants a block last, and got a " + body.kind())
+    }
+    Macro::parse("{ io::println(\\"enter " + label + "\\"); " +
+                 body.inner().text() + " }")
+}""", mode="frag", title="Three macros"),
+        N("Because a block passes through untouched, whatever is inside it is "
+          "compiled in the **program**. That is how a macro reaches "
+          "`std::reflect`: `Macro::parse(\"reflect::typeName<\" + t + \">()\")` "
+          "answers about the program's types, not the package's.",
+          label="Reflection, through an expansion"),
+
+        H("What is reported, for these"),
+        T(["Written", "Reported"],
+          [["`@macro` outside a macro package", "`a procedural macro belongs "
+            "in a macro package`, naming `@type(Macros)`"],
+           ["a `@macro fn` without `pub`", "a macro has to be `pub` — the "
+            "dispatcher the compiler writes is another module"],
+           ["`Macro::error(\"...\")`", "that message, against the "
+            "invocation, with an arrow at the line that refused"],
+           ["a macro that does not finish", "`macro 'x' did not finish`, with "
+            "the status or signal and how to run it yourself"],
+           ["an expansion that does not lex", "`macro 'x' produced text that "
+            "is not valid Rune`"]]),
     ],
     keywords=["macro", "macro_rules", "expand", "stringify", "repetition",
-              "pattern", "assert", "vec", "token"]))
+              "pattern", "assert", "vec", "token", "procedural", "@macro",
+              "@type(Macros)", "Macro::Tokens", "proc macro", "block"]))
 
 SECTIONS.append(Sec(
     "diagnostics", "feedback", "Reading a diagnostic",
@@ -10523,6 +12063,8 @@ SECTIONS.append(Sec(
            ["`--emit-llvm`", "emit textual LLVM IR"],
            ["`--emit-asm`", "emit target assembly"],
            ["`--emit-lib`", "emit a `.rul` library"],
+           ["`--shared`", "emit a native shared library "
+            "(`.dylib` / `.so` / `.dll`)"],
            ["`--check`", "type-check only, produce nothing"],
            ["`-O0` … `-O3`", "optimisation level, default `-O0`"],
            ["`-g`", "emit debug information"],
@@ -10531,6 +12073,7 @@ SECTIONS.append(Sec(
            ["`--sysroot <dir>`", "the target's headers and libraries"],
            ["`--runtime-dir <dir>`", "where `libruneruntime.a` is"],
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
+           ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"],
            ["`--safety <level>`", "`none`, `minimal` or `full` (default)"],
            ["`--memory <mode>`", "`arc` (default) or `zombie`; see **Single "
             "ownership without a count**"],
@@ -10765,12 +12308,16 @@ link = ["m"]                    # -l, inherited by dependents
 link-paths = ["/usr/local/lib"] # -L
 c-sources = ["c/shim.c"]        # compiled with the build's own toolchain
 c-flags = ["-Wall"]
+cxx-sources = ["cxx/shim.cpp"]  # a C++ half, built by the matching driver
+cxx-flags = ["-Wall"]
+cxx-standard = "c++17"
 link-args = ["-Wl,-z,now"]      # passed to the linker verbatim
 target = "mingw"                # build for this target unless told otherwise
 
 [target.mingw]                  # `rune build --target mingw`
 triple = "x86_64-w64-mingw32"
 cc = "x86_64-w64-mingw32-gcc"
+cxx = "x86_64-w64-mingw32-g++"  # derived from `cc` when not given
 runner = "wine"                 # how to run one of its binaries here
 
 [dependencies]
@@ -10798,10 +12345,12 @@ src = "tests"                   # where `rune test` looks""",
            ["", "`no-stdlib`", "`false`"],
            ["", "`link`, `link-paths`", "empty; inherited by dependents"],
            ["", "`c-sources`, `c-flags`", "empty"],
+           ["", "`cxx-sources`, `cxx-flags`", "empty; a C++ half"],
+           ["", "`cxx-standard`", "`\"c++17\"`"],
            ["", "`link-args`", "empty; passed to the linker verbatim"],
            ["", "`target`", "empty, meaning the host"],
            ["`[target.<name>]`", "`triple`", "*required*"],
-           ["", "`cc`, `ar`", "the host's, which usually cannot cross"],
+           ["", "`cc`, `cxx`, `ar`", "the host's, which usually cannot cross"],
            ["", "`sysroot`, `runtime-dir`", "empty"],
            ["", "`runner`", "empty: its binaries cannot be run here"],
            ["", "`link`, `link-paths`, `link-args`", "empty"],
@@ -11621,10 +13170,12 @@ fn main() -> i64 {
           "cannot be shared pays nothing for the fact that some other type "
           "can."),
         T(["Counted with", "Which types"],
-          [["an ordinary add", "classes, closures, `Any`, `dyn Mark` — none "
-            "of which is `Send`"],
-           ["an atomic add", "`String`, `Arc<T>`, `Mutex<T>`, and any "
-            "`@sync` type"]]),
+          [["an ordinary add", "classes, `Any`, `dyn Mark` — none of which "
+            "is `Send`"],
+           ["an atomic add", "`String`, `Arc<T>`, `Mutex<T>`, any `@sync` "
+            "type — and closures, because `task::offload` hands one to a "
+            "worker thread while the thread that made it may still be "
+            "letting go of its own reference"]]),
         P("The weak-reference table is the one piece of runtime state every "
           "thread shares, and it has a lock of its own. Everything else the "
           "runtime keeps is per-object."),
@@ -11647,8 +13198,7 @@ fn main() -> i64 {
 
         H("What is not here"),
         T(["Missing", "Instead"],
-          [["`async` / `await`", "a thread and a join, or a channel"],
-           ["a closure as a thread entry", "a top-level `fn` and an argument"],
+          [["a closure as a thread entry", "a top-level `fn` and an argument"],
            ["a bounded channel", "`Channel` grows; `send` never blocks"],
            ["`select` over several channels", "one channel, or a thread "
             "for each"],
@@ -11661,10 +13211,531 @@ fn main() -> i64 {
           "simply already there. Keep globals immutable in a program that "
           "starts threads.",
           label="Globals are not checked", tone="warn"),
+        P("For several things in progress on *one* thread — waiting on each "
+          "other rather than running at once — see **Tasks and futures**: "
+          "`async fn`, `.await`, and `std::task`."),
     ],
     keywords=["thread", "threads", "concurrency", "parallel", "spawn", "join",
               "Send", "Sync", "Mutex", "lock", "shared", "race", "atomic",
               "sync", "hardwareThreads", "handle"]))
+
+
+# ===========================================================================
+# Tasks and futures
+# ===========================================================================
+SECTIONS.append(Sec(
+    "tasks", "abstraction", "Tasks and futures",
+    "`async fn` and `.await`: one thread doing several things at once. Where "
+    "threads run *at the same time* and the compiler checks what may cross "
+    "between them, tasks take turns on one thread — so they share whatever "
+    "they like, and the question is only who runs next.",
+    [
+        H("A task is a stack"),
+        P("Say what the mechanism is first, because everything else follows "
+          "from it. A task is a piece of code with a stack of its own. "
+          "`.await` on something that is not finished saves that stack and "
+          "switches to another; whatever finishes it switches back. That is "
+          "the whole of it. Nothing is rewritten into a state machine, so "
+          "everything a function can do, an `async fn` can do — `defer`, "
+          "`?`, loops, recursion through `.await` — and a task looks in a "
+          "traceback like what it is: a call, parked."),
+        P("An `async fn` is an ordinary function whose body runs as a task. "
+          "Calling it starts the task and hands back a `Future<T>`, the "
+          "promise of a `T`; `.await` collects the result, parking the task "
+          "that asked until it is there and letting the others run "
+          "meanwhile."),
+        S('''import std::io
+import std::task
+import std::time
+
+async fn step(name: String, delay: i64) -> String {
+    io::println(name + " starts")
+    task::sleep(time::milliseconds(delay)).await
+    io::println(name + " ends")
+    name + "!"
+}
+
+async fn main() -> i64 {
+    let a = step("a", 20)          // starts now, runs until its sleep
+    let b = step("b", 5)           // so does this
+    io::println("main between")
+    io::println(a.await + " " + b.await)
+    0
+}''', mode="run", title="Two tasks, taking turns"),
+        P("Both tasks start at their call and run until they first have to "
+          "wait; `main` carries on in between; the shorter sleep finishes "
+          "first. Nothing here ran at the same time as anything else — the "
+          "three took turns — which is why `step` could have written to a "
+          "class the other held with no lock at all."),
+        N("The rewrite the compiler does is small enough to show. "
+          "`async fn f(a: A) -> T { body }` becomes "
+          "`fn f(a: A) -> task::Future<T> { task::spawn(move ||() -> T { body }) }`: "
+          "the parameters are captured into a closure, and `spawn` starts it "
+          "on a stack of its own. Generics, libraries and the type system "
+          "see an ordinary function whose result is a `Future`.",
+          label="What `async` means"),
+
+        H("Where `.await` may be written"),
+        P("`.await` parks the task it is in, so it needs one: it is allowed "
+          "directly inside an `async fn`, an `async ||` closure or an "
+          "`async { }` block, and nowhere else — not in a plain closure "
+          "written inside one, which is a function of its own and may be "
+          "called from anywhere."),
+        S('''import std::task
+
+async fn answer() -> i64 { 42 }
+
+fn main() -> i64 {
+    let n = answer().await
+    n - 42
+}''', mode="diag", title="Not from ordinary code"),
+        P("From ordinary code the bridge is `wait()`, which blocks the thread "
+          "until the future is done — running every other task meanwhile — "
+          "or `task::run`, the same thing spelled for a `main`. An "
+          "`async fn main` is that, written for you: the task runs to the "
+          "end and its result is the exit code."),
+        S('''import std::io
+import std::task
+
+async fn answer() -> i64 { 6 * 7 }
+
+fn main() -> i64 {
+    io::println(answer().wait())
+    io::println(task::run(answer()))
+    0
+}''', mode="run", title="`wait()` and `run`"),
+        P("A future may be awaited more than once; each asking gets the value "
+          "again. Inside a task `wait()` does exactly what `.await` does — "
+          "parks the task — so calling a function that waits is never a "
+          "thread blocked by mistake. The keyword is there for the reader "
+          "and the compiler: it marks where a task can be set aside."),
+        P("Postfix, and bare, because it chains: `fetch(url).await?` reads "
+          "the result and then propagates its error, and `client.get(id)"
+          ".await.length()` needs no parentheses."),
+
+        H("Blocks and closures"),
+        P("`task::spawn` starts a closure as a task. An `async { }` block is "
+          "the same thing written in place — its value is the future — and "
+          "an `async ||(...)` closure starts a task each time it is called."),
+        S('''import std::io
+import std::task
+
+fn main() -> i64 {
+    let work = task::spawn(||() -> i64 { 3 + 4 })
+    io::println(work.wait())
+
+    let base = 5
+    let block = async { base + 3 }
+    io::println(block.wait())
+
+    let scale = async ||(x: i64) -> i64 { x * 5 }
+    io::println(scale(2).wait())
+    0
+}''', mode="run", title="Three ways to start one"),
+        P("A block or closure captures what it uses by value, as every closure "
+          "does: the task gets its own copy, made when it starts."),
+
+        H("What a task may take"),
+        P("The body runs after the call that started it has returned — the "
+          "caller may have moved on, returned, dropped its locals — so every "
+          "parameter is captured into the task by value. A shared borrow of "
+          "a class, `&Counter`, is the handle itself, kept alive by the "
+          "capture, and is fine. A `&var` of anything, or a `&` of a value "
+          "type, would point at a slot the caller has left, and is refused "
+          "as `E0284`."),
+        S('''import std::task
+
+async fn bump(count: &var i64) { *count += 1 }
+
+fn main() -> i64 { 0 }''', mode="diag", title="A borrow that would dangle"),
+        P("The same rule decides what `self` an `async` method may take: a "
+          "class's `&self` or `&var self` is the object, and is fine; a "
+          "struct's would be a pointer into the caller's slot, so an `async` "
+          "method on a struct or an enum takes `self` by value."),
+        S('''import std::io
+import std::task
+import std::time
+
+class Store {
+    var prefix: String
+    var count: i64
+    fn init(self, prefix: String) { self.prefix = prefix; self.count = 0 }
+
+    pub async fn load(&var self, id: i64) -> String {
+        task::sleep(time::milliseconds(1)).await
+        self.count += 1
+        self.prefix + id.$str()
+    }
+}
+
+async fn main() -> i64 {
+    var store = Store("item")
+    let a = store.load(1)
+    let b = store.load(2)
+    io::println(a.await + " " + b.await + " count=" + store.count.$str())
+    0
+}''', mode="run", title="An async method"),
+        P("`async fn` goes wherever `fn` goes: in a class, a struct, an "
+          "`extend`, a mark's requirements and the `bind` that supplies "
+          "them, a library's public interface. It cannot be an `init` or a "
+          "`deinit`, which have to finish before the object exists and "
+          "before it is gone."),
+
+        H("Sharing between tasks"),
+        P("Tasks on one thread take turns and never overlap, so the two "
+          "questions `std::thread` asks — `Send`, `Sync` — are not asked "
+          "here. Two tasks may hold one class, and both may write to it; a "
+          "write is finished before the other task gets a turn."),
+        S('''import std::io
+import std::task
+
+class Counter {
+    var hits: i64
+    fn init(self) { self.hits = 0 }
+    fn bump(&var self) { self.hits += 1 }
+}
+
+async fn touch(c: Counter, times: i64) {
+    var i = 0
+    while i < times {
+        c.bump()
+        task::yieldNow()          // let the other task have a turn
+        i += 1
+    }
+}
+
+async fn main() -> i64 {
+    let c = Counter()
+    let first = touch(c, 3)
+    let second = touch(c, 3)
+    first.await
+    second.await
+    io::println(c.hits)
+    0
+}''', mode="run", title="One class, two tasks, no lock"),
+        P("Under `--memory zombie` a value has one owner, so the tasks share "
+          "by borrowing — `touch(c: &Counter, ...)` — and change what they "
+          "share through `mem::Checked<T>`, exactly as two borrows anywhere "
+          "else would. A future's result is cloned out to each awaiter, so "
+          "the future keeps its own and frees it exactly once. The future "
+          "itself is a handle: `$clone()` — and so a read out of a "
+          "`Vector<Future<T>>`, or a `vec![...]` of them — shares the task "
+          "rather than copying what is behind it."),
+        N("A task belongs to the thread that made it, and futures do not "
+          "cross threads: awaiting one from another thread is a panic. Each "
+          "thread that uses tasks has an executor of its own.",
+          label="One thread, one executor"),
+
+        H("Sleeping, waiting, and letting others run"),
+        T(["Call", "Does"],
+          [["`task::sleep(duration).await`", "parks this task until the time "
+            "has passed; the thread runs the others"],
+           ["`task::yieldNow()`", "lets every task that is ready run before "
+            "this one continues"],
+           ["`task::all(futures).await`", "every result, in order, once every "
+            "future in the `Vector` is done"],
+           ["`task::first(futures).await`", "the first to finish: its index "
+            "and the future itself, already done. The lowest index when "
+            "several are"],
+           ["`task::race(futures).await`", "the value of the first to finish"],
+           ["`task::pending<T>()`", "a future with no task behind it, which "
+            "`complete(value)` finishes — how a callback becomes something "
+            "awaitable"],
+           ["`future.isDone()`", "whether the result is there"]]),
+        S('''import std::io
+import std::task
+import std::time
+import std::collections::vector
+
+async fn fetch(id: i64) -> String {
+    task::sleep(time::milliseconds(3 - id)).await
+    "item " + id.$str()
+}
+
+async fn main() -> i64 {
+    let results = task::all(vec![fetch(1), fetch(2), fetch(3)]).await
+    for r in results { io::println(r) }
+
+    let answer = task::pending<i64>()
+    let doubled = async { answer.await * 2 }
+    io::println(doubled.isDone())
+    answer.complete(21)
+    io::println(doubled.await)
+    0
+}''', mode="run", title="`all` and `pending`"),
+        S('''import std::io
+import std::task
+import std::time
+import std::collections::vector
+
+async fn mirror(name: String, delay: i64) -> String {
+    task::sleep(time::milliseconds(delay)).await
+    "from " + name
+}
+
+async fn main() -> i64 {
+    let slow = mirror("slow", 30)
+    let fast = mirror("fast", 5)
+    let (which, winner) = task::first(vec![slow, fast]).await
+    io::println(which)
+    io::println(winner.await)
+    // The loser keeps running; nothing cancels it. Here it is collected.
+    io::println(slow.await)
+    io::println(task::race(vec![mirror("a", 20), mirror("b", 3)]).await)
+    0
+}''', mode="run", title="`first` and `race`"),
+        P("`first` hands back the winner rather than only its value, so the "
+          "caller knows which it was and can await the others later; it "
+          "cancels nothing. `race` is `first` with the rest cancelled — and "
+          "waited for, so that when the value comes back nothing of the race "
+          "is still running. See **Cancellation and timeouts**."),
+
+        H("Cancellation and timeouts"),
+        P("A task can be asked to stop. `cancel` marks it; at its next "
+          "*suspension point* — an `.await`, a `sleep`, a `yieldNow`, a "
+          "`checkpoint` — the task leaves its body the way `?` leaves a "
+          "function: from that line, running its `defer`s and releasing "
+          "what it holds on the way out, and it ends without a result. A "
+          "task parked at one of those points is woken to leave at once; "
+          "one that is running leaves when it next reaches one. Nothing is "
+          "interrupted mid-statement, which is what makes a cancelled task "
+          "safe to reason about: every invariant it keeps between "
+          "suspension points still holds."),
+        S('''import std::io
+import std::task
+import std::time
+
+async fn slow(name: String, ms: i64) -> String {
+    defer io::println(name + " leaves")
+    task::sleep(time::milliseconds(ms)).await
+    io::println(name + " finished")
+    name.$clone()
+}
+
+async fn main() -> i64 {
+    let t = slow("tortoise", 40)
+    task::sleep(time::milliseconds(5)).await
+    t.cancel()
+    match t.outcome() {
+        task::Outcome::Done(v) => io::println("done " + v),
+        task::Outcome::Cancelled => io::println("cancelled, done=" + t.isDone().$str()),
+    }
+    0
+}''', mode="run", title="A task cancelled at its sleep"),
+        P("The tortoise left at its `sleep`: its `defer` ran, and \"finished\" "
+          "never printed. A cancelled task has no result, so `.await` on it "
+          "is a panic; `outcome()` waits like `.await` and says which of "
+          "the two happened. `isCancelled()` says whether a cancel has been "
+          "asked for, whether or not the task has reached the point where "
+          "it leaves; a task that never suspends again finishes with its "
+          "value regardless."),
+        T(["Call", "Does"],
+          [["`future.cancel()`", "asks the task to stop at its next "
+            "suspension point; a timer, a socket wait or a `pending` future "
+            "simply ends"],
+           ["`future.outcome()`", "waits, then `Done(value)` or `Cancelled`"],
+           ["`future.isCancelled()`", "whether a cancel has been asked for"],
+           ["`task::checkpoint()`", "leaves the task here if it has been "
+            "cancelled — for a loop with no `.await` in it"],
+           ["`task::race(futures).await`", "the first value; the rest are "
+            "cancelled the moment it arrives, and have left before it is "
+            "handed back"],
+           ["`task::timeout(limit, future).await`", "`Some(value)` within "
+            "`limit`, or `nil` — the task behind it cancelled, and gone"]]),
+        S('''import std::io
+import std::task
+import std::time
+
+async fn fetch(ms: i64) -> String {
+    task::sleep(time::milliseconds(ms)).await
+    "page"
+}
+
+async fn main() -> i64 {
+    match task::timeout(time::milliseconds(10), fetch(60)).await {
+        Some(page) => io::println(page),
+        None => io::println("too slow"),
+    }
+    match task::timeout(time::milliseconds(60), fetch(5)).await {
+        Some(page) => io::println(page),
+        None => io::println("too slow"),
+    }
+    0
+}''', mode="run", title="A deadline"),
+        N("Cancellation is cooperative and not recursive. A task that computes "
+          "without ever suspending is never interrupted — put a `checkpoint()` "
+          "in its loop — and cancelling a task does not cancel the tasks it "
+          "started; cancel those too if they should stop. A cancel reaches "
+          "`wait()` only at the next `.await` after it: `wait()` is for code "
+          "that is not `async`, and is not a suspension point.",
+          label="What cancel cannot do", tone="warn"),
+
+        H("Work on other threads"),
+        P("Anything that would block — a slow read, a long computation — "
+          "would stop every task on the thread if it ran there. `blocking` "
+          "runs a `fn` on a worker thread and hands back a future that is "
+          "done when it returns; `offload` does the same for a closure, and "
+          "`offloadAsync` for an `async` closure. The workers are a pool of "
+          "at most `task::workers()` threads — as many as the machine runs "
+          "at once — started as they are needed and then kept. Each is an "
+          "ordinary thread with an executor of its own, so a job may start "
+          "tasks there and wait for them: tasks do run on several threads "
+          "at once, one executor per thread, and only results cross back."),
+        S('''import std::io
+import std::task
+import std::time
+
+fn slowSquare(n: i64) -> i64 {
+    var i = 0
+    var noise = 0
+    while i < 100000 { noise += (n * n) % 7; i += 1 }
+    n * n
+}
+
+async fn compute(n: i64) -> i64 {
+    task::sleep(time::milliseconds(1)).await
+    n * 2
+}
+
+async fn main() -> i64 {
+    let a = task::blocking(slowSquare, 12)
+    let b = task::blocking(slowSquare, 13)
+    io::println(a.await + b.await)
+
+    let base = 100
+    io::println(task::offload(||() -> i64 { base + 1 }).await)
+
+    // The async closure's tasks run on the worker's executor.
+    let total = task::offloadAsync(async ||() -> i64 {
+        let x = compute(1)
+        let y = compute(2)
+        x.await + y.await
+    })
+    io::println(total.await)
+    0
+}''', mode="run", title="A pool of workers"),
+        P("The rule is `thread::spawn`'s, because these are threads: what "
+          "crosses has to be `Send`. For `blocking` that is the argument "
+          "and the result. For a closure it is everything it captured — "
+          "and a closure's *type* says nothing about its captures, so the "
+          "check is made on the closure as written, at the call, which is "
+          "why one has to be written there:"),
+        S('''import std::task
+
+class Counter { var n: i64
+    fn init(self) { self.n = 0 } }
+
+fn main() -> i64 {
+    let c = Counter()
+    task::offload(||() -> i64 { c.n + 1 }).wait()
+}''', mode="diag", title="A capture that may not cross"),
+
+        H("Sockets driven by tasks"),
+        P("`std::net`'s `TcpStream` blocks: a `read` holds the thread until "
+          "bytes arrive. `net::AsyncStream` and `net::AsyncListener` are the "
+          "same sockets set not to wait: each `read`, `write` and `accept` "
+          "tries at once and, if nothing is ready, parks the task on the "
+          "socket — `task::readable`, `task::writable` — until it is, while "
+          "the other tasks run. The executor watches every parked socket "
+          "with `poll`, alongside its timers. Nothing about the bytes "
+          "changes; only who waits, and how."),
+        S('''import std::io
+import std::net
+import std::task
+import std::collections::vector
+
+async fn serve(server: net::AsyncListener, count: i64) -> i64 {
+    var served = 0
+    while served < count {
+        match server.accept().await {
+            Ok(conn) => { handle(conn); served += 1 },
+            Err(e) => { io::println(net::describe(e)); return served },
+        }
+    }
+    served
+}
+
+async fn handle(conn: net::AsyncStream) {
+    var c = conn
+    if c.read(1024).await is Ok(bytes) {
+        c.writeText("echo: " + bytes.toString()).await
+        c.shutdown(net::Shutdown::Write)
+    }
+}
+
+async fn client(port: i32, message: String) -> String {
+    match net::connectAsync("127.0.0.1", port).await {
+        Ok(conn) => {
+            var c = conn
+            c.writeText(message).await
+            c.shutdown(net::Shutdown::Write)
+            c.readAll().await.unwrap()
+        },
+        Err(e) => net::describe(e),
+    }
+}
+
+async fn main() -> i64 {
+    var server = net::listenAsync("127.0.0.1", 0).unwrap()
+    let port = server.port()
+    let serving = serve(server, 2)
+    for r in task::all(vec![client(port, "one"), client(port, "two")]).await {
+        io::println(r)
+    }
+    io::println(serving.await)
+    0
+}''', mode="run", title="An echo server and its clients, on one thread"),
+        P("Resolving a name and connecting both wait on the network, so "
+          "`connectAsync` does that part on a worker and parks the task "
+          "until it is done. Files are not sockets: an operating system "
+          "cannot say a regular file is \"ready\", so file I/O goes through "
+          "`offload`, as it does in every runtime of this kind."),
+
+        H("What it costs"),
+        T(["Thing", "Cost"],
+          [["starting a task", "a stack from a per-thread pool, a small "
+            "box, and two switches — about half a microsecond in all"],
+           ["`.await` on something finished", "a check"],
+           ["`.await` on something not", "two switches of a few dozen "
+            "instructions each"],
+           ["a task's stack", "`task::stackSize()` bytes of address space "
+            "(1 MiB unless changed), *reserved* — a task that touches 20 KB "
+            "of it costs 20 KB"],
+           ["a task that never finishes", "its stack and whatever it holds, "
+            "until the program ends; the exit report counts them"]]),
+        P("A task that runs off the end of its stack faults rather than "
+          "writing over whatever lies beyond it; a deep recursion inside a "
+          "task wants `task::setStackSize` raised first."),
+        P("Waiting on a future that nothing can finish — no task ready, no "
+          "timer pending, no thread working — is reported as a deadlock "
+          "rather than hung:"),
+        S('''import std::io
+import std::task
+
+async fn main() -> i64 {
+    let never = task::pending<i64>()
+    io::println("waiting")
+    never.await
+}''', mode="panic", title="Reported, not hung"),
+
+        H("What is not here"),
+        T(["Missing", "Instead"],
+          [["a task moving between threads",
+            "a task stays on the thread that made it; `offloadAsync` "
+            "starts one on a worker, and results cross back"],
+           ["pre-emptive cancellation",
+            "cooperative: a `checkpoint()` in a loop that never suspends"],
+           ["asynchronous file I/O",
+            "`offload` around the call; a file is never \"not ready\""],
+           ["`select` over channels", "`first` over futures; a `pending` "
+            "future a channel's reader completes"]]),
+    ],
+    keywords=["async", "await", "task", "tasks", "future", "futures",
+              "spawn", "sleep", "blocking", "offload", "pending", "all",
+              "first", "race", "timeout", "cancel", "cancellation",
+              "yieldNow", "checkpoint", "run", "wait", "executor",
+              "coroutine", "concurrency", "AsyncStream", "AsyncListener",
+              "readable", "writable"]))
 
 
 # ===========================================================================
@@ -11693,7 +13764,8 @@ hello.o: Intel amd64 COFF object file"""),
            ["`--cc <program>`", "the toolchain driver that links"],
            ["`--sysroot <dir>`", "where that target's headers and libraries are"],
            ["`--runtime-dir <dir>`", "where its `libruneruntime.a` is"],
-           ["`--link-arg <arg>`", "appended to the link command verbatim"]]),
+           ["`--link-arg <arg>`", "appended to the link command verbatim"],
+           ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"]]),
         N("A driver named for its target — `x86_64-w64-mingw32-gcc` — is "
           "already the right compiler and is left alone. Only a general one "
           "such as `clang` is told the target, because it is one binary for "
@@ -11771,14 +13843,19 @@ target/pi/debug/report           # --target pi"""),
   ─  note: copy the executable to the target machine, or give [target.mingw]
            a `runner` that can start it here (wine, qemu-aarch64, ...)"""),
 
-        H("C sources"),
-        P("A package with a C half lists it, and `rune` compiles it with "
-          "whichever toolchain the build is using — so the C crosses along "
-          "with the Rune, and a package with an FFI shim needs nothing "
-          "special to target another machine."),
+        H("C and C++ sources"),
+        P("A package with a C or C++ half lists it, and `rune` compiles it "
+          "with whichever toolchain the build is using — so the native code "
+          "crosses along with the Rune, and a package with an FFI shim needs "
+          "nothing special to target another machine. The C++ driver is the "
+          "one that goes with `cc` unless `[target.<name>] cxx` names "
+          "another."),
         S('''[build]
 c-sources = ["c/shim.c"]
-c-flags = ["-Wall", "-Wextra"]''', mode="frag", title="Compiled with the build's own cc"),
+c-flags = ["-Wall", "-Wextra"]
+cxx-sources = ["cxx/shim.cpp"]
+cxx-flags = ["-Wall", "-Wextra"]''', mode="frag",
+          title="Compiled with the build's own cc and c++"),
 
         H("What does not cross"),
         P("The generated code is correct for every target LLVM supports. Three "
@@ -11790,6 +13867,9 @@ c-flags = ["-Wall", "-Wextra"]''', mode="frag", title="Compiled with the build's
            ["A panic message on Windows",
             "the program aborts as it should, but the text does not reach "
             "standard error"],
+           ["`extern \"C++\"`",
+            "every Itanium-ABI target — Linux, macOS, the BSDs, MinGW; not "
+            "`-windows-msvc`"],
            ["Everything else in the FFI",
             "portable: scalars, pointers, `CString`, `@cfunction`, `@export`"]]),
 
@@ -11828,7 +13908,8 @@ SECTIONS.append(Sec(
     "unused \u2014 it is gone, and may name types and foreign symbols that "
     "exist on no other target.",
     keywords=["cfg", "config", "conditional", "platform", "target", "feature",
-              "os", "arch", "windows", "linux", "macos", "portability"],
+              "os", "arch", "windows", "linux", "macos", "portability",
+              "[config]", "backend", "value", "rune add --config"],
     items=[
         H("`@Config`"),
         P("Write the condition on the declaration. Two definitions of one name "
@@ -11915,6 +13996,73 @@ fn main() -> i64 {
     io::println(Handle { id: 1, fd: 3 }.describe())
     0
 }""", mode="run", title="A type with a different shape per platform"),
+
+        H("Keys with a value of your own"),
+        P("A name that is either set or not answers a yes-or-no question. A "
+          "key with a value answers a *which* question, which is what a "
+          "package wants when it has three backends rather than one optional "
+          "one. Declare the keys a package understands, and their defaults, "
+          "in a `[config]` table; every one is then comparable in a "
+          "condition."),
+        S("""[package]
+name = "gfx"
+version = "0.1.0"
+
+[config]
+backend = "software"
+api_level = 1
+tracing = false""", mode="frag", title="Rune.toml"),
+        S("""@Config(backend == "metal")
+fn present() -> String { "metal" }
+
+@Config(backend == "vulkan")
+fn present() -> String { "vulkan" }
+
+@Config(backend != "metal" && backend != "vulkan")
+fn present() -> String { "software" }
+
+// `=` reads as the comparison: there is nothing else it could mean in a
+// condition, and `tracing = true` is how the key was written in the manifest.
+@Config(tracing = true)
+fn trace(what: String) { /* ... */ }
+
+@Config(tracing = false)
+fn trace(what: String) {}
+
+@Config(api_level == 3)
+fn modern() -> bool { true }""", mode="frag", title="What a value key answers"),
+        P("The value may be a string, a number, a boolean or a bare word, and "
+          "either side of the comparison may be the key — "
+          "`@Config(\"metal\" == backend)` says the same thing. A key the "
+          "package never declared is an error rather than a silently false "
+          "condition, so a typo is caught where it is written."),
+        SH("""$ runec --cfg backend=metal --cfg api_level=3 --cfg tracing=true app.rune
+$ rune build --cfg backend=vulkan"""),
+
+        H("Choosing a dependency's configuration"),
+        P("A package that depends on `gfx` says which backend it wants where "
+          "it names the dependency, so one build of an application does not "
+          "have to be one build of everything under it."),
+        S("""[dependencies]
+gfx = { path = "../gfx", config = { backend = "metal", tracing = true } }""",
+          mode="frag", title="Rune.toml"),
+        SH("""$ rune add gfx --config backend=vulkan"""),
+        P("The values a dependency was built with travel with it. A compiled "
+          "`.rul` records them, and its interface is re-read with the answers "
+          "*it* was built under — so a library's own `@Config` can never be "
+          "re-decided by whoever imports it."),
+        T(["Situation", "What happens"],
+          [["a key the package never declared", "an error naming the package "
+            "and listing the keys it has"],
+           ["two dependents choosing differently for one package",
+            "an error naming both, since one build cannot be two things"],
+           ["nobody choosing", "the default from `[config]`"],
+           ["a builtin key (`os`, `memory`, ...)",
+            "refused: the target already answers those"]]),
+        N("A value key and a bare name are the same mechanism. `--cfg "
+          "tracing` sets `tracing` with no value, which `@Config(tracing)` "
+          "answers true and `@Config(tracing = false)` answers false.",
+          label="One mechanism, two spellings"),
 
         H("Features and dependencies"),
         P("`--cfg` on the command line and `cfg` in the manifest set names of "
@@ -12055,7 +14203,7 @@ declaration   ::= { decorator } [ "pub" ] item
 item          ::= function | struct | class | enum | mark | bind
                 | extend | global | typealias | externBlock
 
-function      ::= "fn" identifier [ generics ] "(" params ")"
+function      ::= [ "async" ] "fn" identifier [ generics ] "(" params ")"
                   [ "->" type ] { where } block
 params        ::= [ param { "," param } [ "," "..." ] ]
 param         ::= [ label ] identifier ":" type [ "=" expression ]
@@ -12079,7 +14227,12 @@ bindTarget    ::= markPath [ "<" type { "," type } ">" ]
 extend        ::= "extend" type [ where ] "{" { member } "}"
 global        ::= "global" identifier ":" type "=" expression
 typealias     ::= "type" identifier [ generics ] "=" type
-externBlock   ::= "extern" stringLit "{" { externFn } "}"
+externBlock   ::= "extern" stringLit "{" { externItem } "}"
+externItem    ::= externFn | externVar | cxxNamespace | cxxType
+cxxNamespace  ::= "namespace" identifier "{" { externItem } "}"
+cxxType       ::= ( "class" | "struct" ) identifier [ generics ]
+                  [ ":" identifier ] "{" { member } "}"
+                | enum
 
 generics      ::= "<" genericParam { "," genericParam } ">"
 genericParam  ::= identifier [ ":" bound { "+" bound } ]
@@ -12108,6 +14261,9 @@ whileExpr     ::= "while" expression block
 loopExpr      ::= "loop" block
 forExpr       ::= "for" pattern "in" expression block
 member        ::= expression "." [ "$" ] ( identifier | integer )
+await         ::= expression "." "await"
+closure       ::= [ "move" ] "||" [ "(" params ")" ] [ "->" type ] block
+asyncExpr     ::= "async" ( block | closure )
 markCall      ::= identifier "::" markPath "." identifier "(" [ args ] ")"
 matchExpr     ::= "match" expression "{" { matchArm } "}"
 matchArm      ::= pattern { "|" pattern } [ "if" expression ]
@@ -12145,7 +14301,7 @@ unsafeBlock   ::= "unsafe" block"""),
 
         H("Operator precedence"),
         T(["", "Operators", "Associativity"],
-          [["1", "`.` `::` `()` `[]` `?`", "left"],
+          [["1", "`.` `::` `()` `[]` `?` `.await`", "left"],
            ["2", "`-` `!` `~` `&` `&var` `*` (prefix)", "right"],
            ["3", "`as` `into`", "left"],
            ["4", "`*` `/` `%`", "left"],
@@ -12185,10 +14341,11 @@ unsafeBlock   ::= "unsafe" block"""),
            ["collections", "arrays, slices, `Vector`, `Map` and `Set`; no "
             "ordered map, and no persistent collections"],
            ["concurrency", "threads, channels, atomics, `Send`, `Sync`, "
-            "`Arc` and `Mutex` on pthreads platforms; no async, no `select`, a thread "
-            "entry is a `fn` rather than a closure, and the Windows backing "
-            "still faults when a handle is destroyed and another thread "
-            "spawned"],
+            "`Arc` and `Mutex` on pthreads platforms; tasks with `async fn` "
+            "and `.await` on one thread; no `select`, no cancellation, a "
+            "thread entry is a `fn` rather than a closure, and the Windows "
+            "thread backing still faults when a handle is destroyed and "
+            "another thread spawned"],
            ["generics", "monomorphised; no higher-kinded parameters, and no "
             "specialisation — a more specific implementation cannot displace "
             "a general one"],

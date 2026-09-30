@@ -1,0 +1,22 @@
+// `async fn` across a `.rul` boundary: the library's interface is its source,
+// so the importer sees the same rewrite the library compiled — a function
+// returning a `Future`, and a task behind it.
+// LIB: libfetch lib/libfetch.rune
+// EXPECT: GET /a GET /b calls=2
+// EXPECT: pong
+// EXPECT: 42
+// EXPECT: later
+import std::io
+import std::task
+import libfetch
+
+async fn main() -> i64 {
+    var c = libfetch::Client()
+    let a = c.get("/a")
+    let b = c.get("/b")
+    io::println(a.await + " " + b.await + " calls=" + c.callCount().$str())
+    io::println(libfetch::ping().await)
+    io::println(libfetch::delayed(42, 1).await.$str())
+    io::println(libfetch::delayed("later", 1).await)
+    0
+}

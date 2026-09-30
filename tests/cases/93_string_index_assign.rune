@@ -1,0 +1,7 @@
+// `text[i]` reads a character; it is not a slot to write into.
+// EXPECT-ERROR: cannot assign into a String
+fn main() -> i64 {
+    var text = "abc"
+    text[0] = 'x'
+    0
+}

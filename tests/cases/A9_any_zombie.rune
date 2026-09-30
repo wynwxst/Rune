@@ -1,0 +1,40 @@
+// FLAGS: --memory zombie
+// EXPECT: holds i64 true
+// EXPECT: got 42
+// EXPECT: holds String true
+// EXPECT: got text
+// EXPECT: name i64
+// EXPECT: wrong none
+// EXPECT: through a call 7
+//
+// Putting a value in an `Any` boxes it, and the box is a new owned object
+// that the destination takes. Under single ownership that hand-over has to
+// be said: otherwise the statement destroys the box it just built, and the
+// binding is left holding something already gone.
+import std::io
+
+fn wrap(n: i64) -> Any { n }
+
+fn main() -> i64 {
+    let a: Any = 42
+    println!("holds i64 {}", a.holds::<i64>().$str())
+    match a.get::<i64>() {
+        Some(v) => println!("got {}", v.$str()),
+        None => println!("none"),
+    }
+
+    let s: Any = "text"
+    println!("holds String {}", s.holds::<String>().$str())
+    match s.get::<String>() {
+        Some(v) => println!("got {}", v),
+        None => println!("none"),
+    }
+
+    println!("name {}", a.typeName())
+    match a.get::<String>() {
+        Some(v) => println!("wrong {}", v),
+        None => println!("wrong none"),
+    }
+    println!("through a call {}", wrap(7).get::<i64>().unwrap().$str())
+    0
+}

@@ -19,18 +19,18 @@ fn main() -> i64 {
     let a = vec!(1, 2)
     let b = vec!(3, 4)
     let outer = vec!(a.as_iter(), b.as_iter())
-    for v in outer.as_iter().flatten() { io::println(v) }
+    for v in outer.drain().flatten() { io::println(v) }
 
     let names = vec!("ab", "cd")
     var s = ""
-    for c in names.flatMap(||(n: String) -> text::Chars { text::chars(n) }) {
+    for c in names.flatMap(||(n: &String) -> text::Chars { text::chars(n.$clone()) }) {
         s += c.$str() + "."
     }
     io::println(s)
 
     let nested = vec!(vec!(1, 2, 3), vec!(), vec!(4))
     let total = nested
-        .flatMap(||(v: vector::Vector<i64>) -> vector::VectorIter<i64> { v.as_iter() })
+        .flatMap(||(v: &vector::Vector<i64>) -> vector::VectorIter<i64> { v.as_iter() })
         .fold(0, ||(acc: i64, x: i64) -> i64 { acc + x })
     io::println(total)
 

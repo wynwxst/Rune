@@ -1,6 +1,7 @@
 #include "rune/Diagnostics.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <iostream>
 #include <unistd.h>
 
@@ -232,6 +233,13 @@ DiagnosticEngine::expansionNotes(SourceRange r) const {
 }
 
 void DiagnosticEngine::emit(const Diagnostic &incoming) {
+  if (Silent) {
+    if (incoming.Sev == Severity::Error || incoming.Sev == Severity::Fatal)
+      ++ErrorCount;
+    else if (incoming.Sev == Severity::Warning)
+      ++WarningCount;
+    return;
+  }
   if (suppressDepth())
     return;
   // A pass collecting its findings for later: set aside verbatim, so that
@@ -252,7 +260,7 @@ void DiagnosticEngine::emit(const Diagnostic &incoming) {
   if (sev == Severity::Error || sev == Severity::Fatal) {
     ++ErrorCount;
     if (ErrorLimit && ErrorCount > ErrorLimit) {
-      if (!LimitReported) {
+      if (!LimitReported && !Json && !Short) {
         LimitReported = true;
         const Palette &P = Color ? kColored : kPlain;
         std::cerr << P.BoldRed << "●" << P.Reset << " too many errors emitted; "
@@ -270,6 +278,15 @@ void DiagnosticEngine::emit(const Diagnostic &incoming) {
   if (sev != Severity::Note && sev != Severity::Remark) {
     std::vector<std::string> exp = expansionNotes(d.Range);
     d.Notes.insert(d.Notes.end(), exp.begin(), exp.end());
+  }
+
+  if (Json) {
+    emitJson(std::cerr, d, sev);
+    return;
+  }
+  if (Short) {
+    emitShort(std::cerr, d, sev);
+    return;
   }
 
   const Palette &P = Color ? kColored : kPlain;
@@ -334,17 +351,140 @@ void DiagnosticEngine::emit(const Diagnostic &incoming) {
 // Status lines
 //===----------------------------------------------------------------------===//
 
+namespace {
+void jsonString(std::ostream &os, const std::string &s) {
+  os << '"';
+  for (unsigned char c : s) {
+    switch (c) {
+    case '"': os << "\\\""; break;
+    case '\\': os << "\\\\"; break;
+    case '\n': os << "\\n"; break;
+    case '\r': os << "\\r"; break;
+    case '\t': os << "\\t"; break;
+    default:
+      if (c < 0x20) {
+        static const char *hex = "0123456789abcdef";
+        os << "\\u00" << hex[c >> 4] << hex[c & 15];
+      } else {
+        os << c;
+      }
+    }
+  }
+  os << '"';
+}
+
+const char *severityName(Severity s) {
+  switch (s) {
+  case Severity::Note: return "note";
+  case Severity::Remark: return "remark";
+  case Severity::Warning: return "warning";
+  case Severity::Error: return "error";
+  case Severity::Fatal: return "fatal";
+  }
+  return "error";
+}
+} // namespace
+
+/// `"file":…,"line":…` for `r`: the path made absolute, a 1-based line and a
+/// 0-based byte column, for both ends. Nothing at all for an invalid range.
+static void jsonRange(std::ostream &os, const SourceManager &SM, SourceRange r) {
+  PresumedLoc b = SM.decode(r.begin());
+  if (!b.isValid())
+    return;
+  PresumedLoc e = SM.decode(r.end());
+  if (!e.isValid())
+    e = b;
+  std::error_code ec;
+  std::filesystem::path path = std::filesystem::absolute(b.File->Path, ec);
+  os << ",\"file\":";
+  jsonString(os, ec ? b.File->Path : path.lexically_normal().string());
+  os << ",\"line\":" << b.Line << ",\"column\":" << b.Column
+     << ",\"endLine\":" << e.Line << ",\"endColumn\":" << e.Column;
+}
+
+void DiagnosticEngine::emitJson(std::ostream &os, const Diagnostic &d,
+                                Severity sev) {
+  os << "{\"severity\":\"" << severityName(sev) << "\"";
+  if (d.Code) {
+    os << ",\"code\":";
+    jsonString(os, d.Code.str());
+  }
+  os << ",\"message\":";
+  jsonString(os, d.Message);
+  jsonRange(os, SM, d.Range);
+  os << ",\"notes\":[";
+  for (size_t i = 0; i < d.Notes.size(); ++i) {
+    if (i) os << ",";
+    jsonString(os, d.Notes[i]);
+  }
+  os << "],\"related\":[";
+  bool first = true;
+  for (const RelatedInfo &rel : d.Related) {
+    if (!SM.decode(rel.Range.begin()).isValid())
+      continue;
+    if (!first) os << ",";
+    first = false;
+    std::string text = rel.Label;
+    if (!rel.Hint.empty())
+      text += text.empty() ? rel.Hint : ": " + rel.Hint;
+    os << "{\"message\":";
+    jsonString(os, text);
+    jsonRange(os, SM, rel.Range);
+    os << "}";
+  }
+  os << "]}\n";
+}
+
+/// `file:line:col` for `r`, with a 1-based column as editors count them, or
+/// "" for an invalid range.
+static std::string shortPlace(const SourceManager &SM, SourceRange r) {
+  PresumedLoc b = SM.decode(r.begin());
+  if (!b.isValid())
+    return "";
+  std::error_code ec;
+  std::filesystem::path path = std::filesystem::absolute(b.File->Path, ec);
+  return (ec ? b.File->Path : path.lexically_normal().string()) + ":" +
+         std::to_string(b.Line) + ":" + std::to_string(b.Column + 1);
+}
+
+void DiagnosticEngine::emitShort(std::ostream &os, const Diagnostic &d,
+                                 Severity sev) {
+  std::string place = shortPlace(SM, d.Range);
+  std::string lead = place.empty() ? std::string("runec") : place;
+  os << lead << ": " << severityName(sev) << ": " << d.Message;
+  if (d.Code)
+    os << " [" << d.Code.str() << "]";
+  os << "\n";
+  for (const std::string &n : d.Notes)
+    os << lead << ": note: " << n << "\n";
+  for (const RelatedInfo &rel : d.Related) {
+    std::string at = shortPlace(SM, rel.Range);
+    if (at.empty())
+      continue;
+    std::string text = rel.Label;
+    if (!rel.Hint.empty())
+      text += text.empty() ? rel.Hint : ": " + rel.Hint;
+    os << at << ": note: " << text << "\n";
+  }
+}
+
 void DiagnosticEngine::status(const std::string &text) {
+  if (Json || Short)
+    return;
   const Palette &P = Color ? kColored : kPlain;
   std::cerr << P.Green << "○" << P.Reset << " " << text << "\n";
 }
 
 void DiagnosticEngine::statusOk(const std::string &text) {
+  if (Json || Short)
+    return;
   const Palette &P = Color ? kColored : kPlain;
   std::cerr << P.Green << "●" << P.Reset << " " << text << "\n";
 }
 
 void DiagnosticEngine::statusFail(const std::string &text) {
+  if (Json || Short)
+    return;
   const Palette &P = Color ? kColored : kPlain;
   std::cerr << P.BoldRed << "●" << P.Reset << " " << text << "\n";
 }

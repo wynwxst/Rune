@@ -1,0 +1,62 @@
+// Macros, both kinds: a rewrite chosen by pattern, and one written as code.
+//
+// The second kind lives in a file of its own — see `examples/macros_pack.rune`
+// — because it is built and run while this program is compiled.
+//
+//     runec -o macros examples/macros.rune examples/macros_pack.rune && ./macros
+
+import std::io
+import std::collections::vector
+
+//===--------------------------------------------------------------------===//
+// 1. A pattern is enough when the shape can be written down
+//===--------------------------------------------------------------------===//
+
+macro twiceOver {
+    ($x: expr) => { (($x) + ($x)) }
+}
+
+macro ints {
+    ($($item: expr),*) => {
+        {
+            var built = vector::Vector<i64>()
+            $( built.push($item); )*
+            built
+        }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// 2. Code is needed when the expansion has to be *computed*
+//===--------------------------------------------------------------------===//
+//
+// `enumerate!` writes the enum *and* a `name` for it. A pattern macro cannot:
+// the body has to know each variant's position to give it a number, and there
+// is nothing in a pattern that counts.
+
+enumerate!(Red, Green, Blue)
+
+fn main() -> i64 {
+    io::println("pattern:")
+    println!("  twiceOver {}", twiceOver!(21).$str())
+    println!("  ints      {}", ints!(1, 2, 3).length().$str())
+
+    io::println("computed:")
+    println!("  nameOf    {} {} {}", nameOf(Red), nameOf(Green), nameOf(Blue))
+    println!("  numbers   {} {} {}", (Red as i64).$str(),
+             (Green as i64).$str(), (Blue as i64).$str())
+    println!("  total     {}", total!(10 + 20 + 12).$str())
+    println!("  firstWord {}", firstWord!(alpha beta))
+
+    // A block goes in as one token and comes back as written, so what it
+    // holds is compiled here — including reflection, which then answers
+    // about *this* program's types.
+    timed!(work, {
+        io::println("  in the block")
+    })
+    println!("  typeName  {}", typeNameOf!(i64))
+
+    // `firstWord!(1)` would be refused, with the message the macro wrote and
+    // an arrow at this line.
+    0
+}

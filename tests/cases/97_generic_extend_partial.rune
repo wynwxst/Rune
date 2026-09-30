@@ -1,0 +1,13 @@
+// EXPECT-ERROR: names its parameters
+//
+// An `extend` that names a shape rather than the type's own parameters would
+// be a partial specialisation — methods on some instantiations and not
+// others — which this language does not have.
+struct Pair<A, B> { first: A, second: B }
+struct Box<T> { value: T }
+
+extend<X, Y> Pair<X, Box<Y>> {
+    pub fn inner(&self) -> Y { self.second.value.$clone() }
+}
+
+fn main() -> i64 { 0 }

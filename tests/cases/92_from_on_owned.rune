@@ -1,0 +1,7 @@
+// A `from` clause names where a borrow comes from. On a type that holds no
+// borrow it says nothing, and almost always means the writer expected an
+// owned value to need one to move — it does not.
+// EXPECT-ERROR: `from` names where a borrow comes from, and the result is not a borrow
+fn first_word(text: String) -> String from text { text }
+
+fn main() -> i64 { 0 }

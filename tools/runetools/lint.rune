@@ -1,0 +1,1169 @@
+// The lint rules.
+//
+// Every rule reads the token stream and the index — never the compiler —
+// so linting is fast enough to run on every keystroke, and a file with
+// errors in it still gets linted. Rules report a `Finding`, and where the
+// right change is certain, the edits that make it: `rune lint --fix`
+// applies them, and an editor offers them as quick fixes.
+//
+// A rule is turned off or on for one item — a declaration, a field, a
+// statement — with an `@lint` directive before it, for the whole file with
+// one at the top that nothing follows but imports, and for a package in the
+// `[lint]` table of its `Rune.toml`:
+//
+//     @lint(allow(line-too-long, todo))     // the file's: only imports follow
+//     import std::io
+//
+//     @lint(allow(unused-variable))
+//     let unused = 1
+//
+//     [lint]
+//     allow = ["naming"]
+//     warn = ["missing-docs"]
+//     max-line-length = 100
+
+import std::collections::vector
+import std::dictionary
+import runetools::syntax
+import runetools::index
+import runetools::project
+
+//===--------------------------------------------------------------------===//
+// Rules and findings
+//===--------------------------------------------------------------------===//
+
+/// One rule: its name, whether it is on by default, and what it is for.
+pub class Rule {
+    pub name: String
+    /// `warn`, `note` or `allow`.
+    pub level: String
+    pub summary: String
+
+    fn init(self, name: String, level: String, summary: String) {
+        self.name = name
+        self.level = level
+        self.summary = summary
+    }
+}
+
+/// Every rule there is, in the order `--list` shows them.
+pub fn rules() -> vector::Vector<Rule> {
+    var r = vector::Vector<Rule>()
+    r.push(Rule("unused-variable", "warn", "a local, pattern or loop variable that is never read"))
+    r.push(Rule("unused-parameter", "allow", "a parameter the function never reads"))
+    r.push(Rule("unused-import", "warn", "an import whose name is never used"))
+    r.push(Rule("duplicate-import", "warn", "two imports binding the same name, so the first is silently shadowed"))
+    r.push(Rule("never-reassigned", "warn", "a `var` that is never changed, and could be a `let`"))
+    r.push(Rule("dead-code", "warn", "a private function, type or global nothing in its file uses"))
+    r.push(Rule("unreachable-code", "warn", "a statement after `return`, `break` or `continue`"))
+    r.push(Rule("self-assignment", "warn", "assigning something to itself"))
+    r.push(Rule("bool-comparison", "warn", "comparing with `true` or `false`"))
+    r.push(Rule("empty-block", "warn", "an `if`, `else`, `for` or `loop` body with nothing in it"))
+    r.push(Rule("naming", "note", "types in UpperCamelCase; functions and variables in lowerCamelCase"))
+    r.push(Rule("needless-return", "note", "`return` as a function's last statement"))
+    r.push(Rule("while-true", "note", "`while true`, which `loop` says directly"))
+    r.push(Rule("unnecessary-semicolon", "note",
+                "a `;` at the end of a line, where the line already ends the statement"))
+    r.push(Rule("trailing-whitespace", "note", "spaces or tabs at the end of a line"))
+    r.push(Rule("tab-indentation", "note", "a line indented with tabs"))
+    r.push(Rule("line-too-long", "note", "a line longer than the limit (120 by default)"))
+    r.push(Rule("missing-docs", "allow", "a `pub` declaration with no `///` comment"))
+    r.push(Rule("todo", "allow", "a TODO, FIXME or XXX comment"))
+    r.push(Rule("invalid-lint", "warn", "an `@lint` directive that names no rule or applies to nothing"))
+    r
+}
+
+/// One change to the source: replace bytes `start..end` with `text`.
+pub class Edit {
+    pub start: i64
+    pub end: i64
+    pub text: String
+
+    fn init(self, start: i64, end: i64, text: String) {
+        self.start = start
+        self.end = end
+        self.text = text
+    }
+}
+
+/// Something a rule found.
+pub class Finding {
+    pub rule: String
+    /// `warn` or `note`.
+    pub level: String
+    pub message: String
+    /// Byte offsets into the source.
+    pub start: i64
+    pub end: i64
+    /// What the fix does, and the edits that do it; no edits, no fix.
+    pub fixTitle: String
+    pub edits: vector::Vector<Edit>
+    /// The code is dead or unused, which an editor may show faded.
+    pub unnecessary: bool
+
+    fn init(self) {
+        self.rule = ""
+        self.level = ""
+        self.message = ""
+        self.start = 0
+        self.end = 0
+        self.fixTitle = ""
+        self.edits = vector::Vector<Edit>()
+        self.unnecessary = false
+    }
+}
+
+/// Which rules run, and how.
+pub class Config {
+    /// Rule name to `warn`, `note` or `allow`, overriding the default.
+    pub levels: dictionary::Map<String, String>
+    pub maxLineLength: i64
+
+    fn init(self) {
+        self.levels = dictionary::Map<String, String>()
+        self.maxLineLength = 120
+    }
+
+    /// The level `rule` runs at.
+    pub fn levelOf(&self, rule: &String) -> String {
+        if self.levels.peek(rule) is Some(l) { return l.$clone() }
+        for r in rules() { if r.name == rule { return r.level.$clone() } }
+        "allow"
+    }
+
+    /// Turns `rule` on at its default level (or `warn` if that is `allow`),
+    /// or sets `level` for it. `all` names every rule.
+    pub fn set(&var self, rule: &String, level: &String) {
+        if rule == "all" {
+            for r in rules() { self.set(r.name, level) }
+            return
+        }
+        var l = level.$clone()
+        if l == "warn" {
+            for r in rules() { if r.name == rule && r.level == "note" { l = "note" } }
+        }
+        self.levels.put(rule.$clone(), l)
+    }
+
+    /// What a package's `[lint]` table says.
+    pub fn apply(&var self, m: &project::Manifest) {
+        for r in m.lintAllow { self.set(r, "allow") }
+        for r in m.lintWarn { self.set(r, "warn") }
+        if m.maxLineLength > 0 { self.maxLineLength = m.maxLineLength }
+    }
+}
+
+/// True when `name` is a rule.
+pub fn isRule(name: &String) -> bool {
+    if name == "all" { return true }
+    for r in rules() { if r.name == name { return true } }
+    false
+}
+
+//===--------------------------------------------------------------------===//
+// Running them
+//===--------------------------------------------------------------------===//
+
+/// Collects findings, dropping those the configuration or a comment turns off.
+/// One `@lint(...)` that covers part of a file: bytes `from..upto`.
+class Scope {
+    pub from: i64
+    pub upto: i64
+    pub rule: String
+    pub level: String
+
+    fn init(self, from: i64, upto: i64, rule: String, level: String) {
+        self.from = from
+        self.upto = upto
+        self.rule = rule
+        self.level = level
+    }
+}
+
+/// Collects findings at the level the configuration and the file's `@lint`
+/// directives give them, dropping those turned off.
+class Sink {
+    pub found: vector::Vector<Finding>
+    config: Config
+    /// A file-wide `@lint(...)`: rule (or `all`) to level.
+    fileLevels: dictionary::Map<String, String>
+    /// Every scoped `@lint(...)`, in the order they appear.
+    scopes: vector::Vector<Scope>
+
+    fn init(self, config: Config) {
+        self.found = vector::Vector<Finding>()
+        self.config = config
+        self.fileLevels = dictionary::Map<String, String>()
+        self.scopes = vector::Vector<Scope>()
+    }
+
+    /// The level `rule` runs at for the whole file: the file's own
+    /// directive, then the configuration.
+    fn fileLevel(&self, rule: &String) -> String {
+        if self.fileLevels.peek(rule) is Some(l) { return l.$clone() }
+        if self.fileLevels.peek("all") is Some(l) { return l.$clone() }
+        self.config.levelOf(rule)
+    }
+
+    /// The level `rule` has at byte `at`: the innermost directive covering
+    /// it — a rule named outright beating `all` in the same one — then the
+    /// file's level.
+    fn levelAt(&self, rule: &String, at: i64) -> String {
+        var best = -1
+        var bestSpan = 0
+        var i = 0
+        while i < self.scopes.length() {
+            let sc = self.scopes.look(i)
+            if sc.from <= at && at < sc.upto && (sc.rule == rule || sc.rule == "all") {
+                let span = sc.upto - sc.from
+                let better = best < 0 || span < bestSpan ||
+                             (span == bestSpan && sc.rule == rule && self.scopes.look(best).rule == "all")
+                if better {
+                    best = i
+                    bestSpan = span
+                }
+            }
+            i += 1
+        }
+        if best >= 0 { return self.scopes.look(best).level.$clone() }
+        self.fileLevel(rule)
+    }
+
+    /// Whether `rule` runs anywhere in the file.
+    fn wants(&self, rule: &String) -> bool {
+        if self.fileLevel(rule) != "allow" { return true }
+        for sc in self.scopes {
+            if (sc.rule == rule || sc.rule == "all") && sc.level != "allow" { return true }
+        }
+        false
+    }
+
+    fn add(&var self, lx: &syntax::Lexed, f: Finding) {
+        let level = self.levelAt(f.rule, f.start)
+        if level == "allow" { return }
+        var g = f
+        g.level = level
+        self.found.push(g)
+    }
+}
+
+/// A finding over bytes `start..end`.
+fn finding(rule: String, message: String, start: i64, end: i64) -> Finding {
+    var f = Finding()
+    f.rule = rule
+    f.message = message
+    f.start = start
+    f.end = end
+    f
+}
+
+//===--------------------------------------------------------------------===//
+// `@lint(...)` directives
+//===--------------------------------------------------------------------===//
+
+/// Whether token `i` is the `@` of an `@lint`.
+fn isLintAt(lx: &syntax::Lexed, i: i64) -> bool {
+    lx.isText(i, "@") && lx.text(i + 1) == "lint" && lx.at(i + 1).start == lx.at(i).end
+}
+
+/// The token after the decorator whose `@` is at `i`: past its name and
+/// any argument list.
+fn afterDecorator(lx: &syntax::Lexed, i: i64) -> i64 {
+    var j = i + 2
+    if lx.isText(j, "(") { j = lx.closing(j) + 1 }
+    j
+}
+
+/// Past newlines, `;`, and any run of decorators, from `i`.
+fn pastDecorators(lx: &syntax::Lexed, i: i64) -> i64 {
+    var j = i
+    loop {
+        while !lx.isEnd(j) && (lx.isNewline(j) || lx.isText(j, ";")) { j += 1 }
+        if lx.isText(j, "@") && (lx.isIdent(j + 1) || lx.at(j + 1).kind == syntax::Kind::Keyword) {
+            j = afterDecorator(lx, j)
+            continue
+        }
+        return j
+    }
+}
+
+/// The last token of the item that starts at `n`: a declaration with a
+/// body runs to its closing brace; anything else — a field, a `let`, a
+/// statement — to the end of its statement, blocks and all.
+fn itemEnd(lx: &syntax::Lexed, n: i64) -> i64 {
+    var k = n
+    if lx.isText(k, "pub") { k += 1 }
+    let w = lx.text(k)
+    if w == "fn" || w == "async" || w == "class" || w == "struct" || w == "enum" || w == "mark" ||
+            w == "bind" || w == "extend" || w == "macro" || w == "extern" || w == "unsafe" {
+        // The body's `{`, if there is one before the item ends.
+        let stop = index::statementEnd(lx, k)
+        var j = k
+        var depth = 0
+        while !lx.isEnd(j) {
+            if lx.isText(j, "(") || lx.isText(j, "[") { depth += 1 }
+            elif lx.isText(j, ")") || lx.isText(j, "]") { depth -= 1 }
+            elif depth == 0 && lx.isText(j, "{") { return lx.closing(j) }
+            elif depth == 0 && j > stop { return stop }
+            j += 1
+        }
+        return stop
+    }
+    index::statementEnd(lx, n)
+}
+
+/// `allow(unused-variable, naming)` in tokens `from..upto`: each level with
+/// its rule names, which are spelled with `-` and so arrive as several
+/// tokens. Reports a directive it cannot read.
+fn readLintArgs(sink: &var Sink, lx: &syntax::Lexed, from: i64, upto: i64,
+                levels: &var vector::Vector<String>, rules: &var vector::Vector<String>) {
+    var i = from
+    while i <= upto {
+        if lx.isText(i, ",") || lx.isNewline(i) { i += 1; continue }
+        let level = lx.text(i)
+        if !(level == "allow" || level == "warn" || level == "note") || !lx.isText(i + 1, "(") {
+            var f = finding("invalid-lint", "`@lint` takes `allow(...)`, `warn(...)` or `note(...)`, not `" +
+                            lx.text(i) + "`", lx.at(i).start, lx.at(i).end)
+            f.level = "warn"
+            sink.found.push(f)
+            return
+        }
+        let close = lx.closing(i + 1)
+        var name = ""
+        var k = i + 2
+        while k <= close {
+            if lx.isText(k, ",") || k == close {
+                let rule = syntax::collapse(name)
+                if !rule.$isEmpty() {
+                    if isRule(rule) {
+                        levels.push(level.$clone())
+                        rules.push(rule)
+                    } else {
+                        var f = finding("invalid-lint", "there is no lint rule called `" + rule + "`",
+                                        lx.at(i).start, lx.at(close).end)
+                        f.level = "warn"
+                        sink.found.push(f)
+                    }
+                }
+                name = ""
+            } elif !lx.isNewline(k) {
+                name += lx.text(k)
+            }
+            k += 1
+        }
+        i = close + 1
+    }
+}
+
+/// Reads every `@lint(...)` in the file.
+///
+/// One at the top — nothing above it but comments and other directives —
+/// with nothing after it but directives, imports or the end of the file is
+/// the file's. Any other covers exactly the item after it: a declaration,
+/// a field, a statement.
+fn readDirectives(sink: &var Sink, lx: &syntax::Lexed) {
+    var atTop = true
+    var i = 0
+    while !lx.isEnd(i) {
+        if lx.isNewline(i) || lx.isText(i, ";") { i += 1; continue }
+        if !lx.isText(i, "@") {
+            atTop = false
+            i += 1
+            continue
+        }
+        let after = afterDecorator(lx, i)
+        if !isLintAt(lx, i) {
+            i = after
+            continue
+        }
+        var levels = vector::Vector<String>()
+        var rules = vector::Vector<String>()
+        if lx.isText(i + 2, "(") { readLintArgs(sink, lx, i + 3, lx.closing(i + 2) - 1, &var levels, &var rules) }
+        let next = pastDecorators(lx, after)
+        let fileWide = atTop && (lx.isEnd(next) || lx.isText(next, "import"))
+        if fileWide {
+            var k = 0
+            while k < rules.length() {
+                sink.fileLevels.put(rules.get(k), levels.get(k))
+                k += 1
+            }
+        } elif lx.isEnd(next) || lx.isText(next, "}") {
+            var f = finding("invalid-lint", "this `@lint` applies to nothing: there is no item after it",
+                            lx.at(i).start, lx.at(after - 1).end)
+            f.level = "warn"
+            sink.found.push(f)
+        } else {
+            let from = lx.at(i).start
+            let upto = lx.at(itemEnd(lx, next)).end
+            var k = 0
+            while k < rules.length() {
+                sink.scopes.push(Scope(from, upto, rules.get(k), levels.get(k)))
+                k += 1
+            }
+        }
+        i = after
+    }
+}
+
+/// Lints module `m` of `p`. The findings come back in source order.
+pub fn run(p: &project::Project, m: i64, config: Config) -> vector::Vector<Finding> {
+    var sink = Sink(config)
+    let ix = p.module(m)
+    let lx = ix.lexed
+    readDirectives(&var sink, lx)
+
+    locals(&var sink, ix)
+    imports(&var sink, p, m)
+    deadCode(&var sink, ix)
+    statements(&var sink, ix)
+    naming(&var sink, ix)
+    lines(&var sink, lx)
+    docs(&var sink, ix)
+
+    // Source order, and stable: an insertion sort is plenty for a file's worth.
+    var out = sink.found
+    var i = 1
+    while i < out.length() {
+        var j = i
+        while j > 0 && out.look(j - 1).start > out.look(j).start {
+            out.swap(j - 1, j)
+            j -= 1
+        }
+        i += 1
+    }
+    out
+}
+
+/// Applies every finding's edits to `source`, skipping any that overlap one
+/// already applied. Returns the new text.
+pub fn applyFixes(source: &String, fs: &vector::Vector<Finding>) -> String {
+    var edits = vector::Vector<Edit>()
+    for f in fs {
+        for e in f.edits { edits.push(Edit(e.start, e.end, e.text.$clone())) }
+    }
+    // Last first, so earlier offsets stay right.
+    var i = 1
+    while i < edits.length() {
+        var j = i
+        while j > 0 && edits.look(j - 1).start < edits.look(j).start {
+            edits.swap(j - 1, j)
+            j -= 1
+        }
+        i += 1
+    }
+    var out = source.$clone()
+    var floor = source.$length() + 1
+    for e in edits {
+        if e.end > floor { continue }
+        out = out.$substring(0, e.start) + e.text + out.$substring(e.end, out.$length())
+        floor = e.start
+    }
+    out
+}
+
+//===--------------------------------------------------------------------===//
+// Locals: unused, never reassigned, badly named
+//===--------------------------------------------------------------------===//
+
+/// Whether the use of a name at token `i` only writes it: `x = ...` at the
+/// start of a statement.
+fn onlyWrites(lx: &syntax::Lexed, i: i64) -> bool {
+    lx.isText(i + 1, "=") && (lx.isNewline(i - 1) || lx.isText(i - 1, "{") || lx.isText(i - 1, ";") ||
+                              lx.isText(i - 1, "}"))
+}
+
+/// Whether the use at token `i` may change the variable: assigned, borrowed
+/// mutably, or the receiver of a method that might take `&var self`.
+fn mayChange(lx: &syntax::Lexed, i: i64) -> bool {
+    let next = lx.text(i + 1)
+    if next == "=" || next == "+=" || next == "-=" || next == "*=" || next == "/=" || next == "%=" ||
+            next == "&=" || next == "|=" || next == "^=" || next == "<<=" || next == ">>=" ||
+            next == "." || next == "[" { return true }
+    (lx.isText(i - 1, "var") || lx.isText(i - 1, "mut")) && lx.isText(i - 2, "&")
+}
+
+/// Whether identifier token `i` is a label rather than a use: a named
+/// argument or a field in a struct literal.
+fn isLabel(lx: &syntax::Lexed, i: i64) -> bool {
+    lx.isText(i + 1, ":") && (lx.isText(i - 1, "(") || lx.isText(i - 1, ",") || lx.isText(i - 1, "{") ||
+                              lx.isNewline(i - 1))
+}
+
+fn locals(sink: &var Sink, ix: &index::Index) {
+    let lx = ix.lexed
+    var k = 0
+    while k < ix.symbols.length() {
+        let s = ix.symbols.look(k)
+        k += 1
+        if !s.isCallable() || s.bodyOpen < 0 { continue }
+        let bs = index::bindings(ix, k - 1)
+        var reads = vector::Vector<i64>()
+        var changes = vector::Vector<i64>()
+        var uses = vector::Vector<vector::Vector<i64>>()
+        for _b in bs {
+            reads.push(0)
+            changes.push(0)
+            uses.push(vector::Vector<i64>())
+        }
+        var i = s.bodyOpen + 1
+        while i < s.bodyClose {
+            // `@lint(allow(unused-variable))` names rules, not variables.
+            if isLintAt(lx, i) { i = afterDecorator(lx, i); continue }
+            if lx.isIdent(i) && !lx.isText(i - 1, ".") && !lx.isText(i - 1, "::") && !lx.isText(i + 1, "::") &&
+                    !(lx.isText(i - 1, "$") && lx.isText(i - 2, ".")) {
+                let b = index::resolveLocal(bs, lx.text(i), i)
+                if b >= 0 && bs.look(b).tok != i && !isLabel(lx, i) {
+                    uses.touch(b).push(i)
+                    if !onlyWrites(lx, i) { reads.replace(b, 1) }
+                    if mayChange(lx, i) { changes.replace(b, 1) }
+                }
+                // A struct-literal shorthand, `Point { x, y }`, reads `x`.
+                if b >= 0 && bs.look(b).tok != i && isLabel(lx, i) && !lx.isText(i + 1, ":") { reads.replace(b, 1) }
+            }
+            i += 1
+        }
+        var b = 0
+        while b < bs.length() {
+            let bd = bs.look(b)
+            let name = bd.name.$clone()
+            let tok = lx.at(bd.tok)
+            let underscore = name.$length() > 0 && name.$byteAt(0) == 95
+            if reads.get(b) == 0 && !underscore && name != "self" {
+                let rule = if bd.kind == "param" { "unused-parameter" } else { "unused-variable" }
+                let what = match bd.kind {
+                    "param" => "parameter", "for" => "loop variable", "pattern" => "binding",
+                    "closure" => "closure parameter", _ => "variable",
+                }
+                var f = finding(rule, what + " `" + name + "` is never read", tok.start, tok.end)
+                f.unnecessary = true
+                // A parameter's name is part of how it is called; renaming it
+                // is the author's decision, not a fix.
+                if bd.kind == "pattern" && isFieldShorthand(lx, bd.tok) {
+                    // `Rect { width, height }` names the fields it binds, so
+                    // the name cannot change; the field can be ignored.
+                    f.fixTitle = "Ignore the field with `" + name + ": _`"
+                    f.edits.push(Edit(tok.end, tok.end, ": _"))
+                } elif bd.kind != "param" {
+                    f.fixTitle = "Prefix `" + name + "` with an underscore"
+                    f.edits.push(Edit(tok.start, tok.start, "_"))
+                    for u in uses.look(b) { f.edits.push(Edit(lx.at(u).start, lx.at(u).start, "_")) }
+                }
+                sink.add(lx, f)
+            }
+            // `var x = ...` never changed: it could be `let`.
+            if bd.kind == "var" && lx.isText(bd.tok - 1, "var") && changes.get(b) == 0 && reads.get(b) == 1 &&
+                    uses.look(b).length() > 0 {
+                let kw = lx.at(bd.tok - 1)
+                var f = finding("never-reassigned", "`" + name + "` is never changed; declare it with `let`",
+                                kw.start, tok.end)
+                f.fixTitle = "Change `var` to `let`"
+                f.edits.push(Edit(kw.start, kw.end, "let"))
+                sink.add(lx, f)
+            }
+            if !isLowerCamel(name) && name != "self" {
+                var f = finding("naming", nameKind(bd.kind) + " `" + name + "` should be lowerCamelCase: `" +
+                                toLowerCamel(name) + "`",
+                                tok.start, tok.end)
+                if bd.kind != "param" {
+                    f.fixTitle = "Rename to `" + toLowerCamel(name) + "`"
+                    f.edits.push(Edit(tok.start, tok.end, toLowerCamel(name)))
+                    for u in uses.look(b) { f.edits.push(Edit(lx.at(u).start, lx.at(u).end, toLowerCamel(name))) }
+                }
+                sink.add(lx, f)
+            }
+            b += 1
+        }
+    }
+}
+
+/// Whether the pattern name at `tok` is a field shorthand, `Rect { width }`:
+/// between `{`/`,` and `,`/`}`, in braces that follow a type's name.
+fn isFieldShorthand(lx: &syntax::Lexed, tok: i64) -> bool {
+    if !(lx.isText(tok - 1, "{") || lx.isText(tok - 1, ",")) { return false }
+    if !(lx.isText(tok + 1, ",") || lx.isText(tok + 1, "}")) { return false }
+    var d = 0
+    var k = tok - 1
+    while k >= 0 {
+        if lx.isText(k, "}") || lx.isText(k, ")") { d += 1 }
+        elif lx.isText(k, "(") { if d == 0 { return false } ; d -= 1 }
+        elif lx.isText(k, "{") {
+            if d == 0 { return lx.isIdent(k - 1) }
+            d -= 1
+        }
+        k -= 1
+    }
+    false
+}
+
+fn nameKind(kind: &String) -> String {
+    match kind { "param" => "parameter", "for" => "loop variable", "closure" => "parameter", _ => "variable" }
+}
+
+//===--------------------------------------------------------------------===//
+// Imports
+//===--------------------------------------------------------------------===//
+
+fn imports(sink: &var Sink, p: &project::Project, m: i64) {
+    let ix = p.module(m)
+    let lx = ix.lexed
+    // Names used anywhere outside the imports themselves.
+    var used = dictionary::Map<String, i64>()
+    var i = 0
+    let n = lx.count()
+    while i < n {
+        if isLintAt(lx, i) { i = afterDecorator(lx, i); continue }
+        if lx.isIdent(i) && !lx.isText(i - 1, ".") { used.put(lx.text(i), 1) }
+        i += 1
+    }
+    // Macros invoked, `name!`, which may come from an import.
+    var macros = dictionary::Map<String, i64>()
+    i = 0
+    while i < n {
+        if lx.isIdent(i) && lx.isText(i + 1, "!") && lx.at(i + 1).start == lx.at(i).end { macros.put(lx.text(i), 1) }
+        i += 1
+    }
+    // A package's own module — `src/lib.rune`, `src/main.rune` — imports
+    // the package's other modules to make them part of it, which is a use
+    // however little it says.
+    let file = project::fileOf(ix.path)
+    let dir = project::fileOf(project::dirOf(ix.path))
+    let rootFile = dir == "src" && (file == "lib.rune" || file == "main.rune")
+    var seen = dictionary::Map<String, i64>()
+    var k = 0
+    while k < ix.imports.length() {
+        let imp = ix.imports.look(k)
+        let start = lx.at(imp.memberFrom).start
+        let end = lx.at(imp.memberTo).end
+        if imp.isGlob {
+            k += 1
+            continue
+        }
+        if seen.holds(imp.alias) {
+            let first = ix.imports.look(seen.atOr(imp.alias, 0))
+            let f = finding("duplicate-import",
+                            "`" + imp.alias + "` is already imported as `" + first.path +
+                                "`; this import shadows it, so qualify one of them in full", start, end)
+            sink.add(lx, f)
+        }
+        seen.put(imp.alias.$clone(), k)
+        // Uses of the name inside other imports do not count, and neither
+        // does the import's own name: look for a use past every import.
+        var count = 0
+        var t = 0
+        while t < n {
+            if lx.isIdent(t) && lx.text(t) == imp.alias && !lx.isText(t - 1, ".") && !inImport(ix, t) { count += 1 }
+            t += 1
+        }
+        if count == 0 {
+            let target = p.importTarget(m, k)
+            // A module with `extend` or `bind` blocks changes what other
+            // types can do just by being imported, and one whose macros are
+            // invoked is used by name nowhere: both are left alone. So is an
+            // import that could not be followed — the compiler says so.
+            var needed = target < 0
+            if rootFile && imp.segments.length() > 1 {
+                let own = project::dirOf(project::dirOf(ix.path))
+                if target >= 0 && project::dirOf(p.module(target).path).$find(own) == 0 { needed = true }
+            }
+            if target >= 0 && !p.importIsItem(m, k) {
+                let mod = p.module(target)
+                if mod.hasBindings { needed = true }
+                for s in mod.symbols {
+                    if s.kind == "macro" && macros.holds(s.name) { needed = true }
+                }
+            }
+            if !needed {
+                var f = finding("unused-import", "`" + imp.path + "` is imported but never used", start, end)
+                f.unnecessary = true
+                // A group member alone is not a line to delete.
+                if !imp.inGroup || groupSize(ix, imp.startTok) == 1 {
+                    f.fixTitle = "Remove the import"
+                    f.edits.push(wholeLines(lx, lx.at(imp.startTok).start, lx.at(imp.endTok).end))
+                }
+                sink.add(lx, f)
+            }
+        }
+        k += 1
+    }
+}
+
+/// How many members the import statement starting at `startTok` has.
+fn groupSize(ix: &index::Index, startTok: i64) -> i64 {
+    var n = 0
+    for imp in ix.imports { if imp.startTok == startTok { n += 1 } }
+    n
+}
+
+fn inImport(ix: &index::Index, tok: i64) -> bool {
+    for imp in ix.imports {
+        if imp.startTok <= tok && tok <= imp.endTok { return true }
+    }
+    false
+}
+
+/// An edit deleting the lines bytes `start..end` are on, when nothing else is
+/// on them; otherwise just those bytes.
+fn wholeLines(lx: &syntax::Lexed, start: i64, end: i64) -> Edit {
+    let first = lx.lineOf(start)
+    let last = lx.lineOf(end)
+    let from = lx.lineStarts.get(first)
+    let before = lx.source.$substring(from, start)
+    let lineEnd = from + lx.lineText(last).$length() + (lx.lineStarts.get(last) - from)
+    let after = if lineEnd >= end { lx.source.$substring(end, lineEnd) } else { "" }
+    if syntax::collapse(before).$isEmpty() && syntax::collapse(after).$isEmpty() {
+        var upto = lx.source.$length()
+        if last + 1 < lx.lineStarts.length() { upto = lx.lineStarts.get(last + 1) }
+        return Edit(from, upto, "")
+    }
+    Edit(start, end, "")
+}
+
+//===--------------------------------------------------------------------===//
+// Dead code
+//===--------------------------------------------------------------------===//
+
+fn deadCode(sink: &var Sink, ix: &index::Index) {
+    let lx = ix.lexed
+    // How often each name appears, anywhere.
+    var counts = dictionary::Map<String, i64>()
+    var i = 0
+    while i < lx.count() {
+        if isLintAt(lx, i) { i = afterDecorator(lx, i); continue }
+        if lx.isIdent(i) {
+            let name = lx.text(i)
+            counts.put(name.$clone(), counts.atOr(name, 0) + 1)
+        }
+        i += 1
+    }
+    for s in ix.symbols {
+        if s.isPublic || !s.container.$isEmpty() || s.isExtern || !s.decorators.isEmpty() { continue }
+        if s.name == "main" || s.name.$isEmpty() { continue }
+        if !(s.kind == "function" || s.kind == "class" || s.kind == "struct" || s.kind == "enum" ||
+             s.kind == "global") { continue }
+        // Its own name is one appearance.
+        if counts.atOr(s.name, 0) > 1 { continue }
+        // A file that says it produces something other than a program may
+        // be read by a macro package or a test harness: be sure first.
+        if ix.fileType == "Macros" { continue }
+        let t = lx.at(s.nameTok)
+        var f = finding("dead-code", s.kind + " `" + s.name + "` is never used", t.start, t.end)
+        f.unnecessary = true
+        sink.add(lx, f)
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Statements
+//===--------------------------------------------------------------------===//
+
+fn statements(sink: &var Sink, ix: &index::Index) {
+    let lx = ix.lexed
+    let n = lx.count()
+
+    // Where each function body ends, to recognise its last statement.
+    var bodyCloses = dictionary::Map<i64, i64>()
+    for s in ix.symbols {
+        if s.isCallable() && s.bodyOpen >= 0 { bodyCloses.put(s.bodyClose, s.bodyOpen) }
+    }
+
+    var parenDepth = 0
+    var i = 0
+    while i < n {
+        let t = lx.at(i)
+        if t.kind == syntax::Kind::Punct {
+            if t.text == "(" || t.text == "[" { parenDepth += 1 }
+            elif (t.text == ")" || t.text == "]") && parenDepth > 0 { parenDepth -= 1 }
+        }
+
+        // Unreachable code and needless returns.
+        if t.kind == syntax::Kind::Keyword && (t.text == "return" || t.text == "break" || t.text == "continue") &&
+                !lx.isText(i - 1, "=>") && !lx.isText(i - 1, "??") && !lx.isText(i - 1, "else") {
+            let end = index::statementEnd(lx, i)
+            var next = end + 1
+            while !lx.isEnd(next) && (lx.isNewline(next) || lx.isText(next, ";")) { next += 1 }
+            if !lx.isEnd(next) && !lx.isText(next, "}") && !lx.isText(end + 1, "}") {
+                let stop = index::statementEnd(lx, next)
+                var f = finding("unreachable-code", "this can never run: `" + t.text + "` comes first",
+                                lx.at(next).start, lx.at(if stop >= next { stop } else { next }).end)
+                f.unnecessary = true
+                sink.add(lx, f)
+            }
+            if t.text == "return" && lx.isText(next, "}") && bodyCloses.holds(next) && atBodyLevel(lx,
+                    bodyCloses.atOr(next, -1), i) {
+                var f = finding("needless-return",
+                                "the last expression of a function is its result; `return` is not needed",
+                                t.start, t.end)
+                if end == i {
+                    f.fixTitle = "Remove `return`"
+                    f.edits.push(wholeLines(lx, t.start, t.end))
+                } else {
+                    f.fixTitle = "Remove `return`"
+                    f.edits.push(Edit(t.start, lx.at(i + 1).start, ""))
+                }
+                sink.add(lx, f)
+            }
+        }
+
+        // `while true { ... }`
+        if lx.isText(i, "while") && lx.isText(i + 1, "true") && lx.isText(i + 2, "{") {
+            var f = finding("while-true", "`while true` is an infinite loop; say `loop`", t.start, lx.at(i + 1).end)
+            f.fixTitle = "Replace with `loop`"
+            f.edits.push(Edit(t.start, lx.at(i + 1).end, "loop"))
+            sink.add(lx, f)
+        }
+
+        // `x == true`, `x != false`, and the ones that need a `!`.
+        if t.kind == syntax::Kind::Punct && (t.text == "==" || t.text == "!=") {
+            let rightLit = lx.isText(i + 1, "true") || lx.isText(i + 1, "false")
+            let leftLit = lx.isText(i - 1, "true") || lx.isText(i - 1, "false")
+            if rightLit || leftLit {
+                let lit = if rightLit { lx.text(i + 1) } else { lx.text(i - 1) }
+                let keeps = (t.text == "==") == (lit == "true")
+                let span0 = if rightLit { lx.at(i).start } else { lx.at(i - 1).start }
+                let span1 = if rightLit { lx.at(i + 1).end } else { lx.at(i).end }
+                var f = finding("bool-comparison",
+                                if keeps { "comparing with `" + lit + "` does nothing; use the value itself" }
+                                else { "comparing with `" + lit + "` negates; use `!` instead" },
+                                span0, span1)
+                if keeps {
+                    f.fixTitle = "Remove the comparison"
+                    if rightLit { f.edits.push(Edit(lx.at(i - 1).end, lx.at(i + 1).end, "")) }
+                    else { f.edits.push(Edit(lx.at(i - 1).start, lx.at(i + 1).start, "")) }
+                }
+                sink.add(lx, f)
+            }
+        }
+
+        // An empty body where a body was the point.
+        if lx.isText(i, "{") && lx.isText(i + 1, "}") && !hasCommentBetween(lx, t.end, lx.at(i + 1).start) {
+            let owner = blockOwner(lx, i)
+            if !owner.$isEmpty() {
+                var f = finding("empty-block", "empty `" + owner + "` body", t.start, lx.at(i + 1).end)
+                f.unnecessary = false
+                sink.add(lx, f)
+            }
+        }
+
+        // `x = x`
+        if lx.isText(i, "=") && (lx.isIdent(i - 1) || lx.isText(i - 1, "self")) {
+            var s = i - 1
+            while (lx.isText(s - 1, ".") && (lx.isIdent(s - 2) || lx.isText(s - 2, "self"))) { s -= 2 }
+            if lx.isNewline(s - 1) || lx.isText(s - 1, "{") || lx.isText(s - 1, ";") {
+                let end = index::statementEnd(lx, i)
+                let left = syntax::collapse(lx.span(s, i - 1))
+                let right = syntax::collapse(lx.span(i + 1, end))
+                if left == right && left.$find("(") < 0 {
+                    sink.add(lx, finding("self-assignment", "`" + left + "` is assigned to itself",
+                                         lx.at(s).start, lx.at(end).end))
+                }
+            }
+        }
+
+        // `;` at the end of a line.
+        if lx.isText(i, ";") && parenDepth == 0 {
+            let next = lx.at(i + 1)
+            if next.kind == syntax::Kind::End || next.line > t.line || (next.kind == syntax::Kind::Punct &&
+                    next.text == "}") ||
+                    next.kind == syntax::Kind::Newline {
+                var f = finding("unnecessary-semicolon", "a line break already ends this statement", t.start, t.end)
+                f.fixTitle = "Remove the `;`"
+                // With any space before it, when that space would be left
+                // trailing.
+                var from = t.start
+                if next.line > t.line || next.kind == syntax::Kind::End {
+                    while from > 0 && (lx.source.$byteAt(from - 1) == 32 ||
+                                       lx.source.$byteAt(from - 1) == 9) { from -= 1 }
+                }
+                f.edits.push(Edit(from, t.end, ""))
+                sink.add(lx, f)
+            }
+        }
+        i += 1
+    }
+}
+
+/// Whether token `tok` sits directly in the body opened at `open`, rather
+/// than in a block nested inside it.
+fn atBodyLevel(lx: &syntax::Lexed, open: i64, tok: i64) -> bool {
+    if open < 0 { return false }
+    var depth = 0
+    var j = open + 1
+    while j < tok {
+        if lx.isText(j, "{") { depth += 1 }
+        elif lx.isText(j, "}") { depth -= 1 }
+        j += 1
+    }
+    depth == 0
+}
+
+fn hasCommentBetween(lx: &syntax::Lexed, a: i64, b: i64) -> bool {
+    for c in lx.comments {
+        if c.start >= a && c.end <= b { return true }
+    }
+    false
+}
+
+/// What the `{` at `i` is the body of, when it is one a lint cares about:
+/// `if`, `elif`, `else`, `while`, `for` or `loop`. "" otherwise.
+fn blockOwner(lx: &syntax::Lexed, i: i64) -> String {
+    if lx.isText(i - 1, "else") { return "else" }
+    if lx.isText(i - 1, "loop") { return "loop" }
+    var depth = 0
+    var j = i - 1
+    while j >= 0 {
+        let t = lx.at(j)
+        if t.kind == syntax::Kind::Punct {
+            if t.text == ")" || t.text == "]" { depth += 1 }
+            elif t.text == "(" || t.text == "[" {
+                if depth == 0 { return "" }
+                depth -= 1
+            } elif depth == 0 && (t.text == "{" || t.text == "}" || t.text == ";" || t.text == "=>" || t.text == "=" ||
+                                  t.text == "||") { return "" }
+        } elif t.kind == syntax::Kind::Newline && depth == 0 {
+            return ""
+        } elif t.kind == syntax::Kind::Keyword && depth == 0 {
+            // An empty `while` body is an idiom — `while self.fill() {}` does
+            // its work in the condition — so it is not reported.
+            if t.text == "while" { return "" }
+            if t.text == "if" || t.text == "elif" || t.text == "for" { return t.text.$clone() }
+            if t.text == "fn" || t.text == "match" || t.text == "class" || t.text == "struct" || t.text == "enum" ||
+                    t.text == "extend" || t.text == "bind" || t.text == "mark" || t.text == "unsafe" { return "" }
+        }
+        j -= 1
+    }
+    ""
+}
+
+//===--------------------------------------------------------------------===//
+// Naming
+//===--------------------------------------------------------------------===//
+
+/// `lowerCamelCase`: starts lower case (or with `_`), no `_` after that.
+pub fn isLowerCamel(name: &String) -> bool {
+    var i = 0
+    let n = name.$length()
+    while i < n && name.$byteAt(i) == 95 { i += 1 }
+    if i == n { return true }
+    let b = name.$byteAt(i)
+    if b >= 65 && b <= 90 { return false }
+    while i < n {
+        if name.$byteAt(i) == 95 { return false }
+        i += 1
+    }
+    true
+}
+
+/// `UpperCamelCase`: starts upper case, no `_`.
+pub fn isUpperCamel(name: &String) -> bool {
+    if name.$isEmpty() || !syntax::startsUpper(name) { return false }
+    name.$find("_") < 0
+}
+
+/// `SCREAMING_SNAKE_CASE`.
+fn isScreaming(name: &String) -> bool {
+    var i = 0
+    while i < name.$length() {
+        let b = name.$byteAt(i)
+        if b >= 97 && b <= 122 { return false }
+        i += 1
+    }
+    true
+}
+
+/// `read_line` → `readLine`; `ReadLine` → `readLine`.
+pub fn toLowerCamel(name: &String) -> String {
+    var out = ""
+    var i = 0
+    let n = name.$length()
+    var lead = ""
+    while i < n && name.$byteAt(i) == 95 { lead += "_"; i += 1 }
+    var upper = false
+    var first = true
+    while i < n {
+        let b = name.$byteAt(i) as i64
+        if b == 95 {
+            upper = !first
+            i += 1
+            continue
+        }
+        var c = name.$substring(i, i + 1)
+        if first && b >= 65 && b <= 90 { c = lowerByte(b) }
+        elif upper && b >= 97 && b <= 122 { c = upperByte(b) }
+        out += c
+        upper = false
+        first = false
+        i += 1
+    }
+    lead + out
+}
+
+/// `read_line` → `ReadLine`.
+pub fn toUpperCamel(name: &String) -> String {
+    let lower = toLowerCamel(name)
+    var i = 0
+    while i < lower.$length() && lower.$byteAt(i) == 95 { i += 1 }
+    if i >= lower.$length() { return lower }
+    let b = lower.$byteAt(i) as i64
+    if b >= 97 && b <= 122 { return lower.$substring(i, i + 0) + upperByte(b) + lower.$substring(i + 1,
+            lower.$length()) }
+    lower.$substring(i, lower.$length())
+}
+
+/// The ASCII letter `b` in lower case, as a one-byte string.
+fn lowerByte(b: i64) -> String {
+    let letters = "abcdefghijklmnopqrstuvwxyz"
+    letters.$substring(b - 65, b - 64)
+}
+
+/// The ASCII letter `b` in upper case, as a one-byte string.
+fn upperByte(b: i64) -> String {
+    let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    letters.$substring(b - 97, b - 96)
+}
+
+fn naming(sink: &var Sink, ix: &index::Index) {
+    let lx = ix.lexed
+    for s in ix.symbols {
+        if s.isExtern || s.name.$isEmpty() || s.nameTok < 0 || s.inBind ||
+                lx.at(s.nameTok).kind != syntax::Kind::Ident { continue }
+        let t = lx.at(s.nameTok)
+        if s.isType() || s.kind == "variant" {
+            if !isUpperCamel(s.name) {
+                sink.add(lx, finding("naming", s.kind + " `" + s.name + "` should be UpperCamelCase: `" +
+                                     toUpperCamel(s.name) + "`",
+                                     t.start, t.end))
+            }
+        } elif s.isCallable() || s.kind == "field" {
+            if !isLowerCamel(s.name) {
+                let what = if s.kind == "field" { "field" } else { "function" }
+                sink.add(lx, finding("naming", what + " `" + s.name + "` should be lowerCamelCase: `" +
+                                     toLowerCamel(s.name) + "`",
+                                     t.start, t.end))
+            }
+        } elif s.kind == "global" {
+            if !isLowerCamel(s.name) && !isScreaming(s.name) {
+                sink.add(lx, finding("naming", "global `" + s.name +
+                                     "` should be lowerCamelCase or SCREAMING_SNAKE_CASE",
+                                     t.start, t.end))
+            }
+        }
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// Lines
+//===--------------------------------------------------------------------===//
+
+fn lines(sink: &var Sink, lx: &syntax::Lexed) {
+    // Lines inside a string that spans several: their whitespace is part of
+    // the string, not the layout.
+    var inString = dictionary::Map<i64, i64>()
+    for t in lx.tokens {
+        if t.kind == syntax::Kind::Str {
+            let last = lx.lineOf(t.end)
+            var l = t.line
+            while l < last {
+                inString.put(l, 1)
+                l += 1
+            }
+        }
+    }
+    var inComment = dictionary::Map<i64, i64>()
+    for c in lx.comments {
+        if c.isBlock {
+            var l = c.line + 1
+            let last = lx.lineOf(c.end)
+            while l <= last { inComment.put(l, 1); l += 1 }
+        }
+        let body = c.text.$clone()
+        if body.$find("TODO") >= 0 || body.$find("FIXME") >= 0 || body.$find("XXX") >= 0 {
+            sink.add(lx, finding("todo", "an unfinished task is noted here", c.start, c.end))
+        }
+    }
+    let limit = sink.config.maxLineLength
+    var line = 0
+    while line < lx.lineCount() {
+        let text = lx.lineText(line)
+        let start = lx.lineStarts.get(line)
+        let n = text.$length()
+        if !inString.holds(line) {
+            var e = n
+            while e > 0 && (text.$byteAt(e - 1) == 32 || text.$byteAt(e - 1) == 9) { e -= 1 }
+            if e < n {
+                var f = finding("trailing-whitespace", "trailing whitespace", start + e, start + n)
+                f.fixTitle = "Remove trailing whitespace"
+                f.edits.push(Edit(start + e, start + n, ""))
+                sink.add(lx, f)
+            }
+            var k = 0
+            var tabs = false
+            while k < n && (text.$byteAt(k) == 32 || text.$byteAt(k) == 9) {
+                if text.$byteAt(k) == 9 { tabs = true }
+                k += 1
+            }
+            if tabs && k < n && !inComment.holds(line) {
+                var f = finding("tab-indentation", "indented with tabs; Rune source is indented with spaces", start,
+                                start + k)
+                f.fixTitle = "Indent with spaces"
+                var spaces = ""
+                var j = 0
+                while j < k {
+                    spaces += if text.$byteAt(j) == 9 { "    " } else { " " }
+                    j += 1
+                }
+                f.edits.push(Edit(start, start + k, spaces))
+                sink.add(lx, f)
+            }
+        }
+        if limit > 0 {
+            let width = charWidth(text)
+            if width > limit {
+                sink.add(lx, finding("line-too-long", "line is " + width.$str() + " characters, over the limit of " +
+                                     limit.$str(),
+                                     start + byteAtChar(text, limit), start + n))
+            }
+        }
+        line += 1
+    }
+}
+
+/// How many characters `s` is: its bytes that are not UTF-8 continuations.
+fn charWidth(s: &String) -> i64 {
+    var w = 0
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        if b < 128 || b >= 192 { w += 1 }
+        i += 1
+    }
+    w
+}
+
+/// The byte offset of character `c` in `s`.
+fn byteAtChar(s: &String, c: i64) -> i64 {
+    var w = 0
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        if b < 128 || b >= 192 {
+            if w == c { return i }
+            w += 1
+        }
+        i += 1
+    }
+    s.$length()
+}
+
+//===--------------------------------------------------------------------===//
+// Documentation
+//===--------------------------------------------------------------------===//
+
+fn docs(sink: &var Sink, ix: &index::Index) {
+    let lx = ix.lexed
+    for s in ix.symbols {
+        if !s.isPublic || !s.doc.$isEmpty() || s.nameTok < 0 || s.inBind || s.kind == "variant" { continue }
+        let t = lx.at(s.nameTok)
+        sink.add(lx, finding("missing-docs", "`pub` " + s.kind + " `" + s.name + "` has no documentation", t.start,
+                             t.end))
+    }
+}

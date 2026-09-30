@@ -1,0 +1,14 @@
+// EXPECT-ERROR: is a Rune type, not a
+//
+// A Rune struct and a C++ struct of the same fields may well have the same
+// layout, but only the declaration inside the block says so — and says which
+// C++ type the parameter is, which the symbol has to name.
+extern "C++" {
+    namespace demo {
+        fn consume(p: Point) -> i64
+    }
+}
+
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 { 0 }

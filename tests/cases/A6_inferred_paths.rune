@@ -1,0 +1,66 @@
+// EXPECT: dot variant   2
+// EXPECT: bare variant 1
+// EXPECT: dot static    5000
+// EXPECT: arg static    0
+// EXPECT: payload       12.0
+// EXPECT: array         2
+// EXPECT: pattern       green 6.0
+// EXPECT: method infer  7
+// EXPECT: free infer    2.5
+//
+// A leading `.` names something on the type the context is already
+// expecting — a variant, a static method, anything the type owns — so a type
+// that has been said once does not have to be said again. It works the same
+// in a pattern, where it also says the name is a variant rather than a new
+// binding.
+//
+// The other half of the same idea: a generic parameter no argument mentions
+// may still be settled by where the result is going.
+import std::io
+
+enum Colour { Red, Green, Blue }
+enum Shape { Circle(f64), Rect(f64, f64) }
+
+struct Duration { ms: i64 }
+extend Duration {
+    fn seconds(n: i64) -> Duration { Duration { ms: n * 1000 } }
+    fn zero() -> Duration { Duration { ms: 0 } }
+}
+
+struct Holder { n: i64 }
+extend Holder { fn widen<U>(&self) -> U { self.n as U } }
+
+fn blank<T>() -> T { 2.5 as T }
+
+fn paint(c: Colour) -> i64 { c as i64 }
+fn wait(d: Duration) -> i64 { d.ms }
+fn area(s: Shape) -> f64 {
+    match s { .Circle(r) => r * r * 3.0, .Rect(w, h) => w * h }
+}
+fn name(c: Colour) -> String {
+    match c { .Red => "red", .Green => "green", .Blue => "blue" }
+}
+
+fn main() -> i64 {
+    let c: Colour = .Blue
+    println!("dot variant   {}", (c as i64).$str())
+    println!("bare variant {}", paint(.Green).$str())
+
+    let d: Duration = .seconds(5)
+    println!("dot static    {}", d.ms.$str())
+    println!("arg static    {}", wait(.zero()).$str())
+
+    println!("payload       {}", area(.Circle(2.0)).$str())
+
+    let list: [3:Colour] = [.Red, .Green, .Blue]
+    println!("array         {}", (list[2] as i64).$str())
+
+    println!("pattern       {} {}", name(.Green), area(.Rect(2.0, 3.0)).$str())
+
+    let h = Holder { n: 7 }
+    let widened: i64 = h.widen()
+    println!("method infer  {}", widened.$str())
+    let f: f64 = blank()
+    println!("free infer    {}", f.$str())
+    0
+}

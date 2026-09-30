@@ -1,0 +1,31 @@
+// WITH: macros/pack.rune
+// EXPECT: 2 4 6
+// EXPECT: 5 2 5
+// EXPECT: 3
+// EXPECT: a | b c
+//
+// `Tokens.capture` takes a macro's input apart by a pattern — `$name` for a
+// piece, `[ ... ]` for a part that may be missing — and `Macro::quote` writes
+// the expansion with the pieces' names in it. A `$` that is not a capture's,
+// as in `.$length()`, is left alone.
+import std::io
+import std::collections::vector
+
+fn line(v: vector::Vector<i64>) -> String {
+    var out = ""
+    for x in v {
+        if !out.$isEmpty() { out += " " }
+        out += x.$str()
+    }
+    out
+}
+
+fn main() -> i64 {
+    let xs = vec![-3, 1, 2, 3]
+    io::println(line(comprehend!(x * 2 for x in xs if x > 0)))
+    let words = vec!["alpha", "be", "gamma"]
+    io::println(line(comprehend!(w.$length() for w in words)))
+    io::println(comprehend!(n for n in xs if n != 0 && n < 3).length())
+    io::println(around!(a => b c))
+    0
+}

@@ -1,0 +1,70 @@
+// EXPECT: truncateTo(0.29, 2) = 0.29
+// EXPECT: truncateTo(-1.239, 2) = -1.23
+// EXPECT: truncateTo(4.35, 1) = 4.3
+// EXPECT: roundTo(2.675, 2) = 2.68
+// EXPECT: roundTo(1.005, 2) = 1.01
+// EXPECT: roundTo(3.14159, 3) = 3.142
+// EXPECT: roundTo(-2.5, 0) = -3.0
+// EXPECT: roundTo(1234.0, -2) = 1200.0
+// EXPECT: roundTo(1250.0, -2) = 1300.0
+// EXPECT: floorTo(1.005, 2) = 1.0
+// EXPECT: floorTo(-2.31, 1) = -2.4
+// EXPECT: ceilTo(2.31, 1) = 2.4
+// EXPECT: ceilTo(0.1 + 0.2, 1) = 0.3
+// EXPECT: HalfEven 2.25 = 2.2
+// EXPECT: HalfEven 2.35 = 2.4
+// EXPECT: HalfEven 0.5 = 0.0
+// EXPECT: HalfEven -1.5 = -2.0
+// EXPECT: AwayFromZero -2.31 = -2.4
+// EXPECT: roundToStep(1.23, 0.05) = 1.25
+// EXPECT: roundToStep(17.0, 5.0) = 15.0
+// EXPECT: 10340
+// EXPECT: 29
+// EXPECT: 1999
+// EXPECT: unscaled(10340, 2) = 103.4
+// EXPECT: 103.40
+// EXPECT: 1 0
+// EXPECT: 2 5
+// EXPECT: nan stays = nan
+//
+// Rounding to decimal places rounds the decimal that was meant, not the
+// float error around it: 0.29 truncates to 0.29, 2.675 rounds to 2.68.
+import std::io
+import std::math
+
+fn show(label: String, v: f64) { io::println(label + " = " + v.$str()) }
+
+fn main() -> i64 {
+    show("truncateTo(0.29, 2)", math::truncateTo(0.29, 2))
+    show("truncateTo(-1.239, 2)", math::truncateTo(-1.239, 2))
+    show("truncateTo(4.35, 1)", math::truncateTo(4.35, 1))
+    show("roundTo(2.675, 2)", math::roundTo(2.675, 2))
+    show("roundTo(1.005, 2)", math::roundTo(1.005, 2))
+    show("roundTo(3.14159, 3)", math::roundTo(3.14159, 3))
+    show("roundTo(-2.5, 0)", math::roundTo(-2.5, 0))
+    show("roundTo(1234.0, -2)", math::roundTo(1234.0, -2))
+    show("roundTo(1250.0, -2)", math::roundTo(1250.0, -2))
+    show("floorTo(1.005, 2)", math::floorTo(1.005, 2))
+    show("floorTo(-2.31, 1)", math::floorTo(-2.31, 1))
+    show("ceilTo(2.31, 1)", math::ceilTo(2.31, 1))
+    show("ceilTo(0.1 + 0.2, 1)", math::ceilTo(0.1 + 0.2, 1))
+    show("HalfEven 2.25", math::roundWith(2.25, 1, math::Rounding::HalfEven))
+    show("HalfEven 2.35", math::roundWith(2.35, 1, math::Rounding::HalfEven))
+    show("HalfEven 0.5", math::roundWith(0.5, 0, math::Rounding::HalfEven))
+    show("HalfEven -1.5", math::roundWith(-1.5, 0, math::Rounding::HalfEven))
+    show("AwayFromZero -2.31", math::roundWith(-2.31, 1, math::Rounding::AwayFromZero))
+    show("roundToStep(1.23, 0.05)", math::roundToStep(1.23, 0.05))
+    show("roundToStep(17.0, 5.0)", math::roundToStep(17.0, 5.0))
+    io::println(math::scaled(103.4, 2))
+    io::println(math::scaled(0.29, 2))
+    io::println(math::scaled(19.99, 2))
+    show("unscaled(10340, 2)", math::unscaled(10340, 2))
+    let (w, f) = math::splitDecimal(103.4, 2)
+    io::println(w.$str() + "." + f.$str())
+    let (w2, f2) = math::splitDecimal(0.999, 2)
+    io::println(w2.$str() + " " + f2.$str())
+    let (w3, f3) = math::splitDecimal(-2.5, 1)
+    io::println(w3.$str() + " " + f3.$str())
+    show("nan stays", math::roundTo(math::nan(), 2))
+    0
+}

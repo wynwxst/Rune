@@ -6,8 +6,3 @@ The convention is worth knowing even though you never write it. A function retur
 > **One value on the heap**
 >
 > `mem::Handle<T>` puts any single value on the heap under exactly this scheme — it is a class, so a handle is counted like anything else, and the value goes when the last handle does. Reach for it rather than an allocator.
-
-> [!NOTE]
-> **Checking it yourself**
->
-> `process::liveObjectCount()` is the same counter the leak report uses. It is a legitimate way to assert in a test that a data structure released everything it should.

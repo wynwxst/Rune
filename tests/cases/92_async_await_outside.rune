@@ -1,0 +1,11 @@
+// `.await` parks the task it is in, so it needs one: an `async fn`, an
+// `async ||` closure or an `async { }` block. Elsewhere, `.wait()`.
+// EXPECT-ERROR: `.await` is only allowed inside an `async` function, closure or block
+import std::task
+
+async fn answer() -> i64 { 42 }
+
+fn main() -> i64 {
+    let n = answer().await
+    n - 42
+}

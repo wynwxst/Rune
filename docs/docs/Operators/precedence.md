@@ -4,7 +4,7 @@ Tighter binding first. Everything on one row associates left to right, except `?
 
 | Level | Operators | Kind |
 | --- | --- | --- |
-| tightest | `f(x)` &nbsp; `a[i]` &nbsp; `a.b` &nbsp; `a?` | postfix |
+| tightest | `f(x)` &nbsp; `a[i]` &nbsp; `a.b` &nbsp; `a?` &nbsp; `a.await` | postfix |
 |  | `-a` &nbsp; `!a` &nbsp; `~a` &nbsp; `&a` &nbsp; `&var a` &nbsp; `*a` | prefix |
 |  | `a as T` &nbsp; `a is T` | cast and type test |
 | 10 | `*` &nbsp; `/` &nbsp; `%` | multiplicative |

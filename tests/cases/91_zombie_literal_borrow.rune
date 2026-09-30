@@ -1,0 +1,29 @@
+// A string literal is interned once and never freed, so a borrow of one
+// outlives every place: `&"text"` may be taken outright, it satisfies any
+// `from` clause a parameter or a result asks for, and the temporary the
+// literal sat in going out of scope takes nothing away.
+// FLAGS: --memory zombie
+// EXPECT: Worlde
+// EXPECT: Worlde
+// EXPECT: outlives the block
+// EXPECT: nothing
+import std::io
+
+fn longer(a: &String from a, b: &String from a) -> &String from (a, b) {
+    if a.$length() > b.$length() { a } else { b }
+}
+
+fn fallback(a: &String, useIt: bool) -> &String from a {
+    if useIt { a } else { &"nothing" }
+}
+
+fn main() -> i64 {
+    let h = "Hello"
+    io::println(longer(&h, "Worlde"))            // `b` must borrow from `a`: a literal may
+    io::println(longer(&"Hello", &"Worlde"))
+    var kept: &String = &"start"
+    { kept = &"outlives the block" }
+    io::println(kept)
+    io::println(fallback(&h, false))
+    0
+}

@@ -1,0 +1,90 @@
+// FLAGS: --memory zombie
+// EXPECT: read  1 2
+// EXPECT: sum   3
+// EXPECT: write 10
+// EXPECT: shift 15 7
+// EXPECT: vector 2
+// EXPECT: handle 3 7
+// EXPECT: handle 9
+// EXPECT: rc 7 15
+// EXPECT: both 22
+// EXPECT: nested 1 3
+// EXPECT: nested write 20
+// EXPECT: checked 50 56
+// EXPECT: own member 1 false
+// EXPECT: shadow mine
+//
+// `.` reaches through anything that lends what it holds — a `Handle`, a
+// `Box`, an `Rc`, a `Checked`'s borrow — into the value itself. What makes a
+// type one of these is that it lends: `look(&self) -> &T from self` to read
+// and `touch(&var self) -> &var T from self` to write. The reach-through only
+// happens once the member has *not* been found on the stand-in, so it can
+// never hide anything.
+import std::io
+import std::mem
+import std::collections::vector
+
+struct Point { x: i64, y: i64 }
+
+extend Point {
+    fn sum(&self) -> i64 { self.x + self.y }
+    fn shift(&var self, by: i64) { self.x += by; self.y += by }
+}
+
+/// A stand-in with a member of its own: the reach-through never sees it.
+struct Tagged { label: String }
+extend Tagged { fn look(&self) -> &Point from self { &here } }
+global here: Point = Point { x: 0, y: 0 }
+
+fn main() -> i64 {
+    // A Box: read a field, write a field, call both kinds of method.
+    var b = mem::boxed(Point { x: 1, y: 2 })
+    println!("read  {} {}", b.x.$str(), b.y.$str())
+    println!("sum   {}", b.sum().$str())
+    b.x = 10
+    println!("write {}", b.x.$str())
+    b.shift(5)
+    println!("shift {} {}", b.x.$str(), b.y.$str())
+
+    // A Box around a container: the container's own `&var self` methods.
+    var v = mem::boxed(vector::Vector<i64>())
+    v.push(1)
+    v.push(2)
+    println!("vector {}", v.length().$str())
+
+    // A Handle, the same way.
+    var h = mem::of(Point { x: 3, y: 4 })
+    println!("handle {} {}", h.x.$str(), h.sum().$str())
+    h.y = 9
+    println!("handle {}", h.y.$str())
+
+    // An Rc lends for reading; writing through one is refused.
+    let r = mem::shared(Point { x: 7, y: 8 })
+    println!("rc {} {}", r.x.$str(), r.sum().$str())
+
+    // Reading twice in one expression borrows twice, not mutably.
+    println!("both {}", (b.x + b.y).$str())
+
+    // Stand-ins nest.
+    let inner = mem::boxed(Point { x: 1, y: 2 })
+    var outer = mem::boxed(inner)
+    println!("nested {} {}", outer.x.$str(), outer.sum().$str())
+    outer.y = 20
+    println!("nested write {}", outer.y.$str())
+
+    // A `Checked`'s borrows lend too.
+    let cell = mem::Checked<Point>(Point { x: 5, y: 6 })
+    { var w = cell.borrowVar(); w.x = 50 }
+    println!("checked {} {}", (*cell.borrow()).x.$str(), cell.borrow().sum().$str())
+
+    // `duplicate` and `sameAs` are the Box's own, so they are not looked for
+    // on `Point`.
+    var one = mem::boxed(Point { x: 1, y: 1 })
+    let two = one.duplicate()
+    println!("own member {} {}", two.x.$str(), one.sameAs(&two).$str())
+
+    // A member the stand-in has itself wins.
+    let t = Tagged { label: "mine" }
+    println!("shadow {}", t.label)
+    0
+}

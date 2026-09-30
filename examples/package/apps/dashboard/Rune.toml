@@ -7,9 +7,19 @@ authors = ["The Rune examples"]
 
 [build]
 safety = "full"
+c-flags = ["-c"]
+
+[target.mingw]
+triple = "x86_64-w64-mingw32"
+cc = "x86_64-w64-mingw32-gcc"
+# Extra libraries this target needs, added to the package's own.
+link = ["ws2_32"]
+# How to run one of its binaries on *this* machine. Without it, `rune run`
+# and `rune test` build and stop, rather than pretend.
+runner = "wine"
 
 [dependencies]
 report = "1.2.0"
 geometry = "0.3.0"
+logger = "1.0.0"
 shapes = "1.0.0"
-logger = { version = "1.0.0", registry = "lab" }

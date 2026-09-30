@@ -102,8 +102,10 @@ pub fn unreachable(name: String) {
 /// Give it a name of your own when the expression is not the explanation:
 /// `assert!(n % 2 == 0, "even after doubling")`.
 pub macro assert {
-    ($cond: expr) => { testing::isTrue(stringify!($cond), $cond) }
-    ($cond: expr, $name: expr) => { testing::isTrue($name, $cond) }
+    // Spelled in full, so a file that only asserts needs no import — the
+    // same courtesy `println!` does.
+    ($cond: expr) => { std::testing::isTrue(stringify!($cond), $cond) }
+    ($cond: expr, $name: expr) => { std::testing::isTrue($name, $cond) }
 }
 
 /// `assertEq!(got, want)` — compares, and names the check after the two sides.
@@ -112,18 +114,18 @@ pub macro assert {
 ///     ✓ twice(21) == 42
 pub macro assertEq {
     ($got: expr, $want: expr) => {
-        testing::equal(stringify!($got) + " == " + stringify!($want),
-                       $got, $want)
+        std::testing::equal(stringify!($got) + " == " + stringify!($want),
+                            $got, $want)
     }
     ($got: expr, $want: expr, $name: expr) => {
-        testing::equal($name, $got, $want)
+        std::testing::equal($name, $got, $want)
     }
 }
 
 /// `assertNot!(x)` — the negative of `assert!`.
 pub macro assertNot {
-    ($cond: expr) => { testing::isFalse(stringify!($cond), $cond) }
-    ($cond: expr, $name: expr) => { testing::isFalse($name, $cond) }
+    ($cond: expr) => { std::testing::isFalse(stringify!($cond), $cond) }
+    ($cond: expr, $name: expr) => { std::testing::isFalse($name, $cond) }
 }
 
 //===--------------------------------------------------------------------===//

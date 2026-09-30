@@ -1,5 +1,13 @@
 # End-to-end tests: each `cases/*.rune` file is compiled, linked and run, and
 # its stdout compared against the `// EXPECT:` lines in its header.
+# `LLVM_INCLUDE_DIRS` and `LLVM_LIBRARY_DIRS` may each name several
+# directories; a case wants the one LLVM itself lives in.
+list(GET LLVM_INCLUDE_DIRS 0 RUNE_LLVM_ONE_INCLUDE)
+list(GET LLVM_LIBRARY_DIRS 0 RUNE_LLVM_ONE_LIBDIR)
+
+# A case may bring a C++ half (`// CXX: <path>`), compiled with the compiler
+# this build uses; the LLVM the compiler was built against is what the C++
+# interop cases call into, so its directories are passed along too.
 add_test(NAME rune_end_to_end
   COMMAND ${CMAKE_COMMAND}
     -DRUNEC=$<TARGET_FILE:runec>
@@ -7,6 +15,9 @@ add_test(NAME rune_end_to_end
     -DSTDLIB_DIR=${RUNE_STDLIB_DIR}
     -DCASE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/cases
     -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/work
+    "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
+    "-DLLVM_LIBDIR=${RUNE_LLVM_ONE_LIBDIR}"
+    "-DLLVM_INCLUDE_DIR=${RUNE_LLVM_ONE_INCLUDE}"
     -P ${CMAKE_CURRENT_SOURCE_DIR}/RunCases.cmake)
 
 # The package registry, end to end: a registry made and served from files, a
@@ -26,4 +37,28 @@ if(RUNE_PYTHON3)
   add_test(NAME rune_ecosystem
     COMMAND ${RUNE_PYTHON3} ${CMAKE_SOURCE_DIR}/examples/package/ecosystem.py
             check --rune $<TARGET_FILE:rune>)
+endif()
+
+# The editor tooling: `rune-lint` over files with known problems, and a whole
+# language server session driven the way an editor drives it.
+if(RUNE_PYTHON3)
+  add_test(NAME rune_tooling
+    COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tooling_test.py
+            ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# editors/vim, in Vim and Neovim run headless; an editor that is not
+# installed is skipped.
+if(RUNE_PYTHON3)
+  add_test(NAME rune_vim
+    COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/vim_test.py
+            ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# The VS Code extension's grammar, with the TextMate engine VS Code uses.
+# Needs `npm install` in editors/vscode first; skipped until then.
+find_program(RUNE_NODE node)
+if(RUNE_NODE AND EXISTS ${CMAKE_SOURCE_DIR}/editors/vscode/node_modules/vscode-textmate)
+  add_test(NAME rune_vscode_grammar
+    COMMAND ${RUNE_NODE} ${CMAKE_SOURCE_DIR}/editors/vscode/test/grammar.test.js)
 endif()

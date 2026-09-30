@@ -1,4 +1,4 @@
-# std::mem
+# std::mem: Buffer
 
 A fixed-size run of values on the heap, checked on every access. An array's length is part of its type, so it cannot be decided at run time; a `Buffer` can. Reading and writing both go through `[]`.
 

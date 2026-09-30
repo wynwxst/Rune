@@ -1,0 +1,50 @@
+// FLAGS: --memory zombie
+// EXPECT: holder Woof!
+// EXPECT: array  Woof! Meow!
+// EXPECT: boxed  Woof!
+// EXPECT: widened 2
+// EXPECT: still  1
+//
+// Where a value is going is part of deciding what it is. `boxed(Dog {})`
+// going into a `Box<dyn Speaker>` boxes a `dyn Speaker`; read off the
+// argument alone it would box a `Dog`, and the annotation would then be
+// wrong about its own value.
+//
+// The arguments still have the last word when the two cannot be reconciled,
+// so a call that used to infer one thing goes on inferring it.
+import std::io
+import std::mem
+
+mark Speaker { fn speak(&self) -> String }
+
+struct Dog {}
+struct Cat {}
+bind Speaker to Dog { fn speak(&self) -> String { "Woof!" } }
+bind Speaker to Cat { fn speak(&self) -> String { "Meow!" } }
+
+struct Holder<T> { v: T }
+fn wrap<T>(v: T) -> Holder<T> { Holder<T> { v: v } }
+
+/// The destination and the argument agree here; what matters is that the
+/// seeding never gets in the way of a call the arguments already answer.
+fn firstOf<T>(values: [T]) -> T { values[0] }
+
+fn main() -> i64 {
+    let holder: Holder<dyn Speaker> = wrap(Dog {})
+    println!("holder {}", holder.v.speak())
+
+    let pair: [2:mem::Box<dyn Speaker>] = [mem::boxed(Dog {}), mem::boxed(Cat {})]
+    println!("array  {} {}", pair[0].look().speak(), pair[1].look().speak())
+
+    let one: mem::Box<dyn Speaker> = mem::boxed(Dog {})
+    println!("boxed  {}", one.look().speak())
+
+    // A boolean where a number is wanted still widens, and an `Any` still
+    // takes what it is given.
+    let widened: i64 = 2
+    println!("widened {}", widened.$str())
+    let ints = [1, 2, 3]
+    let taken: i64 = firstOf(ints)
+    println!("still  {}", taken.$str())
+    0
+}

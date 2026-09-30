@@ -100,3 +100,36 @@ fn main() -> i64 {
 > A removed slot becomes a tombstone rather than an empty one. Emptying it would cut the probe chain for any key that walked past it on its way in, and those keys would silently stop being found.
 
 `Set<T>` is a `Map<T, bool>` whose values are all true, which is what a set is — so there is one probing implementation rather than two. `dictionary::setOf(values)` and `dictionary::mapOf(keys, values)` build one from a slice.
+
+A map is common enough to be worth writing short. `[K:V]` is the type and `[key: value, ...]` is the value, with `[:]` for the empty one:
+
+**Written short**
+
+```rune
+import std::io
+
+fn count(m: [String:i64]) -> i64 { m.length() }
+
+fn main() -> i64 {
+    let ages: [String:i64] = ["ada": 36, "bob": 41]
+    io::println(ages.at("ada").or(0))
+    io::println(count(ages))
+
+    // Pairs may go on their own lines.
+    let words = [
+        "one": 1,
+        "two": 2,
+    ]
+    io::println(words.at("two").or(0))
+
+    // `[:]` takes its types from where it is going.
+    let empty: [String:i64] = [:]
+    io::println(empty.length())
+    0
+}
+```
+
+> [!NOTE]
+> **How it is told from an array**
+>
+> `[3:i64]` is an array of three and `[String:i64]` is a map: an array's length is a **number** and a map's key is a **type**, so what was meant is decided by what the name means rather than by the punctuation. `[SIZE:i64]` with `SIZE` a constant is still an array.

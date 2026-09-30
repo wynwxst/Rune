@@ -9,14 +9,28 @@ import std::process
 
 /// A contiguous, growable sequence of `T`.
 ///
-///     var v = Vector<i64>()
-///     v.push(1)
-///     v.push(2)
-///     io::println(v.at(0).unwrap().$str())
+///     var v = Vector<String>()
+///     v.push("one")
+///     v.push("two")
+///     io::println(v.look(0))            // borrows: nothing is copied
+///     for word in v { io::println(word) }
+///
+/// A vector owns its elements, and the way in and out of it says what
+/// happens to ownership, in the same words under either memory model:
+///
+/// * **Reading borrows.** `look`, `peek`, `touch`, `v[i]` and `for` hand out
+///   references into the vector. They work for every `T` — a `Box`, a `File`,
+///   a `dyn Mark` — because nothing is duplicated.
+/// * **Copying asks.** `at`, `get` and `last` hand back a value of the
+///   caller's own, which is a `$clone()` of the element, so they exist only
+///   `where T: Clone`. A vector of something that cannot be copied has no
+///   `at`; the compiler says so rather than letting two owners free it twice.
+/// * **Taking moves.** `pop`, `remove` and `replace` hand an element over and
+///   the vector no longer holds it.
 ///
 /// `Vector` is a class, so passing one around shares it rather than copying.
 /// The storage is a single block from `mem::allocator`, grown by doubling and
-/// handed back when the last reference goes away.
+/// handed back when the vector goes.
 pub class Vector<T> {
     block: *var u8
     count: usize
@@ -44,46 +58,103 @@ pub class Vector<T> {
     /// How many it can hold before it has to grow.
     pub fn capacityOf(&self) -> i64 { self.capacity as i64 }
 
-    //=== Reading ========================================================//
+    /// A vector of its own holding a clone of every element. This is what
+    /// `$clone()` does to a `Vector`: the compiler's memberwise copy would
+    /// hand two vectors one block of storage, and the second to go would
+    /// free it again. Only a vector of clonable elements can be cloned.
+    @safe("every index below the count holds a live element, read once each")
+    pub fn clone(&self) -> Self where T: mem::Clone {
+        var out = Vector<T>()
+        out.reserve(self.count as i64)
+        let slot = unsafe { self.block as *var T }
+        var i = 0
+        while i < self.count as i64 {
+            out.push(unsafe { slot[i] }.$clone())
+            i += 1
+        }
+        out
+    }
 
-    /// The element at `index`, or nothing if there is none there.
-    @safe("the index is compared against the count before the read")
-    pub fn at(&self, index: i64) -> T? {
+    //=== Borrowing ======================================================//
+
+    /// The element at `index`, borrowed. Aborts if there is none there.
+    ///
+    ///     let name = people.look(0)       // a `&String`, valid while `people` is
+    ///
+    /// The borrow is of the vector: while it is held the vector cannot grow
+    /// or shrink, which is what keeps it pointing at a live element.
+    @safe("the index is compared against the count before the borrow")
+    pub fn look(&self, index: i64) -> &T from self {
+        if index < 0 || index >= self.count as i64 {
+            process::panic("Vector index out of range")
+        }
+        let slot = unsafe { self.block as *var T }
+        unsafe { &slot[index] }
+    }
+
+    /// The element at `index`, borrowed to write through. Aborts if there is
+    /// none there.
+    ///
+    ///     v.touch(0).push(4)              // a `Vector<Vector<i64>>`, changed in place
+    @safe("the index is compared against the count before the borrow")
+    pub fn touch(&var self, index: i64) -> &var T from self {
+        if index < 0 || index >= self.count as i64 {
+            process::panic("Vector index out of range")
+        }
+        let slot = unsafe { self.block as *var T }
+        unsafe { &var slot[index] }
+    }
+
+    /// The element at `index`, borrowed, or nothing if there is none there.
+    ///
+    ///     if v.peek(i) is Some(item) { io::println(item) }
+    @safe("the index is compared against the count before the borrow")
+    pub fn peek(&self, index: i64) -> (&T from self)? {
         if index < 0 || index >= self.count as i64 { return nil }
         let slot = unsafe { self.block as *var T }
-        // A copy for the caller; the slot keeps its own. Under counting a
-        // clone is a share, under single ownership a deep copy — `$clone` is
-        // both, so reading never empties the slot in either mode.
-        Some(unsafe { slot[index] }.$clone())
+        Some(unsafe { &slot[index] })
     }
 
-    /// The element at `index`. Aborts if there is none there.
-    pub fn get(&self, index: i64) -> T {
-        match self.at(index) {
-            Some(v) => v
-            None => {
-                process::panic("Vector index out of range")
-                self.at(0).unwrap()
-            }
-        }
-    }
+    /// The first element, borrowed, or nothing when empty.
+    pub fn peekFirst(&self) -> (&T from self)? { self.peek(0) }
 
-    /// The last element, or nothing when empty.
-    pub fn last(&self) -> T? { self.at(self.count as i64 - 1) }
+    /// The last element, borrowed, or nothing when empty.
+    pub fn peekLast(&self) -> (&T from self)? { self.peek(self.count as i64 - 1) }
 
     /// Every element, as a slice over the vector's own storage.
     ///
     ///     let biggest = slice::maximumBy(v.asSlice(), ||(a: i64, b: i64) -> bool { a < b })
     ///
     /// Nothing is copied, which is the point: anything that takes a `[T]`
-    /// can read the vector as it is. The slice is a view, not an owner,
-    /// so it is valid only while the vector lives and until the next
-    /// `push`, `reserve` or `clear` — growing may move the storage, and a
-    /// slice taken before then still points at where it was.
+    /// can read the vector as it is. The slice borrows the vector, so it
+    /// cannot be held across a `push`, `reserve` or `clear` — growing may
+    /// move the storage.
     @safe("the slice covers exactly the elements below the count, which every write keeps live")
     pub fn asSlice(&self) -> [T] from self {
         unsafe { mem::slice_of<T>(self.block as *var T, self.count) }
     }
+
+    //=== Copying ========================================================//
+
+    /// A copy of the element at `index`, or nothing if there is none there.
+    ///
+    /// Under counting a copy of a shared object is a second reference to
+    /// it; under single ownership it is a deep copy. Either way the caller
+    /// owns what it gets and the vector keeps its own, which is why this is
+    /// only here for elements that can be cloned — `look` and `peek` are
+    /// for the rest, and cheaper for everything.
+    pub fn at(&self, index: i64) -> T? where T: mem::Clone {
+        match self.peek(index) {
+            Some(r) => Some(r.$clone())
+            None => nil
+        }
+    }
+
+    /// A copy of the element at `index`. Aborts if there is none there.
+    pub fn get(&self, index: i64) -> T where T: mem::Clone { self.look(index).$clone() }
+
+    /// A copy of the last element, or nothing when empty.
+    pub fn last(&self) -> T? where T: mem::Clone { self.at(self.count as i64 - 1) }
 
     //=== Writing ========================================================//
 
@@ -122,6 +193,77 @@ pub class Vector<T> {
         true
     }
 
+    /// Takes the element at `index` out, closing the gap: everything after it
+    /// moves down one. Nothing if there is none there.
+    @safe("the index is compared against the count, and each slot is emptied as its value moves down")
+    pub fn remove(&var self, index: i64) -> T? {
+        if index < 0 || index >= self.count as i64 { return nil }
+        let slot = unsafe { self.block as *var T }
+        let out = unsafe { mem::take<T>(&var slot[index] as *var T) }
+        var i = index + 1
+        while i < self.count as i64 {
+            unsafe {
+                let moved = mem::take<T>(&var slot[i] as *var T)
+                mem::store<T>(&var slot[i - 1] as *var T, moved)
+            }
+            i += 1
+        }
+        self.count -= 1
+        Some(out)
+    }
+
+    /// Puts `value` in at `index`, moving everything from there up one.
+    /// `index` may be the length, which appends. Returns false, keeping
+    /// nothing, when it is past that.
+    @safe("the index is compared against the count, and room is reserved before anything moves")
+    pub fn insert(&var self, index: i64, value: T) -> bool {
+        if index < 0 || index > self.count as i64 { return false }
+        self.reserve(self.count as i64 + 1)
+        let slot = unsafe { self.block as *var T }
+        var i = self.count as i64
+        while i > index {
+            unsafe {
+                let moved = mem::take<T>(&var slot[i - 1] as *var T)
+                mem::store<T>(&var slot[i] as *var T, moved)
+            }
+            i -= 1
+        }
+        unsafe { mem::store<T>(&var slot[index] as *var T, value) }
+        self.count += 1
+        true
+    }
+
+    /// Puts `value` at `index` and hands back what was there. Aborts if
+    /// there is nothing at `index`.
+    @safe("the index is compared against the count before the swap")
+    pub fn replace(&var self, index: i64, value: T) -> T {
+        if index < 0 || index >= self.count as i64 {
+            process::panic("Vector index out of range")
+        }
+        let slot = unsafe { self.block as *var T }
+        unsafe {
+            let old = mem::take<T>(&var slot[index] as *var T)
+            mem::store<T>(&var slot[index] as *var T, value)
+            old
+        }
+    }
+
+    /// Exchanges the elements at `a` and `b`. Aborts if either is missing.
+    @safe("both indices are compared against the count before either moves")
+    pub fn swap(&var self, a: i64, b: i64) {
+        if a < 0 || a >= self.count as i64 || b < 0 || b >= self.count as i64 {
+            process::panic("Vector index out of range")
+        }
+        if a == b { return }
+        let slot = unsafe { self.block as *var T }
+        unsafe {
+            let x = mem::take<T>(&var slot[a] as *var T)
+            let y = mem::take<T>(&var slot[b] as *var T)
+            mem::store<T>(&var slot[a] as *var T, y)
+            mem::store<T>(&var slot[b] as *var T, x)
+        }
+    }
+
     /// Drops every element, keeping the storage for reuse.
     @safe("every index below the count holds a live element")
     pub fn clear(&var self) {
@@ -155,10 +297,14 @@ pub class Vector<T> {
 }
 
 // `v[i]` and `v[i] = x`, both checked: reading or writing past the end aborts
-// rather than touching memory the vector does not own. `at` and `set` are the
-// forms that answer instead of aborting.
+// rather than touching memory the vector does not own. `peek` and `set` are
+// the forms that answer instead of aborting.
+//
+// `v[i]` is a borrow of the element, like `look`: it works for every `T`, and
+// a number read out of it is a number (`v[i] + 1`). Write `v[i].$clone()` for
+// a value of your own.
 bind<T> operator::"[]" to Vector<T> {
-    fn index(&self, index: i64) -> T { self.get(index) }
+    fn index(&self, index: i64) -> &T from self { self.look(index) }
 
     fn indexSet(&var self, index: i64, value: T) {
         if !self.set(index, value) {
@@ -178,20 +324,56 @@ bind<T> operator::"[]" to Vector<T> {
 /// `from` does the same from a slice, and is what to reach for when the
 /// elements are already in one. This is for writing them out.
 pub macro vec {
-    () => { vector::Vector<i64>() }
-    ($($item: expr),+) => {
-        {
-            let built = vector::from([$($item),+])
-            built
-        }
-    }
+    // Written out in full, so `vec![...]` needs no import of its own.
+    () => { std::collections::vector::Vector<i64>() }
+    // One expression, not a block with a local in it: what the vector is
+    // going into is then what the elements are checked against, so
+    // `let v: Vector<Box<dyn Speaker>> = vec![boxed(Dog {}), boxed(Cat {})]`
+    // boxes each animal as a `dyn Speaker` rather than as itself.
+    //
+    // `drain` rather than `from`, because the elements are being handed
+    // *over*: an array written here has no other name, so taking the values
+    // out of it is the honest thing, and a value that owns something is then
+    // owned by the vector alone rather than by both.
+    ($($item: expr),+) => { std::collections::vector::drain([$($item),+]) }
 }
 
-/// Builds a vector holding a copy of every element of `values`.
-pub fn from<T>(values: [T]) -> Vector<T> {
+/// Builds a vector by taking every element of `values`, leaving the slots
+/// behind empty.
+///
+/// The difference from `from` is ownership: `from` copies, which is right for
+/// a slice somebody else is keeping; `drain` takes, which is right for one
+/// written on the spot to carry values over. What is left behind is zero
+/// bytes, so whatever the slice was a view of must be one whose destruction
+/// tolerates that — everything in this library is.
+@safe("every slot is emptied as it is read, so nothing is owned twice")
+pub fn drain<T>(values: [T]) -> Vector<T> {
+    var v = Vector<T>()
+    let n = values.$length()
+    v.reserve(n)
+    let base = unsafe { mem::slice_data<T>(values) }
+    var i = 0
+    while i < n {
+        // The slot is emptied as its value comes out, so whatever the slice
+        // was a view of no longer owns it. What is left behind is zero bytes,
+        // which every `deinit` in this library is written to ignore.
+        //
+        // Through the slice's own address, not `&values[i]`: a borrow of a
+        // handle *is* the handle, which is the value rather than the slot it
+        // sits in, and it is the slot that has to be emptied.
+        let taken = unsafe { mem::take<T>(&var base[i] as *var T) }
+        v.push(taken)
+        i += 1
+    }
+    v
+}
+
+/// Builds a vector holding a copy of every element of `values`, which is
+/// why the elements have to be clonable; `drain` takes them instead.
+pub fn from<T>(values: [T]) -> Vector<T> where T: mem::Clone {
     let v = Vector<T>()
     v.reserve(values.$length())
-    for e in values { v.push(e) }
+    for e in values { v.push(e.$clone()) }
     v
 }
 
@@ -199,34 +381,34 @@ pub fn from<T>(values: [T]) -> Vector<T> {
 // Iteration
 //===--------------------------------------------------------------------===//
 
-/// A cursor over a `Vector`, handed out by `iterate`.
+/// A cursor over a `Vector`, handed out by `iterate`. It yields a borrow of
+/// each element in turn.
 ///
-/// It holds a reference to the vector, so the vector outlives any loop over
-/// it. Two cursors over the same vector are independent.
+///     for name in names { io::println(name) }     // `name` is a `&String`
 ///
-/// Growing or shrinking a vector while a cursor is walking it is allowed and
-/// is not undefined — the cursor asks for one index per turn and stops when
-/// the index falls off the end — but which elements it sees is whatever the
-/// vector holds when it asks.
+/// Borrowing is what makes one loop right for every element type: a vector of
+/// `Box`es or `File`s is walked without copying any of them, and a number
+/// read out of a borrow is still a number, so `total += n` needs nothing
+/// extra. Take a value of your own with `$clone()` where one is wanted.
 ///
-/// The cursor holds a reference to its vector, written the same way in both
-/// memory models. Under single ownership `from self` on `iterate` makes it a
-/// checked borrow — the vector outlives the cursor. Under reference counting a
-/// stored borrow of a heap object is simply a second owner (retained while the
-/// cursor holds it, released when the cursor is gone), so the vector stays
-/// alive and a cursor may outlive the binding it was made from — one source,
-/// no divergence.
+/// The cursor borrows the vector, and so does every element it hands out:
+/// under single ownership the vector cannot change while the loop holds
+/// them, and under counting the cursor keeps it alive.
 pub struct VectorIter<T> {
     source: &Vector<T>
     index: i64
 }
 
 bind<T> Iterator to VectorIter<T> {
-    type Item = T
-    fn next(&var self) -> T? {
-        let value = self.source.at(self.index)
+    type Item = &T
+
+    /// The next element, borrowed from the vector rather than from the
+    /// cursor — so it outlives the call, and the loop can ask again while
+    /// holding it.
+    fn next(&var self) -> (&T from self.source)? {
+        let item = self.source.peek(self.index)
         self.index += 1
-        value
+        item
     }
 }
 
@@ -237,11 +419,75 @@ bind<T> Sequence to Vector<T> {
     ///
     ///     for value in v { io::println(value) }
     ///
-    /// `for` calls this itself; there is rarely a reason to. The `from self`
-    /// records that the cursor reads out of this vector — inert under
-    /// counting, load-bearing under single ownership.
+    /// `for` calls this itself; there is rarely a reason to.
     fn iterate(&self) -> VectorIter<T> from self {
         VectorIter<T> { source: self, index: 0 }
+    }
+}
+
+/// A cursor over copies of a vector's elements, handed out by `values`.
+pub struct VectorValues<T> {
+    source: &Vector<T>
+    index: i64
+}
+
+bind<T> Iterator to VectorValues<T> where T: mem::Clone {
+    type Item = T
+    fn next(&var self) -> T? {
+        let item = self.source.at(self.index)
+        self.index += 1
+        item
+    }
+}
+
+/// A cursor that takes a vector's elements out, first to last, handed out
+/// by `drain`.
+pub struct VectorDrain<T> {
+    source: Vector<T>
+    index: i64
+}
+
+bind<T> Iterator to VectorDrain<T> {
+    type Item = T
+    fn next(&var self) -> T? {
+        let item = self.source.takeSlot(self.index)
+        self.index += 1
+        item
+    }
+}
+
+extend<T> Vector<T> {
+    /// A cursor over a copy of each element, for the places a value of its
+    /// own is wanted rather than a borrow:
+    ///
+    ///     let biggest = v.values().reduce(||(a: i64, b: i64) -> i64 { if a > b { a } else { b } })
+    pub fn values(&self) -> VectorValues<T> from self where T: mem::Clone {
+        VectorValues<T> { source: self, index: 0 }
+    }
+
+    /// Every element, taken out in order: the vector is given up to the
+    /// cursor and each value handed on as it comes. This is how the values
+    /// of a vector that owns them — boxes, files, iterators — are had one by
+    /// one without copying any.
+    ///
+    ///     for task in pending.drain() { task.run() }
+    ///
+    /// Under single ownership the vector is moved into the cursor. Under
+    /// counting it is shared, and the other holders see it emptied.
+    pub fn drain(self) -> VectorDrain<T> {
+        VectorDrain<T> { source: self, index: 0 }
+    }
+
+    /// The element at `index`, taken out and its slot left as zero bytes —
+    /// which clearing the vector later ignores. For `drain`, which never
+    /// reads a slot twice.
+    @safe("the index is compared against the count, and the slot is emptied as its value moves out")
+    fn takeSlot(&var self, index: i64) -> T? {
+        if index < 0 || index >= self.count as i64 { return nil }
+        let slot = unsafe { self.block as *var T }
+        let out = unsafe { mem::take<T>(&var slot[index] as *var T) }
+        mem::zero(unsafe { &var slot[index] as *var u8 }, mem::size_of<T>())
+        Some(out)
     }
 }
 
@@ -264,15 +510,18 @@ pub fn collect<I: Iterator>(source: I) -> Vector<I::Item> {
 bind<T> std::io::Display to Vector<T> where T: std::io::Display {
     fn display(&self) -> String {
         var out = "["
-        for idx in 0..self.length() {
-            element = self[idx]
+        var first = true
+        for element in self {
+            if !first { out += ", " }
             out += element.display()
-            if (idx != self.length()-1) {
-                out += ", "
-            }
-            
+            first = false
         }
         out += "]"
         out
     }
 }
+
+/// A vector writes its own `clone` — the memberwise copy would hand two
+/// vectors one block — so it claims the mark that copy stands behind, when
+/// what it holds can be copied too.
+bind<T> mem::Clone to Vector<T> where T: mem::Clone {}

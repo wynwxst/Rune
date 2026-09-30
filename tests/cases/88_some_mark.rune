@@ -39,7 +39,7 @@ fn evens(limit: i64) -> some iter::Iterator {
 }
 
 fn labelled(names: vector::Vector<String>) -> some iter::Iterator {
-    names.as_iter().enumerate().map(||(p: (i64, String)) -> String { p.0.$str() + ":" + p.1 })
+    names.as_iter().enumerate().map(||(p: (i64, &String)) -> String { p.0.$str() + ":" + p.1 })
 }
 
 /// Every call returns the same type, so two results satisfy one `S`.
@@ -69,7 +69,7 @@ fn main() -> i64 {
     io::println(d.area())
     io::println(s)
     let v = vec!(make(1.0), make(2.0))
-    io::println(v.get(1).area())
+    io::println(v[1].area())
     io::println(Box { w: 2.0 }.shape().area())
     io::println(Box::unit().area())
     io::println(wrap(Sq { s: 2.0 }).area())

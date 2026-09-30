@@ -1,0 +1,75 @@
+// FLAGS: --memory zombie
+// EXPECT: let      212.0
+// EXPECT: argument 33.0
+// EXPECT: result   98.6
+// EXPECT: field    68.0
+// EXPECT: assign   50.0
+// EXPECT: return   212.0
+// EXPECT: tuple    100.0 100.0 500.0 300.0
+// EXPECT: bool     1 0 1
+// EXPECT: still explicit 212.0
+//
+// A conversion the type already knows how to make is put in wherever the
+// destination is written down — an argument, an annotated binding, a field,
+// a declared result, an assignment. Nothing is implicit between two types
+// that never said they convert; `bind X into Y` is the saying.
+//
+// A boolean goes where a number is asked for by name for the same reason: it
+// is one of two values and every integer has room for both. The reverse is
+// not a conversion, because which integers count as true has no one answer.
+import std::io
+
+struct Celsius { degrees: f64 }
+struct Fahrenheit { degrees: f64 }
+
+bind Celsius into Fahrenheit {
+    fn convert(&self) -> Fahrenheit {
+        Fahrenheit { degrees: self.degrees * 9.0 / 5.0 + 32.0 }
+    }
+}
+
+struct Reading { at: Fahrenheit }
+
+fn warmer(t: Fahrenheit) -> Fahrenheit { Fahrenheit { degrees: t.degrees + 1.0 } }
+fn asF(c: Celsius) -> Fahrenheit { c }
+fn boiling() -> Fahrenheit { return Celsius { degrees: 100.0 } }
+fn flag(b: i8) -> i64 { b as i64 }
+
+// A source type that has no name to write as a mark path.
+struct CGPoint { x: f64, y: f64 }
+struct CGSize { width: f64, height: f64 }
+struct CGRect { origin: CGPoint, size: CGSize }
+
+bind (f64, f64) into CGPoint {
+    fn convert(&self) -> CGPoint { CGPoint { x: self.0, y: self.1 } }
+}
+bind (f64, f64) into CGSize {
+    fn convert(&self) -> CGSize { CGSize { width: self.0, height: self.1 } }
+}
+
+fn main() -> i64 {
+    let a: Fahrenheit = Celsius { degrees: 100.0 }
+    println!("let      {}", a.degrees.$str())
+    println!("argument {}", warmer(Celsius { degrees: 0.0 }).degrees.$str())
+    println!("result   {}", asF(Celsius { degrees: 37.0 }).degrees.$str())
+
+    let r = Reading { at: Celsius { degrees: 20.0 } }
+    println!("field    {}", r.at.degrees.$str())
+
+    var b: Fahrenheit = Fahrenheit { degrees: 0.0 }
+    b = Celsius { degrees: 10.0 }
+    println!("assign   {}", b.degrees.$str())
+    println!("return   {}", boiling().degrees.$str())
+
+    let rect = CGRect { origin: (100.0, 100.0), size: (500.0, 300.0) }
+    println!("tuple    {} {} {} {}", rect.origin.x.$str(), rect.origin.y.$str(),
+             rect.size.width.$str(), rect.size.height.$str())
+
+    let n: i64 = true
+    println!("bool     {} {} {}", flag(true).$str(), flag(false).$str(), n.$str())
+
+    // Writing it out still works and means the same thing.
+    let c = Celsius { degrees: 100.0 }
+    println!("still explicit {}", (c into Fahrenheit).degrees.$str())
+    0
+}

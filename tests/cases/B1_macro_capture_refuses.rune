@@ -1,0 +1,10 @@
+// WITH: macros/pack.rune
+// EXPECT-ERROR: comprehend! expected <value> `for` <item> `in` <source>
+//
+// Input that does not have the pattern's shape is refused with a message
+// that says what the shape was.
+fn main() -> i64 {
+    let xs = vec![1, 2]
+    let ys = comprehend!(x * 2 for x)
+    0
+}

@@ -173,6 +173,203 @@ pub fn remainderOf(a: f64, b: f64) -> f64 { fmod(a, b) }
 @safe("copysign is total: every pair of inputs has a defined result")
 pub fn withSignOf(magnitude: f64, sign: f64) -> f64 { copysign(magnitude, sign) }
 
+//=== Decimal places ======================================================//
+//
+// Rounding to a number of decimal places, as a person means it.
+//
+// A float holds most decimals only approximately: `0.29` is really
+// 0.28999999999999998, so `0.29 * 100.0` is 28.999999999999996, and cutting
+// that off gives 28 where anyone would expect 29. Every function here first
+// asks whether the scaled value is within a few units of float error of a
+// whole number — or of a half, for the rounding modes that care — and if so
+// takes it to be exactly that, the decimal that was written. Only then does
+// it round. So:
+//
+//     math::truncateTo(0.29, 2)      // 0.29, not 0.28
+//     math::roundTo(2.675, 2)        // 2.68: the 5 is taken as written
+//     math::floorTo(1.005, 2)        // 1.0
+//
+// `places` may be negative, which rounds to tens, hundreds and so on:
+// `roundTo(1234.0, -2)` is 1200.0.
+
+/// How a value that falls between two representable decimals is settled.
+pub enum Rounding {
+    /// Towards negative infinity: 2.37 → 2.3, -2.31 → -2.4.
+    Floor,
+    /// Towards positive infinity: 2.31 → 2.4, -2.37 → -2.3.
+    Ceiling,
+    /// Towards zero — the digits past the last place are dropped.
+    TowardZero,
+    /// Away from zero: 2.31 → 2.4, -2.31 → -2.4.
+    AwayFromZero,
+    /// To the nearest, and a half away from zero: 2.25 → 2.3. What is taught
+    /// at school, and what `roundTo` does.
+    HalfAwayFromZero,
+    /// To the nearest, and a half to the even neighbour: 2.25 → 2.2, 2.35 →
+    /// 2.4. Banker's rounding: over many values the halves cancel instead of
+    /// all pushing the same way.
+    HalfEven,
+}
+
+/// Ten to the `places`, exactly — every power of ten up to 10^22 is a
+/// double, which is further than any float has digits for.
+fn powerOfTen(places: i64) -> f64 {
+    var p = 1.0
+    var i = 0
+    while i < places && i < 308 {
+        p *= 10.0
+        i += 1
+    }
+    p
+}
+
+/// How far from a whole number `x` may be and still be taken as one: a few
+/// units in the last place, at `x`'s own size.
+fn slack(x: f64) -> f64 {
+    let size = if x < 0.0 { 0.0 - x } else { x }
+    8.0 * EPSILON * (if size > 1.0 { size } else { 1.0 })
+}
+
+/// `x`, or the whole number it is float error away from.
+@safe("libm handles its own domain errors by returning NaN")
+fn snapWhole(x: f64) -> f64 {
+    let r = round(x)
+    let d = if x > r { x - r } else { r - x }
+    if d <= slack(x) { r } else { x }
+}
+
+/// `x`, or the half — n + 0.5 — it is float error away from.
+@safe("libm handles its own domain errors by returning NaN")
+fn snapHalf(x: f64) -> f64 {
+    let h = floor(x) + 0.5
+    let d = if x > h { x - h } else { h - x }
+    if d <= slack(x) { h } else { x }
+}
+
+/// `x` settled to a whole number by `mode`.
+@safe("libm handles its own domain errors by returning NaN")
+fn settle(x: f64, mode: Rounding) -> f64 {
+    let w = snapWhole(x)
+    match mode {
+        Rounding::Floor => floor(w),
+        Rounding::Ceiling => ceil(w),
+        Rounding::TowardZero => trunc(w),
+        Rounding::AwayFromZero => if w < 0.0 { floor(w) } else { ceil(w) },
+        Rounding::HalfAwayFromZero => round(snapHalf(w)),
+        Rounding::HalfEven => {
+            let h = snapHalf(w)
+            let down = floor(h)
+            if h - down == 0.5 {
+                // Exactly between: the even one of the two.
+                if fmod(down, 2.0) == 0.0 { down } else { down + 1.0 }
+            } else {
+                round(h)
+            }
+        },
+    }
+}
+
+/// `value` rounded to `places` decimal places by `mode`.
+///
+///     math::roundWith(2.25, 1, math::Rounding::HalfEven)    // 2.2
+///     math::roundWith(-2.31, 1, math::Rounding::Floor)      // -2.4
+pub fn roundWith(value: f64, places: i64, mode: Rounding) -> f64 {
+    if isNan(value) || isInfinite(value) { return value }
+    if places >= 0 {
+        let f = powerOfTen(places)
+        return settle(value * f, mode) / f
+    }
+    let f = powerOfTen(0 - places)
+    settle(value / f, mode) * f
+}
+
+/// `value` rounded to `places` decimal places, halves away from zero.
+///
+///     math::roundTo(3.14159, 2)      // 3.14
+///     math::roundTo(2.675, 2)        // 2.68
+///     math::roundTo(1234.0, -2)      // 1200.0
+pub fn roundTo(value: f64, places: i64) -> f64 {
+    roundWith(value, places, Rounding::HalfAwayFromZero)
+}
+
+/// `value` cut off after `places` decimal places, towards zero.
+///
+///     math::truncateTo(0.29, 2)      // 0.29
+///     math::truncateTo(-1.239, 2)    // -1.23
+pub fn truncateTo(value: f64, places: i64) -> f64 {
+    roundWith(value, places, Rounding::TowardZero)
+}
+
+/// `value` rounded down, towards negative infinity, to `places` places.
+pub fn floorTo(value: f64, places: i64) -> f64 {
+    roundWith(value, places, Rounding::Floor)
+}
+
+/// `value` rounded up, towards positive infinity, to `places` places.
+pub fn ceilTo(value: f64, places: i64) -> f64 {
+    roundWith(value, places, Rounding::Ceiling)
+}
+
+/// `value` rounded to the nearest multiple of `step`, halves away from zero
+/// — cash rounding, a grid, a slider's notches:
+///
+///     math::roundToStep(1.23, 0.05)  // 1.25
+///     math::roundToStep(17.0, 5.0)   // 15.0
+///
+/// A `step` of zero, or one that is not a number, gives `value` back.
+pub fn roundToStep(value: f64, step: f64) -> f64 {
+    if step == 0.0 || isNan(step) || isNan(value) || isInfinite(value) { return value }
+    let s = if step < 0.0 { 0.0 - step } else { step }
+    settle(value / s, Rounding::HalfAwayFromZero) * s
+}
+
+/// `value` as a whole number of `10^-places` units, rounded halves away from
+/// zero — hundredths for `places` 2. This is the form money wants: count in
+/// cents, add and compare exactly, and turn it back with `unscaled` only to
+/// show it.
+///
+///     math::scaled(103.4, 2)         // 10340
+///     math::scaled(0.29, 2)          // 29
+///
+/// A value too large for an `i64` at that scale is not a sensible amount of
+/// anything; it saturates rather than wrapping.
+pub fn scaled(value: f64, places: i64) -> i64 {
+    if isNan(value) { return 0 }
+    let x = if places >= 0 { settle(value * powerOfTen(places), Rounding::HalfAwayFromZero) }
+            else { settle(value / powerOfTen(0 - places), Rounding::HalfAwayFromZero) }
+    if x >= 9.2233720368547748e18 { return 9223372036854775807 }
+    if x <= -9.2233720368547748e18 { return -9223372036854775807 - 1 }
+    x as i64
+}
+
+/// A whole number of `10^-places` units, as a float: the way back from
+/// `scaled`.
+///
+///     math::unscaled(10340, 2)       // 103.4
+pub fn unscaled(units: i64, places: i64) -> f64 {
+    if places >= 0 { return (units as f64) / powerOfTen(places) }
+    (units as f64) * powerOfTen(0 - places)
+}
+
+/// The whole part and the first `places` digits after the point of
+/// `value`'s magnitude, rounded to that many places first — so a value that
+/// rounds up carries into the whole part:
+///
+///     math::splitDecimal(103.4, 2)   // (103, 40)
+///     math::splitDecimal(0.999, 2)   // (1, 0)
+///     math::splitDecimal(-2.5, 1)    // (2, 5): the sign is `value`'s to say
+///
+/// Which is what showing an amount as `103.40`, or storing it as dollars and
+/// cents, wants — and what `wholePart` and `fractionPart` give only
+/// approximately.
+pub fn splitDecimal(value: f64, places: i64) -> (i64, i64) {
+    let p = if places < 0 { 0 } else { places }
+    let magnitude = if value < 0.0 { 0.0 - value } else { value }
+    let units = scaled(magnitude, p)
+    let unit = powerInt(10, p)
+    (units / unit, units % unit)
+}
+
 //=== Asking about a float ================================================//
 
 /// True when `value` is not a number.

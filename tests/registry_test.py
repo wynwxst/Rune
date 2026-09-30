@@ -69,35 +69,35 @@ def main():
 
         # A registry with geometry 0.1.0, 0.2.0 and shapes 1.0.0.
         reg = os.path.join(tmp, "reg")
-        run(["pkg", "init", reg], tmp, env)
-        run(["pkg", "server", "--addPackage", "geometry", "--dir", reg], tmp, env)
+        run(["registry", "init", reg], tmp, env)
+        run(["registry", "--addPackage", "geometry", "--dir", reg], tmp, env)
         set_version(os.path.join(tmp, "geometry"), "0.2.0")
-        run(["pkg", "server", "--addPackage", "geometry", "--dir", reg], tmp, env)
-        run(["pkg", "server", "--addPackage", "shapes", "--dir", reg], tmp, env)
+        run(["registry", "--addPackage", "geometry", "--dir", reg], tmp, env)
+        run(["registry", "--addPackage", "shapes", "--dir", reg], tmp, env)
         index = open(os.path.join(reg, "index.toml")).read()
         check("index lists three releases", index.count("[[release]]") == 3, index)
         check("index records shapes' dependency", 'dependencies = ["geometry 0.2"]' in index)
         check("duplicate release is refused",
-              "already in this registry" in run(["pkg", "server", "--addPackage", "shapes", "--dir", reg], tmp, env, expect=1))
+              "already in this registry" in run(["registry", "--addPackage", "shapes", "--dir", reg], tmp, env, expect=1))
 
         # A client that uses it through a file:// URL. The registry calls
         # itself `reg` (its directory); here it is known as `local`.
         check("the index declares the registry's name", 'name = "reg"' in index, index)
-        out = run(["pkg", "server", "add", "file://" + reg, "--name", "local"], tmp, env)
+        out = run(["registry", "add", "file://" + reg, "--name", "local"], tmp, env)
         check("registry added with a warning", "3 releases" in out and "not monitored" in out, out)
         check("the alias is explained", "calls itself 'reg'" in out, out)
-        out = run(["pkg", "server", "list"], tmp, env)
+        out = run(["registry", "list"], tmp, env)
         check("server list shows the alias, the url and the declared name",
               "local" in out and "file://" + reg in out and "calls itself 'reg'" in out, out)
-        out = run(["pkg", "server", "add", "file://" + reg], tmp, env)
+        out = run(["registry", "add", "file://" + reg], tmp, env)
         check("adding the same url again is a no-op", "already configured as 'local'" in out, out)
         # A registry with no name is refused.
         nameless = os.path.join(tmp, "nameless")
         os.makedirs(nameless)
         write(os.path.join(nameless, "index.toml"), "[registry]\nformat = 1\n")
-        out = run(["pkg", "server", "add", nameless], tmp, env, expect=1)
+        out = run(["registry", "add", nameless], tmp, env, expect=1)
         check("a nameless registry is refused", "must provide a name" in out, out)
-        out = run(["pkg", "server", "add", nameless, "--name", "bad name"], tmp, env, expect=2)
+        out = run(["registry", "add", nameless, "--name", "bad name"], tmp, env, expect=2)
         check("a bad alias is refused", "cannot name a registry" in out, out)
         out = run(["search", "geo|shap"], tmp, env)
         check("search finds both by regex", "geometry" in out and "shapes" in out, out)
@@ -116,7 +116,7 @@ def main():
         lock = open(os.path.join(app, "Rune.lock")).read()
         check("Rune.lock pins both", 'name = "geometry"' in lock and 'name = "shapes"' in lock, lock)
         check("installed once, under RUNE_HOME",
-              os.path.exists(os.path.join(env["RUNE_HOME"], "pkg", "geometry", "0.2.0", "Rune.toml")))
+              os.path.exists(os.path.join(env["RUNE_HOME"], "registry", "geometry", "0.2.0", "Rune.toml")))
         write(os.path.join(app, "src/main.rune"),
               "import std::io\nimport shapes\nimport geometry\n"
               "fn main() -> i64 {\n"
@@ -152,15 +152,15 @@ def main():
         # A second registry, `mirror`, carrying its own geometry 0.3.0 and a
         # package of its own. Names tell them apart everywhere.
         mirror = os.path.join(tmp, "mirror")
-        run(["pkg", "init", mirror], tmp, env)
+        run(["registry", "init", mirror], tmp, env)
         set_version(os.path.join(tmp, "geometry"), "0.3.0")
-        run(["pkg", "server", "--addPackage", "geometry", "--dir", mirror], tmp, env)
+        run(["registry", "--addPackage", "geometry", "--dir", mirror], tmp, env)
         run(["new", "colours", "--lib"], tmp, env)
         write(os.path.join(tmp, "colours/src/lib.rune"), "pub fn red() -> String { \"red\" }\n")
-        run(["pkg", "server", "--addPackage", "colours", "--dir", mirror], tmp, env)
-        out = run(["pkg", "server", "add", "file://" + mirror], tmp, env)
+        run(["registry", "--addPackage", "colours", "--dir", mirror], tmp, env)
+        out = run(["registry", "add", "file://" + mirror], tmp, env)
         check("a registry is added under its own name", "Added registry 'mirror'" in out, out)
-        out = run(["pkg", "server", "add", nameless_named(tmp, "mirror")], tmp, env, expect=1)
+        out = run(["registry", "add", nameless_named(tmp, "mirror")], tmp, env, expect=1)
         check("two registries cannot share a name", "already configured" in out and "--name" in out, out)
         out = run(["search", "--registry", "mirror", "."], tmp, env)
         check("search filters by registry", "colours" in out and "shapes" not in out, out)
@@ -221,7 +221,7 @@ def main():
         pp = os.path.join(tmp, "palette/Rune.toml")
         ps = open(pp).read().replace("[dependencies]\n", '[dependencies]\ncolours = { version = "0.1", registry = "mirror" }\n')
         open(pp, "w").write(ps)
-        run(["pkg", "server", "--addPackage", "palette", "--dir", reg], tmp, env)
+        run(["registry", "--addPackage", "palette", "--dir", reg], tmp, env)
         index = open(os.path.join(reg, "index.toml")).read()
         check("the index records the registry a dependency insists on", 'dependencies = ["mirror::colours 0.1"]' in index, index)
         out = run(["add", "palette", "--registry", "local"], app, env)
@@ -229,35 +229,35 @@ def main():
         run(["remove", "palette"], app, env)
 
         # Dropping the mirror: what came from it stays installed.
-        out = run(["pkg", "server", "remove", "mirror"], tmp, env)
+        out = run(["registry", "remove", "mirror"], tmp, env)
         check("server remove drops the registry and says what stays", "Removed registry 'mirror'" in out and "stays installed" in out or "stay installed" in out, out)
-        out = run(["pkg", "server", "list"], tmp, env)
+        out = run(["registry", "list"], tmp, env)
         check("the mirror is gone from the list", "mirror" not in out, out)
-        out = run(["pkg", "server", "remove", "mirror"], tmp, env, expect=1)
+        out = run(["registry", "remove", "mirror"], tmp, env, expect=1)
         check("removing it again fails", "no registry called 'mirror'" in out, out)
         out = run(["remove"], tmp, env)
         check("unreferenced packages from the doc reads are reclaimed", "Uninstalled colours v0.1.0" in out, out)
 
         # A newer geometry: update moves it and the old one becomes unused.
         set_version(os.path.join(tmp, "geometry"), "0.2.1")
-        run(["pkg", "server", "--addPackage", "geometry", "--dir", reg], tmp, env)
+        run(["registry", "--addPackage", "geometry", "--dir", reg], tmp, env)
         out = run(["update"], app, env)
         check("update moves to the newest allowed", "v0.2.0 -> v0.2.1" in out, out)
         check("update warns about the unused version", "not used by any project" in out, out)
         out = run(["remove"], app, env)
         check("remove with no arguments uninstalls it", "Uninstalled geometry v0.2.0" in out, out)
         check("the unused directory is gone",
-              not os.path.exists(os.path.join(env["RUNE_HOME"], "pkg", "geometry", "0.2.0")))
+              not os.path.exists(os.path.join(env["RUNE_HOME"], "registry", "geometry", "0.2.0")))
 
         # A fresh machine: the lock alone is enough to build.
-        shutil.rmtree(os.path.join(env["RUNE_HOME"], "pkg"))
+        shutil.rmtree(os.path.join(env["RUNE_HOME"], "registry"))
         shutil.rmtree(os.path.join(env["RUNE_HOME"], "cache", "archives"), ignore_errors=True)
         out = run(["build"], app, env)
         check("a build with only the lock reinstalls what it pins", "Installed shapes v1.0.0" in out and "Finished" in out, out)
 
         # Tampering is caught.
         archive = os.path.join(reg, "packages", "shapes", "shapes-1.0.0.tar")
-        shutil.rmtree(os.path.join(env["RUNE_HOME"], "pkg", "shapes"))
+        shutil.rmtree(os.path.join(env["RUNE_HOME"], "registry", "shapes"))
         shutil.rmtree(os.path.join(env["RUNE_HOME"], "cache", "archives"), ignore_errors=True)
         with open(archive, "ab") as f:
             f.write(b"garbage")
@@ -265,7 +265,7 @@ def main():
         check("a tampered archive fails its checksum", "checksum does not match" in out, out)
 
         # Removing the dependency drops the references.
-        run(["pkg", "server", "--addPackage", "shapes", "--dir", reg, "--force"], tmp, env)
+        run(["registry", "--addPackage", "shapes", "--dir", reg, "--force"], tmp, env)
         out = run(["remove", "shapes"], app, env)
         check("remove drops the dependency line", 'shapes = "1.0.0"' not in open(os.path.join(app, "Rune.toml")).read(), out)
         check("nothing remains pinned", "[[package]]" not in open(os.path.join(app, "Rune.lock")).read())

@@ -1,0 +1,23 @@
+// A library that exports async functions, for the `.rul` boundary.
+import std::task
+import std::time
+
+pub class Client {
+    var calls: i64
+    fn init(self) { self.calls = 0 }
+
+    pub async fn get(&var self, path: String) -> String {
+        task::sleep(time::milliseconds(1)).await
+        self.calls += 1
+        "GET " + path
+    }
+
+    pub fn callCount(&self) -> i64 { self.calls }
+}
+
+pub async fn delayed<T>(value: T, ms: i64) -> T {
+    task::sleep(time::milliseconds(ms)).await
+    value
+}
+
+pub async fn ping() -> String { "pong" }

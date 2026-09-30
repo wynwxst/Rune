@@ -1,0 +1,51 @@
+import std::io
+
+enum Currency {
+    USD = 1f64,
+    AUD = 1.43f64,
+    GBP = 0.76f64
+}
+
+bind Currency into f64 {
+    fn convert(&self) -> f64 {
+        match self {
+            .USD => 1,
+            .AUD => 1.43,
+            .GBP => 0.76
+
+        }
+    }
+}
+
+struct Money {
+    cur: Currency
+    minor: u8
+    major: u64
+}
+
+/*extend Money {
+    fn convert(value: f64 /*assumes USD */, dest: Currency) -> f64 {
+        value*(dest as f64)
+    }
+    fn asCurrency(&self, currency: Currency) {
+        value: f64 = self.major + (self.minor/100f64)
+        if self.cur == currency {
+            return value
+        }
+        match self.cur {
+            .USD => {self.convert(value,currency).$str()},
+            .AUD => {self.convert(value/(Currency::AUD as f64),currency).$str()},
+            .GBP => {self.convert(value/(Currency::GBP as f64),currency).$str()}
+        }
+    }
+}*/
+
+fn main() -> i64 {
+    println!("Hello from proc_macro! {}",Currency::USD as f64)
+    /* enums/values cannot be casted into f64? */
+    /*xs = vec![-3,1,2,3]
+    for value in my_macro!(x * 2 for x in xs if x > 0) {
+        println!("{value}")
+    }*/
+    0
+}

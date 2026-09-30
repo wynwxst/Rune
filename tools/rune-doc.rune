@@ -110,16 +110,16 @@ fn unescape(src: String) -> String {
     out
 }
 
-fn keyOf(line: String) -> String {
+fn keyOf(line: &String) -> String {
     var i = 0
     while i < line.$length() {
         if line.$byteAt(i) == 32 { return line.$substring(0, i) }
         i += 1
     }
-    line
+    line.$clone()
 }
 
-fn valueOf(line: String) -> String {
+fn valueOf(line: &String) -> String {
     var i = 0
     while i < line.$length() {
         if line.$byteAt(i) == 32 { return line.$substring(i + 1, line.$length()) }
@@ -161,7 +161,7 @@ fn readSidecar(src: String) -> vector::Vector<Entry> {
 //===--------------------------------------------------------------------===//
 
 /// The directory part of a relative path, or "" when it has none.
-fn folderOf(path: String) -> String {
+fn folderOf(path: &String) -> String {
     var cut = -1
     var i = 0
     while i < path.$length() {
@@ -172,9 +172,9 @@ fn folderOf(path: String) -> String {
     path.$substring(0, cut)
 }
 
-fn fileOf(path: String) -> String {
+fn fileOf(path: &String) -> String {
     let dir = folderOf(path)
-    if dir.$isEmpty() { return path }
+    if dir.$isEmpty() { return path.$clone() }
     path.$substring(dir.$length() + 1, path.$length())
 }
 
@@ -412,7 +412,7 @@ fn moduleOfPath(rel: String) -> String {
 /// The guide page written for `module`, when there is one.
 fn guideFor(pages: vector::Vector<Page>, module: String) -> Page? {
     for p in pages {
-        if p.module == module { return p }
+        if p.module == module { return p.$clone() }
     }
     nil
 }
@@ -446,7 +446,7 @@ fn readGuide(root: String) -> vector::Vector<Page> {
             Err(e) => continue,
         }
         var p = Page()
-        p.path = rel
+        p.path = rel.$clone()
         p.folder = folderOf(rel)
         p.isIndex = fileOf(rel) == "index.md" || fileOf(rel) == "README.md"
         p.body = body
@@ -775,7 +775,7 @@ fn selectBy(entries: vector::Vector<Entry>, kind: String, module: String,
         if e.kind != kind { continue }
         if !module.$isEmpty() && e.module != module { continue }
         if e.owner != owner { continue }
-        out.push(e)
+        out.push(e.$clone())
     }
     out
 }
@@ -801,7 +801,7 @@ fn renderMembers(list: vector::Vector<Entry>, label: String, tag: String,
 }
 
 /// One type, with everything that belongs to it beneath it.
-fn renderType(entries: vector::Vector<Entry>, t: Entry, prefix: String) {
+fn renderType(entries: vector::Vector<Entry>, t: &Entry, prefix: String) {
     let id = prefix + "-" + slug(t.name)
     entryCount += 1
     body += "<h2 id=\"" + id + "\">" + attr(t.name) +
@@ -838,7 +838,7 @@ fn renderType(entries: vector::Vector<Entry>, t: Entry, prefix: String) {
 
     var binds = vector::Vector<Entry>()
     for e in entries {
-        if e.kind == "bind" && e.owner == t.name { binds.push(e) }
+        if e.kind == "bind" && e.owner == t.name { binds.push(e.$clone()) }
     }
     // A binding is never `pub` in the source — it cannot be hidden — so it is
     // always reported: what a type carries is part of what it is.
@@ -894,7 +894,7 @@ fn moduleLabel(name: String, pkg: String) -> String {
 }
 
 fn renderModule(entries: vector::Vector<Entry>, pages: vector::Vector<Page>,
-                m: Entry) {
+                m: &Entry) {
     let id = "m-" + slug(m.name)
     let kind = moduleKind(m.name, pkgName)
     let what = moduleWhat(kind)
@@ -927,7 +927,7 @@ fn renderModule(entries: vector::Vector<Entry>, pages: vector::Vector<Page>,
 
     var types = vector::Vector<Entry>()
     for e in entries {
-        if isType(e.kind) && e.module == m.name && e.isPublic { types.push(e) }
+        if isType(e.kind) && e.module == m.name && e.isPublic { types.push(e.$clone()) }
     }
     if types.length() > 0 {
         for t in types { renderType(entries, t, id) }
@@ -941,7 +941,7 @@ fn renderModule(entries: vector::Vector<Entry>, pages: vector::Vector<Page>,
         if e.kind != "bind" || e.module != m.name { continue }
         var owned = false
         for t in types { if t.name == e.owner { owned = true } }
-        if !owned { loose.push(e) }
+        if !owned { loose.push(e.$clone()) }
     }
     renderMembers(loose, "Bindings", "bind", id + "-bind", false)
 
@@ -965,7 +965,7 @@ fn renderModule(entries: vector::Vector<Entry>, pages: vector::Vector<Page>,
 
 /// A hand-written page, as a section. The tree entry is separate, so a page
 /// can be the node that a folder's other pages hang beneath.
-fn renderPageBody(p: Page, kind: String, what: String) -> String {
+fn renderPageBody(p: &Page, kind: String, what: String) -> String {
     let id = "p-" + slug(p.path)
     entryCount += 1
     let saved = linkFrom
@@ -985,7 +985,7 @@ fn renderPageBody(p: Page, kind: String, what: String) -> String {
 /// A page of prose, on its own. Its `##` `###` and `####` headings become
 /// the entries beneath it, nested as they nest in the page, so a long page
 /// is navigable without being cut into files.
-fn renderPage(p: Page) {
+fn renderPage(p: &Page) {
     openPage("p-" + slug(p.path), p.title, "page", "written")
     let html = renderPageBody(p, "page", "written")
     headingScope = "p-" + slug(p.path)
@@ -1004,7 +1004,7 @@ fn renderPage(p: Page) {
 
 /// A page inside a folder: a section and a tree entry, but no page of its
 /// own — the folder is the page, and its members sit beneath it.
-fn renderNestedPage(p: Page) {
+fn renderNestedPage(p: &Page) {
     let id = "p-" + slug(p.path)
     let html = renderPageBody(p, "page", "written")
     headingScope = id
@@ -1253,12 +1253,12 @@ fn main() -> i64 {
     // — is that module's prose. It goes at the top of the module's own page,
     // where the reference is, so `rune doc std::io` lands on one page that
     // says what the module is for before it lists what is in it.
-    for p in pages {
-        let asModule = moduleOfPath(p.path)
+    for i in 0..pages.length() {
+        let asModule = moduleOfPath(pages[i].path)
         for e in entries {
             if e.kind == "module" && e.name == asModule {
-                p.module = e.name
-                moduleGuides.put(p.path, e.name)
+                pages.touch(i).module = e.name.$clone()
+                moduleGuides.put(pages[i].path.$clone(), e.name.$clone())
             }
         }
     }
@@ -1364,7 +1364,7 @@ fn escapeHtml(src: String) -> String {
 }
 
 /// `code`, *emphasis*, **strong** and [label](href) inside a line of prose.
-fn inline(src: String) -> String {
+fn inline(src: &String) -> String {
     var out = ""
     var i = 0
     let n = src.$length()
@@ -1442,7 +1442,7 @@ fn joinDocsPath(baseDir: String, rel: String) -> String {
     var parts = vector::Vector<String>()
     if !baseDir.$isEmpty() {
         for seg in text::split(baseDir, "/") {
-            if !seg.$isEmpty() { parts.push(seg) }
+            if !seg.$isEmpty() { parts.push(seg.$clone()) }
         }
     }
     for seg in text::split(rel, "/") {
@@ -1451,7 +1451,7 @@ fn joinDocsPath(baseDir: String, rel: String) -> String {
             if !parts.isEmpty() { parts.pop() }
             continue
         }
-        parts.push(seg)
+        parts.push(seg.$clone())
     }
     var out = ""
     var i = 0

@@ -137,6 +137,7 @@ struct ResolvedTarget {
   std::string Name;            ///< what `target/<name>/` is called
   std::string Triple;
   std::string Cc;
+  std::string Cxx;
   std::string Ar;
   std::string Sysroot;
   std::string RuntimeDir;
@@ -180,6 +181,9 @@ struct Options {
   std::string TargetName;      ///< `--target`, before it is resolved
   /// `--cfg <name>`, joined with whatever the manifest asked for.
   std::vector<std::string> ConfigFlags;
+  /// `--cfg key=value` on `rune`'s own command line: a key for this build,
+  /// over whatever the manifest said.
+  std::vector<std::pair<std::string, std::string>> ConfigValues;
   ResolvedTarget Target;
 };
 
@@ -252,7 +256,8 @@ fs::path buildDir(const Manifest &m, const Options &o) {
 }
 
 /// Adds the flags a manifest asks for to a `runec` command line.
-void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o) {
+void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o,
+                      const std::map<std::string, std::string> &config) {
   cmd += " --safety " + m.Safety;
   cmd += " --memory " + o.Memory;
   unsigned opt = o.Release ? std::max(2u, m.OptLevel) : m.OptLevel;
@@ -295,6 +300,12 @@ void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o) {
     names.erase(std::unique(names.begin(), names.end()), names.end());
     for (const std::string &n : names)
       cmd += " --cfg " + quote(n);
+    // Keys with values: the package's own `[config]`, as its dependents
+    // chose them, and anything `--cfg key=value` added on the command line.
+    for (const auto &kv : config)
+      cmd += " --cfg " + quote(kv.first + "=" + kv.second);
+    for (const auto &kv : o.ConfigValues)
+      cmd += " --cfg " + quote(kv.first + "=" + kv.second);
   }
   // Native link flags are not added here: they come from DependencyInputs,
   // which already merges this package's own with its dependencies' and
@@ -334,6 +345,17 @@ pm::Fingerprint stepFingerprint(const std::string &cmd,
 /// written out in one piece rather than a line at a time — two interleaved
 /// diagnostics are worse than either on its own. The child cannot see a
 /// terminal through a pipe, so it is told whether to colour.
+/// `--diagnostic-format json`: every compile reports one JSON object per
+/// diagnostic, for an editor to read. Like colour, it changes only how the
+/// compiler narrates, so it stays out of the digest.
+static bool gJsonDiagnostics = false;
+/// `--diagnostic-format short`: `file:line:col: error: message` lines, which
+/// Vim's quickfix list and other `make`-minded tools read.
+static bool gShortDiagnostics = false;
+/// `--source <path>=<file>` pairs, handed to every compile: an editor's
+/// unsaved buffers, checked in place of what is on disk.
+static std::vector<std::string> gSourceOverrides;
+
 bool runStep(const std::string &verb, const std::string &what,
              const std::string &cmd, const Options &opts) {
   std::string line = std::string(c("\x1b[32m")) + "○" + c("\x1b[0m") + " " +
@@ -347,6 +369,15 @@ bool runStep(const std::string &verb, const std::string &what,
   std::string full = cmd;
   if (gColor)
     full += " --color";
+  if (gJsonDiagnostics)
+    full += " --diagnostic-format json";
+  else if (gShortDiagnostics)
+    full += " --diagnostic-format short";
+  // Only a check: a build's output is cached against what is on disk, and
+  // must not be made from text that was never saved.
+  if (full.find(" --check") != std::string::npos)
+    for (const std::string &o : gSourceOverrides)
+      full += " --source " + quote(o);
   if (opts.Verbose)
     full += " -v";
 
@@ -376,9 +407,14 @@ struct DependencyInputs {
   std::vector<std::string> Libraries;   ///< staged .rul paths
   std::vector<std::string> LinkLibs;    ///< -l names, in dependency order
   std::vector<std::string> LinkPaths;   ///< -L directories
-  /// Objects compiled from `c-sources`, this package's and its dependencies'.
+  /// Objects compiled from `c-sources` and `cxx-sources`, this package's and
+  /// its dependencies'.
   std::vector<std::string> Objects;
   std::vector<std::string> LinkArgs;    ///< [build] link-args, verbatim
+  /// True when anything in the graph has a C++ half. The C++ runtime is then
+  /// linked even if no Rune file declares an `extern "C++"` block — the
+  /// objects themselves need it.
+  bool NeedsCxx = false;
 
   void merge(const DependencyInputs &other) {
     auto append = [](std::vector<std::string> &into,
@@ -392,66 +428,110 @@ struct DependencyInputs {
     append(LinkPaths, other.LinkPaths);
     append(Objects, other.Objects);
     append(LinkArgs, other.LinkArgs);
+    NeedsCxx = NeedsCxx || other.NeedsCxx;
   }
 };
 
-/// Compiles a package's C sources with the same toolchain the rest of the
-/// build uses, and returns the objects to hand the linker.
+/// Compiles a package's C and C++ sources with the same toolchain the rest of
+/// the build uses, and returns the objects to hand the linker.
 ///
-/// This is what lets a package have a C half at all: the compiler links one
-/// object, and nothing else knows how to produce one from a `.c`. Using the
-/// build's own `cc` is what makes such a package cross-compile.
-bool buildCSources(const Manifest &m, const Options &opts, const fs::path &dir,
-                   const pm::FingerprintStore &stamps,
-                   std::vector<std::string> &objects) {
-  if (m.CSources.empty())
+/// This is what lets a package have a C or C++ half at all: the compiler links
+/// one object, and nothing else knows how to produce one from a `.c` or a
+/// `.cpp`. Using the build's own `cc` is what makes such a package
+/// cross-compile.
+///
+/// The C++ driver is `[target.<name>] cxx` when the manifest names one, and
+/// otherwise the C driver with its suffix swapped — `…-gcc` becomes `…-g++`,
+/// `clang` becomes `clang++` — because a cross toolchain ships the two
+/// together and naming one is naming both.
+std::string cxxDriverFor(const ResolvedTarget &t) {
+  if (!t.Cxx.empty())
+    return t.Cxx;
+  if (t.Cc.empty())
+    return "c++";
+  static const std::pair<const char *, const char *> kPairs[] = {
+      {"-gcc", "-g++"}, {"gcc", "g++"}, {"clang", "clang++"}, {"cc", "c++"}};
+  for (const auto &pair : kPairs) {
+    const size_t n = strlen(pair.first);
+    if (t.Cc.size() >= n && t.Cc.compare(t.Cc.size() - n, n, pair.first) == 0)
+      return t.Cc.substr(0, t.Cc.size() - n) + pair.second;
+  }
+  return t.Cc;
+}
+
+bool buildNativeSources(const Manifest &m, const Options &opts,
+                        const fs::path &dir, const pm::FingerprintStore &stamps,
+                        std::vector<std::string> &objects) {
+  if (m.CSources.empty() && m.CxxSources.empty())
     return true;
   std::error_code ec;
   fs::create_directories(dir, ec);
-  std::string cc = opts.Target.Cc.empty() ? std::string("cc") : opts.Target.Cc;
+  const std::string cc = opts.Target.Cc.empty() ? std::string("cc") : opts.Target.Cc;
+  const std::string cxx = cxxDriverFor(opts.Target);
 
-  for (const std::string &src : m.CSources) {
-    if (!fs::exists(src, ec)) {
-      failLine("cannot find the C source '" + src + "'");
-      note("paths in `c-sources` are relative to Rune.toml");
-      return false;
+  struct Half {
+    const std::vector<std::string> &Sources;
+    const std::vector<std::string> &Flags;
+    const std::string &Driver;
+    bool IsCxx;
+  };
+  const Half halves[] = {
+      {m.CSources, m.CFlags, cc, false},
+      {m.CxxSources, m.CxxFlags, cxx, true},
+  };
+
+  for (const Half &half : halves) {
+    for (const std::string &src : half.Sources) {
+      if (!fs::exists(src, ec)) {
+        failLine(std::string("cannot find the ") + (half.IsCxx ? "C++" : "C") +
+                 " source '" + src + "'");
+        note(std::string("paths in `") + (half.IsCxx ? "cxx-sources" : "c-sources") +
+             "` are relative to Rune.toml");
+        return false;
+      }
+      // Two sources with the same stem, one C and one C++, would otherwise
+      // write the same object.
+      fs::path obj = dir / (fs::path(src).stem().string() +
+                            (half.IsCxx ? ".cxx.o" : ".o"));
+      objects.push_back(obj.string());
+
+      std::string cmd = quote(half.Driver) + " -c -fPIC";
+      if (half.IsCxx)
+        cmd += " -std=" + quote(m.CxxStandard.empty() ? std::string("c++17")
+                                                      : m.CxxStandard);
+      cmd += opts.Release ? " -O2" : " -O0 -g";
+      if (opts.Target.Active && opts.Target.Cc.empty())
+        cmd += " --target=" + quote(opts.Target.Triple);
+      if (!opts.Target.Sysroot.empty())
+        cmd += " --sysroot=" + quote(opts.Target.Sysroot);
+      for (const std::string &f : half.Flags)
+        cmd += " " + quote(f);
+      cmd += " -o " + quote(obj.string()) + " " + quote(src);
+
+      pm::Fingerprint fp;
+      fp.add(cmd);
+      fp.addStamp(half.Driver);
+      fp.addFile(src);
+      fp.addFile((fs::path(m.Root) / "Rune.toml").string());
+      if (stamps.isFresh(obj, fp))
+        continue;
+
+      // A C or C++ compiler's own diagnostics, not the Rune compiler's:
+      // `--color` is not a flag it would take.
+      std::string output;
+      std::string line = std::string(c("\x1b[32m")) + "○" + c("\x1b[0m") + " " +
+                         c("\x1b[1m") + "Compiling" + c("\x1b[0m") + " " +
+                         fs::path(src).filename().string() + "\n";
+      if (opts.Verbose)
+        line += std::string(c("\x1b[2m")) + "  " + cmd + c("\x1b[0m") + "\n";
+      int rc = pm::runCaptured(cmd, output);
+      pm::writeSerialized(line + output);
+      if (rc != 0) {
+        failLine("could not compile '" + src + "'");
+        return false;
+      }
+      stamps.record(obj, fp);
     }
-    fs::path obj = dir / (fs::path(src).stem().string() + ".o");
-    objects.push_back(obj.string());
-
-    std::string cmd = quote(cc) + " -c -fPIC";
-    cmd += opts.Release ? " -O2" : " -O0 -g";
-    if (opts.Target.Active && opts.Target.Cc.empty())
-      cmd += " --target=" + quote(opts.Target.Triple);
-    if (!opts.Target.Sysroot.empty())
-      cmd += " --sysroot=" + quote(opts.Target.Sysroot);
-    for (const std::string &f : m.CFlags)
-      cmd += " " + quote(f);
-    cmd += " -o " + quote(obj.string()) + " " + quote(src);
-
-    pm::Fingerprint fp;
-    fp.add(cmd);
-    fp.addStamp(cc);
-    fp.addFile(src);
-    fp.addFile((fs::path(m.Root) / "Rune.toml").string());
-    if (stamps.isFresh(obj, fp))
-      continue;
-
-    // A C compiler's own diagnostics, not the Rune compiler's: `--color` is
-    // not a flag it would take.
-    std::string output;
-    std::string line = std::string(c("\x1b[32m")) + "○" + c("\x1b[0m") + " " +
-                       c("\x1b[1m") + "Compiling" + c("\x1b[0m") + " " +
-                       fs::path(src).filename().string() + "\n";
-    if (opts.Verbose)
-      line += std::string(c("\x1b[2m")) + "  " + cmd + c("\x1b[0m") + "\n";
-    int rc = pm::runCaptured(cmd, output);
-    pm::writeSerialized(line + output);
-    if (rc != 0) {
-      failLine("could not compile '" + src + "'");
-      return false;
-    }
-    stamps.record(obj, fp);
   }
   return true;
 }
@@ -472,6 +552,12 @@ struct PackageNode {
   Manifest M;
   std::vector<size_t> Deps;     ///< indices of direct dependencies
   bool IsRoot = false;
+  /// What this package is compiled with: its own `[config]`, with whatever
+  /// its dependents chose for those keys written over it. A package is built
+  /// once, so two dependents that disagree is an error rather than a race.
+  std::map<std::string, std::string> Config;
+  /// Which dependent chose each overridden key, so a clash can name both.
+  std::map<std::string, std::string> ConfigChosenBy;
 
   // Filled in as the build runs. Each is written by this package's own
   // library step and read by its dependents' — which the graph guarantees
@@ -540,10 +626,57 @@ bool resolvePackages(const std::string &rootDir, std::vector<PackageNode> &out,
   node.Dir = canonical;
   node.M = std::move(m);
   node.Deps = std::move(deps);
+  node.Config = node.M.Config;
   out.push_back(std::move(node));
   result = out.size() - 1;
   index[canonical] = result;
   return true;
+}
+
+/// Writes each package's dependents' `config = { ... }` choices over its own
+/// `[config]` defaults.
+///
+/// A package is built once for the whole graph, so two dependents choosing
+/// differently for one key have asked for two different builds of it — which
+/// is a question only they can settle.
+bool applyDependencyConfig(std::vector<PackageNode> &nodes) {
+  bool ok = true;
+  for (PackageNode &node : nodes) {
+    for (size_t depIndex : node.Deps) {
+      PackageNode &dep = nodes[depIndex];
+      for (const Dependency &d : node.M.Dependencies) {
+        if (d.Name != dep.M.Name || d.Config.empty())
+          continue;
+        for (const auto &kv : d.Config) {
+          if (!dep.M.Config.count(kv.first)) {
+            failLine("'" + dep.M.Name + "' has no config key '" + kv.first +
+                     "'");
+            note("'" + node.M.Name + "' chooses it in its `[dependencies]` "
+                 "entry; the keys a package offers are the ones in its own "
+                 "`[config]` table");
+            ok = false;
+            continue;
+          }
+          auto had = dep.Config.find(kv.first);
+          auto by = dep.ConfigChosenBy.find(kv.first);
+          if (by != dep.ConfigChosenBy.end() && had != dep.Config.end() &&
+              had->second != kv.second) {
+            failLine("'" + dep.M.Name + "' is asked for two builds at once");
+            note("'" + by->second + "' chose " + kv.first + " = " +
+                 had->second + ", and '" + node.M.Name + "' chose " +
+                 kv.first + " = " + kv.second);
+            note("a package is built once for the whole graph; settle on one "
+                 "value, or depend on it through one of them");
+            ok = false;
+            continue;
+          }
+          dep.Config[kv.first] = kv.second;
+          dep.ConfigChosenBy[kv.first] = node.M.Name;
+        }
+      }
+    }
+  }
+  return ok;
 }
 
 /// Stages a package's dependencies' libraries where its compiles can find
@@ -597,19 +730,20 @@ bool prepareInputs(PackageNode &node, std::vector<PackageNode> &nodes,
   // Whatever this package needs natively, its dependents need too. A cross
   // target's own libraries go in alongside them: `ws2_32` is needed by the
   // build, not by the package.
-  // A package's C half is compiled before anything links, and travels with
-  // the package: a dependent linking against this library needs those objects
+  // A package's C or C++ half is compiled before anything links, and travels
+  // with the package: a dependent linking against this library needs those objects
   // too, because the symbols they define are the ones it calls.
   std::vector<std::string> cObjects;
   const fs::path target = buildDir(node.M, opts);
-  if (!buildCSources(node.M, opts, target / "c",
-                     pm::FingerprintStore(target), cObjects))
+  if (!buildNativeSources(node.M, opts, target / "c",
+                          pm::FingerprintStore(target), cObjects))
     return false;
 
   DependencyInputs own;
   own.LinkLibs = node.M.LinkLibraries;
   own.LinkPaths = node.M.LinkPaths;
   own.Objects = cObjects;
+  own.NeedsCxx = !node.M.CxxSources.empty();
   for (const std::string &a : node.M.LinkArgs)
     own.LinkArgs.push_back(a);
   for (const std::string &l : opts.Target.LinkLibraries)
@@ -649,7 +783,7 @@ bool buildPackageLibrary(PackageNode &node, std::vector<PackageNode> &nodes,
     std::string cmd = quote(findCompiler()) +
                       emitFlagFor(OutputKind::Library) + " --module " +
                       quote(m.Name);
-    appendBuildFlags(cmd, m, opts);
+    appendBuildFlags(cmd, m, opts, node.Config);
     cmd += " -I " + quote(depsDir.string());
     cmd += " -o " + quote(libOut.string());
     for (const std::string &s : sources)
@@ -807,7 +941,7 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
   } else if (step.Kind != OutputKind::Executable) {
     cmd += emitFlagFor(step.Kind);
   }
-  appendBuildFlags(cmd, m, opts);
+  appendBuildFlags(cmd, m, opts, node.Config);
   cmd += " -I " + quote(depsDir.string());
   // Staged dependency libraries are already in depsDir; a library built by
   // this package sits one level up, so make that visible too. The library
@@ -825,6 +959,8 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
       cmd += " --link-arg " + quote(obj);
     for (const std::string &a : inputs.LinkArgs)
       cmd += " --link-arg " + quote(a);
+    if (inputs.NeedsCxx)
+      cmd += " --link-cxx";
   }
   if (!opts.CheckOnly)
     cmd += " -o " + quote(out.string());
@@ -891,6 +1027,11 @@ WorkspaceResult buildWorkspace(const Options &opts) {
   if (!resolvePackages(opts.PackageDir, nodes, index, onPath, root))
     return result;
   nodes[root].IsRoot = true;
+  // What each package's dependents chose for its `[config]` keys, settled
+  // before anything is compiled: the answer decides which declarations the
+  // package even has.
+  if (!applyDependencyConfig(nodes))
+    return result;
 
   // A dependency is always built as a library, whatever `--emit` asked of the
   // root package: its `.rul` is what makes its dependents compile at all, and
@@ -1071,6 +1212,7 @@ bool resolveTarget(const Manifest &m, Options &opts) {
     t.Name = spec->Name;
     t.Triple = spec->Triple;
     t.Cc = spec->Cc;
+    t.Cxx = spec->Cxx;
     t.Ar = spec->Ar;
     t.Sysroot = spec->Sysroot;
     t.RuntimeDir = spec->RuntimeDir;
@@ -1114,6 +1256,8 @@ int commandTargets(const Manifest &m) {
     std::cout << "      triple  " << t.Triple << "\n";
     if (!t.Cc.empty())
       std::cout << "      cc      " << t.Cc << "\n";
+    if (!t.Cxx.empty())
+      std::cout << "      cxx     " << t.Cxx << "\n";
     if (!t.Sysroot.empty())
       std::cout << "      sysroot " << t.Sysroot << "\n";
     if (!t.Runner.empty())
@@ -1228,7 +1372,7 @@ int commandTest(const Options &opts) {
     std::string name = fs::path(testFile).stem().string();
     exes[i] = testDir / (name + opts.Target.exeSuffix());
     std::string cmd = quote(compiler) + " --module " + quote(name);
-    appendBuildFlags(cmd, m, opts);
+    appendBuildFlags(cmd, m, opts, m.Config);
     cmd += " -I " + quote((target / "deps").string());
     cmd += " -I " + quote(target.string());
     for (const std::string &dir2 : inputs.LinkPaths)
@@ -1239,6 +1383,8 @@ int commandTest(const Options &opts) {
       cmd += " --link-arg " + quote(obj);
     for (const std::string &a : inputs.LinkArgs)
       cmd += " --link-arg " + quote(a);
+    if (inputs.NeedsCxx)
+      cmd += " --link-cxx";
     cmd += " -o " + quote(exes[i].string()) + " " + quote(testFile);
 
     std::vector<std::string> deps{testFile,
@@ -1430,6 +1576,7 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
 
   std::vector<std::string> sources = {
       (cRoot / "src" / "rune_runtime.c").string(),
+      (cRoot / "src" / "rune_task.c").string(),
       (cRoot / "src" / "rune_unicode_data.c").string()};
 
   std::error_code ec;
@@ -1510,6 +1657,93 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
     return "";
   }
   return dir.string();
+}
+
+/// `rune-lint`, `rune-fmt` or `rune-lsp`: the editor tools, which are Rune
+/// programs.
+///
+/// A build tree has them beside the compiler, built by CMake from the same
+/// sources as it; that one is used when it is there. Otherwise they are
+/// compiled from `tools/` into `~/.rune/bin` and kept, and compiled again
+/// whenever a source is newer than what is kept — the same arrangement as
+/// the documentation generator. Returns "" when neither can be had.
+std::string ensureEditorTool(const std::string &name, const Options &opts) {
+  std::error_code ec;
+  fs::path here = fs::path(findCompiler()).parent_path();
+  for (const std::string &file : {name, name + ".exe"}) {
+    fs::path p = here / file;
+    if (fs::is_regular_file(p, ec))
+      return p.string();
+  }
+
+  fs::path src(RUNE_TOOLCHAIN_ROOT);
+  fs::path root = src / "tools" / (name + ".rune");
+  if (!fs::exists(root, ec))
+    return "";
+  std::vector<fs::path> sources = {root};
+  for (fs::directory_iterator it(src / "tools" / "runetools", ec), end; it != end;
+       it.increment(ec)) {
+    if (!ec && it->path().extension() == ".rune")
+      sources.push_back(it->path());
+  }
+  std::sort(sources.begin() + 1, sources.end());
+
+  fs::path bin = runeHome() / "bin" / name;
+  bool stale = !fs::exists(bin, ec);
+  if (!stale) {
+    auto built = fs::last_write_time(bin, ec);
+    for (const fs::path &p : sources)
+      if (fs::last_write_time(p, ec) > built)
+        stale = true;
+  }
+  if (stale) {
+    fs::create_directories(bin.parent_path(), ec);
+    status("Preparing", name);
+    // Every file after the first is a module under `runetools`, which is
+    // what the tools import: `runetools::syntax`, `runetools::lint`.
+    std::string cmd = quote(findCompiler()) + " --stdlib " +
+                      quote(RUNE_DEFAULT_STDLIB_DIR) +
+                      " --module runetools -O2 -o " + quote(bin.string());
+    for (const fs::path &p : sources)
+      cmd += " " + quote(p.string());
+    if (runCommand(cmd, opts.Verbose) != 0) {
+      failLine("could not build " + name + " from " + root.string());
+      return "";
+    }
+  }
+  return bin.string();
+}
+
+/// `rune lint [args]` and `rune lsp [args]`: the editor tools, run with the
+/// toolchain's own standard library and compilers, and handed whatever else
+/// was on the command line. Their exit status is the command's.
+int commandEditorTool(const std::string &command, const std::vector<std::string> &rest,
+                      const Options &opts) {
+  std::string name = command == "lsp" ? "rune-lsp" : command == "fmt" ? "rune-fmt" : "rune-lint";
+  std::string tool = ensureEditorTool(name, opts);
+  if (tool.empty()) {
+    failLine("could not find or build " + name);
+    note("build the toolchain with CMake, which puts it beside `runec`");
+    return 2;
+  }
+  std::error_code ec;
+  std::string cmd = quote(tool) + " --stdlib " + quote(RUNE_DEFAULT_STDLIB_DIR);
+  if (command == "fmt")
+    cmd += " --runec " + quote(findCompiler());   // it asks the compiler for types
+  if (command == "lsp") {
+    // The server runs the compiler itself: this one, and this `rune`.
+    fs::path self = fs::path(gExecutableDir) / "rune";
+    cmd += " --runec " + quote(findCompiler());
+    if (fs::is_regular_file(self, ec))
+      cmd += " --rune " + quote(fs::absolute(self, ec).lexically_normal().string());
+  }
+  for (const std::string &a : rest)
+    cmd += " " + quote(a);
+  if (!opts.PackageDir.empty() && opts.PackageDir != ".")
+    cmd = "cd " + quote(opts.PackageDir) + " && " + cmd;
+  // Not through `runStep`: the server talks over this process's own
+  // standard input and output, and the linter's report is for the terminal.
+  return runCommand(cmd, false);
 }
 
 /// The cached generator, falling back to one sitting beside the compiler.
@@ -1716,6 +1950,69 @@ int commandDocStdlib(const Options &opts) {
   return 0;
 }
 
+/// The books the toolchain ships about its own tools, by the name
+/// `rune doc <name>` takes: the directory under `tools/books/` it is written
+/// in. Each is prose only — a folder of Markdown, like a package's `docs/`
+/// with no source beside it.
+const char *toolBookDir(const std::string &name) {
+  if (name == "lint") return "rune-lint";
+  if (name == "lsp") return "rune-lsp";
+  if (name == "fmt") return "rune-fmt";
+  return nullptr;
+}
+
+/// `rune doc lint`, `rune doc lsp`: the linter's and the language server's
+/// books. Copied into the cache with the rest of the toolchain, so this
+/// works from any directory, and rebuilt only when a page has changed or the
+/// generator has.
+int commandDocBook(const Options &opts, const std::string &dirName) {
+  primeToolchainCache(opts);
+  fs::path home = runeHome();
+  fs::path books = home / "share" / "books";
+  refresh(fs::path(RUNE_TOOLCHAIN_ROOT) / "tools" / "books", books, true);
+  fs::path src = books / dirName;
+  fs::path out = home / "docs" / dirName;
+  fs::path page = out / "index.html";
+  std::error_code ec;
+  if (!fs::is_directory(src, ec)) {
+    failLine("the book is not in the cache at " + src.string());
+    note("build the toolchain, or set RUNE_HOME to where it was installed");
+    return 1;
+  }
+  std::string gen = findDocGenerator();
+  if (gen.empty()) {
+    failLine("the documentation generator is not built");
+    note("build it with `runec -o rune-doc tools/rune-doc.rune`");
+    return 1;
+  }
+  bool stale = !fs::exists(page, ec);
+  if (!stale) {
+    auto built = fs::last_write_time(page, ec);
+    std::error_code gec;
+    auto genWhen = fs::last_write_time(gen, gec);
+    stale = newestUnder(src) > built || (!gec && genWhen > built);
+  }
+  if (stale) {
+    fs::create_directories(out, ec);
+    status("Writing", page.string());
+    // `-` for the sidecar: there is no source to read, only the pages.
+    std::string run = quote(gen) + " - " + quote(src.string()) + " " + quote(out.string());
+    fs::path style = home / "share" / "style.css";
+    fs::path app = home / "share" / "app.js";
+    if (fs::exists(style, ec)) {
+      run += " " + quote(style.string());
+      if (fs::exists(app, ec))
+        run += " " + quote(app.string());
+    }
+    if (runCommand(run, opts.Verbose) != 0)
+      return 1;
+  }
+  std::string url = fileUrl(page, "");
+  okLine("Opening " + url);
+  openInBrowser(url, opts.Verbose);
+  return 0;
+}
+
 int commandDoc(const Options &opts);
 
 /// `rune doc geometry`, `rune doc work::geometry`: a package's documentation,
@@ -1761,6 +2058,10 @@ int commandDocPackage(const Options &opts) {
 int commandDoc(const Options &opts) {
   if (opts.DocModule == "std" || opts.DocModule.rfind("std::", 0) == 0)
     return commandDocStdlib(opts);
+  // The toolchain's own books come before packages: a package that happens
+  // to be called `lint` is still `rune doc <registry>::lint`.
+  if (const char *book = toolBookDir(opts.DocModule))
+    return commandDocBook(opts, book);
   if (!opts.DocModule.empty())
     return commandDocPackage(opts);
   primeToolchainCache(opts);
@@ -1972,10 +2273,17 @@ COMMANDS
     test                 Build and run every program under tests/
     doc [--open]         Read docs/ and the source; write target/<profile>/docs
     doc std::<module>    Open the standard library's reference at a module
+    doc lint | doc lsp | doc fmt
+                         Open the book about the linter, the language server
+                         or the formatter
     doc <package>        Open a package's documentation; <registry>::<package>
                          reads the copy from that registry (--no-open: only say
                          where the page is)
     check                Type-check without producing output
+    lint [path...]       Look for likely mistakes and style problems; --fix applies fixes
+    fmt [path...]        Lay source out and write in types and argument labels;
+                         --check only reports
+    lsp                  Run the language server, for an editor, over stdin and stdout
     clean                Delete the target/ directory
     targets              List the cross targets this package configures
 
@@ -1983,6 +2291,7 @@ PACKAGES
     search <regex>       Find packages in the configured registries
     desc <name>          Describe a package: versions, authors, dependencies
     add <name>[@req]...  Depend on a package; install it and pin it in Rune.lock
+                         `--config key=value` chooses one of its `[config]` keys
     remove [<name>...]   Drop a dependency; with no names, uninstall unused packages
     update [<name>...]   Move dependencies to the newest versions their requirements allow
     deps                 Print the dependency tree
@@ -2008,6 +2317,7 @@ OPTIONS
                          manifest's [build] memory, else arc)
     -j, --jobs <n>       Compile at most <n> things at once (default: cores)
     --cfg <name>         Set <name> for `@Config(...)`, on top of [build] cfg
+    --cfg <key>=<value>  Give <key> a value, over what [config] says
     --target <name>      Build for a [target.<name>] toolchain, or a triple
     --emit <kind>        llvm-ir | asm | obj | lib | exe — what to produce
                          instead of linking (default exe)
@@ -2045,6 +2355,20 @@ int main(int argc, char **argv) {
   bool wantLib = false;
   bool afterSeparator = false;
   bool memoryFromFlag = false;
+
+  // The editor tools take flags of their own, which they are handed as
+  // written; only `-C` is `rune`'s.
+  if (command == "lint" || command == "lsp" || command == "fmt") {
+    std::vector<std::string> rest;
+    for (int i = 2; i < argc; ++i) {
+      std::string a = argv[i];
+      if ((a == "-C" || a == "--directory") && i + 1 < argc) { opts.PackageDir = argv[++i]; continue; }
+      if (a == "--no-color") { gColor = false; continue; }
+      if (a == "-v" || a == "--verbose") { opts.Verbose = true; continue; }
+      rest.push_back(a);
+    }
+    return commandEditorTool(command, rest, opts);
+  }
 
   // The package commands take their own flags — `--serve`, `--port`,
   // `--refresh` — so they see the arguments as written, less the few every
@@ -2091,13 +2415,35 @@ int main(int argc, char **argv) {
     }
     if (a == "-v" || a == "--verbose") { opts.Verbose = true; continue; }
     if (a == "--no-color") { gColor = false; continue; }
+    if (a == "--diagnostic-format" && i + 1 < argc) {
+      std::string v = argv[++i];
+      if (v != "json" && v != "human" && v != "short") {
+        std::cerr << "rune: --diagnostic-format takes 'human', 'json' or 'short'\n";
+        return 2;
+      }
+      gJsonDiagnostics = v == "json";
+      gShortDiagnostics = v == "short";
+      if (v != "human") gColor = false;
+      continue;
+    }
+    if (a == "--source" && i + 1 < argc) {
+      gSourceOverrides.push_back(argv[++i]);
+      continue;
+    }
     if (a == "--lib") { wantLib = true; continue; }
     if (a == "--bin") { wantLib = false; continue; }
     if (a == "--all") { opts.RunAll = true; continue; }
     if (a == "--open") { opts.OpenDocs = true; continue; }
     if (a == "--no-open") { gNoBrowser = true; continue; }
     if (a == "--cfg" && i + 1 < argc) {
-      opts.ConfigFlags.push_back(argv[++i]);
+      {
+        std::string v = argv[++i];
+        size_t eq = v.find('=');
+        if (eq == std::string::npos)
+          opts.ConfigFlags.push_back(v);
+        else
+          opts.ConfigValues.push_back({v.substr(0, eq), v.substr(eq + 1)});
+      }
       continue;
     }
     if ((a == "-j" || a == "--jobs") && i + 1 < argc) {

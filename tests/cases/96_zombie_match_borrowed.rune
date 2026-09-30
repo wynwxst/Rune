@@ -1,0 +1,52 @@
+// FLAGS: --memory zombie
+// EXPECT: first 2
+// EXPECT: again 2
+// EXPECT: counted 2
+// EXPECT: bumped 11
+//
+// Matching a field of something the function only borrows looks at it where
+// it lies. It used to be copied into the match and the field emptied to pay
+// for the copy, so a second call found nothing there — the borrow checker
+// had meanwhile checked the arms as borrows, which is what they are.
+import std::mem::{Handle}
+import std::{mem, io}
+
+struct Node { elem: i64, next: Handle<Node>? }
+
+fn peek(n: &var Node) -> i64 {
+    match n.next {
+        Some(h) => (*h).elem,
+        None => 0
+    }
+}
+
+/// The same through `if … is`, and through a class receiver.
+class Chain {
+    node: Node
+
+    fn init(self, node: Node) { self.node = node }
+
+    pub fn count(&self) -> i64 {
+        if self.node.next is Some(h) { (*h).elem } else { 0 }
+    }
+
+    /// Writing through a binding taken out of a `&var` receiver.
+    pub fn bump(&var self) {
+        match &var self.node.next {
+            Some(h) => h.touch().elem += 9,
+            None => {}
+        }
+    }
+}
+
+fn main() -> i64 {
+    var a = Node { elem: 1, next: Some(Handle<Node>(Node { elem: 2, next: nil })) }
+    io::println("first " + peek(&var a).$str())
+    io::println("again " + peek(&var a).$str())
+
+    var chain = Chain(Node { elem: 1, next: Some(Handle<Node>(Node { elem: 2, next: nil })) })
+    io::println("counted " + chain.count().$str())
+    chain.bump()
+    io::println("bumped " + chain.count().$str())
+    0
+}

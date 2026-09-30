@@ -1152,7 +1152,10 @@ void collectMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
         continue;
       }
     }
-    if (toks[i].Kind == Tok::KwMacro) {
+    // `@macro` is the *attribute* that marks a procedural macro, not the
+    // start of a declarative one. It is taken out by `collectProcMacros`.
+    if (toks[i].Kind == Tok::KwMacro &&
+        !(i > 0 && toks[i - 1].Kind == Tok::At)) {
       i = readDefinition(toks, i, diags, into, record, module,
                          /*isPublic=*/false);
       continue;
@@ -1164,7 +1167,7 @@ void collectMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
 
 bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
                   const MacroTable &macros, const std::string &module,
-                  unsigned depthLimit) {
+                  unsigned depthLimit, const MacroPackage *procs) {
   // Pass two: expand, repeatedly, so a macro may expand into another.
   bool ok = true;
   for (unsigned round = 0; round < depthLimit; ++round) {
@@ -1223,6 +1226,37 @@ bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
         continue;
       }
 
+      // A procedural macro — a `@macro fn` — is run rather than matched. It
+      // is looked for first, so a name is one kind of macro or the other and
+      // never quietly both.
+      if (procs) {
+        auto pit = procs->Macros.find(name);
+        if (pit != procs->Macros.end()) {
+          size_t argsEnd = skipGroup(toks, i + 2);
+          // The brackets themselves are kept, so a macro sees what is inside
+          // them as the group it was written as.
+          std::vector<Token> args(
+              toks.begin() + static_cast<long>(i) + 3,
+              toks.begin() + static_cast<long>(argsEnd) - 1);
+          std::vector<Token> produced;
+          if (!runProcMacro(pit->second, procs->Program, args, at, diags,
+                            produced)) {
+            ok = false;
+          } else {
+            out.insert(out.end(), produced.begin(), produced.end());
+            diags.noteExpansion(
+                at,
+                spellTokens(withoutLayout(std::vector<Token>(
+                    toks.begin() + static_cast<long>(i),
+                    toks.begin() + static_cast<long>(argsEnd)))),
+                spellTokens(produced));
+          }
+          expandedAny = true;
+          i = argsEnd;
+          continue;
+        }
+      }
+
       auto mit = macros.find(name);
       // A macro that is not `pub` is only in scope in the file it was written
       // in. Saying so here is far clearer than letting the grammar trip over
@@ -1247,15 +1281,17 @@ bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
         // negation, which cannot follow a name — so this is a call to one
         // that does not exist.
         auto d = diags.error(at, "no macro named '{}'", name);
-        if (!macros.empty()) {
-          std::string names;
-          for (const auto &m : macros)
-            if (m.second.IsPublic || m.second.Module == module)
-              names += (names.empty() ? "" : ", ") + m.first;
-          if (!names.empty())
-            d.note(("in scope here: " + names).c_str());
-        }
-        d.note("a macro is declared with `macro name { (pattern) => { ... } }`");
+        std::string names;
+        for (const auto &m : macros)
+          if (m.second.IsPublic || m.second.Module == module)
+            names += (names.empty() ? "" : ", ") + m.first;
+        if (procs)
+          for (const auto &m : procs->Macros)
+            names += (names.empty() ? "" : ", ") + m.first;
+        if (!names.empty())
+          d.note(("in scope here: " + names).c_str());
+        d.note("a macro is declared with `macro name { (pattern) => { ... } }`, "
+               "or written as code with `@macro fn name(...)`");
         d.code(123);
         ok = false;
         i = skipGroup(toks, i + 2);

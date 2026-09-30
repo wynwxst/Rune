@@ -1,0 +1,52 @@
+// FLAGS: --memory zombie
+// EXPECT: ada   36
+// EXPECT: count 2
+// EXPECT: three 3
+// EXPECT: empty 0
+// EXPECT: keyed two
+// EXPECT: fixed 6
+// EXPECT: named 7
+// EXPECT: slice 3
+// EXPECT: array 2
+//
+// `[key: value]` builds a map, and `[K:V]` names its type. An array's length
+// is a number and a map's key is a type, which is what tells `[3:i64]` from
+// `[String:i64]` — the names decide, not the punctuation.
+import std::io
+import std::dictionary
+
+let SIZE = 3
+
+fn count(m: [String:i64]) -> i64 { m.length() }
+
+fn main() -> i64 {
+    let ages: [String:i64] = ["ada": 36, "bob": 41]
+    println!("ada   {}", ages.at("ada").unwrap().$str())
+    println!("count {}", count(ages).$str())
+
+    // Pairs may go on their own lines, with or without commas.
+    let multi = [
+        "one": 1,
+        "two": 2,
+        "three": 3,
+    ]
+    println!("three {}", multi.at("three").unwrap().$str())
+
+    // `[:]` is the empty one; its types come from where it is going.
+    let empty: [String:i64] = [:]
+    println!("empty {}", empty.length().$str())
+
+    var byKey: [i64:String] = [1: "one", 2: "two"]
+    println!("keyed {}", byKey.at(2).unwrap())
+
+    // Arrays still mean what they did.
+    let fixed: [3:i64] = [4, 5, 6]
+    println!("fixed {}", fixed[2].$str())
+    let named: [SIZE:i64] = [7, 8, 9]
+    println!("named {}", named[0].$str())
+    let sl: [i64] = fixed
+    println!("slice {}", sl.$length().$str())
+    let plain = [1, 2, 3]
+    println!("array {}", plain[1].$str())
+    0
+}

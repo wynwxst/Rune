@@ -1,0 +1,96 @@
+// `async fn` and `.await`: one thread doing several things at once. Calling
+// an async function starts its task at once; `.await` collects the result,
+// parking the task that asked and letting the others run meanwhile.
+// EXPECT: a starts
+// EXPECT: b starts
+// EXPECT: main between
+// EXPECT: b ends
+// EXPECT: a ends
+// EXPECT: a! b!
+// EXPECT: again: a!
+// EXPECT: chain: 55
+// EXPECT: total leaves
+// EXPECT: ok 30
+// EXPECT: total leaves
+// EXPECT: err negative
+// EXPECT: sum 1999000
+// EXPECT: in task: true
+import std::io
+import std::task
+import std::time
+
+async fn step(name: String, delay: i64) -> String {
+    io::println(name + " starts")
+    task::sleep(time::milliseconds(delay)).await
+    io::println(name + " ends")
+    name + "!"
+}
+
+/// Recursion through `.await`, each level a task of its own.
+async fn chain(n: i64) -> i64 {
+    if n == 0 { return 0 }
+    chain(n - 1).await + n
+}
+
+struct Failed { why: String }
+
+async fn mayFail(n: i64) -> Result<i64, Failed> {
+    task::sleep(time::milliseconds(1)).await
+    if n < 0 { return Err(Failed { why: "negative" }) }
+    Ok(n * 10)
+}
+
+/// `?` and `defer` work inside a task exactly as they do in a function.
+async fn total(a: i64, b: i64) -> Result<i64, Failed> {
+    defer io::println("total leaves")
+    let x = mayFail(a).await?
+    let y = mayFail(b).await?
+    Ok(x + y)
+}
+
+async fn tiny(n: i64) -> i64 {
+    task::yieldNow()
+    n
+}
+
+/// A task whose result nobody collects still runs to the end, and what it
+/// made is freed with it: nothing is reported live at exit.
+async fn forgotten() -> String {
+    task::sleep(time::milliseconds(1)).await
+    "nobody reads this " + "but it is freed"
+}
+
+async fn main() -> i64 {
+    // Both start before `main` carries on; the shorter sleep finishes first.
+    let a = step("a", 30)
+    let b = step("b", 10)
+    io::println("main between")
+    io::println(a.await + " " + b.await)
+    // A future may be awaited more than once; each asking gets the value.
+    io::println("again: " + a.await)
+
+    io::println("chain: " + chain(10).await.$str())
+
+    match total(1, 2).await {
+        Ok(v) => io::println("ok " + v.$str()),
+        Err(e) => io::println("err " + e.why),
+    }
+    match total(1, -2).await {
+        Ok(v) => io::println("ok " + v.$str()),
+        Err(e) => io::println("err " + e.why),
+    }
+
+    forgotten()
+    task::sleep(time::milliseconds(5)).await
+
+    // Many short tasks in a row: each gets a stack, most from the pool.
+    var sum = 0
+    var i = 0
+    while i < 2000 {
+        sum += tiny(i).await
+        i += 1
+    }
+    io::println("sum " + sum.$str())
+    io::println("in task: " + task::inTask().$str())
+    0
+}

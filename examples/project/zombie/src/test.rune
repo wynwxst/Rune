@@ -1,0 +1,67 @@
+import std::mem::{Handle}
+import std::{mem, testing}
+
+pub struct List {
+    head: Link,
+}
+
+enum Link {
+    Empty,
+    More(Handle<Node>),
+}
+
+struct Node {
+    elem: i32,
+    next: Link,
+}
+
+extend List {
+    pub fn new() -> Self {
+        List {head: Link::Empty}
+    }
+
+    pub fn push(&var self, value: i32) {
+        let new_node = Node {
+            elem: value,
+            next: mem::replace(&var self.head, Link::Empty)
+        }
+        self.head = Link::More(Handle<Node>(new_node)) /* improve Handle inferrence, does handle work on Zombie? */
+    }
+
+    /*pub fn pop(&var self) -> Option<i32> {
+        match mem::replace(&var self.head, Link::Empty) { /* consider match borrowing semantics as well , lazy resolution of type phase as well */
+            Link::Empty => {
+                nil
+            },
+            Link::More(handle) => {
+                node = *handle
+                result = Some(node.elem)
+                self.head = node.next
+                result
+            }
+        }
+    }*/
+
+    // drops an object prematurely
+    pub fn pop(&var self) -> Option<i32> {
+        match mem::replace(&var self.head, Link::Empty) {
+            Link::Empty => None,
+            Link::More(node) => {
+                self.head = (*node).next;
+                Some((*node).elem)
+            }
+        }
+    }
+
+}
+
+
+fn main(){
+    list = List::new()
+    list.push(57)
+    list.push(33)
+    //println!("{}, {}", list.pop().unwrap(), list.pop().unwrap())
+    assert!(list.pop().unwrap() == 33i32 && list.pop().unwrap() == 57i32)
+
+
+}

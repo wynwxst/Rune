@@ -61,7 +61,8 @@ pub fn scatter(points: [geometry::Point], width: i64, height: i64) -> String {
         let fy = if highY > lowY { (p.y - lowY) / (highY - lowY) } else { 0.0 }
         let col = (fx * ((width - 1) as f64) + 0.5) as i64
         let row = (height - 1) - ((fy * ((height - 1) as f64) + 0.5) as i64)
-        grid[row][col] = "*"
+        // `touch` lends the row where it sits, so the mark is made in place.
+        grid.touch(row)[col] = "*"
     }
     var out = ""
     for row in grid {

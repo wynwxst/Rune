@@ -1,0 +1,22 @@
+import std::{io,process,random}
+
+fn main() -> i64 {
+    println!("Welcome to guessing game!\nEnter your guess: ")
+    let number = random::between(0, 100)
+    var guess: int? = nil
+
+    while io::readLineOrEnd() is Some(line) {
+        guess = line.$toInt().expect("Please enter a number!")
+        break
+    }
+
+    if guess.unwrap() == number {
+        println!("Wow! You guessed it right!")
+    } else {
+        println!("Better luck next time.")
+    }
+
+
+
+    0
+}

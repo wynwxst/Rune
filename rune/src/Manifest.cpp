@@ -11,6 +11,21 @@ namespace fs = std::filesystem;
 
 namespace rune {
 
+namespace {
+/// A `[config]` value as `@Config` compares it: a string as itself, a number
+/// or a boolean as it prints. Anything else — an array, a table — has no
+/// spelling a condition could compare against.
+std::string configText(const TomlValue &v) {
+  switch (v.K) {
+  case TomlValue::Kind::String: return v.Str;
+  case TomlValue::Kind::Integer: return std::to_string(v.Int);
+  case TomlValue::Kind::Boolean: return v.Bool ? "true" : "false";
+  default: return std::string();
+  }
+}
+} // namespace
+
+
 const TargetSpec *Manifest::findTarget(const std::string &name) const {
   for (const TargetSpec &t : Targets)
     if (t.Name == name)
@@ -160,10 +175,17 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
     out.LinkPaths = stringList(build->find("link-paths"));
     out.CSources = stringList(build->find("c-sources"));
     out.CFlags = stringList(build->find("c-flags"));
+    out.CxxSources = stringList(build->find("cxx-sources"));
+    out.CxxFlags = stringList(build->find("cxx-flags"));
+    if (const TomlValue *v = build->find("cxx-standard"))
+      out.CxxStandard = v->stringOr("");
     out.ConfigFlags = stringList(build->find("cfg"));
     out.LinkArgs = stringList(build->find("link-args"));
     // A source path is relative to the manifest, like everything else in it.
     for (std::string &p : out.CSources)
+      if (!fs::path(p).is_absolute())
+        p = (root / p).lexically_normal().string();
+    for (std::string &p : out.CxxSources)
       if (!fs::path(p).is_absolute())
         p = (root / p).lexically_normal().string();
     for (std::string &p : out.LinkPaths)
@@ -186,6 +208,7 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
       const TomlValue &v = entry.second;
       if (const TomlValue *x = v.find("triple")) t.Triple = x->stringOr("");
       if (const TomlValue *x = v.find("cc")) t.Cc = x->stringOr("");
+      if (const TomlValue *x = v.find("cxx")) t.Cxx = x->stringOr("");
       if (const TomlValue *x = v.find("ar")) t.Ar = x->stringOr("");
       if (const TomlValue *x = v.find("sysroot")) t.Sysroot = x->stringOr("");
       if (const TomlValue *x = v.find("runtime-dir")) t.RuntimeDir = x->stringOr("");
@@ -213,6 +236,12 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
     }
   }
 
+  // `[config]`: this package's own keys, as `@Config` compares them.
+  if (const TomlValue *cfg = doc.get("config"))
+    if (cfg->isTable())
+      for (const auto &kv : cfg->Tbl)
+        out.Config[kv.first] = configText(kv.second);
+
   if (const TomlValue *deps = doc.get("dependencies")) {
     for (const auto &entry : deps->Tbl) {
       Dependency d;
@@ -223,6 +252,10 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
         if (const TomlValue *p = entry.second.find("path")) d.Path = p->stringOr("");
         if (const TomlValue *v = entry.second.find("version")) d.Version = v->stringOr("");
         if (const TomlValue *r = entry.second.find("registry")) d.Registry = r->stringOr("");
+        if (const TomlValue *c = entry.second.find("config"))
+          if (c->isTable())
+            for (const auto &kv : c->Tbl)
+              d.Config[kv.first] = configText(kv.second);
       }
       out.Dependencies.push_back(std::move(d));
     }

@@ -21,6 +21,7 @@
 #define RUNE_MACRO_H
 
 #include "rune/Diagnostics.h"
+#include "rune/MacroEval.h"
 #include "rune/Token.h"
 
 #include <map>
@@ -81,7 +82,8 @@ void collectMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
 /// in scope there.
 bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
                   const MacroTable &table, const std::string &module = "",
-                  unsigned depthLimit = 128);
+                  unsigned depthLimit = 128,
+                  const MacroPackage *procs = nullptr);
 
 /// Collects and expands in one go, for a file compiled on its own.
 bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,

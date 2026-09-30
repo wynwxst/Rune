@@ -14,6 +14,12 @@ The everyday half of `std::text`. These work on bytes rather than code points, a
 | `replace` | `(String, String, String) -> String` | every occurrence; the replacement is not searched again |
 | `join` | `(Vector<String>, String) -> String` | the other half of `split` |
 | `padStart` / `padEnd` | `(String, i64, Character) -> String` | to a width; longer text is returned rather than cut |
+| `lower` / `upper` | `(String) -> String` | case, **ASCII only** — every other byte is left as it is |
+
+> [!NOTE]
+> **Why only ASCII**
+>
+> `lower` and `upper` deliberately stop at ASCII. Real case mapping depends on the language (Turkish dotless ı, German ß, Greek final sigma) and can change a string's length, so a function that quietly did the wrong thing for those would be worse than one that says what it does. Use them for keywords, extensions and protocol tokens; for anything a person reads, normalise first.
 
 **Taking a line apart**
 

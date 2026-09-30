@@ -1,0 +1,61 @@
+import std::{io, math, text}
+import std::collections::vector
+
+// An enum whose variants carry float values: `as f64` gives each one back.
+// Each value is how many of that currency one US dollar buys.
+enum Currency {
+    USD = 1f64,
+    AUD = 1.43f64,
+    GBP = 0.76f64
+}
+
+struct Money {
+    cur: Currency
+    minor: u8
+    major: u64
+}
+
+extend Money {
+    fn new(value: f64, currency: Currency = .AUD) -> Self {
+        // Split by decimal places rather than by `as`: `(0.29 * 100.0) as u8`
+        // is 28, because 0.29 is really 0.28999999999999998.
+        let (major, minor) = math::splitDecimal(value, 2)
+        Money { minor: minor as u8, major: major as u64, cur: currency }
+    }
+    fn convert(value: f64 /* assumes USD */, dest: Currency) -> f64 {
+        value * (dest as f64)
+    }
+    fn asCurrency(&self, currency: Currency) -> f64 {
+        let value = math::unscaled((self.major as i64) * 100 + (self.minor as i64), 2)
+        if self.cur == currency {
+            return value
+        }
+        // Into US dollars, then out of them.
+        math::roundTo(Money::convert(value / (self.cur as f64), currency), 2)
+    }
+}
+
+fn main() -> i64 {
+    println!("Hello from proc_macro! {}", Currency::AUD as f64)
+    let m = Money::new(103.4)
+    println!("You have {}.{}", m.major, text::padStart(m.minor.$str(), 2, '0'))
+    println!("This is {:.2} USD", m.asCurrency(.USD))
+    let small = Money::new(0.29, .USD)
+    println!("And {}.{} USD is {:.2} GBP", small.major, text::padStart(small.minor.$str(), 2, '0'),
+             small.asCurrency(.GBP))
+
+    // `comprehend!` is the procedural macro in macros.rune.
+    let xs = vec![-3, 1, 2, 3]
+    for value in comprehend!(x * 2 for x in xs if x > 0) {
+        println!("{}", value)
+    }
+    let words = vec!["alpha", "be", "gamma"]
+    println!("lengths: {}", comprehend!(w.$length() for w in words))
+    0
+}
+
+/*
+1 USD = 1.43 AUD
+
+1 AUD = USD/1.43
+ */

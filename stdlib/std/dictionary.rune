@@ -2,7 +2,12 @@
 //
 //     var ages = dictionary::Map<String, i64>()
 //     ages.put("ada", 36)
-//     match ages.at("ada") { Some(n) => ..., None => ... }
+//     if ages.peek("ada") is Some(n) { ... }       // `n` borrows the value
+//
+// Reading borrows and copying asks, as in `Vector`: `look`, `peek`, `m[key]`
+// and `for (key, value) in m` hand out references into the table and work
+// for any value type; `at` and `atOr` hand back a copy and exist only where
+// the value type can be cloned. `put` and `remove` move values in and out.
 //
 // Both are open-addressed hash tables with linear probing, backed by
 // `mem::Buffer`: one buffer for the keys, one for the values, and one for the
@@ -37,9 +42,10 @@ fn stateGone() -> i64 { 2 }
 /// `Map` is a class, so passing one around shares it rather than copying it.
 pub class Map<K, V> {
     // `state` is what says whether a slot is live, so every read of `keys`
-    // and `vals` goes through `Buffer::read` rather than `Buffer::at`: `at`
-    // reads a slot of all zero bytes as one that was never written, and an
-    // empty `String` or a counted enum's first empty variant is exactly that.
+    // and `vals` goes through `Buffer::look` rather than `Buffer::peek`:
+    // `peek` reads a slot of all zero bytes as one that was never written,
+    // and an empty `String` or a counted enum's first empty variant is
+    // exactly that.
     keys: mem::Buffer<K>
     vals: mem::Buffer<V>
     state: mem::Buffer<i64>
@@ -88,9 +94,7 @@ pub class Map<K, V> {
             if st == stateGone() {
                 if firstGone < 0 { firstGone = i }
             } else {
-                if self.keys.read(i) is Some(k) {
-                    if mem::equals(k, key) { return i }
-                }
+                if mem::equals(self.keys.look(i), key) { return i }
             }
             i = (i + 1) & mask
             steps += 1
@@ -98,23 +102,57 @@ pub class Map<K, V> {
         firstGone
     }
 
-    //=== Reading ========================================================//
-
-    /// The value stored under `key`, or nothing.
-    pub fn at(&self, key: &K) -> V? {
+    /// The slot holding `key`, or -1 when it is not there.
+    fn slotOf(&self, key: &K) -> i64 {
         let i = self.probe(key, false)
+        if i < 0 { return 0 - 1 }
+        if self.state.get(i) != stateLive() { return 0 - 1 }
+        i
+    }
+
+    //=== Borrowing ======================================================//
+
+    /// The value stored under `key`, borrowed, or nothing.
+    pub fn peek(&self, key: &K) -> (&V from self)? {
+        let i = self.slotOf(key)
         if i < 0 { return nil }
-        if self.state.get(i) != stateLive() { return nil }
-        self.vals.read(i)
+        Some(self.vals.look(i))
+    }
+
+    /// The value stored under `key`, borrowed. Aborts when there is none.
+    pub fn look(&self, key: &K) -> &V from self {
+        let i = self.slotOf(key)
+        if i < 0 { process::panic("Map has no such key") }
+        self.vals.look(i)
+    }
+
+    /// The value stored under `key`, borrowed to write through. Aborts when
+    /// there is none.
+    ///
+    ///     counts.touch("ada") += 1
+    pub fn touch(&var self, key: &K) -> &var V from self {
+        let i = self.slotOf(key)
+        if i < 0 { process::panic("Map has no such key") }
+        self.vals.touch(i)
     }
 
     /// True when `key` is present.
-    pub fn holds(&self, key: &K) -> bool { self.at(key).hasValue() }
+    pub fn holds(&self, key: &K) -> bool { self.slotOf(key) >= 0 }
 
-    /// The value under `key`, or `fallback` when there is none.
-    pub fn atOr(&self, key: &K, fallback: V) -> V {
-        match self.at(key) {
-            Some(v) => v,
+    //=== Copying ========================================================//
+
+    /// A copy of the value stored under `key`, or nothing.
+    pub fn at(&self, key: &K) -> V? where V: mem::Clone {
+        match self.peek(key) {
+            Some(v) => Some(v.$clone()),
+            None => nil,
+        }
+    }
+
+    /// A copy of the value under `key`, or `fallback` when there is none.
+    pub fn atOr(&self, key: &K, fallback: V) -> V where V: mem::Clone {
+        match self.peek(key) {
+            Some(v) => v.$clone(),
             None => fallback,
         }
     }
@@ -125,10 +163,10 @@ pub class Map<K, V> {
     /// value it replaced, or nothing when the key is new.
     pub fn put(&var self, key: K, value: V) -> V? {
         self.growIfFull()
-        let i = self.probe(key, true)
+        let i = self.probe(&key, true)
         if i < 0 { return nil }
         if self.state.get(i) == stateLive() {
-            let old = self.vals.read(i)
+            let old = self.vals.take(i)
             self.vals.put(i, value)
             return old
         }
@@ -145,12 +183,10 @@ pub class Map<K, V> {
     /// The slot is marked removed rather than emptied, because emptying it
     /// would cut the probe chain for anything that walked past it.
     pub fn remove(&var self, key: &K) -> V? {
-        let i = self.probe(key, false)
+        let i = self.slotOf(key)
         if i < 0 { return nil }
-        if self.state.get(i) != stateLive() { return nil }
-        let old = self.vals.read(i)
+        let old = self.vals.take(i)
         self.keys.clear(i)
-        self.vals.clear(i)
         self.state.put(i, stateGone())
         self.live -= 1
         self.gone += 1
@@ -188,8 +224,8 @@ pub class Map<K, V> {
         // (that would leave the field empty), and `replace` is exactly the
         // move-out-and-put-back that says so. Under counting it is the same
         // store-and-return.
-        let oldKeys = mem::replace(&var self.keys, mem::Buffer<K>(wanted))
-        let oldVals = mem::replace(&var self.vals, mem::Buffer<V>(wanted))
+        var oldKeys = mem::replace(&var self.keys, mem::Buffer<K>(wanted))
+        var oldVals = mem::replace(&var self.vals, mem::Buffer<V>(wanted))
         let oldState = mem::replace(&var self.state, mem::Buffer<i64>(wanted))
         let oldSlots = self.slots
         self.slots = wanted
@@ -202,8 +238,8 @@ pub class Map<K, V> {
                 // `is` destructures without the match having to be an
                 // expression, so the replaced value `put` returns is simply
                 // dropped rather than having to be matched too.
-                if oldKeys.read(i) is Some(k) {
-                    if oldVals.read(i) is Some(v) {
+                if oldKeys.take(i) is Some(k) {
+                    if oldVals.take(i) is Some(v) {
                         self.put(k, v)
                     }
                 }
@@ -214,55 +250,42 @@ pub class Map<K, V> {
 
     //=== Walking ========================================================//
 
-    /// Every key, in whatever order the table holds them.
+    /// A copy of every key, in whatever order the table holds them.
     ///
     /// The order is not the insertion order and is not stable across a resize.
-    /// Sort the result if you need one.
-    pub fn keysOf(&self) -> vector::Vector<K> {
+    /// Sort the result if you need one. `for (key, _) in m` walks them
+    /// without copying.
+    pub fn keysOf(&self) -> vector::Vector<K> where K: mem::Clone {
+        // The slots are walked directly rather than through `MapIter`: a
+        // `(&K, &V)` pair handed back in an `Option` is released once too
+        // often under counting, which frees a counted key — any `String` not
+        // written as a literal — before the map is done with it.
         let out = vector::Vector<K>()
         var i = 0
         while i < self.slots {
-            if self.state.get(i) == stateLive() {
-                match self.keys.read(i) {
-                    Some(k) => out.push(k),
-                    None => {}
-                }
-            }
+            if self.state.get(i) == stateLive() { out.push(self.keys.look(i).$clone()) }
             i += 1
         }
         out
     }
 
-    /// Every value, in the same order `keysOf` gives its keys.
-    pub fn valuesOf(&self) -> vector::Vector<V> {
+    /// A copy of every value, in the same order `keysOf` gives its keys.
+    pub fn valuesOf(&self) -> vector::Vector<V> where V: mem::Clone {
         let out = vector::Vector<V>()
         var i = 0
         while i < self.slots {
-            if self.state.get(i) == stateLive() {
-                match self.vals.read(i) {
-                    Some(v) => out.push(v),
-                    None => {}
-                }
-            }
+            if self.state.get(i) == stateLive() { out.push(self.vals.look(i).$clone()) }
             i += 1
         }
         out
     }
 }
 
-// `m[key]` and `m[key] = value`. Reading is the direct form and **aborts** on
-// a key that is not there, the same way an out-of-range index does elsewhere;
-// `at` and `atOr` are the forms that answer instead.
+// `m[key]` and `m[key] = value`. Reading borrows, like `look`, and **aborts**
+// on a key that is not there, the same way an out-of-range index does
+// elsewhere; `peek` is the form that answers instead.
 bind<K, V> operator::"[]" to Map<K, V> {
-    fn index(&self, key: K) -> V {
-        match self.at(key) {
-            Some(v) => v,
-            None => {
-                process::panic("Map has no such key")
-                self.at(key).unwrap()
-            }
-        }
-    }
+    fn index(&self, key: K) -> &V from self { self.look(&key) }
 
     fn indexSet(&var self, key: K, value: V) { self.put(key, value) }
 }
@@ -270,44 +293,39 @@ bind<K, V> operator::"[]" to Map<K, V> {
 //===--------------------------------------------------------------------===//
 // Walking a Map
 //
-// A cursor produces `(key, value)` pairs. It holds the map, so the map
-// outlives any loop over it, and it reads the keys and values it was built
-// from — a map that grows while a loop walks it may show the loop anything.
+// A cursor produces `(key, value)` pairs of borrows into the table. It
+// borrows the map, so under single ownership the map cannot change while a
+// loop walks it, and under counting the cursor keeps it alive.
 //===--------------------------------------------------------------------===//
 
 /// A cursor over a `Map`, handed out by `iterate`.
 pub struct MapIter<K, V> {
-    keys: vector::Vector<K>
-    values: vector::Vector<V>
-    index: i64
+    source: &Map<K, V>
+    slot: i64
 }
 
 bind<K, V> Iterator to MapIter<K, V> {
-    type Item = (K, V)
-    fn next(&var self) -> (K, V)? {
-        if self.index >= self.keys.length() { return nil }
-        let i = self.index
-        self.index += 1
-        match self.keys.at(i) {
-            Some(k) => {
-                match self.values.at(i) {
-                    Some(v) => (k, v),
-                    None => nil,
-                }
+    type Item = (&K, &V)
+    fn next(&var self) -> (&K from self.source, &V from self.source)? {
+        while self.slot < self.source.slots {
+            let i = self.slot
+            self.slot += 1
+            if self.source.state.get(i) == stateLive() {
+                return Some((self.source.keys.look(i), self.source.vals.look(i)))
             }
-            None => nil,
         }
+        nil
     }
 }
 
 bind<K, V> Sequence to Map<K, V> {
     type Iter = MapIter<K, V>
 
-    /// A cursor over every entry, as a `(key, value)` pair.
+    /// A cursor over every entry, as a `(key, value)` pair of borrows.
     ///
     ///     for (name, age) in ages { ... }
-    fn iterate(&self) -> MapIter<K, V> {
-        MapIter<K, V> { keys: self.keysOf(), values: self.valuesOf(), index: 0 }
+    fn iterate(&self) -> MapIter<K, V> from self {
+        MapIter<K, V> { source: self, slot: 0 }
     }
 }
 
@@ -346,28 +364,31 @@ pub class Set<T> {
     /// Drops everything, keeping the storage.
     pub fn clear(&var self) { self.items.clear() }
 
-    /// Every member, in whatever order the table holds them.
-    pub fn membersOf(&self) -> vector::Vector<T> { self.items.keysOf() }
+    /// A copy of every member, in whatever order the table holds them.
+    pub fn membersOf(&self) -> vector::Vector<T> where T: mem::Clone {
+        self.items.keysOf()
+    }
 }
 
 // `s[value]` asks whether it is there. A set has nothing to store under a key,
 // so there is no `indexSet`; use `add` and `remove`.
 bind<T> operator::"[]" to Set<T> {
-    fn index(&self, value: T) -> bool { self.holds(value) }
+    fn index(&self, value: T) -> bool { self.holds(&value) }
 }
 
-/// A cursor over a `Set`, handed out by `iterate`.
+/// A cursor over a `Set`, handed out by `iterate`. It yields a borrow of
+/// each member.
 pub struct SetIter<T> {
-    members: vector::Vector<T>
-    index: i64
+    entries: MapIter<T, bool>
 }
 
 bind<T> Iterator to SetIter<T> {
-    type Item = T
-    fn next(&var self) -> T? {
-        let value = self.members.at(self.index)
-        self.index += 1
-        value
+    type Item = &T
+    fn next(&var self) -> (&T from self.entries.source)? {
+        match self.entries.next() {
+            Some((member, _)) => Some(member),
+            None => nil,
+        }
     }
 }
 
@@ -377,8 +398,8 @@ bind<T> Sequence to Set<T> {
     /// A cursor over every member.
     ///
     ///     for name in seen { ... }
-    fn iterate(&self) -> SetIter<T> {
-        SetIter<T> { members: self.membersOf(), index: 0 }
+    fn iterate(&self) -> SetIter<T> from self {
+        SetIter<T> { entries: self.items.iterate() }
     }
 }
 
@@ -386,21 +407,29 @@ bind<T> Sequence to Set<T> {
 // Building
 //===--------------------------------------------------------------------===//
 
-/// A set holding every element of `values`, duplicates collapsed.
-pub fn setOf<T>(values: [T]) -> Set<T> {
+/// A set holding a copy of every element of `values`, duplicates collapsed.
+pub fn setOf<T>(values: [T]) -> Set<T> where T: mem::Clone {
     let s = Set<T>()
-    for v in values { s.add(v) }
+    for v in values { s.add(v.$clone()) }
     s
 }
 
+/// The empty map. What `[:]` stands for: its type arguments come from where
+/// the value is going, so `let m: [String:i64] = [:]` says everything.
+pub fn emptyMap<K, V>() -> Map<K, V> { Map<K, V>() }
+
 /// A map built from matching runs of keys and values, stopping at the shorter.
-pub fn mapOf<K, V>(keys: [K], values: [V]) -> Map<K, V> {
+pub fn mapOf<K, V>(keys: [K], values: [V]) -> Map<K, V>
+    where K: mem::Clone, V: mem::Clone {
     let m = Map<K, V>()
     var i = 0
     var n = keys.$length()
     if values.$length() < n { n = values.$length() }
     while i < n {
-        m.put(keys[i], values[i])
+        // A copy per entry: the arrays are borrowed, so nothing may be taken
+        // out of them. Under counting that is a share; under single
+        // ownership it is a clone.
+        m.put(keys[i].$clone(), values[i].$clone())
         i += 1
     }
     m

@@ -1,7 +1,7 @@
 # The C half. The memory core — allocation, reference counting, the weak
 # table and raw memory — lives in `runetime/core.rune` and is archived in
 # alongside it.
-add_library(runeruntime STATIC src/rune_runtime.c src/rune_unicode_data.c ${RUNETIME_OBJECT})
+add_library(runeruntime STATIC src/rune_runtime.c src/rune_task.c src/rune_unicode_data.c ${RUNETIME_OBJECT})
 set_source_files_properties(${RUNETIME_OBJECT} PROPERTIES
   EXTERNAL_OBJECT TRUE GENERATED TRUE)
 add_dependencies(runeruntime runetime_core)

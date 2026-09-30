@@ -46,6 +46,30 @@ fn main() -> i64 {
 }
 ```
 
+## Reading by length
+
+A protocol that says how long its next message is — an HTTP body, or a
+language server's `Content-Length` header — needs the message by count,
+newlines and all. `readExactly` gives exactly that many bytes, or `nil` when
+the input ends first. `flush` pushes buffered output out, which a program
+answering requests over a pipe does after every answer.
+
+```rune
+import std::io
+
+fn main() -> i64 {
+    // Run with no input, so there is nothing to read.
+    match io::readExactly(5) {
+        Some(body) => io::println("got " + body),
+        None => io::println("the input ended first"),
+    }
+    io::print("answered")
+    io::flush()
+    io::newline()
+    0
+}
+```
+
 ## Files
 
 Every failure is a `FileError`, and `describe` turns one into a sentence.

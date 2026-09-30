@@ -33,12 +33,19 @@ pub fn fixed(value: f64, places: i64) -> String {
 ///
 ///     fmt::radix(255, 16, false, false)   // "ff"
 ///     fmt::radix(255, 16, true, true)     // "0xFF"
-pub fn radix(value: i64, base: i64, upper: bool, prefix: bool) -> String {
+///
+/// Generic over the integer type, because the two readings of a bit pattern
+/// are both wanted: `{:x}` on an `i64` of -1 is `-1`, and `{:#x}` on the
+/// `u64` an address was cast to is the whole address. Which one applies is
+/// decided by the type at the call, so neither caller has to say.
+pub fn radix<T>(value: T, base: i64, upper: bool, prefix: bool) -> String {
     if base < 2 || base > 36 { return value.$str() }
 
     let digits = if upper { "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" }
                  else { "0123456789abcdefghijklmnopqrstuvwxyz" }
 
+    // Always false for an unsigned `T`, and the branch it guards is then
+    // never taken — which is what makes one body serve both.
     let negative = value < 0
     // The magnitude is counted in `u64`, because the magnitude of the most
     // negative `i64` is one larger than the largest positive one.

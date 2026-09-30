@@ -1,0 +1,738 @@
+// std::task — one thread doing several things at once.
+//
+// `std::thread` is how several things happen *at the same time*, and its
+// rule is that nothing crosses a thread boundary unless the compiler can see
+// that it is safe to. This module is the other half: how one thread keeps
+// several things *in progress*, each waiting its turn, none of them ever
+// running while another does. Because they take turns rather than overlap,
+// tasks on a thread may share whatever they like — a class, a `Vector`, a
+// closure — with no `Send`, no `Sync`, and no lock.
+//
+// The unit is a `Future<T>`: some work that will produce a `T`. Calling an
+// `async fn` makes one and starts it; `.await` collects the result, parking
+// the task that asked until it is there and letting the others run
+// meanwhile.
+//
+//     async fn fetch(id: i64) -> String {
+//         task::sleep(time::milliseconds(10)).await
+//         "item " + id.$str()
+//     }
+//
+//     async fn main() -> i64 {
+//         let a = fetch(1)                 // both start now
+//         let b = fetch(2)
+//         io::println(a.await + ", " + b.await)
+//         0
+//     }
+//
+// What a task is, plainly: a stack of its own. `.await` on something that is
+// not finished saves that stack and switches to another; whatever finishes
+// it switches back. So everything a function can do, an `async fn` can do —
+// `defer`, `?`, loops, borrows — and nothing has to be rewritten to suspend.
+// What it costs is that stack: reserved at `stackSize()` bytes, committed
+// only as far as the task actually uses.
+//
+// A task can be asked to stop. `cancel` marks it; at its next suspension
+// point — an `.await`, a `sleep`, a `checkpoint` — the task leaves its body
+// the way `?` leaves a function, running its `defer`s and releasing what it
+// holds, and ends without a value. `race` and `timeout` cancel the futures
+// they no longer need.
+//
+// A task belongs to the thread that made it. To use another thread — for
+// work that would otherwise block this one — there is `blocking` and
+// `offload`, which run a `fn` or a closure on a worker thread and hand back a
+// `Future` that finishes when it does. Those are the places here where
+// `Send` is asked for.
+
+import std::mem
+import std::process
+import std::thread
+import std::time
+import std::collections::vector
+
+extern "C" {
+    fn rune_task_new(entry: @cfunction(*var u8), payload: *var u8) -> *var u8
+    fn rune_task_start(task: *var u8)
+    fn rune_task_wait(task: *var u8) -> i64
+    fn rune_task_wait_any(tasks: *var u8, count: i64) -> i64
+    fn rune_task_is_done(task: *var u8) -> i64
+    fn rune_task_yield_now()
+    fn rune_task_timer(nanos: i64) -> *var u8
+    fn rune_task_io(descriptor: i64, events: i64) -> *var u8
+    fn rune_task_external() -> *var u8
+    fn rune_task_manual() -> *var u8
+    fn rune_task_complete(task: *var u8)
+    fn rune_task_complete_remote(task: *var u8)
+    fn rune_task_wait_posted(task: *var u8)
+    fn rune_task_cancel(task: *var u8)
+    fn rune_task_is_cancelled(task: *var u8) -> i64
+    fn rune_task_exited_cancelled(task: *var u8) -> i64
+    fn rune_task_free(task: *var u8)
+    fn rune_task_in_task() -> i64
+    fn rune_task_stack_size() -> i64
+    fn rune_task_set_stack_size(bytes: i64)
+    fn rune_pool_submit(entry: @cfunction(*var u8) -> *var u8, argument: *var u8)
+    fn rune_pool_size() -> i64
+}
+
+/// What a task came back with.
+pub enum Outcome<T> {
+    /// It finished, and this is its result.
+    Done(T),
+    /// It was cancelled before it had one.
+    Cancelled,
+}
+
+//===--------------------------------------------------------------------===//
+// Where a result lives
+//===--------------------------------------------------------------------===//
+
+/// What every future has behind it: the result, first, so a `Future<T>`
+/// reads it as a `T`; the body, until the task takes it; and a count of who
+/// still holds the box — every `Future` object that refers to it, and the
+/// task while it runs. Whoever lets go last frees it.
+///
+/// Counted by hand, in raw memory, because the holders live on different
+/// stacks and in both memory models: a task must be able to finish after the
+/// future that started it has been dropped, and under single ownership a
+/// `Future` handed to a `Vector` or cloned out of one has to share this
+/// rather than copy it.
+struct Shared<T> {
+    value: T
+    body: @function() -> T
+    holders: i64
+    /// True once `value` has been written by this thread — the task's body,
+    /// or `complete`. A result from another thread is known through the
+    /// runtime instead.
+    filled: bool
+    task: *var u8
+    /// Set for `blocking` and `offload`: the value is written by a worker
+    /// thread, which posts the task's completion once it has.
+    external: bool
+}
+
+/// What `blocking` hands a worker thread: the call to make, and where to
+/// put the result and whom to wake when it is there.
+struct Job<A, R> {
+    entry: @cfunction(A) -> R
+    argument: A
+    shared: *var u8
+    task: *var u8
+}
+
+/// The same for `offload`: a closure rather than a call.
+struct Offload<R> {
+    body: @function() -> R
+    shared: *var u8
+    task: *var u8
+}
+
+/// A fresh box with one holder: the future about to be built on it.
+@safe("sized by the type, zeroed, and counted from one")
+fn newShared<T>() -> *var u8 {
+    let raw = mem::allocator.allocate(mem::size_of::<Shared<T>>())
+    if mem::isNull(raw) { process::panic("cannot allocate a future") }
+    mem::zero(raw, mem::size_of::<Shared<T>>())
+    let shared = unsafe { raw as *var Shared<T> }
+    unsafe { shared[0].holders = 1 }
+    raw
+}
+
+/// True once the task is over, with a value or without one.
+@safe("reads the box, and asks the runtime about the task")
+fn sharedIsDone<T>(raw: *var u8) -> bool {
+    let shared = unsafe { raw as *var Shared<T> }
+    if unsafe { shared[0].filled } { return true }
+    let task = unsafe { shared[0].task }
+    !mem::isNull(task) && unsafe { rune_task_is_done(task) } != 0
+}
+
+/// True once the box holds a value that has to be destroyed with it. A task
+/// that was cancelled ended without one; its slot is zero bytes, which is
+/// no value at all.
+@safe("reads the box, and asks the runtime about the task")
+fn sharedHasValue<T>(raw: *var u8) -> bool {
+    let shared = unsafe { raw as *var Shared<T> }
+    if unsafe { shared[0].filled } { return true }
+    let task = unsafe { shared[0].task }
+    if mem::isNull(task) { return false }
+    unsafe { rune_task_is_done(task) != 0 && rune_task_exited_cancelled(task) == 0 }
+}
+
+/// One holder letting go. The last one out destroys the value, the task and
+/// the box — which may be the task itself, on its own stack; the runtime
+/// keeps that stack until the task has left it.
+@safe("the count says whether anyone else still reaches the box")
+fn releaseShared<T>(raw: *var u8) {
+    let shared = unsafe { raw as *var Shared<T> }
+    unsafe { shared[0].holders -= 1 }
+    if unsafe { shared[0].holders } > 0 { return }
+    let task = unsafe { shared[0].task }
+    if unsafe { shared[0].external } {
+        // A worker thread writes the value and then posts; waiting for the
+        // post is what makes it safe to free what the worker writes into.
+        // Cancelled or not, the value is there once it has posted.
+        unsafe { rune_task_wait_posted(task) }
+        unsafe { mem::drop_at<T>(raw as *var T) }
+    } else if sharedHasValue::<T>(raw) {
+        unsafe { mem::drop_at<T>(raw as *var T) }
+    }
+    if !mem::isNull(task) {
+        unsafe { rune_task_free(task) }
+    }
+    mem::allocator.deallocate(raw)
+}
+
+//===--------------------------------------------------------------------===//
+// Futures
+//===--------------------------------------------------------------------===//
+
+/// Work that will produce a `T`.
+///
+/// One comes from calling an `async fn`, from `spawn`, `sleep`, `blocking`
+/// or `pending`. `.await` — or `wait()` from code that is not `async` —
+/// hands back the result once it exists; either may be asked more than
+/// once, and each asking gets the value again.
+///
+/// A `Future` is a handle: copies of it — cloned, stored in a `Vector`,
+/// handed to `all` — all refer to the same task. The task holds the box too
+/// while it runs, so a future nobody kept still finishes. One that never
+/// finishes — parked on something that is never completed — keeps its stack
+/// and whatever it holds until the program ends.
+pub class Future<T> {
+    shared: *var u8
+
+    fn init(self, shared: *var u8) { self.shared = shared }
+
+    /// True once the task is over: it has its result, or it was cancelled.
+    @safe("reads the box, and asks the runtime about the task")
+    pub fn isDone(&self) -> bool { sharedIsDone::<T>(self.shared) }
+
+    /// The result, once there is one.
+    ///
+    /// Written `future.await` inside an `async` function, which is the form
+    /// the compiler checks. This is a suspension point: a task cancelled
+    /// while it waits here leaves its body from this line, and nothing
+    /// after it runs. A task that ended without a result — one that was
+    /// cancelled — has nothing to give, and asking is a panic; `outcome`
+    /// is the way to ask when that is possible.
+    @suspend
+    @safe("the value is written before the task is marked done, and read after")
+    pub fn await(&self) -> T {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        let task = unsafe { shared[0].task }
+        match rune_task_wait(task) {
+            // Leaving: the caller's `.await` ends the body as soon as this
+            // returns, and what is returned is never looked at.
+            1 => unsafe { mem::zeroed<T>() },
+            2 => {
+                process::panic("awaited a task that was cancelled")
+                unsafe { mem::zeroed<T>() }
+            },
+            _ => self.value(),
+        }
+    }
+
+    /// Blocks until the result is there, and hands it back.
+    ///
+    /// The same from code that is not `async`: on the thread's own stack —
+    /// in a `main` that is not `async`, say — it runs the other tasks right
+    /// here until this one is done. Inside a task it parks the task, but is
+    /// not a suspension point: a cancel is noticed at the next `.await`.
+    @safe("the value is written before the task is marked done, and read after")
+    pub fn wait(&self) -> T {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        if rune_task_wait(unsafe { shared[0].task }) != 0 {
+            process::panic("waited on a task that was cancelled")
+        }
+        self.value()
+    }
+
+    /// Waits like `wait`, and says how the task ended: with its result, or
+    /// cancelled before it had one.
+    @safe("the value is written before the task is marked done, and read after")
+    pub fn outcome(&self) -> Outcome<T> {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        if rune_task_wait(unsafe { shared[0].task }) != 0 {
+            return Outcome::<T>::Cancelled
+        }
+        Outcome::<T>::Done(self.value())
+    }
+
+    /// Asks the task to stop.
+    ///
+    /// A task parked at a suspension point — an `.await`, a `sleep`, a
+    /// `checkpoint` — leaves its body from there at once, running its
+    /// `defer`s and releasing what it holds on the way out; one that is
+    /// running does so at its next. It ends without a result: `isDone` is
+    /// true, `isCancelled` is true, and `.await` on it is a panic. A timer,
+    /// a socket wait or a `pending` future simply ends. Tasks the cancelled
+    /// one started are not touched; cancel them too if they should stop.
+    @safe("asks the runtime to mark the task; nothing is freed here")
+    pub fn cancel(&self) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe { rune_task_cancel(shared[0].task) }
+    }
+
+    /// True once `cancel` has been asked of it — whether or not the task has
+    /// reached the point where it leaves.
+    @safe("reads a flag the runtime keeps")
+    pub fn isCancelled(&self) -> bool {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe { rune_task_is_cancelled(shared[0].task) != 0 }
+    }
+
+    /// A copy of the value, for a caller; the box keeps its own, so every
+    /// asking hands the value out again.
+    @safe("only called once the task has written the value")
+    fn value(&self) -> T {
+        let slot = unsafe { self.shared as *var T }
+        unsafe { slot[0] }.$clone()
+    }
+
+    /// Hands a `pending` future its value, waking whoever is waiting on it.
+    ///
+    /// Only a future from `pending` can be completed this way, and only
+    /// once; the second attempt is a mistake worth hearing about.
+    @safe("the value is written before the task is marked done")
+    pub fn complete(&var self, value: T) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        if unsafe { shared[0].filled } {
+            process::panic("a future can only be completed once")
+        }
+        unsafe { mem::store<T>(self.shared as *var T, value) }
+        unsafe { shared[0].filled = true }
+        rune_task_complete(unsafe { shared[0].task })
+    }
+
+    /// Another handle to the same task. This is what `$clone()` does, so a
+    /// future read out of a `Vector` under single ownership shares the task
+    /// rather than copying the box behind it.
+    @safe("one more holder is counted before the handle exists")
+    pub fn clone(&self) -> Self {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe { shared[0].holders += 1 }
+        Future<T>(self.shared)
+    }
+
+    /// The runtime's task, for waiting on several at once.
+    @safe("reads a field of the box")
+    fn task(&self) -> *var u8 {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe { shared[0].task }
+    }
+
+    //--- Setting one up: the module's own business ---------------------//
+
+    /// A stack of its own, running `body` until it is done. The task holds
+    /// the box too, until it has parked the result.
+    @safe("the box is held by this future and by the task, and freed by the last of them")
+    fn runOn(&var self, body: @function() -> T) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe {
+            mem::store<@function() -> T>(&var shared[0].body as *var @function() -> T, body)
+            shared[0].holders += 1
+        }
+        let task = unsafe { rune_task_new(trampoline::<T>, self.shared) }
+        unsafe { shared[0].task = task }
+        rune_task_start(task)
+    }
+
+    /// Done once `duration` has passed.
+    @safe("a timer holds nothing but a deadline")
+    fn timer(&var self, duration: time::Time) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe { shared[0].task = rune_task_timer(duration.asNanoseconds()) }
+    }
+
+    /// Done when `complete` says so.
+    @safe("a manual task holds nothing until it is completed")
+    fn manual(&var self) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe { shared[0].task = rune_task_manual() }
+    }
+
+    /// Done when a socket is ready: `events` is 1 to read, 2 to write.
+    @safe("a socket wait holds nothing but the descriptor")
+    fn onSocket(&var self, descriptor: i64, events: i64) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        unsafe { shared[0].task = rune_task_io(descriptor, events) }
+    }
+
+    /// Runs `entry(argument)` on a worker thread; done when it returns.
+    @safe("the job outlives the worker's use of it; the worker frees it, and the box waits for the post")
+    fn onThread<A: thread::Send>(&var self, entry: @cfunction(A) -> T, argument: A) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        let task = rune_task_external()
+        unsafe {
+            shared[0].task = task
+            shared[0].external = true
+        }
+        let raw = mem::allocator.allocate(mem::size_of::<Job<A, T>>())
+        if mem::isNull(raw) { process::panic("cannot allocate a blocking job") }
+        mem::zero(raw, mem::size_of::<Job<A, T>>())
+        let job = unsafe { raw as *var Job<A, T> }
+        // Storing into the job claims a reference of its own, which is what
+        // keeps the argument alive for as long as the worker runs.
+        unsafe {
+            job[0].entry = entry
+            job[0].argument = argument
+            job[0].shared = self.shared
+            job[0].task = task
+        }
+        unsafe { rune_pool_submit(jobTrampoline::<A, T>, raw) }
+    }
+
+    /// Runs `body()` on a worker thread; done when it returns.
+    @safe("the job outlives the worker's use of it; the worker frees it, and the box waits for the post")
+    fn offloadTo(&var self, body: @function() -> T) {
+        let shared = unsafe { self.shared as *var Shared<T> }
+        let task = rune_task_external()
+        unsafe {
+            shared[0].task = task
+            shared[0].external = true
+        }
+        let raw = mem::allocator.allocate(mem::size_of::<Offload<T>>())
+        if mem::isNull(raw) { process::panic("cannot allocate an offloaded job") }
+        mem::zero(raw, mem::size_of::<Offload<T>>())
+        let job = unsafe { raw as *var Offload<T> }
+        unsafe {
+            mem::store<@function() -> T>(&var job[0].body as *var @function() -> T, body)
+            job[0].shared = self.shared
+            job[0].task = task
+        }
+        unsafe { rune_pool_submit(offloadTrampoline::<T>, raw) }
+    }
+
+    fn deinit(self) { releaseShared::<T>(self.shared) }
+}
+
+/// Runs on the task's own stack: takes the body out of the box, runs it,
+/// parks the result, and lets the box go. When this returns the runtime
+/// marks the task done and wakes whoever was waiting.
+fn trampoline<T>(raw: *var u8) {
+    let shared = unsafe { raw as *var Shared<T> }
+    let body = unsafe { mem::take<@function() -> T>(&var shared[0].body as *var @function() -> T) }
+    unsafe { shared[0].value = body() }
+    // A body that left because it was cancelled handed back zero bytes,
+    // which is no value: the slot is left unfilled, and never destroyed.
+    if unsafe { rune_task_exited_cancelled(shared[0].task) } == 0 {
+        unsafe { shared[0].filled = true }
+    }
+    releaseShared::<T>(raw)
+}
+
+/// Runs on a worker thread for `blocking`: makes the call, parks the result
+/// in the box, tells the executor that made the future, and frees the job.
+fn jobTrampoline<A, R>(raw: *var u8) -> *var u8 {
+    let job = unsafe { raw as *var Job<A, R> }
+    let entry = unsafe { job[0].entry }
+    let argument = unsafe { job[0].argument }
+    let shared = unsafe { job[0].shared as *var Shared<R> }
+    unsafe { shared[0].value = entry(argument) }
+    // The argument was retained for this thread when the job was built.
+    unsafe { mem::release(argument) }
+    unsafe { rune_task_complete_remote(job[0].task) }
+    mem::allocator.deallocate(raw)
+    mem::noBlock()
+}
+
+/// The same for `offload`: the closure is called on the worker, and let go
+/// of there. What it captured is `Send`, so that is where it may end.
+fn offloadTrampoline<R>(raw: *var u8) -> *var u8 {
+    let job = unsafe { raw as *var Offload<R> }
+    runOffloaded::<R>(job)
+    // Only now, with the closure and everything it captured already gone:
+    // once the completion is posted the other thread may finish and count
+    // what is still live, and nothing of this job should be.
+    unsafe { rune_task_complete_remote(job[0].task) }
+    mem::allocator.deallocate(raw)
+    mem::noBlock()
+}
+
+/// Takes the closure out of the job, runs it, and parks the result. The
+/// closure is let go of when this returns — before the completion is posted.
+fn runOffloaded<R>(job: *var Offload<R>) {
+    let body = unsafe { mem::take<@function() -> R>(&var job[0].body as *var @function() -> R) }
+    let shared = unsafe { job[0].shared as *var Shared<R> }
+    unsafe { shared[0].value = body() }
+}
+
+//===--------------------------------------------------------------------===//
+// Making futures
+//===--------------------------------------------------------------------===//
+
+/// Starts `body` as a task of its own and hands back its future.
+///
+/// This is what calling an `async fn` does, and what an `async { ... }`
+/// block is; it is here for the times the body is a closure you already
+/// have. The task runs at once, on this thread, until it first has to wait.
+///
+///     let work = task::spawn(||() -> i64 { expensive() })
+///     ...
+///     io::println(work.wait().$str())
+pub fn spawn<T>(body: @function() -> T) -> Future<T> {
+    var f = Future<T>(newShared::<T>())
+    f.runOn(body)
+    f
+}
+
+/// A future that is done once `duration` has passed. Awaiting it is how a
+/// task waits without holding the thread:
+///
+///     task::sleep(time::milliseconds(50)).await
+///
+/// At least that long, not exactly: the executor looks at the clock between
+/// tasks, and a task that runs for a while delays every timer behind it.
+pub fn sleep(duration: time::Time) -> Future<()> {
+    var f = Future<()>(newShared::<()>())
+    f.timer(duration)
+    f
+}
+
+/// A future with no task behind it, for a result that some other code on
+/// this thread will hand over with `complete`. How a callback becomes
+/// something awaitable.
+///
+///     let answer = task::pending<i64>()
+///     ...
+///     answer.complete(42)
+pub fn pending<T>() -> Future<T> {
+    var f = Future<T>(newShared::<T>())
+    f.manual()
+    f
+}
+
+/// A future that is done once the socket `descriptor` has something to
+/// read — or has hung up, or failed, which the read that follows reports.
+/// What `net::AsyncStream` parks on; there for anything else that owns a
+/// non-blocking socket.
+///
+///     task::readable(fd).await
+pub fn readable(descriptor: i64) -> Future<()> {
+    var f = Future<()>(newShared::<()>())
+    f.onSocket(descriptor, 1)
+    f
+}
+
+/// The same, for room to write.
+pub fn writable(descriptor: i64) -> Future<()> {
+    var f = Future<()>(newShared::<()>())
+    f.onSocket(descriptor, 2)
+    f
+}
+
+/// Runs `entry(argument)` on a worker thread, and hands back a future that
+/// is done when it returns.
+///
+/// For work that would block — a read from a slow file, a computation that
+/// takes a while — and so would stop every other task on this thread if it
+/// ran here. The rules are `thread::spawn`'s: `entry` is a top-level `fn`,
+/// and what it is given and what it returns must both be `Send`. The
+/// workers are a pool of at most `workers()` threads, started as they are
+/// needed and kept; each has an executor of its own, so `entry` may start
+/// tasks there and `wait()` for them.
+///
+///     let hash = task::blocking(digest, contents)
+///     io::println(hash.await)
+pub fn blocking<A: thread::Send, R: thread::Send>(entry: @cfunction(A) -> R,
+                                  argument: A) -> Future<R> {
+    var f = Future<R>(newShared::<R>())
+    f.onThread(entry, argument)
+    f
+}
+
+/// Runs a closure on a worker thread, and hands back a future that is done
+/// when it returns.
+///
+/// The closure has to be written in the call, because what it captures goes
+/// to the other thread with it and every capture has to be `Send` — which
+/// the compiler checks where the closure is written, and nowhere else.
+///
+///     let name = "report"
+///     let size = task::offload(||() -> i64 { io::open(name).length() })
+///     io::println(size.await)
+@sendable
+pub fn offload<R: thread::Send>(body: @function() -> R) -> Future<R> {
+    var f = Future<R>(newShared::<R>())
+    f.offloadTo(body)
+    f
+}
+
+/// Runs an `async` closure on a worker thread: its task runs there, on that
+/// thread's executor, and the future here is done when the task is. The
+/// same rule as `offload`: written in the call, capturing only `Send`.
+///
+///     let total = task::offloadAsync(async ||() -> i64 {
+///         let a = compute(1)          // tasks on the worker thread
+///         let b = compute(2)
+///         a.await + b.await
+///     })
+@sendable
+pub fn offloadAsync<R: thread::Send>(body: @function() -> Future<R>) -> Future<R> {
+    var f = Future<R>(newShared::<R>())
+    f.offloadTo(||() -> R { body().wait() })
+    f
+}
+
+/// How many worker threads `blocking` and `offload` may use at once.
+@safe("reads a number the runtime keeps")
+pub fn workers() -> i64 { rune_pool_size() }
+
+/// Every result, in order, once every future is done.
+///
+///     let pages = task::all(vec![fetch(1), fetch(2), fetch(3)]).await
+pub async fn all<T>(futures: vector::Vector<Future<T>>) -> vector::Vector<T> {
+    var out = vector::Vector<T>()
+    for f in futures {
+        out.push(f.await)
+    }
+    out
+}
+
+/// Which of `futures` is done first: its index. The lowest index when
+/// several already are. A suspension point: parks the task until one is,
+/// and comes back with -1 when the task is cancelled meanwhile — at which
+/// point the caller is leaving, and never reads it.
+@suspend
+@safe("the array of tasks is sized here and freed here; the futures outlive the call")
+fn waitAny<T>(futures: &vector::Vector<Future<T>>) -> i64 {
+    let count = futures.length()
+    if count == 0 { process::panic("first: no futures to wait for") }
+    let raw = mem::allocator.allocate((count * 8) as usize)
+    if mem::isNull(raw) { process::panic("cannot allocate a wait list") }
+    let tasks = unsafe { raw as *var u64 }
+    var i = 0
+    while i < count {
+        unsafe { tasks[i] = futures.look(i).task() as u64 }
+        i += 1
+    }
+    let index = unsafe { rune_task_wait_any(raw, count) }
+    mem::allocator.deallocate(raw)
+    index
+}
+
+/// `waitAny` for two futures of different types: 0 for the first, 1 for
+/// the second.
+@suspend
+@safe("two task pointers in a block sized for two, freed here")
+fn waitEither(a: *var u8, b: *var u8) -> i64 {
+    let raw = mem::allocator.allocate(16)
+    if mem::isNull(raw) { process::panic("cannot allocate a wait list") }
+    let tasks = unsafe { raw as *var u64 }
+    unsafe {
+        tasks[0] = a as u64
+        tasks[1] = b as u64
+    }
+    let index = unsafe { rune_task_wait_any(raw, 2) }
+    mem::allocator.deallocate(raw)
+    index
+}
+
+/// The first of `futures` to finish, and where it was: its index, and the
+/// future itself — done, so awaiting it returns at once.
+///
+///     let (which, winner) = task::first(vec![slow(), fast()]).await
+///     io::println(which)                 // 1
+///     io::println(winner.await)
+///
+/// The others keep running; `race` is this with the rest cancelled. When
+/// several are already done, the lowest index wins.
+pub async fn first<T>(futures: vector::Vector<Future<T>>) -> (i64, Future<T>) {
+    let index = waitAny::<T>(&futures)
+    var all = futures
+    (index, all.remove(index).unwrap())
+}
+
+/// The value of the first of `futures` to finish. The others are cancelled
+/// the moment it does, and `race` waits for each to leave before it hands
+/// the value back — so when it returns, nothing of it is still running.
+///
+///     let page = task::race(vec![mirror("a"), mirror("b")]).await
+///
+/// A loser leaves at its next suspension point; one that computes without
+/// ever suspending — and has no `checkpoint` — is waited for to its end.
+pub async fn race<T>(futures: vector::Vector<Future<T>>) -> T {
+    let index = waitAny::<T>(&futures)
+    var i = 0
+    while i < futures.length() {
+        if i != index { futures.look(i).cancel() }
+        i += 1
+    }
+    i = 0
+    while i < futures.length() {
+        if i != index { futures.look(i).outcome() }
+        i += 1
+    }
+    var all = futures
+    all.remove(index).unwrap().await
+}
+
+/// `future`'s result if it arrives within `limit`, and nothing otherwise —
+/// in which case the task behind it is cancelled, and has left by the time
+/// `nil` comes back.
+///
+///     match task::timeout(time::seconds(2), fetch(url)).await {
+///         Some(page) => io::println(page),
+///         None => io::println("too slow"),
+///     }
+pub async fn timeout<T>(limit: time::Time, future: Future<T>) -> T? {
+    let clock = sleep(limit)
+    if waitEither(future.task(), clock.task()) == 0 {
+        clock.cancel()
+        return Some(future.await)
+    }
+    future.cancel()
+    future.outcome()
+    nil
+}
+
+/// Leaves the task here if it has been cancelled, and does nothing
+/// otherwise. For a loop with no `.await` in it, which would never
+/// otherwise notice.
+///
+///     while working {
+///         task::checkpoint()
+///         step()
+///     }
+@suspend
+@safe("a point the compiler checks; nothing is read or written here")
+pub fn checkpoint() {}
+
+//===--------------------------------------------------------------------===//
+// The thread's own stack
+//===--------------------------------------------------------------------===//
+
+/// Runs the other tasks until `future` is done, and hands back its result.
+///
+/// The bridge from code that is not `async`: the same as `future.wait()`,
+/// spelled for the place it is usually written.
+///
+///     fn main() -> i64 { task::run(program()) }
+///
+/// An `async fn main` is this, written for you.
+pub fn run<T>(future: Future<T>) -> T { future.wait() }
+
+/// Lets every task that is ready run before this one continues.
+///
+/// Inside a task, the task goes to the back of the queue — and this is a
+/// suspension point, so a cancelled task leaves from here. On the thread's
+/// own stack, everything ready runs once and this returns.
+@suspend
+@safe("a scheduling hint; nothing is read or written")
+pub fn yieldNow() { rune_task_yield_now() }
+
+/// True inside a task; false on the thread's own stack.
+@safe("a flag the runtime keeps")
+pub fn inTask() -> bool { rune_task_in_task() != 0 }
+
+/// How much stack each new task is given, in bytes. Reserved rather than
+/// used: a task pays for the pages it touches, not for this number.
+@safe("reads a setting")
+pub fn stackSize() -> i64 { rune_task_stack_size() }
+
+/// Sets the stack for tasks started from here on. Never less than 16 KiB.
+/// A task that runs past the end of its stack faults rather than corrupting
+/// what lies beyond it, so a deep recursion inside a task wants this raised.
+@safe("writes a setting the runtime reads when it next makes a stack")
+pub fn setStackSize(bytes: i64) { rune_task_set_stack_size(bytes) }

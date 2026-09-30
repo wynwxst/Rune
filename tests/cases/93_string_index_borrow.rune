@@ -1,0 +1,7 @@
+// A character read out of a String is a value, so there is nothing to borrow.
+// EXPECT-ERROR: cannot borrow a temporary value
+fn main() -> i64 {
+    let text = "abc"
+    let p = &text[0]
+    0
+}
