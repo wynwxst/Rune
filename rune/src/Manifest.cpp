@@ -269,6 +269,15 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
       t.LinkLibraries = stringList(v.find("link"));
       t.LinkPaths = stringList(v.find("link-paths"));
       t.LinkArgs = stringList(v.find("link-args"));
+      if (const TomlValue *x = v.find("linker")) t.Linker = x->stringOr("");
+      if (const TomlValue *x = v.find("linker-kind")) t.LinkerKind = x->stringOr("");
+      if (const TomlValue *x = v.find("default-flags")) t.DefaultFlags = x->boolOr(true);
+      if (!t.LinkerKind.empty() && t.LinkerKind != "driver" && t.LinkerKind != "ld") {
+        error = manifestPath.string() + ": [target." + t.Name +
+                "] `linker-kind` is \"" + t.LinkerKind +
+                "\"; it is \"driver\" (a compiler that links) or \"ld\" (a linker)";
+        return false;
+      }
       // A target with no triple, and no foreign target to take one from,
       // names nothing; the mistake is worth saying rather than building for
       // the host under another name.

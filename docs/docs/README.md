@@ -553,6 +553,7 @@ When a package needs more than compiling and linking — a flag worked out from 
 - [Two phases](Build_Scripts/two_phases.md)
 - [What it is told](Build_Scripts/what_it_is_told.md)
 - [How it answers](Build_Scripts/how_it_answers.md)
+- [Linking it yourself](Build_Scripts/linking_it_yourself.md)
 - [When it runs](Build_Scripts/when_it_runs.md)
 
 ## Cross compilation
@@ -582,6 +583,7 @@ Programs with nothing underneath them: a kernel, a boot loader, firmware. The la
 - [Starting without main](Bare_Metal/starting_without_main.md)
 - [@weak](Bare_Metal/weak.md)
 - [Bare-metal targets](Bare_Metal/bare_metal_targets.md)
+- [Your own toolchain](Bare_Metal/your_own_toolchain.md)
 - [Tables in the image](Bare_Metal/tables_in_the_image.md)
 
 ## Conditional compilation

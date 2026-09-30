@@ -471,6 +471,7 @@
   "two_phases.md",
   "what_it_is_told.md",
   "how_it_answers.md",
+  "linking_it_yourself.md",
   "when_it_runs.md"
  ],
  "Cross_Compilation": [
@@ -494,6 +495,7 @@
   "starting_without_main.md",
   "weak.md",
   "bare_metal_targets.md",
+  "your_own_toolchain.md",
   "tables_in_the_image.md"
  ],
  "Conditional_Compilation": [

@@ -46,6 +46,10 @@ pub fn preparing() -> bool { env::getOr("RUNE_BUILD_PHASE", "") == "prepare" }
 /// True in the phase that runs after an executable is linked.
 pub fn finishing() -> bool { env::getOr("RUNE_BUILD_PHASE", "") == "finish" }
 
+/// True while linking, for a target whose `linker = "build-script"`: the
+/// script is then called in place of a linker, with a linker's arguments.
+pub fn linking() -> bool { env::getOr("RUNE_BUILD_PHASE", "") == "link" }
+
 /// The package's name, from its manifest.
 pub fn packageName() -> String { env::getOr("RUNE_PACKAGE_NAME", "") }
 
@@ -78,11 +82,57 @@ pub fn freestanding() -> bool { env::getOr("RUNE_FREESTANDING", "0") == "1" }
 /// The C compiler the target builds with, as `rune` would call it.
 pub fn cc() -> String { env::getOr("RUNE_CC", "cc") }
 
+/// The program that links for this target: its `linker`, else its `cc`.
+pub fn linker() -> String { env::getOr("RUNE_LINKER", "cc") }
+
+/// How that program takes its flags: `ld` for a linker, `driver` for a
+/// compiler that links.
+pub fn linkerKind() -> String { env::getOr("RUNE_LINKER_KIND", "driver") }
+
 /// While finishing: the executable that was just linked.
 pub fn artifact() -> String { env::getOr("RUNE_ARTIFACT", "") }
 
 /// While finishing: its name, without directory or suffix.
 pub fn artifactName() -> String { env::getOr("RUNE_ARTIFACT_NAME", "") }
+
+//=== Linking =============================================================//
+//
+// With `linker = "build-script"` in the target's table, the link is the
+// script's. It is called exactly as a linker would be — the objects, `-o`
+// and every flag the build has for the link (a linker script, a package's
+// `link-args`) — and can do with them what it likes:
+//
+//     if build::linking() {
+//         var args = build::linkArguments()
+//         build::runAll("i686-elf-ld", &args)
+//     }
+
+/// While linking: every argument, in order, as a linker would get them.
+pub fn linkArguments() -> vector::Vector<String> { process::arguments() }
+
+/// While linking: the file to write — the argument after `-o`.
+pub fn linkOutput() -> String {
+    let args = process::arguments()
+    var i = 0
+    while i + 1 < args.length() {
+        if args.look(i) == "-o" { return args.look(i + 1).$clone() }
+        i += 1
+    }
+    artifact()
+}
+
+/// While linking: the objects and archives — every argument ending in `.o`,
+/// `.obj`, `.a` or `.lib`.
+pub fn linkInputs() -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    for a in process::arguments() {
+        if text::endsWith(a, &".o") || text::endsWith(a, &".obj") ||
+           text::endsWith(a, &".a") || text::endsWith(a, &".lib") {
+            out.push(a.$clone())
+        }
+    }
+    out
+}
 
 //=== Answers =============================================================//
 
@@ -142,7 +192,22 @@ pub fn tool(candidates: [String]) -> String {
 /// Runs `program` with `args` in the package's directory, and fails the build
 /// — with its output — unless it succeeds.
 pub fn run(program: String, args: [String]) {
-    var c = process::Command(program.$clone())
+    var all = vector::Vector<String>()
+    for a in args { all.push(a.$clone()) }
+    runAll(program, &all)
+}
+
+/// `run`, with the arguments in a vector: for a list worked out as the script
+/// goes, like the one `linkArguments` hands back. `program` may carry
+/// arguments of its own, separated by spaces: `"clang --target=i686-elf"`.
+pub fn runAll(program: String, args: &vector::Vector<String>) {
+    let words = text::split(&program, &" ")
+    var c = process::Command(words.look(0).$clone())
+    var i = 1
+    while i < words.length() {
+        if !words.look(i).$isEmpty() { c.arg(words.look(i).$clone()) }
+        i += 1
+    }
     for a in args { c.arg(a.$clone()) }
     c.inDirectory(packageDir())
     match c.run() {

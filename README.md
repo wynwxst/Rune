@@ -230,7 +230,9 @@ division and nil check is inserted, the Zombie borrow checker proves every
 borrow, and a failed check goes to the `@panicHandler`. Classes, `Unique<T>`
 and optionals work, on the program's own heap; `String`, `std::io` and
 threads are refused at compile time. `bare-x86`, `bare-x86_64`, `bare-arm64`
-and `bare-riscv64` build with clang and ld.lld.
+and `bare-riscv64` build with clang and ld.lld unless told otherwise: name any
+`cc` and `linker` for the target — `i686-elf-gcc` and `i686-elf-ld`, say —
+and none of clang's flags follow them.
 [`examples/toyos`](examples/toyos/README.md) is a multiboot kernel that QEMU
 boots with `rune run`, and [`examples/tetris-os`](examples/tetris-os/README.md)
 is jdah's TETRIS-OS ported from C — its own boot sector, interrupts, VGA mode

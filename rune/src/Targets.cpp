@@ -111,10 +111,14 @@ const std::vector<ForeignTarget> &foreignTargets() {
       t.Freestanding = true;
       if (!runner.empty())
         t.Runners = {runner};
-      // `-ffreestanding` means nothing to an assembly file; saying so is noise.
-      t.CFlags = {"--target=" + triple, "-ffreestanding", "-fno-pic",
-                  "-Wno-unused-command-line-argument"};
-      t.LinkArgs = {"--target=" + triple, "-fuse-ld=lld"};
+      // What any C compiler for bare metal wants, GCC and clang alike.
+      t.CFlags = {"-ffreestanding", "-fno-pic"};
+      // What only this machine's clang and lld want: gone as soon as the
+      // package names its own tools. (`-ffreestanding` means nothing to an
+      // assembly file, and clang says so; that is noise.)
+      t.ToolchainCFlags = {"--target=" + triple,
+                           "-Wno-unused-command-line-argument"};
+      t.ToolchainLinkArgs = {"--target=" + triple, "-fuse-ld=lld"};
       t.InstallHint = "install clang and lld: `apt install clang lld` or "
                       "`brew install llvm`";
       return t;
@@ -232,6 +236,33 @@ std::string findWasiSdk(const std::string &configured) {
   return versioned.back();
 }
 
+std::string linkerKindOf(const ResolvedTarget &t) {
+  if (!t.LinkerKind.empty())
+    return t.LinkerKind;
+  if (t.Linker.empty() || t.Linker == "build-script")
+    return "driver";
+  // The program's own name: its first word, without a directory.
+  std::string name = t.Linker.substr(0, t.Linker.find(' '));
+  name = fs::path(name).filename().string();
+  auto endsWith = [&](const std::string &s) {
+    return name.size() >= s.size() &&
+           name.compare(name.size() - s.size(), s.size(), s) == 0;
+  };
+  if (name == "ld" || endsWith("-ld") || name.rfind("ld.", 0) == 0 ||
+      name.rfind("ld64", 0) == 0 || endsWith("-ld.bfd") ||
+      endsWith("-ld.gold") || endsWith("-ld.lld") || name == "wasm-ld" ||
+      name == "lld" || name == "lld-link")
+    return "ld";
+  return "driver";
+}
+
+std::vector<std::string> linkerScriptArgs(const ResolvedTarget &t,
+                                          const std::string &script) {
+  if (linkerKindOf(t) == "ld")
+    return {"-T", script};
+  return {"-Wl,-T," + script};
+}
+
 std::string archiverFor(const ResolvedTarget &t) {
   if (!t.Ar.empty())
     return t.Ar;
@@ -308,11 +339,22 @@ static std::vector<std::string> knownNames(const Manifest &m) {
 static bool fillFromForeign(const ForeignTarget &f, const TargetSpec *spec,
                             ResolvedTarget &out, TargetProblem &problem) {
   out.Triple = f.Triple;
-  out.CFlags = f.CFlags;
   out.LinkLibraries = f.LinkLibraries;
-  out.LinkArgs = f.LinkArgs;
   out.Freestanding = f.Freestanding;
   const bool ccGiven = spec && !spec->Cc.empty();
+  const bool linkerGiven = spec && !spec->Linker.empty();
+  // The target's own flags, and its toolchain's only while that toolchain is
+  // the one in use. `default-flags = false` keeps none of them.
+  if (!spec || spec->DefaultFlags) {
+    out.CFlags = f.CFlags;
+    out.LinkArgs = f.LinkArgs;
+    if (!ccGiven)
+      out.CFlags.insert(out.CFlags.end(), f.ToolchainCFlags.begin(),
+                        f.ToolchainCFlags.end());
+    if (!ccGiven && !linkerGiven)
+      out.LinkArgs.insert(out.LinkArgs.end(), f.ToolchainLinkArgs.begin(),
+                          f.ToolchainLinkArgs.end());
+  }
 
   switch (f.Toolchain) {
   case ToolchainKind::WasiSdk: {
@@ -344,13 +386,20 @@ static bool fillFromForeign(const ForeignTarget &f, const TargetSpec *spec,
     break;
   }
   case ToolchainKind::Clang: {
-    if (!ccGiven && (findOnPath("clang").empty() || findOnPath("ld.lld").empty())) {
-      problem.Message = std::string("cannot find ") +
-                        (findOnPath("clang").empty() ? "clang" : "ld.lld") +
-                        ", which " + f.Name + " builds with";
+    // clang is wanted only for what nobody else was named for: compiling,
+    // unless there is a `cc`; linking, unless there is a `cc` or a `linker`.
+    const bool needClang = !ccGiven;
+    const bool needLld = !ccGiven && !linkerGiven;
+    const char *missing = needClang && findOnPath("clang").empty()  ? "clang"
+                          : needLld && findOnPath("ld.lld").empty() ? "ld.lld"
+                                                                    : nullptr;
+    if (missing) {
+      problem.Message = std::string("cannot find ") + missing + ", which " +
+                        f.Name + " builds with by default";
       problem.Notes.push_back(f.InstallHint);
-      problem.Notes.push_back("or name another compiler: `cc = \"...\"` in "
-                              "[target." + f.Name + "]");
+      problem.Notes.push_back("or use your own toolchain: `cc = \"...\"` and "
+                              "`linker = \"...\"` in [target." + f.Name +
+                              "] — i686-elf-gcc and i686-elf-ld, say");
       return false;
     }
     out.Cc = "clang";
@@ -396,6 +445,9 @@ static void overlay(const TargetSpec &spec, ResolvedTarget &out) {
   take(out.Sysroot, spec.Sysroot);
   take(out.RuntimeDir, spec.RuntimeDir);
   take(out.Runner, spec.Runner);
+  take(out.Linker, spec.Linker);
+  take(out.LinkerKind, spec.LinkerKind);
+  out.DefaultFlags = spec.DefaultFlags;
   auto append = [](std::vector<std::string> &into,
                    const std::vector<std::string> &from) {
     into.insert(into.end(), from.begin(), from.end());
@@ -528,6 +580,27 @@ static void printEntry(const std::string &name, const std::string &triple,
   }
   std::cout << "      " << c("\x1b[32m") << "✓ " << c("\x1b[0m")
             << "builds with " << (t.Cc.empty() ? "cc" : t.Cc) << "\n";
+  // Everything the build will add of its own, so nothing is a surprise and
+  // anything here can be changed in [target.<name>].
+  auto list = [](const std::vector<std::string> &v) {
+    std::string out;
+    for (const std::string &s : v)
+      out += (out.empty() ? "" : " ") + s;
+    return out;
+  };
+  const std::string linker = t.Linker.empty() ? (t.Cc.empty() ? "cc" : t.Cc)
+                                              : t.Linker;
+  std::cout << "        " << c("\x1b[2m") << "links with " << linker << " ("
+            << linkerKindOf(t) << ")" << c("\x1b[0m") << "\n";
+  if (!t.CFlags.empty())
+    std::cout << "        " << c("\x1b[2m") << "c-flags   " << list(t.CFlags)
+              << c("\x1b[0m") << "\n";
+  if (!t.LinkArgs.empty())
+    std::cout << "        " << c("\x1b[2m") << "link-args " << list(t.LinkArgs)
+              << c("\x1b[0m") << "\n";
+  if (!t.DefaultFlags)
+    std::cout << "        " << c("\x1b[2m") << "no default flags"
+              << c("\x1b[0m") << "\n";
   if (!t.Runner.empty())
     std::cout << "      " << c("\x1b[32m") << "✓ " << c("\x1b[0m")
               << "runs with " << t.Runner << "\n";

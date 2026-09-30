@@ -18,6 +18,9 @@
 | `--link-arg <arg>` | appended to the link command verbatim |
 | `--link-cxx` | link the C++ runtime (implied by `extern "C++"`) |
 | `--cxx-stdlib <lib>` | which one: `libc++` or `libstdc++` (default: the platform's) |
+| `--linker <program>` | what links, with any arguments of its own (as `--cc` does) |
+| `--linker-kind <k>` | `driver` (default) or `ld`: flags for a linker run directly |
+| `--no-default-link-args` | link with the objects, `-o` and what `--link-arg`, `-L` and `-l` say, nothing more |
 | `--safety <level>` | `none`, `minimal` or `full` (default) |
 | `--memory <mode>` | `zombie` (default) or `arc`; see **Single ownership without a count** |
 | `--no-zombie-stdlib` | silence Zombie findings inside the standard library (reported by default) |

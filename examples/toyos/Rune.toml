@@ -22,3 +22,18 @@ linker-script = "kernel.ld"
 # panic ends the run with a status of its own.
 [target.bare-x86]
 runner = "qemu-system-i386 -display none -serial stdio -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -kernel"
+
+# The same, built with a GNU cross toolchain instead of clang and lld — the
+# usual one on macOS (`brew install i686-elf-gcc i686-elf-binutils`):
+#
+#     rune run --target i686-elf
+#
+# Naming your own `cc` and `linker` is all it takes: none of clang's flags
+# are added to tools that are not clang, and `kernel.ld` is handed to the
+# linker as `-T kernel.ld`. `rune targets` lists exactly what each target
+# compiles and links with.
+[target.i686-elf]
+base = "bare-x86"
+cc = "i686-elf-gcc"
+linker = "i686-elf-ld"
+runner = "qemu-system-i386 -display none -serial stdio -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -kernel"

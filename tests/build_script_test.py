@@ -73,6 +73,27 @@ fn main() -> i64 {
 """
 
 
+LINK_SCRIPT = """import std::build
+import std::io
+
+fn main() -> i64 {
+    if build::preparing() {
+        build::cfg("generated")
+        build::cfgValue("mode", "linked")
+    }
+    if build::linking() {
+        let note = build::outDir() + "/linked-by-script"
+        if io::writeString(&note, build::linkOutput()) is Err(e) {
+            build::fail("cannot write the note")
+        }
+        var args = build::linkArguments()
+        build::runAll("cc", &args)
+    }
+    0
+}
+"""
+
+
 def rune(project, *args):
     env = dict(os.environ, RUNE_HOME=os.path.join(project, ".home"))
     r = subprocess.run([os.path.join(BIN, "rune"), *args, "--no-color"],
@@ -114,6 +135,21 @@ def main():
         check("an edited build script is compiled again, and nothing else",
               rc == 0 and "(build script)" in out and
               "Compiling scripted v0.1.0\n" not in out, out)
+
+        # The script as the linker: called with a linker's arguments, it
+        # links with whatever it likes and leaves a note that it did.
+        machine = subprocess.run(["cc", "-dumpmachine"], capture_output=True,
+                                 text=True).stdout.strip()
+        with open(os.path.join(project, "Rune.toml"), "a") as f:
+            f.write('\n[target.own-link]\ntriple = "%s"\ncc = "cc"\nlinker = "build-script"\n'
+                    'linker-kind = "driver"\nrunner = "env"\n' % machine)
+        with open(os.path.join(project, "build.rune"), "w") as f:
+            f.write(LINK_SCRIPT)
+        rc, out = rune(project, "run", "--target", "own-link")
+        check("with linker = \"build-script\", the script links the program",
+              rc == 0 and "config: set by build.rune, mode other" in out and
+              os.path.exists(os.path.join(project, "target", "own-link",
+                                          "debug", "linked-by-script")), out)
 
         with open(os.path.join(project, "build.rune"), "w") as f:
             f.write("import std::build\nfn main() -> i64 {\n"

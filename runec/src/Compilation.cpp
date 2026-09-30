@@ -417,14 +417,52 @@ bool linkExecutable(const std::string &objPath,
       cc = "cc";
   }
 
-  std::vector<std::string> argv{cc, objPath};
+  // The link program may carry arguments of its own:
+  // `--linker "clang --target=i686-elf"`.
+  std::vector<std::string> argv;
+  {
+    std::istringstream words(cc);
+    for (std::string w; words >> w;)
+      argv.push_back(w);
+  }
+
+  // Everything below that the compiler adds of its own accord goes through
+  // `own`, never straight onto the line. `--no-default-link-args` drops all
+  // of it, so the link is exactly what the build said; and a linker run
+  // directly (`--linker-kind ld`) gets it in a linker's spelling, with what
+  // only a compiler driver understands left out. Nothing is forced on a
+  // toolchain it was not written for.
+  auto own = [&](const std::string &a) {
+    if (opts.NoDefaultLinkArgs)
+      return;
+    if (!opts.LinkerIsLd) {
+      argv.push_back(a);
+      return;
+    }
+    if (a.rfind("-Wl,", 0) == 0) {
+      std::stringstream parts(a.substr(4));
+      for (std::string part; std::getline(parts, part, ',');)
+        argv.push_back(part);
+      return;
+    }
+    if (a.rfind("--target=", 0) == 0 || a.rfind("-fuse-ld", 0) == 0 ||
+        a == "-nostdlib" || a == "-static" || a == "-pthread")
+      return;
+    if (a == "-rdynamic") {
+      argv.push_back("--export-dynamic");
+      return;
+    }
+    argv.push_back(a);
+  };
+
+  argv.push_back(objPath);
   // Only a driver that was not chosen for the target needs telling. A
   // `<triple>-gcc` is already the right compiler and rejects `--target`;
   // clang is one binary for every target and needs it.
   if (!opts.TargetTriple.empty() && opts.LinkDriver.empty())
-    argv.push_back("--target=" + opts.TargetTriple);
+    own("--target=" + opts.TargetTriple);
   if (!opts.Sysroot.empty())
-    argv.push_back("--sysroot=" + opts.Sysroot);
+    own("--sysroot=" + opts.Sysroot);
   for (const std::string &extra : extraObjects)
     argv.push_back(extra);
   argv.push_back("-o");
@@ -434,8 +472,8 @@ bool linkExecutable(const std::string &objPath,
   // files. What it needs beyond its own object — a linker script, a boot
   // stub — comes through `--link-arg`.
   if (opts.Freestanding) {
-    argv.push_back("-nostdlib");
-    argv.push_back("-static");
+    own("-nostdlib");
+    own("-static");
   } else {
     std::filesystem::path runtimeLib =
         std::filesystem::path(opts.RuntimeLibDir) / "libruneruntime.a";
@@ -445,7 +483,6 @@ bool linkExecutable(const std::string &objPath,
       diags.fatal("cannot find the Rune runtime at '{}'", runtimeLib.string())
           .note("build the `runeruntime` target, or pass --runtime-dir");
   }
-
   const llvm::Triple triple = targetTripleOf(opts);
   const bool isWindows = triple.isOSWindows();
   const bool isWasm = triple.isWasm();
@@ -457,14 +494,14 @@ bool linkExecutable(const std::string &objPath,
   }
 
   if (shared) {
-    argv.push_back("-shared");
+    own("-shared");
     // Apple wants the library to know the name it will be found under, so a
     // program linked against it records that rather than the build path.
     if (triple.isOSDarwin()) {
-      argv.push_back("-Wl,-install_name,@rpath/" +
+      own("-Wl,-install_name,@rpath/" +
                      std::filesystem::path(outPath).filename().string());
     } else if (!isWindows) {
-      argv.push_back("-Wl,-soname," +
+      own("-Wl,-soname," +
                      std::filesystem::path(outPath).filename().string());
     }
   }
@@ -475,7 +512,7 @@ bool linkExecutable(const std::string &objPath,
   // WebAssembly has no dynamic linker to ask, and its traps carry their own
   // backtrace.
   if (opts.DebugInfo && !isWindows && !isWasm && !opts.Freestanding)
-    argv.push_back("-rdynamic");
+    own("-rdynamic");
 
   // What WASI leaves out, the SDK emulates, and the runtime asks for those
   // emulations when it is compiled; here is where they are linked. With the
@@ -484,15 +521,15 @@ bool linkExecutable(const std::string &objPath,
   // with a ceiling it can grow to (the whole of wasm32's 4 GB).
   if (isWasm && !opts.Freestanding) {
     if (triple.str().find("threads") != std::string::npos) {
-      argv.push_back("-pthread");
-      argv.push_back("-Wl,--import-memory,--export-memory,"
-                     "--max-memory=4294967296");
+      own("-pthread");
+      own("-Wl,--import-memory,--export-memory,"
+          "--max-memory=4294967296");
     } else {
-      argv.push_back("-lwasi-emulated-pthread");
+      own("-lwasi-emulated-pthread");
     }
     // wasm-ld reserves 64 KB of stack unless told otherwise; a native main
     // thread has 8 MB, and Rune code is written expecting about that.
-    argv.push_back("-Wl,-z,stack-size=8388608");
+    own("-Wl,-z,stack-size=8388608");
   }
 
   for (const std::string &dir : opts.LinkPaths)
@@ -515,29 +552,29 @@ bool linkExecutable(const std::string &objPath,
       // Asked for by name: C++ built with `-stdlib=libc++` where the
       // platform's own is libstdc++. Its ABI half is a library of its own
       // everywhere but Apple.
-      argv.push_back("-lc++");
-      argv.push_back("-lc++abi");
+      own("-lc++");
+      own("-lc++abi");
     } else if (opts.CxxStdlib == "libstdc++" && !isWindows) {
-      argv.push_back("-lstdc++");
+      own("-lstdc++");
     } else if (triple.isOSDarwin() || triple.isOSFreeBSD()) {
-      argv.push_back("-lc++");
+      own("-lc++");
     } else if (isWasm) {
       // The WASI SDK ships libc++, split in two as LLVM builds it.
-      argv.push_back("-lc++");
-      argv.push_back("-lc++abi");
+      own("-lc++");
+      own("-lc++abi");
     } else if (isWindows) {
       // `-static-libstdc++` is a `g++`-driver spelling and this is `gcc`, so
       // the linker is told directly. `-lgcc_eh` is what libstdc++'s unwinder
       // hooks resolve against once it is static; `-lgcc` and the C runtime
       // are what the driver adds after these anyway.
-      argv.push_back("-Wl,-Bstatic");
-      argv.push_back("-lstdc++");
-      argv.push_back("-lgcc_eh");
-      argv.push_back("-lgcc");
-      argv.push_back("-lwinpthread"); // libstdc++'s threads, static too
-      argv.push_back("-Wl,-Bdynamic");
+      own("-Wl,-Bstatic");
+      own("-lstdc++");
+      own("-lgcc_eh");
+      own("-lgcc");
+      own("-lwinpthread"); // libstdc++'s threads, static too
+      own("-Wl,-Bdynamic");
     } else {
-      argv.push_back("-lstdc++");
+      own("-lstdc++");
     }
   }
   // The standard library calls into libm; only add it if nobody else did, and
@@ -545,7 +582,7 @@ bool linkExecutable(const std::string &objPath,
   // runtime and Apple's platforms keep them in libSystem, so on both, asking
   // for `-lm` means the driver goes looking for a library that is not there.
   if (!wantsMath && !isWindows && !triple.isOSDarwin() && !opts.Freestanding)
-    argv.push_back("-lm");
+    own("-lm");
 
   if (opts.Verbose)
     diags.status("link: " + spellCommand(argv));

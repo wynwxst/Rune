@@ -12,4 +12,7 @@ For a package's `build.rune`: what it is told, and how it answers. See [Build sc
 | `linkArg`, `linkLibrary`, `linkPath` | add to every link |
 | `runWith` | while finishing: what `rune run` starts instead |
 | `warning`, `fail` | say something; stop the build |
-| `tool`, `run` | find the first of several programs on `PATH`; run one, failing the build unless it succeeds |
+| `tool`, `run`, `runAll` | find the first of several programs on `PATH`; run one, failing the build unless it succeeds |
+| `linking` | with `linker = "build-script"`: this call is the link |
+| `linkArguments`, `linkInputs`, `linkOutput` | while linking: what a linker would have been given, the objects in it, and the file to write |
+| `linker`, `linkerKind` | what links for the target, and whether it is a linker (`ld`) or a compiler (`driver`) |

@@ -56,6 +56,12 @@ CROSS COMPILATION
     --cc <program>       C toolchain driver used to link (default: cc)
     --sysroot <dir>      Pass --sysroot=<dir> to the link driver
     --link-arg <arg>     Append <arg> to the link command verbatim
+    --linker <program>   What links: a compiler driver or a linker, with any
+                         arguments of its own (same as --cc for linking)
+    --linker-kind <k>    driver (default) or ld: how the linker takes flags
+    --no-default-link-args
+                         Add nothing to the link but the objects, -o and what
+                         --link-arg, -L and -l say
     --link-cxx           Link the C++ runtime (implied by `extern "C++"`)
     --cxx-stdlib <lib>   Which one: libc++ or libstdc++ (default: the platform's)
     --runtime-dir <dir>  Where this target's libruneruntime.a lives
@@ -182,6 +188,18 @@ int runCompilerMain(int argc, char **argv) {
       continue;
     }
     if (a == "--link-cxx") { opts.LinkCxx = true; continue; }
+    if (a == "--linker") { opts.LinkDriver = needsValue(i, "--linker"); continue; }
+    if (a == "--linker-kind") {
+      std::string v = needsValue(i, "--linker-kind");
+      if (v != "driver" && v != "ld") {
+        std::cerr << "runec: unknown linker kind '" << v
+                  << "' (expected driver or ld)\n";
+        return 2;
+      }
+      opts.LinkerIsLd = v == "ld";
+      continue;
+    }
+    if (a == "--no-default-link-args") { opts.NoDefaultLinkArgs = true; continue; }
     if (a == "--cxx-stdlib") {
       std::string v = needsValue(i, "--cxx-stdlib");
       if (v != "libc++" && v != "libstdc++") {

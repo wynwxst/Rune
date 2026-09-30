@@ -11,7 +11,11 @@ rune run -- -append panic       # trip a bounds check on purpose
 rune run --release
 ```
 
-Needs clang, ld.lld and `qemu-system-i386`. Everything the kernel prints goes
+Needs `qemu-system-i386`, and either clang and ld.lld (the default) or a GNU
+cross toolchain — `rune run --target i686-elf` builds with `i686-elf-gcc` and
+`i686-elf-ld` instead (on macOS: `brew install i686-elf-gcc
+i686-elf-binutils`). Both are tables in `Rune.toml`; change either to suit
+your system. Everything the kernel prints goes
 to the VGA screen and to the first serial port, which QEMU connects to your
 terminal:
 

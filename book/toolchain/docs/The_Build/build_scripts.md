@@ -41,6 +41,16 @@ All of it is in `rune/src/main.cpp`, under *Build scripts*.
   `BuildResult::RunWith`, which `rune run` looks the executable up in before
   starting it.
 
+## The link phase
+
+A target with `linker = "build-script"` is linked by the script itself.
+`buildTarget` prefixes the `runec` command with `buildScriptEnv(..., "link",
+...)` and adds `--linker <script>`, so `runec` calls the script exactly as it
+would call a linker, and the environment reaches it through `runec`. The
+script reads its arguments back with `build::linkArguments()` (and
+`linkInputs` / `linkOutput`); `linker-kind` decides which spelling they come
+in.
+
 ## Around it
 
 Two smaller things came with it, both for running what a script makes:

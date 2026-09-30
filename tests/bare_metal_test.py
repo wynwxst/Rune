@@ -119,6 +119,75 @@ def toyos(tmp):
           f"exit {r.returncode}\n{(r.stdout + r.stderr)[-4000:]}")
 
 
+WRAPPED_GCC = """#!/bin/sh
+# Stands in for a GNU i686-elf cross compiler: refuses clang-only flags.
+for a in "$@"; do
+  case "$a" in --target=*|-fuse-ld=*|-Wno-unused-command-line-argument)
+    echo "i686-elf-gcc: error: unrecognized option '$a'" >&2; exit 1;;
+  esac
+done
+exec gcc -m32 "$@"
+"""
+
+WRAPPED_LD = """#!/bin/sh
+# Stands in for a GNU i686-elf linker: refuses anything meant for a driver.
+for a in "$@"; do
+  case "$a" in -Wl,*|--target=*|-fuse-ld=*|-nostdlib|-static|-f*)
+    echo "i686-elf-ld: unrecognized option '$a'" >&2; exit 1;;
+  esac
+done
+exec ld -m elf_i386 "$@"
+"""
+
+
+def gnu_toolchain(tmp):
+    """toyos, built with a GNU cross toolchain rather than clang and lld.
+
+    `i686-elf-gcc` and `i686-elf-ld` are stood in for by the host's gcc and
+    GNU ld, behind scripts that refuse any flag a GNU tool would: nothing
+    the build adds of its own may assume clang."""
+    needed = ["qemu-system-i386", "gcc", "ld"]
+    missing = [t for t in needed if not shutil.which(t)]
+    if missing:
+        print("skip GNU toolchain: needs " + ", ".join(missing))
+        return
+    probe = subprocess.run(["ld", "-m", "elf_i386", "-V"], capture_output=True, text=True)
+    if probe.returncode != 0:
+        print("skip GNU toolchain: this ld cannot link 32-bit x86")
+        return
+    tools = os.path.join(tmp, "gnu-bin")
+    os.makedirs(tools)
+    for name, text in (("i686-elf-gcc", WRAPPED_GCC), ("i686-elf-ld", WRAPPED_LD)):
+        path = os.path.join(tools, name)
+        with open(path, "w") as f:
+            f.write(text)
+        os.chmod(path, 0o755)
+    project = os.path.join(tmp, "toyos-gnu")
+    shutil.copytree(os.path.join(ROOT, "examples", "toyos"), project,
+                    ignore=shutil.ignore_patterns("target"))
+    # The example's own `[target.i686-elf]`, as a macOS user would run it.
+    env = dict(os.environ, RUNE_HOME=os.path.join(tmp, "home"),
+               PATH=tools + os.pathsep + os.environ["PATH"])
+    rune = os.path.join(BIN, "rune")
+    r = subprocess.run([rune, "targets", "--no-color"], cwd=project, env=env,
+                       capture_output=True, text=True, timeout=60)
+    listing = r.stdout[r.stdout.find("  i686-elf "):]
+    check("rune targets shows the GNU tools and no clang flags",
+          "links with i686-elf-ld (ld)" in listing and "--target=" not in
+          listing.split("\n  ")[0], r.stdout)
+    r = subprocess.run([rune, "run", "--target", "i686-elf", "--no-color", "-v"],
+                       cwd=project, env=env, capture_output=True, text=True,
+                       timeout=300)
+    out = r.stdout + r.stderr
+    check("toyos builds with i686-elf-gcc and i686-elf-ld, and boots",
+          r.returncode == 0 and "all checks passed" in out,
+          f"exit {r.returncode}\n{out[-4000:]}")
+    link = [l for l in out.splitlines() if "link: " in l]
+    check("the link is the objects, -o and the linker script — nothing more",
+          link and "'-T'" in link[0] and "-Wl," not in link[0] and
+          "-nostdlib" not in link[0], "\n".join(link) or out[-2000:])
+
+
 def read_ppm(path):
     """A QEMU screendump: width, height and RGB bytes."""
     with open(path, "rb") as f:
@@ -256,6 +325,7 @@ def main():
     try:
         freestanding(tmp)
         toyos(tmp)
+        gnu_toolchain(tmp)
         tetris(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

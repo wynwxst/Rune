@@ -13,7 +13,10 @@ import std::build
 fn main() -> i64 {
     if build::finishing() {
         let image = build::artifact() + ".img"
-        let objcopy = build::tool(["llvm-objcopy", "objcopy"])
+        // Whichever objcopy this machine has: LLVM's, a cross toolchain's,
+        // the system's, or Homebrew's GNU one.
+        let objcopy = build::tool(["llvm-objcopy", "i686-elf-objcopy", "objcopy",
+                                   "gobjcopy"])
         build::run(objcopy, ["-O", "binary", build::artifact(), image.$clone()])
         build::runWith(image)
     }

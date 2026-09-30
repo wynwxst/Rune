@@ -34,7 +34,10 @@ runner = "qemu-aarch64 -L /opt/pi-sysroot"
 | --- | --- |
 | `base` | the foreign target to start from |
 | `triple` | passed to `runec --target`; needed unless there is a base |
-| `cc` | the C driver that compiles the runtime and links |
+| `cc` | the C compiler for the runtime and `c-sources`; also what links, unless `linker` says otherwise |
+| `linker` | what links: a compiler (`i686-elf-gcc`) or a linker (`i686-elf-ld`, `ld.lld`), with any arguments of its own, or `"build-script"` |
+| `linker-kind` | `"driver"` or `"ld"`: how `linker` takes flags; worked out from its name when not given |
+| `default-flags` | `false`: add no flags of the build's own to compiles or links — only what this table says |
 | `cxx` | the C++ driver; derived from `cc` when absent |
 | `ar` | the archiver; derived from `cc` when absent |
 | `sysroot` | passed as `--sysroot` |

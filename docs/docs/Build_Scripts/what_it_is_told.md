@@ -10,4 +10,5 @@
 | `target()`, `triple()` | `RUNE_TARGET`, `_TRIPLE` | the `--target` name, or `host`; its triple |
 | `freestanding()` | `RUNE_FREESTANDING` | built with no hosted runtime |
 | `cc()` | `RUNE_CC` | the target's C compiler |
+| `linker()`, `linkerKind()` | `RUNE_LINKER`, `_KIND` | what links, and whether it is `ld` or a `driver` |
 | `artifact()`, `artifactName()` | `RUNE_ARTIFACT`, `_NAME` | finishing: the executable just linked |

@@ -93,6 +93,15 @@ struct CompilerOptions {
   /// when an `extern "C++"` block is seen; a build tool passes it when a
   /// package has C++ sources that only reach Rune through `extern "C"`.
   bool LinkCxx = false;
+  /// `--linker-kind ld`: the link program is a linker run directly
+  /// (`i686-elf-ld`, `ld.lld`), not a compiler driver, so what the compiler
+  /// adds is spelled as a linker takes it — `-T x`, not `-Wl,-T,x` — and
+  /// nothing only a driver understands is passed at all.
+  bool LinkerIsLd = false;
+  /// `--no-default-link-args`: the link command is the objects, `-o`, and
+  /// exactly what `--link-arg`, `-L` and `-l` said — nothing of the
+  /// compiler's own (`-nostdlib`, `-static`, `-lm`, the runtime archive...).
+  bool NoDefaultLinkArgs = false;
   /// `--cxx-stdlib`: which C++ runtime `LinkCxx` links, `libc++` or
   /// `libstdc++`. Empty means the platform's own: libc++ on Apple, FreeBSD
   /// and wasm, libstdc++ elsewhere. C++ built with `-stdlib=libc++` on Linux

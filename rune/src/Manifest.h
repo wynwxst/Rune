@@ -55,6 +55,17 @@ struct TargetSpec {
   std::vector<std::string> LinkLibraries;
   std::vector<std::string> LinkPaths;
   std::vector<std::string> LinkArgs;
+  /// `linker`: the program that links, when it is not `cc`. A compiler
+  /// driver (`i686-elf-gcc`, `clang`) or a linker itself (`i686-elf-ld`,
+  /// `ld.lld`); may carry arguments of its own (`"clang --target=..."`).
+  /// `"build-script"` hands the link to the package's build.rune.
+  std::string Linker;
+  /// `linker-kind`: `"driver"` or `"ld"` — how link flags are spelled for
+  /// it. Worked out from `linker`'s name when not given.
+  std::string LinkerKind;
+  /// `default-flags = false`: none of the flags a foreign target would add
+  /// on its own, to compiles or to the link. Only what the table says.
+  bool DefaultFlags = true;
 };
 
 /// An extra executable declared with `[[bin]]`.

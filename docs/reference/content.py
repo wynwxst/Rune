@@ -10255,8 +10255,15 @@ fn main() -> i64 {
            ["`linkArg`, `linkLibrary`, `linkPath`", "add to every link"],
            ["`runWith`", "while finishing: what `rune run` starts instead"],
            ["`warning`, `fail`", "say something; stop the build"],
-           ["`tool`, `run`", "find the first of several programs on `PATH`; "
-            "run one, failing the build unless it succeeds"]]),
+           ["`tool`, `run`, `runAll`", "find the first of several programs on "
+            "`PATH`; run one, failing the build unless it succeeds"],
+           ["`linking`", "with `linker = \"build-script\"`: this call is the "
+            "link"],
+           ["`linkArguments`, `linkInputs`, `linkOutput`", "while linking: "
+            "what a linker would have been given, the objects in it, and "
+            "the file to write"],
+           ["`linker`, `linkerKind`", "what links for the target, and "
+            "whether it is a linker (`ld`) or a compiler (`driver`)"]]),
 
         H("std::env"),
         P("The process's environment: its variables, and where it is. A "
@@ -12105,6 +12112,9 @@ SECTIONS.append(Sec(
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
            ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"],
            ["`--cxx-stdlib <lib>`", "which one: `libc++` or `libstdc++` (default: the platform's)"],
+           ["`--linker <program>`", "what links, with any arguments of its own (as `--cc` does)"],
+           ["`--linker-kind <k>`", "`driver` (default) or `ld`: flags for a linker run directly"],
+           ["`--no-default-link-args`", "link with the objects, `-o` and what `--link-arg`, `-L` and `-l` say, nothing more"],
            ["`--safety <level>`", "`none`, `minimal` or `full` (default)"],
            ["`--memory <mode>`", "`zombie` (default) or `arc`; see **Single "
             "ownership without a count**"],
@@ -13821,6 +13831,7 @@ fn main() -> i64 {
            ["`target()`, `triple()`", "`RUNE_TARGET`, `_TRIPLE`", "the `--target` name, or `host`; its triple"],
            ["`freestanding()`", "`RUNE_FREESTANDING`", "built with no hosted runtime"],
            ["`cc()`", "`RUNE_CC`", "the target's C compiler"],
+           ["`linker()`, `linkerKind()`", "`RUNE_LINKER`, `_KIND`", "what links, and whether it is `ld` or a `driver`"],
            ["`artifact()`, `artifactName()`", "`RUNE_ARTIFACT`, `_NAME`", "finishing: the executable just linked"]]),
 
         H("How it answers"),
@@ -13841,6 +13852,31 @@ fn main() -> i64 {
         SH("""$ rune build
 \u25cb Compiling widgets v0.1.0 (build script)
 \u25cf the build script of widgets failed in its prepare phase (exit 1): libwidget is not installed"""),
+
+        H("Linking it yourself"),
+        P("A target with `linker = \"build-script\"` has no linker of its "
+          "own: the package's build script is called in its place, with "
+          "exactly what a linker would get \u2014 the objects, `-o` and the "
+          "file to write, the linker script, every `link-args` \u2014 in a "
+          "third phase, `link`. What it does with them is its own business: "
+          "hand them to a linker with some of its own, lay out an image "
+          "directly, anything."),
+        S("""[target.kernel]
+base = "bare-x86"
+cc = "i686-elf-gcc"
+linker = "build-script"
+linker-kind = "ld"          # hand me the flags as a linker takes them""",
+          mode="frag", title="Rune.toml"),
+        S("""import std::build
+
+fn main() -> i64 {
+    if build::linking() {
+        var args = build::linkArguments()      // objects, -o out, -T kernel.ld
+        args.push("--gc-sections")
+        build::runAll("i686-elf-ld", &args)
+    }
+    0
+}""", mode="frag", title="build.rune"),
 
         H("When it runs"),
         P("The script is compiled again only when it changes, and runs on "
@@ -13989,7 +14025,9 @@ hello.o: Intel amd64 COFF object file"""),
            ["`--runtime-dir <dir>`", "where its `libruneruntime.a` is"],
            ["`--link-arg <arg>`", "appended to the link command verbatim"],
            ["`--link-cxx`", "link the C++ runtime (implied by `extern \"C++\"`)"],
-           ["`--cxx-stdlib <lib>`", "`libc++` for C++ built with `-stdlib=libc++`, `libstdc++`, or the platform's own"]]),
+           ["`--cxx-stdlib <lib>`", "`libc++` for C++ built with `-stdlib=libc++`, `libstdc++`, or the platform's own"],
+           ["`--linker <program>` / `--linker-kind ld`", "link with a linker run directly, in its own spelling"],
+           ["`--no-default-link-args`", "nothing of the compiler's own on the link line"]]),
         SH("""$ runec --target wasm32-wasip1 \\
         --cc /opt/wasi-sdk/bin/wasm32-wasip1-clang \\
         --sysroot /opt/wasi-sdk/share/wasi-sysroot \\
@@ -14036,7 +14074,15 @@ runner = "qemu-aarch64 -L /opt/pi-sysroot"''', mode="frag",
         T(["Key", "Means"],
           [["`base`", "the foreign target to start from"],
            ["`triple`", "passed to `runec --target`; needed unless there is a base"],
-           ["`cc`", "the C driver that compiles the runtime and links"],
+           ["`cc`", "the C compiler for the runtime and `c-sources`; also "
+            "what links, unless `linker` says otherwise"],
+           ["`linker`", "what links: a compiler (`i686-elf-gcc`) or a linker "
+            "(`i686-elf-ld`, `ld.lld`), with any arguments of its own, or "
+            "`\"build-script\"`"],
+           ["`linker-kind`", "`\"driver\"` or `\"ld\"`: how `linker` takes "
+            "flags; worked out from its name when not given"],
+           ["`default-flags`", "`false`: add no flags of the build's own "
+            "to compiles or links \u2014 only what this table says"],
            ["`cxx`", "the C++ driver; derived from `cc` when absent"],
            ["`ar`", "the archiver; derived from `cc` when absent"],
            ["`sysroot`", "passed as `--sysroot`"],
@@ -14318,8 +14364,10 @@ fn kernelMain(magic: u32, info: u32) -> Never {
           "the same for any `@export`ed function of your own."),
 
         H("Bare-metal targets"),
-        P("Four foreign targets build with this machine's clang and ld.lld "
-          "and are freestanding whatever the sources say."),
+        P("Four foreign targets are freestanding whatever the sources say. "
+          "Out of the box they build with this machine's clang and ld.lld, "
+          "which need nothing installed per target; any other toolchain is "
+          "a table away (see *Your own toolchain*, below)."),
         T(["Name", "Triple", "Runs here with"],
           [["`bare-x86`", "`i686-unknown-none-elf`", "`qemu-system-i386 -kernel`: a multiboot kernel"],
            ["`bare-x86_64`", "`x86_64-unknown-none-elf`", "—"],
@@ -14358,6 +14406,44 @@ $ rune run -- -append panic         # trips a bounds check on purpose; exits 3""
           "out-of-bounds write and a missing table entry the C had carried "
           "silently. Its [build script](#buildscripts) lays the linked kernel "
           "out as a disk image, which is what `rune run` then boots."),
+        H("Your own toolchain"),
+        P("Rune compiles Rune; everything around it \u2014 assembling the boot "
+          "code, compiling C, linking, laying out an image \u2014 is done by "
+          "tools you choose, and nothing the build adds assumes which. Name "
+          "a `cc` and a `linker` for the target, and that is what runs:"),
+        S("""[target.i686-elf]
+base = "bare-x86"
+cc = "i686-elf-gcc"         # assembles boot.s, compiles any C
+linker = "i686-elf-ld"      # links, as a linker: -T kernel.ld, not -Wl,-T,...
+c-flags = ["-march=i686"]   # whatever else your system needs
+link-args = ["-Map=kernel.map"]""", mode="frag",
+          title="GNU cross tools, as on macOS"),
+        SH("""$ rune targets
+  i686-elf        i686-unknown-none-elf
+      \u2713 builds with i686-elf-gcc
+        links with i686-elf-ld (ld)
+        c-flags   -ffreestanding -fno-pic -march=i686
+        link-args -Map=kernel.map
+$ rune run --target i686-elf"""),
+        T(["Rule", "So"],
+          [["A foreign target's clang flags (`--target=`, `-fuse-ld=lld`) "
+            "belong to its clang", "naming your own `cc` drops the compile "
+            "ones; naming your own `cc` or `linker` drops the link ones"],
+           ["What any bare-metal compiler takes stays: `-ffreestanding`, "
+            "`-fno-pic`", "`default-flags = false` drops those too, and "
+            "every flag the compiler would add to the link"],
+           ["A linker is told things a linker's way", "`linker-kind = "
+            "\"ld\"` (worked out from names like `ld`, `i686-elf-ld`, "
+            "`ld.lld`): `-T script`, and nothing only a compiler driver "
+            "understands \u2014 no `-nostdlib`, no `-Wl,`"],
+           ["The rest is yours", "`c-flags` and `link-args` add anything; "
+            "`linker = \"build-script\"` hands the link to "
+            "[build.rune](#buildscripts); a finish step there makes an image, "
+            "signs it, anything"]]),
+        P("`rune targets` prints what each target compiles and links with, "
+          "flags included, and `rune build -v` every command it runs, so "
+          "nothing is hidden."),
+
         H("Tables in the image"),
         P("A global whose initialiser is made only of constants — numbers, "
           "`bool`s, strings as `CString`, top-level functions as "
@@ -14373,7 +14459,8 @@ $ rune run -- -append panic         # trips a bounds check on purpose; exits 3""
               "panicHandler", "allocator", "deallocator", "weak", "rune_init",
               "multiboot", "qemu", "linker script", "linker-script",
               "bare-x86", "bare-arm64", "bare-riscv64", "E0542", "E0248",
-              "CString literal", "disk image",
+              "CString literal", "disk image", "i686-elf-gcc", "i686-elf-ld",
+              "gcc", "ld", "linker", "linker-kind", "default-flags", "toolchain",
               "E0249", "memcpy", "__udivdi3", "firmware", "embedded"]))
 
 

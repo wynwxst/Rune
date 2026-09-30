@@ -12,4 +12,5 @@ Programs with nothing underneath them: a kernel, a boot loader, firmware. The la
 - [Starting without main](starting_without_main.md)
 - [@weak](weak.md)
 - [Bare-metal targets](bare_metal_targets.md)
+- [Your own toolchain](your_own_toolchain.md)
 - [Tables in the image](tables_in_the_image.md)

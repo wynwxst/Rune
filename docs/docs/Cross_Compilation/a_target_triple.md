@@ -19,6 +19,8 @@ Linking is the part that needs help. A linker is platform software: it knows one
 | `--link-arg <arg>` | appended to the link command verbatim |
 | `--link-cxx` | link the C++ runtime (implied by `extern "C++"`) |
 | `--cxx-stdlib <lib>` | `libc++` for C++ built with `-stdlib=libc++`, `libstdc++`, or the platform's own |
+| `--linker <program>` / `--linker-kind ld` | link with a linker run directly, in its own spelling |
+| `--no-default-link-args` | nothing of the compiler's own on the link line |
 
 ```sh
 $ runec --target wasm32-wasip1 \

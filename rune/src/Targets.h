@@ -53,9 +53,15 @@ struct ForeignTarget {
   std::vector<std::string> CFlags;
   /// Native libraries the runtime needs on this target.
   std::vector<std::string> LinkLibraries;
-  /// Added to the link command: `-fuse-ld=lld`, the target for a driver that
-  /// was not named after it.
+  /// Added to the link command whatever links it.
   std::vector<std::string> LinkArgs;
+  /// Flags that belong to the toolchain this target finds, not to the
+  /// target: clang's `--target=...`, `-fuse-ld=lld`. They are used only
+  /// while that toolchain is: a package that names its own `cc` gets none of
+  /// the compile ones, and one that names its own `cc` or `linker` none of
+  /// the link ones. Nothing is forced on a toolchain it was not written for.
+  std::vector<std::string> ToolchainCFlags;
+  std::vector<std::string> ToolchainLinkArgs;
   /// Bare metal: no operating system, so no hosted runtime — the program is
   /// built as `@runtime(none)` whatever its sources say.
   bool Freestanding = false;
@@ -90,6 +96,13 @@ struct ResolvedTarget {
   std::vector<std::string> LinkArgs;
   /// Bare metal: see `ForeignTarget::Freestanding`.
   bool Freestanding = false;
+  /// The program that links, when it is not `Cc`; see `TargetSpec::Linker`.
+  std::string Linker;
+  /// `driver` or `ld`, as given; `linkerKindOf` works it out otherwise.
+  std::string LinkerKind;
+  /// False: the compiler adds no link flags of its own either
+  /// (`runec --no-default-link-args`).
+  bool DefaultFlags = true;
 
   /// Enough to name what a build produces. Parsing the whole triple here
   /// would mean linking LLVM into the package driver for two questions.
@@ -129,6 +142,16 @@ std::string findWasiSdk(const std::string &configured = "");
 /// The full path of `program` on `PATH`, or empty. A path with a slash in it
 /// is taken as it is, if it exists.
 std::string findOnPath(const std::string &program);
+
+/// How the target's linker takes its flags: `"ld"` for a linker run
+/// directly (`ld`, `i686-elf-ld`, `ld.lld`, `wasm-ld`), `"driver"` for a
+/// compiler that links (`cc`, `i686-elf-gcc`, `clang`). `linker-kind` says
+/// so outright; otherwise the linker's name does.
+std::string linkerKindOf(const ResolvedTarget &t);
+
+/// A linker script on the link line, in the spelling the linker takes.
+std::vector<std::string> linkerScriptArgs(const ResolvedTarget &t,
+                                          const std::string &script);
 
 /// The archiver for a target: `ar` when configured, else derived from `cc`.
 std::string archiverFor(const ResolvedTarget &t);

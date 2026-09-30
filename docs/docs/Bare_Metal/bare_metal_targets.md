@@ -1,6 +1,6 @@
 # Bare-metal targets
 
-Four foreign targets build with this machine's clang and ld.lld and are freestanding whatever the sources say.
+Four foreign targets are freestanding whatever the sources say. Out of the box they build with this machine's clang and ld.lld, which need nothing installed per target; any other toolchain is a table away (see *Your own toolchain*, below).
 
 | Name | Triple | Runs here with |
 | --- | --- | --- |

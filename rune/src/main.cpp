@@ -269,6 +269,13 @@ void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o,
     cmd += " --target " + quote(o.Target.Triple);
     if (!o.Target.Cc.empty())
       cmd += " --cc " + quote(o.Target.Cc);
+    // What links, and how it takes its flags. A build script as the linker
+    // is only known per package; `buildTarget` adds it.
+    if (!o.Target.Linker.empty() && o.Target.Linker != "build-script")
+      cmd += " --linker " + quote(o.Target.Linker);
+    cmd += " --linker-kind " + linkerKindOf(o.Target);
+    if (!o.Target.DefaultFlags)
+      cmd += " --no-default-link-args";
     if (!o.Target.Sysroot.empty())
       cmd += " --sysroot " + quote(o.Target.Sysroot);
     if (!o.Target.RuntimeDir.empty())
@@ -476,7 +483,8 @@ bool buildNativeSources(const Manifest &m, const Options &opts,
         cmd += " -std=" + quote(m.CxxStandard.empty() ? std::string("c++17")
                                                       : m.CxxStandard);
       cmd += opts.Release ? " -O2" : " -O0 -g";
-      if (opts.Target.Active && opts.Target.Cc.empty())
+      if (opts.Target.Active && opts.Target.Cc.empty() &&
+          opts.Target.DefaultFlags)
         cmd += " --target=" + quote(opts.Target.Triple);
       if (!opts.Target.Sysroot.empty())
         cmd += " --sysroot=" + quote(opts.Target.Sysroot);
@@ -763,8 +771,12 @@ bool prepareInputs(PackageNode &node, std::vector<PackageNode> &nodes,
   own.NeedsCxx = !node.M.CxxSources.empty();
   for (const std::string &a : node.M.LinkArgs)
     own.LinkArgs.push_back(a);
+  // Spelled for whatever links: `-T script` to a linker, `-Wl,-T,script` to
+  // a compiler driver.
   if (!node.M.LinkerScript.empty())
-    own.LinkArgs.push_back("-Wl,-T," + node.M.LinkerScript);
+    for (const std::string &a :
+         linkerScriptArgs(opts.Target, node.M.LinkerScript))
+      own.LinkArgs.push_back(a);
   for (const std::string &l : opts.Target.LinkLibraries)
     own.LinkLibs.push_back(l);
   for (const std::string &p : opts.Target.LinkPaths)
@@ -804,10 +816,10 @@ bool compileBuildScript(PackageNode &node, const Options &opts) {
   return true;
 }
 
-/// Runs the build script in one of its phases, and reads its answers.
-bool runBuildScript(const PackageNode &node, const Options &opts,
-                    const std::string &phase, const std::string &artifact,
-                    const std::string &artifactName, ScriptAnswers &out) {
+/// What a build script is told, as `NAME=value ` assignments for a shell.
+std::string buildScriptEnv(const PackageNode &node, const Options &opts,
+                           const std::string &phase, const std::string &artifact,
+                           const std::string &artifactName) {
   const Manifest &m = node.M;
   const fs::path root = fs::absolute(m.Root).lexically_normal();
   std::string env;
@@ -826,10 +838,27 @@ bool runBuildScript(const PackageNode &node, const Options &opts,
   set("RUNE_CC", opts.Target.Active && !opts.Target.Cc.empty()
                      ? opts.Target.Cc
                      : std::string("cc"));
+  set("RUNE_LINKER", !opts.Target.Linker.empty() &&
+                         opts.Target.Linker != "build-script"
+                     ? opts.Target.Linker
+                     : (opts.Target.Active && !opts.Target.Cc.empty()
+                            ? opts.Target.Cc
+                            : std::string("cc")));
+  set("RUNE_LINKER_KIND", linkerKindOf(opts.Target));
   if (!artifact.empty()) {
     set("RUNE_ARTIFACT", artifact);
     set("RUNE_ARTIFACT_NAME", artifactName);
   }
+  return env;
+}
+
+/// Runs the build script in one of its phases, and reads its answers.
+bool runBuildScript(const PackageNode &node, const Options &opts,
+                    const std::string &phase, const std::string &artifact,
+                    const std::string &artifactName, ScriptAnswers &out) {
+  const Manifest &m = node.M;
+  const fs::path root = fs::absolute(m.Root).lexically_normal();
+  const std::string env = buildScriptEnv(node, opts, phase, artifact, artifactName);
   std::string cmd = "cd " + quote(root.string()) + " && " + env +
                     quote(node.ScriptExe);
   const std::string what = m.Name + " v" + m.Version + " (build script, " +
@@ -1116,6 +1145,18 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
     if (inputs.NeedsCxx)
       cmd += " --link-cxx";
     appendScriptLink(cmd, node.Script);
+    // `linker = "build-script"`: the package's own build.rune links, called
+    // as a linker would be — the objects, `-o` and the flags as arguments —
+    // in its `link` phase.
+    if (opts.Target.Linker == "build-script") {
+      if (node.ScriptExe.empty()) {
+        failLine("[target." + opts.Target.Name + "] says `linker = "
+                 "\"build-script\"`, and '" + m.Name + "' has no build.rune");
+        return false;
+      }
+      cmd = buildScriptEnv(node, opts, "link", out.string(), step.Name) +
+            cmd + " --linker " + quote(node.ScriptExe);
+    }
   }
   if (!opts.CheckOnly)
     cmd += " -o " + quote(out.string());
@@ -1708,7 +1749,7 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
       cmd += " -fPIC";
     // A driver chosen for the target already knows its target; a generic one
     // has to be told, exactly as at link time.
-    if (t.Cc.empty())
+    if (t.Cc.empty() && t.DefaultFlags)
       cmd += " --target=" + quote(t.Triple);
     if (!t.Sysroot.empty())
       cmd += " --sysroot=" + quote(t.Sysroot);

@@ -22,3 +22,17 @@ linker-script = "link.ld"
 # `coreaudio` to hear it). `{}` is where the image goes.
 [target.bare-x86]
 runner = "qemu-system-i386 -drive format=raw,file={} -audiodev none,id=snd -device sb16,audiodev=snd"
+
+# The same, built with a GNU cross toolchain instead of clang and lld — the
+# usual one on macOS (`brew install i686-elf-gcc i686-elf-binutils`):
+#
+#     rune run --target i686-elf
+#
+# Naming your own `cc` and `linker` is all it takes: none of clang's flags
+# are added to tools that are not clang. `rune targets` lists exactly what
+# each target compiles and links with.
+[target.i686-elf]
+base = "bare-x86"
+cc = "i686-elf-gcc"
+linker = "i686-elf-ld"
+runner = "qemu-system-i386 -drive format=raw,file={} -audiodev none,id=snd -device sb16,audiodev=snd"

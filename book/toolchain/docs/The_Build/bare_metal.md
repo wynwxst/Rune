@@ -70,9 +70,10 @@ fixed symbol (`langItemSymbol` in `AST.h`) and a fixed C signature, checked by
 `checkRuntimeHook` (E0248, and E0249 for a second one). `@weak` is linkage
 only.
 
-**Linking.** `linkExecutable` passes `-nostdlib -static` and leaves out the
-runtime archive, `-lm` and `-rdynamic`. A linker script and anything else
-arrive through `--link-arg`.
+**Linking.** `linkExecutable` passes `-nostdlib -static` to a compiler
+driver — nothing to a linker run directly, and nothing at all under
+`--no-default-link-args` — and leaves out the runtime archive, `-lm` and
+`-rdynamic`. A linker script and anything else arrive through `--link-arg`.
 
 ## In `runetime/freestanding.rune`
 
@@ -92,10 +93,21 @@ freestanding programs that reach it fail with E0542.
 `[build] runtime = "none"` and `entry = "none"`, or the directives in any
 source file, set `Manifest::Freestanding` / `NoEntry`; the root package's
 choice applies to the whole build, as `memory` does. A foreign target with
-`Freestanding` — `bare-x86`, `bare-x86_64`, `bare-arm64`, `bare-riscv64`,
-built with `ToolchainKind::Clang` — forces it. A freestanding build never
-prepares a hosted runtime. `[build] linker-script` is passed as
-`-Wl,-T,<path>` and is part of the step's fingerprint, as is the runtime file.
+`Freestanding` — `bare-x86`, `bare-x86_64`, `bare-arm64`, `bare-riscv64` —
+forces it. A freestanding build never prepares a hosted runtime.
+`[build] linker-script` is passed as `-T <path>` to a linker and
+`-Wl,-T,<path>` to a driver, and is part of the step's fingerprint, as is
+the runtime file.
+
+**No toolchain is assumed.** The bare targets default to `ToolchainKind::Clang`
+because this machine's clang builds for every one of them with nothing
+installed per target. That default is only a default: `cc`, `linker`,
+`linker-kind`, `c-flags`, `link-args` and `default-flags` in the target's
+table replace it piece by piece, and clang's own flags leave with clang (see
+*Cross compilation*, "Flags belong to tools"). `rune_bare_metal` builds
+toyos with stand-ins for `i686-elf-gcc` and `i686-elf-ld` that refuse any
+clang or driver flag, and checks that the link line is the objects, `-o`
+and `-T kernel.ld`.
 
 What a linker cannot produce — a raw disk image laid out by load address —
 is a [build script](build_scripts.md)'s finish phase; TETRIS-OS's makes one

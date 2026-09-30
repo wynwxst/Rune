@@ -15,7 +15,10 @@ rune run              # build it, make the disk image, boot it in QEMU
 rune run --release
 ```
 
-Needs clang, ld.lld, llvm-objcopy (or objcopy) and `qemu-system-i386`, and
+Needs `qemu-system-i386`, an objcopy (LLVM's, `i686-elf-objcopy`, or the
+system's), and either clang and ld.lld (the default) or a GNU cross
+toolchain: `rune run --target i686-elf` builds with `i686-elf-gcc` and
+`i686-elf-ld` instead. It
 works from anywhere in this directory. `rune build` links the kernel as an ELF
 file, the boot sector inside it; `build.rune`, the package's build script,
 then lays that out as a disk image — each section at its load address — and

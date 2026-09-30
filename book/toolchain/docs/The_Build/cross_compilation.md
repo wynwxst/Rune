@@ -71,11 +71,38 @@ flags and libraries the runtime needs there:
 | --- | --- |
 | `GnuPrefix` | `<prefix>-gcc` on `PATH`; `-g++` and `-ar` beside it |
 | `WasiSdk` | `sdk`, `$WASI_SDK_PATH`, `/opt/wasi-sdk`, `/opt/wasi-sdk-*`, `~/.rune/toolchains/wasi-sdk`, `~/wasi-sdk`; then `bin/<triple>-clang`, `bin/llvm-ar`, `share/wasi-sysroot` |
-| `Clang` | `clang` and `ld.lld` on `PATH`; the triple goes in `c-flags` and `link-args` |
+| `Clang` | `clang` and `ld.lld` on `PATH`, told the triple |
 
-`Clang` (host clang and ld.lld, told the target) is for the bare-metal
-targets, which are also `Freestanding`: built `@runtime(none)` whatever the
-sources say. See *Bare metal*.
+`Clang` (host clang and ld.lld, told the target) is the bare-metal targets'
+default, and they are also `Freestanding`: built `@runtime(none)` whatever
+the sources say. See *Bare metal*.
+
+### Flags belong to tools
+
+A foreign target's flags come in two lists. `CFlags` and `LinkArgs` are the
+target's own — what any compiler for it takes (`-ffreestanding`, `-fno-pic`;
+`ws2_32` for Windows is a library, not a flag). `ToolchainCFlags` and
+`ToolchainLinkArgs` belong to the toolchain `fillFromForeign` found — clang's
+`--target=` and `-fuse-ld=lld` — and are used only while it is: a table
+that names its own `cc` gets none of the compile ones, and one that names a
+`cc` or a `linker` none of the link ones. `default-flags = false` keeps
+neither list. The same rule covers `--target=`, which `rune` adds to a C
+compile only when no `cc` was named, since that `cc` is the host's.
+
+`linker` (a program, with arguments if it wants them, or `"build-script"`)
+and `linker-kind` go to `runec` as `--linker` and `--linker-kind`.
+`linkerKindOf` infers the kind from the program's name — `ld`, `*-ld`,
+`ld.*`, `ld64*`, `wasm-ld`, `lld` are linkers, anything else a driver — and
+`linkerScriptArgs` spells `[build] linker-script` for it: `-T <path>` or
+`-Wl,-T,<path>`.
+
+In `runec`, `linkExecutable` puts every flag it adds of its own through one
+lambda, `own`. Under `--no-default-link-args` it drops them all, so the line
+is the objects, `-o` and exactly what `--link-arg`, `-L` and `-l` said. For a
+linker (`--linker-kind ld`) it rewrites them as a linker takes them —
+`-Wl,a,b` becomes `a b`, `-rdynamic` becomes `--export-dynamic` — and drops
+what only a driver understands: `--target=`, `-fuse-ld`, `-nostdlib`,
+`-static`, `-pthread`. Arguments the build passed through are never touched.
 
 A missing toolchain is an error at resolution, before anything compiles, with
 the entry's `InstallHint` as the note. A missing runner is not: the target
