@@ -6,12 +6,19 @@ from C to Rune file for file, from its own boot sector up. 32-bit x86, its own
 bootloader, a SoundBlaster 16 driver playing the Tetris theme in four parts,
 and double-buffered 320x200 graphics with an 8-bit RRRGGGBB palette.
 
+![The menu](images/menu.png)
+![A game](images/game.png)
+![Game over](images/gameover.png)
+
 ```sh
-rune run              # build the disk image and boot it in QEMU
+rune run              # build it, make the disk image, boot it in QEMU
 rune run --release
 ```
 
-Needs clang, ld.lld and `qemu-system-i386`. Enter starts a game; the arrow
+Run from this directory. Needs clang, ld.lld, llvm-objcopy (or objcopy) and
+`qemu-system-i386`. `rune build` makes the kernel as an ELF file, the boot
+sector inside it; `tools/run.sh` lays that out as a disk image — each section
+at its load address — and boots it. Enter starts a game; the arrow
 keys move, `a` and `d` (or `r`) rotate, space drops, `m` toggles the music.
 QEMU is started with a SoundBlaster 16 and no audio output; to hear it, change
 `-audiodev none` in `Rune.toml` to `pa` (PulseAudio) or `coreaudio`.
@@ -22,7 +29,7 @@ QEMU is started with a SoundBlaster 16 and no audio output; to hear it, change
 | --- | --- | --- |
 | `stage0.S` | `boot/stage0.S` | the boot sector: loads the kernel, mode 13h, A20, protected mode |
 | `start.S` | `boot/start.S` | `_start`, and the 48 interrupt entry stubs |
-| `link.ld`, `Makefile` | `link.ld`, `Rune.toml` | one disk image: the boot sector as sector 0, the kernel from sector 1 |
+| `link.ld`, `Makefile` | `link.ld`, `Rune.toml`, `tools/run.sh` | the boot sector as sector 0 of the disk, the kernel from sector 1 |
 | `util.h` | `src/port.rune` | I/O ports and the interrupt flag, over `std::asm` |
 | `idt.c` | `src/idt.rune` | the IDT, and `lidt` |
 | `isr.c` | `src/isr.rune` | installing the stubs; `isr_handler` |
@@ -88,3 +95,18 @@ Where the port knowingly differs:
 As in the original, starting a game clears every flag in the game state —
 the music flag included — so the first `m` after a game starts turns the
 music "on", which it already was.
+
+The keyboard is read once a frame, as in the original, so a key has to be
+held for longer than a frame (a thirtieth of a second) to be seen. A person
+always does; QEMU's `sendkey` by default does not, which is why the test
+holds each key for a few hundred milliseconds.
+
+## How it is checked
+
+`tests/bare_metal_test.py` (CTest `rune_bare_metal`) builds it, boots it
+headless under QEMU with the monitor on a socket, and reads the serial log
+and screen dumps: it boots through its own boot sector into Rune, finds the
+SoundBlaster 16, builds the four parts of the theme with the original's note
+counts (62, 195, 128, 58), draws the menu, starts a game on Enter, fills the
+board with hard drops until the game ends, and shows the GAME OVER box —
+with nothing panicking on the way.

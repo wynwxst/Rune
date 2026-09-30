@@ -208,7 +208,9 @@ def tetris(tmp):
         check("the menu is drawn, and is not the panic screen",
               lit > w * h // 20 and red < w * h // 2, f"{lit} lit, {red} red")
 
-        command("sendkey ret")
+        # Held, as a person holds a key: the game reads the keyboard once a
+        # frame, and `sendkey`'s own press is shorter than one.
+        command("sendkey ret 300")
         check("Enter starts a game", wait_for("tetris: new game", 10), log())
 
         for _ in range(80):

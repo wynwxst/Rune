@@ -52,6 +52,12 @@ links the library brings one). The parser reads them again in
 - A global whose initialiser is all zeros is left to the zeroed storage it
   starts in, hosted or not: nothing to run, and a `[0; 65536]` arena no
   longer becomes a 64 KB aggregate store.
+- More generally, `constantValueOf` turns an initialiser made only of
+  constants — literals, strings as `CString`, functions as `@cfunction`,
+  arrays and structs of those — into an LLVM constant, and the global starts
+  as it. Before this, TETRIS-OS's tables were built by `rune.init_globals`
+  in a 21 KB stack frame, on a 16 KB stack that sat directly above the
+  kernel's read-only data: the overflow zeroed its strings.
 
 **Sema.** `@panicHandler`, `@allocator` and `@deallocator` give a function a
 fixed symbol (`langItemSymbol` in `AST.h`) and a fixed C signature, checked by
@@ -92,4 +98,6 @@ prepares a hosted runtime. `[build] linker-script` is passed as
 calls by inline assembly — and checks each failed check's message and exit
 status, the heap's behaviour, the borrow checker, and E0542. Then it boots
 `examples/toyos` under `qemu-system-i386`, normally and with `-append panic`,
-debug and release. Each half is skipped where the machine cannot run it.
+debug and release, and `examples/tetris-os` from its own boot sector,
+driving it through QEMU's monitor (`sendkey`, `screendump`). Each part is
+skipped where the machine cannot run it.

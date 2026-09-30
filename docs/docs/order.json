@@ -484,7 +484,8 @@
   "what_the_freestanding_runtime_provides.md",
   "starting_without_main.md",
   "weak.md",
-  "bare_metal_targets.md"
+  "bare_metal_targets.md",
+  "tables_in_the_image.md"
  ],
  "Conditional_Compilation": [
   "config.md",

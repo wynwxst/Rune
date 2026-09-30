@@ -14201,6 +14201,23 @@ $ rune run -- -append panic         # trips a bounds check on purpose; exits 3""
           "on a round-robin scheduler, each owned by the one before it, and "
           "64-bit arithmetic on a 32-bit processor — all of it under "
           "`--safety full`."),
+        P("[`examples/tetris-os`](examples/tetris-os/README.md) is a larger "
+          "one: jdah's TETRIS-OS, ported from C. It boots from its own boot "
+          "sector, sets up the IDT and the PICs, drives the timer, the "
+          "keyboard, VGA mode 13h and a SoundBlaster 16 by DMA, and plays "
+          "Tetris to the theme — Rune throughout but for the boot sector and "
+          "the interrupt stubs. Porting it under `--safety full` turned up an "
+          "out-of-bounds write and a missing table entry the C had carried "
+          "silently."),
+        H("Tables in the image"),
+        P("A global whose initialiser is made only of constants — numbers, "
+          "`bool`s, strings as `CString`, top-level functions as "
+          "`@cfunction`, and arrays and structs of those — is emitted as "
+          "data in the image, whether it is a `let` or a `global var`. "
+          "Nothing runs to set it up, so it is ready before `rune_init`, and "
+          "a font, a score table or an interrupt handler table costs no "
+          "stack at start-up. Anything else is set by the generated "
+          "initialiser, which is what `rune_init` runs."),
     ],
     keywords=["bare metal", "freestanding", "kernel", "os", "no_std",
               "no_main", "runtime", "entry", "@runtime", "@entry",

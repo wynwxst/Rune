@@ -571,6 +571,7 @@ Programs with nothing underneath them: a kernel, a boot loader, firmware. The la
 - [Starting without main](Bare_Metal/starting_without_main.md)
 - [@weak](Bare_Metal/weak.md)
 - [Bare-metal targets](Bare_Metal/bare_metal_targets.md)
+- [Tables in the image](Bare_Metal/tables_in_the_image.md)
 
 ## Conditional compilation
 
