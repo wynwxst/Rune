@@ -1,0 +1,372 @@
+// The Tetris theme, four parts: melody, snare, bass and harmony. From
+// music.c (MIT; see LICENSE), where each part was a table built with
+// macros; here each is a function that writes it, and the macros are
+// functions too. Every part loops on its own.
+import tetris::sound
+import tetris::timer
+
+pub struct Note {
+    pub octave: u8
+    pub note: u8
+    pub duration: u16      // in sixteenths
+}
+
+let octave1: u8 = 0
+let octave2: u8 = 1
+let octave3: u8 = 2
+let octave4: u8 = 3
+let octave5: u8 = 4
+let octave6: u8 = 5
+let octave7: u8 = 6
+
+let noteC: u8 = 0
+let noteCSharp: u8 = 1
+let noteD: u8 = 2
+let noteDSharp: u8 = 3
+let noteE: u8 = 4
+let noteF: u8 = 5
+let noteFSharp: u8 = 6
+let noteG: u8 = 7
+let noteGSharp: u8 = 8
+let noteA: u8 = 9
+let noteASharp: u8 = 10
+let noteB: u8 = 11
+let rest: u8 = 12
+
+let parts: i64 = 4
+let partCapacity: i64 = 256
+let beatsPerMinute: f64 = 150.0
+
+global var track: [4:[256:Note]] = [[Note { octave: 0, note: 12, duration: 0 }; 256]; 4]
+global var lengths: [4:i64] = [0; 4]
+global var indices: [4:i64] = [0; 4]
+/// How many timer ticks the note each part is playing has left.
+global var remaining: [4:f64] = [0.0; 4]
+
+/// One note at the end of `part`. Past `partCapacity` this is a checked
+/// index, and a panic, rather than a write over the next part.
+fn add(part: i64, octave: u8, note: u8, duration: u16) {
+    track[part][lengths[part]] = Note { octave: octave, note: note, duration: duration }
+    lengths[part] += 1
+}
+
+// The bass line's building blocks: a note and its octave, alternating.
+fn bassNote(part: i64, octave: u8, note: u8) {
+    add(part, octave, note, 8)
+    add(part, octave + 1, note, 8)
+}
+fn bassHalfMeasure(part: i64, octave: u8, note: u8) {
+    bassNote(part, octave, note)
+    bassNote(part, octave, note)
+}
+fn bassMeasure(part: i64, octave: u8, note: u8) {
+    bassHalfMeasure(part, octave, note)
+    bassHalfMeasure(part, octave, note)
+}
+
+// The bridge's bass alternates two notes rather than two octaves.
+fn bridgeBassNote(part: i64, firstOctave: u8, firstNote: u8, secondOctave: u8, secondNote: u8) {
+    add(part, firstOctave, firstNote, 8)
+    add(part, secondOctave, secondNote, 8)
+}
+fn bridgeBassHalfMeasure(part: i64, firstOctave: u8, firstNote: u8, secondOctave: u8, secondNote: u8) {
+    bridgeBassNote(part, firstOctave, firstNote, secondOctave, secondNote)
+    bridgeBassNote(part, firstOctave, firstNote, secondOctave, secondNote)
+}
+fn bridgeBassMeasure(part: i64, firstOctave: u8, firstNote: u8, secondOctave: u8, secondNote: u8) {
+    bridgeBassHalfMeasure(part, firstOctave, firstNote, secondOctave, secondNote)
+    bridgeBassHalfMeasure(part, firstOctave, firstNote, secondOctave, secondNote)
+}
+
+// The snare, which is noise played at E.
+fn snareAnd(part: i64) {
+    add(part, octave4, rest, 8)
+    add(part, octave4, noteE, 2)
+    add(part, octave4, rest, 6)
+}
+fn snareEighth(part: i64) {
+    add(part, octave4, noteE, 2)
+    add(part, octave4, rest, 6)
+}
+fn snareMeasure(part: i64) {
+    snareAnd(part)
+    snareAnd(part)
+    snareAnd(part)
+    snareAnd(part)
+}
+
+fn chorusMelody(part: i64) {
+    // chorus melody
+    add(part, octave5, noteE, 16)
+    add(part, octave4, noteB, 8)
+    add(part, octave5, noteC, 8)
+    add(part, octave5, noteD, 16)
+
+    add(part, octave5, noteC, 8)
+    add(part, octave4, noteB, 8)
+    add(part, octave4, noteA, 16)
+
+    add(part, octave4, noteA, 8)
+    add(part, octave5, noteC, 8)
+    add(part, octave5, noteE, 16)
+
+    add(part, octave5, noteD, 8)
+    add(part, octave5, noteC, 8)
+    add(part, octave4, noteB, 16)
+
+    add(part, octave4, noteB, 8)
+    add(part, octave5, noteC, 8)
+    add(part, octave5, noteD, 16)
+    add(part, octave5, noteE, 16)
+    add(part, octave5, noteC, 16)
+    add(part, octave4, noteA, 16)
+    add(part, octave4, noteA, 16)
+    add(part, octave4, rest, 24)
+
+    add(part, octave5, noteD, 16)
+    add(part, octave5, noteF, 8)
+    add(part, octave5, noteA, 8)
+    add(part, octave5, noteA, 4)
+    add(part, octave5, noteA, 4)
+    add(part, octave5, noteG, 8)
+    add(part, octave5, noteF, 8)
+    add(part, octave5, noteE, 16)
+    add(part, octave5, rest, 8)
+
+    add(part, octave5, noteC, 8)
+    add(part, octave5, noteE, 8)
+    add(part, octave5, noteE, 4)
+    add(part, octave5, noteE, 4)
+    add(part, octave5, noteD, 8)
+    add(part, octave5, noteC, 8)
+    add(part, octave4, noteB, 16)
+
+    add(part, octave4, noteB, 8)
+    add(part, octave5, noteC, 8)
+    add(part, octave5, noteD, 16)
+    add(part, octave5, noteE, 16)
+    add(part, octave5, noteC, 16)
+    add(part, octave4, noteA, 16)
+    add(part, octave4, noteA, 16)
+    add(part, octave4, rest, 16)
+}
+
+fn bridgeMelody(part: i64) {
+    // bridge
+    add(part, octave4, noteE, 32)
+    add(part, octave4, noteC, 32)
+    add(part, octave4, noteD, 32)
+    add(part, octave3, noteB, 32)
+    add(part, octave4, noteC, 32)
+    add(part, octave3, noteA, 32)
+    add(part, octave3, noteGSharp, 48)
+    add(part, octave3, rest, 16)
+
+    add(part, octave4, noteE, 32)
+    add(part, octave4, noteC, 32)
+    add(part, octave4, noteD, 32)
+    add(part, octave3, noteB, 32)
+    add(part, octave3, noteA, 16)
+    add(part, octave4, noteE, 16)
+    add(part, octave4, noteA, 32)
+    add(part, octave4, noteGSharp, 48)
+    add(part, octave4, rest, 16)
+}
+
+fn chorusBass(part: i64) {
+    // chorus bass
+    bassMeasure(part, octave2, noteE)
+    bassMeasure(part, octave2, noteA)
+    bassHalfMeasure(part, octave2, noteGSharp)
+    bassHalfMeasure(part, octave2, noteE)
+    bassHalfMeasure(part, octave2, noteA)
+    add(part, octave2, noteA, 8)
+    add(part, octave2, noteA, 8)
+    add(part, octave2, noteB, 8)
+    add(part, octave3, noteC, 8)
+
+    bassMeasure(part, octave2, noteD)
+    bassMeasure(part, octave2, noteC)
+    bassHalfMeasure(part, octave2, noteGSharp)
+    bassHalfMeasure(part, octave2, noteE)
+    bassMeasure(part, octave2, noteA)
+}
+
+fn bridgeBass(part: i64) {
+    bridgeBassMeasure(part, octave2, noteA, octave3, noteE)
+    bridgeBassMeasure(part, octave2, noteGSharp, octave3, noteE)
+
+    bridgeBassHalfMeasure(part, octave2, noteA, octave3, noteE)
+    bridgeBassHalfMeasure(part, octave2, noteE, octave2, noteA)
+
+    bridgeBassHalfMeasure(part, octave2, noteE, octave2, noteGSharp)
+    bridgeBassNote(part, octave2, noteE, octave2, noteGSharp)
+    add(part, octave2, noteE, 8)
+    add(part, octave2, rest, 8)
+
+    bridgeBassMeasure(part, octave2, noteA, octave3, noteE)
+    bridgeBassMeasure(part, octave2, noteGSharp, octave3, noteE)
+
+    bridgeBassHalfMeasure(part, octave2, noteA, octave3, noteE)
+    bridgeBassHalfMeasure(part, octave2, noteE, octave2, noteA)
+
+    bridgeBassHalfMeasure(part, octave2, noteE, octave2, noteGSharp)
+    bridgeBassNote(part, octave2, noteE, octave2, noteGSharp)
+    add(part, octave2, noteE, 8)
+    add(part, octave2, rest, 8)
+}
+
+fn chorusHarmony(part: i64) {
+    // chorus harmony
+    add(part, octave5, rest, 16)
+    add(part, octave4, noteGSharp, 8)
+    add(part, octave4, noteA, 8)
+    add(part, octave4, noteB, 16)
+
+    add(part, octave4, noteA, 8)
+    add(part, octave4, noteGSharp, 8)
+    add(part, octave4, noteE, 16)
+
+    add(part, octave4, noteE, 8)
+    add(part, octave4, noteA, 8)
+    add(part, octave4, noteA, 16)
+
+    add(part, octave4, noteB, 8)
+    add(part, octave4, noteA, 8)
+    add(part, octave4, noteGSharp, 16)
+
+    add(part, octave4, noteGSharp, 8)
+    add(part, octave4, noteA, 8)
+    add(part, octave4, noteB, 16)
+    add(part, octave5, noteC, 16)
+    add(part, octave4, noteA, 16)
+    add(part, octave4, noteE, 16)
+    add(part, octave4, noteE, 16)
+    add(part, octave4, rest, 24)
+
+    add(part, octave4, noteF, 16)
+    add(part, octave4, noteA, 8)
+    add(part, octave5, noteC, 16)
+    add(part, octave4, noteB, 8)
+    add(part, octave4, noteA, 8)
+    add(part, octave4, noteG, 16)
+    add(part, octave4, rest, 8)
+
+    add(part, octave4, noteE, 8)
+    add(part, octave4, noteG, 16)
+    add(part, octave4, noteF, 8)
+    add(part, octave4, noteE, 8)
+    add(part, octave4, noteGSharp, 16)
+
+    add(part, octave4, noteGSharp, 8)
+    add(part, octave4, noteA, 8)
+    add(part, octave4, noteB, 16)
+    add(part, octave5, noteC, 16)
+    add(part, octave4, noteA, 16)
+    add(part, octave4, noteE, 16)
+    add(part, octave4, noteE, 16)
+    add(part, octave4, rest, 16)
+}
+
+fn bridgeHarmony(part: i64) {
+    add(part, octave4, noteC, 32)
+    add(part, octave3, noteA, 32)
+    add(part, octave3, noteB, 32)
+    add(part, octave3, noteGSharp, 32)
+    add(part, octave3, noteA, 32)
+    add(part, octave3, noteE, 32)
+    add(part, octave3, noteE, 48)
+    add(part, octave3, rest, 16)
+
+    add(part, octave4, noteC, 32)
+    add(part, octave3, noteA, 32)
+    add(part, octave3, noteB, 32)
+    add(part, octave3, noteGSharp, 32)
+    add(part, octave3, noteE, 16)
+    add(part, octave3, noteA, 16)
+    add(part, octave4, noteE, 32)
+    add(part, octave4, noteE, 48)
+    add(part, octave4, rest, 16)
+}
+
+fn chorusSnare(part: i64) {
+    snareMeasure(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareAnd(part)
+    snareAnd(part)
+    snareAnd(part)
+    snareEighth(part)
+    snareEighth(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareAnd(part)
+    snareAnd(part)
+    snareAnd(part)
+    snareEighth(part)
+    snareEighth(part)
+}
+
+fn bridgeSnare(part: i64) {
+    snareMeasure(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareMeasure(part)
+    snareAnd(part)
+    snareAnd(part)
+    snareAnd(part)
+    snareEighth(part)
+    snareEighth(part)
+}
+
+/// Moves every part on by one timer tick, starting the next note of any
+/// whose note is over. The tick a note ends on is silent, which gives the
+/// next one an attack.
+pub fn tick() {
+    let ticksPerSixteenth =
+        (timer::ticksPerSecond as f64) / (beatsPerMinute / 60.0) / 16.0
+    for i in 0..parts {
+        // `||` in the original: a part that has not started does not count
+        // down.
+        if indices[i] != -1 { remaining[i] -= 1.0 }
+        if indices[i] == -1 || remaining[i] <= 0.0 {
+            indices[i] = (indices[i] + 1) % lengths[i]
+            let leftover = if remaining[i] < 0.0 { 0.0 - remaining[i] } else { remaining[i] }
+            let note = track[i][indices[i]]
+            remaining[i] = ticksPerSixteenth * (note.duration as f64) - leftover
+            sound::note(i, note.octave, note.note)
+        }
+        if remaining[i] == 1.0 {
+            sound::note(i, octave1, rest)
+        }
+    }
+}
+
+pub fn init() {
+    sound::wave(0, sound::waveTriangle)
+    sound::volume(0, 255)
+    sound::wave(1, sound::waveNoise)
+    sound::volume(1, 0)
+    sound::wave(2, sound::waveTriangle)
+    sound::volume(2, 0)
+    sound::wave(3, sound::waveTriangle)
+    sound::volume(3, 0)
+
+    chorusMelody(0)
+    bridgeMelody(0)
+    chorusSnare(1)
+    bridgeSnare(1)
+    chorusBass(2)
+    bridgeBass(2)
+    chorusHarmony(3)
+    bridgeHarmony(3)
+
+    for i in 0..parts { indices[i] = -1 }
+}
+
+/// How many notes a part has, for a test to compare with the original's.
+pub fn length(part: i64) -> i64 { lengths[part] }

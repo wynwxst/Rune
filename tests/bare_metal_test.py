@@ -117,11 +117,124 @@ def toyos(tmp):
           f"exit {r.returncode}\n{(r.stdout + r.stderr)[-4000:]}")
 
 
+def read_ppm(path):
+    """A QEMU screendump: width, height and RGB bytes."""
+    with open(path, "rb") as f:
+        data = f.read()
+    magic, size, _depth, pixels = data.split(b"\n", 3)
+    w, h = map(int, size.split())
+    return w, h, pixels
+
+
+def tetris(tmp):
+    needed = ["qemu-system-i386", "clang", "ld.lld"]
+    missing = [t for t in needed if not shutil.which(t)]
+    if not shutil.which("llvm-objcopy") and not shutil.which("objcopy"):
+        missing.append("llvm-objcopy")
+    if missing:
+        print("skip tetris-os: needs " + ", ".join(missing))
+        return
+    import socket
+    import time
+    project = os.path.join(tmp, "tetris-os")
+    shutil.copytree(os.path.join(ROOT, "examples", "tetris-os"), project,
+                    ignore=shutil.ignore_patterns("target"))
+    env = dict(os.environ, RUNE_HOME=os.path.join(tmp, "home"))
+    r = subprocess.run([os.path.join(BIN, "rune"), "build", "--no-color"],
+                       cwd=project, env=env, capture_output=True, text=True,
+                       timeout=600)
+    check("tetris-os builds", r.returncode == 0, r.stdout + r.stderr)
+    if r.returncode != 0:
+        return
+
+    kernel = os.path.join(project, "target", "bare-x86", "debug", "tetris")
+    serial = os.path.join(tmp, "tetris-serial.txt")
+    monitor = os.path.join(tmp, "tetris-monitor.sock")
+    qemu = subprocess.Popen(
+        ["sh", "tools/run.sh", kernel, "-display", "none", "-no-reboot",
+         "-serial", "file:" + serial,
+         "-monitor", "unix:" + monitor + ",server,nowait"],
+        cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        def log():
+            try:
+                with open(serial) as f:
+                    return f.read()
+            except OSError:
+                return ""
+
+        def wait_for(text, seconds):
+            deadline = time.time() + seconds
+            while time.time() < deadline:
+                if text in log():
+                    return True
+                time.sleep(0.2)
+            return False
+
+        for _ in range(100):
+            if os.path.exists(monitor):
+                break
+            time.sleep(0.1)
+        mon = socket.socket(socket.AF_UNIX)
+        mon.connect(monitor)
+        mon.settimeout(1)
+
+        def command(line):
+            mon.sendall((line + "\n").encode())
+            time.sleep(0.25)
+            try:
+                mon.recv(65536)
+            except OSError:
+                pass
+
+        def screen(name):
+            path = os.path.join(tmp, name + ".ppm")
+            command("screendump " + path)
+            time.sleep(0.5)
+            return read_ppm(path)
+
+        check("tetris-os boots from its own boot sector into Rune",
+              wait_for("tetris: booted into Rune", 30), log())
+        check("tetris-os finds the SoundBlaster 16",
+              wait_for("sb16: dsp version 4", 30), log())
+        check("tetris-os builds the four parts of the theme",
+              wait_for("music parts of 62 195 128 58 notes", 30), log())
+        check("tetris-os reaches its menu", wait_for("tetris: menu", 30), log())
+
+        w, h, pixels = screen("menu")
+        red = sum(1 for i in range(0, len(pixels), 3)
+                  if pixels[i] > 200 and pixels[i + 1] < 40 and pixels[i + 2] < 40)
+        lit = sum(1 for i in range(0, len(pixels), 3) if pixels[i:i + 3] != b"\0\0\0")
+        check("the menu is drawn, and is not the panic screen",
+              lit > w * h // 20 and red < w * h // 2, f"{lit} lit, {red} red")
+
+        command("sendkey ret")
+        check("Enter starts a game", wait_for("tetris: new game", 10), log())
+
+        for _ in range(80):
+            if "game over" in log():
+                break
+            command("sendkey spc")
+        check("hard drops fill the board and end the game",
+              wait_for("tetris: game over, score", 20), log())
+
+        time.sleep(0.5)
+        w, h, pixels = screen("gameover")
+        grey = sum(1 for i in range(0, len(pixels), 3)
+                   if pixels[i:i + 3] == b"\x80\x80\x80")
+        check("the GAME OVER box is on the screen", grey > 1000, f"{grey} grey pixels")
+        check("nothing panicked", "panic" not in log(), log())
+        command("quit")
+    finally:
+        qemu.kill()
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="rune-bare-")
     try:
         freestanding(tmp)
         toyos(tmp)
+        tetris(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:

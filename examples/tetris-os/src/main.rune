@@ -1,0 +1,688 @@
+@runtime(none)
+@entry(none)
+// TETRIS-OS, in Rune: an operating system that only plays Tetris.
+//
+// A port of https://github.com/jdah/tetris-os (MIT; see LICENSE), from C to
+// Rune, file for file. The boot sector and the interrupt entry stubs are
+// still assembly (boot/); everything else — the interrupt tables, the PIC,
+// the timer, the keyboard, the screen, the SoundBlaster 16 and its music,
+// and the game — is Rune, built freestanding with `--safety full`: every
+// array index is checked, every `+` that could overflow is checked, and the
+// Zombie borrow checker proves every borrow.
+import tetris::font
+import tetris::fpu
+import tetris::idt
+import tetris::irq
+import tetris::isr
+import tetris::keyboard
+import tetris::music
+import tetris::port
+import tetris::screen
+import tetris::serial
+import tetris::sound
+import tetris::system
+import tetris::timer
+
+extern "C" {
+    /// The initialisers of every global that is not simply zero: the
+    /// tables, the handlers, the font. There is no `main` to run them, so
+    /// `_main` calls this first.
+    fn rune_init()
+}
+
+let framesPerSecond: i64 = 30
+let tileSize: i64 = 10
+
+// The board: 10 by 20 tiles, in the middle of the screen.
+let boardWidth: i64 = 10
+let boardHeight: i64 = 20
+let boardX: i64 = 110           // (320 - 10 * 10) / 2
+let boardY: i64 = 0
+
+// Tiles. The low four bits of a board cell are one of these; the flags
+// above them mark a cell that is flashing, or about to go.
+let tileNone: u8 = 0
+let tileGreen: u8 = 1
+let tileOrange: u8 = 2
+let tileYellow: u8 = 3
+let tilePurple: u8 = 4
+let tilePink: u8 = 5
+let tileBlue: u8 = 6
+let tileCyan: u8 = 7
+let tileRed: u8 = 8
+let tileBorder: u8 = 9
+let tileCount: i64 = 10
+
+let tileMask: u8 = 15
+let flagFlash: u8 = 16
+let flagDestroy: u8 = 32
+
+global var tileColours: [10:u8] = [0; 10]
+global var tileSprites: [10:[100:u8]] = [[0; 100]; 10]
+
+let logo: [5:CString] = [
+    "AAA BBB CCC DD  EEE FFF",
+    " A  B    C  D D  E  F  ",
+    " A  BBB  C  DD   E  FFF",
+    " A  B    C  D D  E    F",
+    " A  BBB  C  D D EEE FFF",
+]
+
+/// A piece: its colour, and its four rotations as 4x4 bitmaps, a nibble a
+/// row, the lowest bit leftmost.
+struct Tetromino {
+    colour: u8
+    rotations: [4:u16]
+}
+
+let tetrominos: [7:Tetromino] = [
+    Tetromino { colour: 7, rotations: [240, 8738, 3840, 17476] },       // line
+    Tetromino { colour: 6, rotations: [36352, 25664, 3616, 17600] },    // left L
+    Tetromino { colour: 2, rotations: [11776, 17504, 3712, 50240] },    // right L
+    Tetromino { colour: 3, rotations: [52224, 52224, 52224, 52224] },   // cube
+    Tetromino { colour: 1, rotations: [27648, 17952, 1728, 35904] },    // right skew
+    Tetromino { colour: 8, rotations: [50688, 9792, 3168, 19584] },     // left skew
+    Tetromino { colour: 4, rotations: [19968, 17984, 3648, 19520] },    // T
+]
+
+/// Frames between steps at each level, NES NTSC. The original listed 29 for
+/// its 30 levels, so level 29 read a 0, and the step counter never came
+/// round to zero again: a piece at level 29 never fell. Rune will not let an
+/// array literal be shorter than its type, which is how this was found; the
+/// 30th is NES's own, 1.
+let framesPerStep: [30:u8] = [
+    48, 43, 38, 33, 28, 23, 18, 13, 8, 6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 1, 1,
+]
+let levels: i64 = 30
+
+let lineScores: [4:i64] = [40, 100, 300, 1200]
+
+// The controls, in the order they are read.
+let rotateLeft: i64 = 0
+let rotateRight: i64 = 1
+let rotateEither: i64 = 2
+let left: i64 = 3
+let right: i64 = 4
+let down: i64 = 5
+let fastDown: i64 = 6
+
+struct Control {
+    down: bool
+    last: bool
+    pressed: bool
+    pressedFrames: i64
+}
+
+struct Piece {
+    kind: i64          // index into `tetrominos`
+    r: i64             // rotation
+    x: i64
+    y: i64
+    done: bool
+}
+
+struct State {
+    board: [20:[10:u8]]
+    frames: i64
+    steps: i64
+    framesSinceStep: i64
+    score: i64
+    lines: i64
+    level: i64
+    linesLeft: i64
+    menu: bool
+    stopped: bool
+    destroy: bool
+    gameOver: bool
+    music: bool
+    next: i64          // index into `tetrominos`, or -1
+    curr: Piece
+    controls: [7:Control]
+}
+
+fn freshState() -> State {
+    State {
+        board: [[0; 10]; 20], frames: 0, steps: 0, framesSinceStep: 0,
+        score: 0, lines: 0, level: 0, linesLeft: 0, menu: false,
+        stopped: false, destroy: false, gameOver: false, music: false,
+        next: -1,
+        curr: Piece { kind: 0, r: 0, x: 0, y: 0, done: false },
+        controls: [Control { down: false, last: false, pressed: false, pressedFrames: 0 }; 7],
+    }
+}
+
+global var state: State = freshState()
+
+//===----------------------------------------------------------------------===//
+// The pieces' bitmaps
+//===----------------------------------------------------------------------===//
+
+fn inBoard(x: i64, y: i64) -> bool {
+    x >= 0 && y >= 0 && x < boardWidth && y < boardHeight
+}
+
+/// Whether the 4x4 bitmap `t` has a block at column `i`, row `j`.
+fn block(t: u16, i: i64, j: i64) -> bool {
+    (t & ((1 as u16) << ((j * 4 + i) as u16))) != 0
+}
+
+/// The index of the lowest set bit of `x`, which is not zero: LOBIT.
+fn lowBit(x: u16) -> i64 {
+    var i: i64 = 0
+    while (x & ((1 as u16) << (i as u16))) == 0 { i += 1 }
+    i
+}
+
+/// How far in from the left the bitmap's first column is: TTM_OFFSET_X.
+fn offsetX(t: u16) -> i64 {
+    var least: i64 = 3
+    for row in 0..4 {
+        let nibble = (t >> ((row * 4) as u16)) & 15
+        if nibble != 0 {
+            let first = lowBit(nibble)
+            if first < least { least = first }
+        }
+    }
+    least
+}
+
+/// How far down its first row is: TTM_OFFSET_Y.
+fn offsetY(t: u16) -> i64 { lowBit(t) / 4 }
+
+fn rotationOf(kind: i64, r: i64) -> u16 { tetrominos[kind].rotations[r] }
+
+//===----------------------------------------------------------------------===//
+// The game
+//===----------------------------------------------------------------------===//
+
+/// The current piece has landed: flash it, find the full lines, score them.
+fn done() {
+    let t = rotationOf(state.curr.kind, state.curr.r)
+    for y in 0..4 {
+        for x in 0..4 {
+            let xx = state.curr.x + x
+            let yy = state.curr.y + y
+            if inBoard(xx, yy) && block(t, x, y) {
+                state.board[yy][xx] = state.board[yy][xx] | flagFlash
+            }
+        }
+    }
+
+    var lines: i64 = 0
+    for y in 0..boardHeight {
+        var full = true
+        for x in 0..boardWidth {
+            if (state.board[y][x] & tileMask) == tileNone {
+                full = false
+                break
+            }
+        }
+        if full {
+            lines += 1
+            for x in 0..boardWidth {
+                state.board[y][x] = state.board[y][x] | flagFlash | flagDestroy
+            }
+            state.destroy = true
+        }
+    }
+
+    if lines > 0 {
+        state.lines += lines
+        state.score += lineScores[lines - 1] * (state.level + 1)
+        if state.level != levels - 1 {
+            state.linesLeft -= lines
+            if state.linesLeft <= 0 {
+                state.level += 1
+                state.linesLeft = 10
+            }
+        }
+    }
+    // The next piece is spawned by `update`, once the lines have gone.
+    state.curr.done = true
+}
+
+/// Moves a piece from bitmap `tc` at (`xc`, `yc`) to `tn` at (`xn`, `yn`):
+/// true if it fits, and if not the board is left as it was.
+fn tryModify(kind: i64, tc: u16, xc: i64, yc: i64, tn: u16, xn: i64, yn: i64) -> bool {
+    let saved = state.board
+    if tc != 0 {
+        for y in 0..4 {
+            for x in 0..4 {
+                if inBoard(xc + x, yc + y) && block(tc, x, y) {
+                    state.board[yc + y][xc + x] = tileNone
+                }
+            }
+        }
+    }
+    for y in 0..4 {
+        for x in 0..4 {
+            let xx = xn + x
+            let yy = yn + y
+            if yy < 0 {
+                // Above the board is fine, but not beside it.
+                if block(tn, x, y) && (xx < 0 || xx >= boardWidth) {
+                    state.board = saved
+                    return false
+                }
+                continue
+            }
+            if !block(tn, x, y) { continue }
+            if !inBoard(xx, yy) || state.board[yy][xx] != tileNone {
+                state.board = saved
+                return false
+            }
+            state.board[yy][xx] = tetrominos[kind].colour
+        }
+    }
+    true
+}
+
+fn randomPiece() -> i64 { (system::rand() % 7) as i64 }
+
+/// A new piece at the top: false if there is no room for it, which is the
+/// end of the game.
+fn spawn() -> bool {
+    if state.next == -1 { state.next = randomPiece() }
+    state.curr.kind = state.next
+    state.curr.r = 0
+    state.curr.x = boardWidth / 2 - 2
+    state.curr.y = 0 - offsetY(rotationOf(state.curr.kind, 0)) - 1
+    state.curr.done = false
+    if !tryModify(state.curr.kind, 0, 0, 0, rotationOf(state.curr.kind, 0),
+                  state.curr.x, state.curr.y) {
+        return false
+    }
+    state.next = randomPiece()
+    true
+}
+
+fn shift(dx: i64, dy: i64) -> bool {
+    let t = rotationOf(state.curr.kind, state.curr.r)
+    if tryModify(state.curr.kind, t, state.curr.x, state.curr.y,
+                 t, state.curr.x + dx, state.curr.y + dy) {
+        state.curr.x += dx
+        state.curr.y += dy
+        return true
+    }
+    false
+}
+
+fn rotate(clockwise: bool) -> bool {
+    let r = (state.curr.r + (if clockwise { 1 } else { -1 }) + 4) % 4
+    if tryModify(state.curr.kind, rotationOf(state.curr.kind, state.curr.r),
+                 state.curr.x, state.curr.y,
+                 rotationOf(state.curr.kind, r), state.curr.x, state.curr.y) {
+        state.curr.r = r
+        return true
+    }
+    false
+}
+
+/// One step of gravity. A piece that cannot fall on two steps running is
+/// done.
+fn step() {
+    let stopped = !shift(0, 1)
+    if stopped && state.stopped { done() }
+    state.stopped = stopped
+}
+
+/// A new game. Like the original's `memset` of the whole state, this clears
+/// the menu and music flags too.
+fn reset() {
+    state = freshState()
+    state.framesSinceStep = framesPerStep[0] as i64
+    state.level = 0
+    state.linesLeft = state.level * 10 + 10
+    spawn()
+    serial::line("tetris: new game")
+}
+
+/// A held key repeats every other frame.
+fn everyOther(c: i64) -> bool {
+    (state.frames - state.controls[c].pressedFrames) % 2 == 0
+}
+
+fn update() {
+    if state.gameOver {
+        if keyboard::char(10) { reset() }       // Enter
+        return
+    }
+
+    // Un-flash what flashed; drop the rows above a destroyed one.
+    for y in 0..boardHeight {
+        var destroyed = false
+        for x in 0..boardWidth {
+            let data = state.board[y][x]
+            if (data & flagDestroy) != 0 {
+                state.board[y][x] = tileNone
+                destroyed = true
+            } else {
+                state.board[y][x] = data & (255 ^ flagFlash)
+            }
+        }
+        if destroyed {
+            var k = y
+            while k > 0 {
+                state.board[k] = state.board[k - 1]
+                k -= 1
+            }
+            state.board[0] = [0; 10]
+        }
+    }
+
+    if state.curr.done && !spawn() {
+        state.gameOver = true
+        serial::print("tetris: game over, score ")
+        serial::number(state.score)
+        serial::line("")
+        return
+    }
+
+    if state.destroy {
+        state.destroy = false
+        return
+    }
+
+    let pressed: [7:bool] = [
+        keyboard::char(97),                     // a
+        keyboard::char(100),                    // d
+        keyboard::char(114),                    // r
+        keyboard::key(keyboard::keyLeft),
+        keyboard::key(keyboard::keyRight),
+        keyboard::key(keyboard::keyDown),
+        keyboard::char(32),                     // space
+    ]
+    for i in 0..7 {
+        state.controls[i].last = state.controls[i].down
+        state.controls[i].down = pressed[i]
+        state.controls[i].pressed = !state.controls[i].last && state.controls[i].down
+        if state.controls[i].pressed {
+            state.controls[i].pressedFrames = state.frames
+        }
+    }
+
+    if state.controls[rotateLeft].pressed {
+        rotate(false)
+    } else if state.controls[rotateRight].pressed || state.controls[rotateEither].pressed {
+        rotate(true)
+    }
+
+    if state.controls[left].down && everyOther(left) {
+        shift(-1, 0)
+    } else if state.controls[right].down && everyOther(right) {
+        shift(1, 0)
+    } else if state.controls[down].down && everyOther(down) {
+        if !shift(0, 1) { done() }
+    } else if state.controls[fastDown].pressed {
+        while shift(0, 1) {}
+        done()
+    }
+
+    state.framesSinceStep -= 1
+    if state.framesSinceStep == 0 {
+        step()
+        state.steps += 1
+        state.framesSinceStep = framesPerStep[state.level] as i64
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// Drawing
+//===----------------------------------------------------------------------===//
+
+/// Each tile's 10x10 sprite: its colour, lighter along the top and left,
+/// darker along the bottom and right.
+fn generateSprites() {
+    tileColours = [
+        screen::colour(7, 0, 3), screen::colour(0, 5, 0), screen::colour(5, 3, 0),
+        screen::colour(5, 5, 0), screen::colour(3, 0, 3), screen::colour(5, 0, 5),
+        screen::colour(0, 0, 2), screen::colour(0, 3, 3), screen::colour(5, 0, 0),
+        screen::colour(2, 2, 1),
+    ]
+    for t in 1..tileCount {
+        let c = tileColours[t]
+        for y in 0..tileSize {
+            for x in 0..tileSize {
+                var shade = c
+                if y == 0 || x == 0 {
+                    shade = screen::add(c, 1)
+                } else if y == tileSize - 1 || x == tileSize - 1 {
+                    shade = screen::add(c, -1)
+                }
+                tileSprites[t][y * tileSize + x] = shade
+            }
+        }
+    }
+}
+
+@safe("each row read is inside the tile's own sprite")
+fn renderTile(tile: u8, x: i64, y: i64) {
+    for j in 0..tileSize {
+        let row = unsafe { &var tileSprites[tile as i64][j * tileSize] as *var u8 }
+        screen::blit(unsafe { row as *u8 }, tileSize, x, y + j)
+    }
+}
+
+fn renderBorder() {
+    for y in 0..(screen::height / tileSize) {
+        let yy = boardY + y * tileSize
+        renderTile(tileBorder, boardX - tileSize, yy)
+        renderTile(tileBorder, boardX + boardWidth * tileSize, yy)
+    }
+}
+
+fn renderBoard() {
+    for y in 0..boardHeight {
+        for x in 0..boardWidth {
+            let data = state.board[y][x]
+            let tile = data & tileMask
+            let xs = boardX + x * tileSize
+            let ys = boardY + y * tileSize
+            if (data & flagFlash) != 0 {
+                screen::fill(screen::colour(4, 4, 1), xs, ys, tileSize, tileSize)
+            } else if tile != tileNone {
+                renderTile(tile, xs, ys)
+            }
+        }
+    }
+}
+
+/// Where `numberText` writes: itoa's buffer.
+global var digits: [24:u8] = [0; 24]
+
+/// `value` in decimal, as a CString in a buffer of its own — which the next
+/// call overwrites, so it is drawn straight away.
+@safe("the buffer is NUL-terminated and outlives every use")
+fn numberText(value: i64) -> CString {
+    var scratch: [20:u8] = [0; 20]
+    var n = if value < 0 { 0 - value } else { value }
+    var count: i64 = 0
+    while true {
+        scratch[count] = (48 + n % 10) as u8
+        n = n / 10
+        count += 1
+        if n == 0 { break }
+    }
+    var at: i64 = 0
+    if value < 0 {
+        digits[0] = 45
+        at = 1
+    }
+    while count > 0 {
+        count -= 1
+        digits[at] = scratch[count]
+        at += 1
+    }
+    digits[at] = 0
+    unsafe { &var digits[0] as *var u8 as CString }
+}
+
+fn renderStat(title: CString, value: i64, colour: u8, x: i64, y: i64, w: i64) {
+    font::strDoubled(title, x, y, screen::colour(7, 7, 3))
+    let text = numberText(value)
+    font::strDoubled(text, x + w - font::width(text), y + tileSize, colour)
+}
+
+fn renderUi() {
+    let rightX = boardX + boardWidth * tileSize + tileSize * 2
+    let w = font::width("SCORE")
+    renderStat("SCORE", state.score, screen::colour(5, 5, 0), rightX, tileSize, w)
+    renderStat("LINES", state.lines, screen::colour(5, 3, 0), rightX, tileSize * 4, w)
+    renderStat("LEVEL", state.level, screen::colour(5, 0, 0), rightX, tileSize * 7, w)
+
+    let leftX = boardX - tileSize * 8
+    font::strDoubled("NEXT", leftX, tileSize, screen::colour(7, 7, 3))
+    let t = rotationOf(state.next, 0)
+    for j in 0..4 {
+        for i in 0..4 {
+            if block(t, i, j) {
+                renderTile(tetrominos[state.next].colour,
+                           leftX + (i - offsetX(t)) * tileSize,
+                           tileSize + tileSize / 2 + (j - offsetY(t) + 1) * tileSize)
+            }
+        }
+    }
+}
+
+fn renderGameOver() {
+    let w = screen::width / 3
+    let h = screen::height / 3
+    screen::fill(screen::colour(4, 4, 2), (screen::width - w) / 2,
+                 (screen::height - h) / 2, w, h)
+    screen::fill(screen::colour(2, 2, 1), (screen::width - (w - 8)) / 2,
+                 (screen::height - (h - 8)) / 2, w - 8, h - 8)
+    let flash = if (state.frames / 5) % 2 == 0 { screen::colour(6, 2, 1) } else { screen::colour(7, 4, 2) }
+    font::strDoubled("GAME OVER", (screen::width - font::width("GAME OVER")) / 2,
+                     screen::height / 2 - tileSize, flash)
+    font::strDoubled("SCORE:", (screen::width - font::width("SCORE:")) / 2,
+                     screen::height / 2, screen::colour(6, 6, 0))
+    let score = numberText(state.score)
+    font::strDoubled(score, (screen::width - font::width(score)) / 2,
+                     screen::height / 2 + tileSize, screen::colour(7, 7, 3))
+}
+
+fn render() {
+    screen::clear(screen::colour(0, 0, 0))
+    renderBorder()
+    renderBoard()
+    renderUi()
+    if state.gameOver { renderGameOver() }
+}
+
+fn updateMenu() {
+    if keyboard::char(10) {
+        reset()
+        state.menu = false
+    }
+}
+
+@safe("reads each logo row up to its length")
+fn renderMenu() {
+    screen::clear(screen::colour(0, 0, 0))
+    let logoWidth = screen::length(logo[0])
+    let logoX = (screen::width - logoWidth * tileSize) / 2
+    let logoY = tileSize * 3
+
+    for x in -1..(logoWidth + 1) {
+        renderTile(tileBorder, logoX + x * tileSize, logoY - tileSize * 2)
+        renderTile(tileBorder, logoX + x * tileSize, logoY + tileSize * 6)
+    }
+
+    for y in 0..5 {
+        let row = unsafe { logo[y] as *u8 }
+        for x in 0..logoWidth {
+            let c = unsafe { row[x] } as i64
+            if c == 32 { continue }
+            // The letters cycle through the colours, a little apart.
+            let tile = tileGreen as i64 + (((state.frames / 10) + (6 - (c - 65))) / 6) % 8
+            renderTile(tile as u8, logoX + x * tileSize, logoY + y * tileSize)
+        }
+    }
+
+    let play: CString = "PRESS ENTER TO PLAY"
+    let flash = if (state.frames / 6) % 2 == 0 { screen::colour(6, 6, 2) } else { screen::colour(7, 7, 3) }
+    font::strDoubled(play, (screen::width - font::width(play)) / 2,
+                     logoY + 11 * tileSize, flash)
+}
+
+//===----------------------------------------------------------------------===//
+// The kernel
+//===----------------------------------------------------------------------===//
+
+@export("_main")
+fn kernelMain(magic: u32, stack: u32) -> Never {
+    unsafe { rune_init() }
+    serial::init()
+    serial::line("tetris: booted into Rune")
+    idt::init()
+    isr::init()
+    fpu::init()
+    irq::init()
+    screen::init()
+    timer::init()
+    keyboard::init()
+    sound::init()
+    generateSprites()
+    music::init()
+    serial::print("tetris: music parts of ")
+    for i in 0..4 {
+        serial::number(music::length(i))
+        serial::print(" ")
+    }
+    serial::line("notes")
+
+    state.menu = true
+    state.music = true
+    sound::setMaster(255)
+    serial::line("tetris: menu")
+
+    var lastMusicToggle = false
+    var lastFrame: u32 = 0
+    var last: u32 = 0
+    while true {
+        let now = timer::get() as u32
+        if now != last {
+            music::tick()
+            last = now
+        }
+        if (now - lastFrame) as i64 > timer::ticksPerSecond / framesPerSecond {
+            lastFrame = now
+            if state.menu {
+                updateMenu()
+                renderMenu()
+            } else {
+                update()
+                render()
+            }
+
+            if keyboard::char(109) {                // m
+                if !lastMusicToggle {
+                    state.music = !state.music
+                    sound::setMaster(if state.music { 255 } else { 0 })
+                }
+                lastMusicToggle = true
+            } else {
+                lastMusicToggle = false
+            }
+
+            screen::swap()
+            state.frames += 1
+        }
+    }
+    port::halt()
+}
+
+/// Every failed check ends here: an index off the board, an overflow, a
+/// division by zero. As the original's `panic` does, the screen goes red
+/// with the message on it; the log says where.
+@panicHandler
+fn panicked(message: CString, location: CString) -> Never {
+    port::cli()
+    serial::print("tetris: panic: ")
+    serial::print(message)
+    serial::print(" at ")
+    serial::line(location)
+    system::panicScreen(message)
+    port::halt()
+}

@@ -1,0 +1,24 @@
+[package]
+name = "tetris"
+version = "0.1.0"
+edition = "2026"
+description = "TETRIS-OS by jdah, ported to Rune: an operating system that only plays Tetris."
+license = "MIT"
+
+[build]
+safety = "full"
+memory = "zombie"
+runtime = "none"
+entry = "none"
+target = "bare-x86"
+# The kernel's entry and interrupt stubs, and the boot sector. Both are
+# assembly for the reasons given at the top of each.
+c-sources = ["boot/start.S", "boot/stage0.S"]
+linker-script = "link.ld"
+
+# `rune build` makes the kernel as an ELF file; tools/run.sh turns it into a
+# disk image and boots it from its own boot sector, with a SoundBlaster 16
+# and no audio output (edit the script's `-audiodev` to hear it). Run from
+# this directory.
+[target.bare-x86]
+runner = "sh tools/run.sh"

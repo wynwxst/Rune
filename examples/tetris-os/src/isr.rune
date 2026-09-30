@@ -1,0 +1,138 @@
+// Interrupt service routines: the 48 entry stubs in boot/start.S, installed
+// in the IDT, and the one Rune function they all call. From isr.c.
+import tetris::idt
+import tetris::system
+
+/// What a stub leaves on the stack: the segment registers, `pusha`'s eight,
+/// the interrupt's number and error code, and what the processor pushed.
+pub struct Registers {
+    pub gs: u32
+    pub fs: u32
+    pub es: u32
+    pub ds: u32
+    pub edi: u32
+    pub esi: u32
+    pub ebp: u32
+    pub esp: u32
+    pub ebx: u32
+    pub edx: u32
+    pub ecx: u32
+    pub eax: u32
+    pub intNo: u32
+    pub errNo: u32
+    pub eip: u32
+    pub cs: u32
+    pub eflags: u32
+    pub userEsp: u32
+    pub ss: u32
+}
+
+extern "C" {
+    fn _isr0()
+    fn _isr1()
+    fn _isr2()
+    fn _isr3()
+    fn _isr4()
+    fn _isr5()
+    fn _isr6()
+    fn _isr7()
+    fn _isr8()
+    fn _isr9()
+    fn _isr10()
+    fn _isr11()
+    fn _isr12()
+    fn _isr13()
+    fn _isr14()
+    fn _isr15()
+    fn _isr16()
+    fn _isr17()
+    fn _isr18()
+    fn _isr19()
+    fn _isr20()
+    fn _isr21()
+    fn _isr22()
+    fn _isr23()
+    fn _isr24()
+    fn _isr25()
+    fn _isr26()
+    fn _isr27()
+    fn _isr28()
+    fn _isr29()
+    fn _isr30()
+    fn _isr31()
+    fn _isr32()
+    fn _isr33()
+    fn _isr34()
+    fn _isr35()
+    fn _isr36()
+    fn _isr37()
+    fn _isr38()
+    fn _isr39()
+    fn _isr40()
+    fn _isr41()
+    fn _isr42()
+    fn _isr43()
+    fn _isr44()
+    fn _isr45()
+    fn _isr46()
+    fn _isr47()
+}
+
+pub let count: i64 = 48
+
+global var stubs: [48:@cfunction() -> ()] = [
+    _isr0, _isr1, _isr2, _isr3, _isr4, _isr5, _isr6, _isr7,
+    _isr8, _isr9, _isr10, _isr11, _isr12, _isr13, _isr14, _isr15,
+    _isr16, _isr17, _isr18, _isr19, _isr20, _isr21, _isr22, _isr23,
+    _isr24, _isr25, _isr26, _isr27, _isr28, _isr29, _isr30, _isr31,
+    _isr32, _isr33, _isr34, _isr35, _isr36, _isr37, _isr38, _isr39,
+    _isr40, _isr41, _isr42, _isr43, _isr44, _isr45, _isr46, _isr47,
+]
+
+global var names: [32:CString] = [
+    "DIVIDE BY ZERO", "DEBUG", "NMI", "BREAKPOINT", "OVERFLOW", "OOB",
+    "INVALID OPCODE", "NO COPROCESSOR", "DOUBLE FAULT",
+    "COPROCESSOR SEGMENT OVERRUN", "BAD TSS", "SEGMENT NOT PRESENT",
+    "STACK FAULT", "GENERAL PROTECTION FAULT", "PAGE FAULT",
+    "UNRECOGNIZED INTERRUPT", "COPROCESSOR FAULT", "ALIGNMENT CHECK",
+    "MACHINE CHECK", "RESERVED", "RESERVED", "RESERVED", "RESERVED",
+    "RESERVED", "RESERVED", "RESERVED", "RESERVED", "RESERVED", "RESERVED",
+    "RESERVED", "RESERVED", "RESERVED",
+]
+
+/// A handler per interrupt; one that does nothing until something is
+/// installed. (A table of optional function pointers would be the obvious
+/// shape; see the README for why it is not.)
+fn ignore(regs: *var Registers) {}
+
+global var handlers: [48:@cfunction(*var Registers) -> ()] = [ignore; 48]
+
+pub fn install(index: i64, handler: @cfunction(*var Registers) -> ()) {
+    handlers[index] = handler
+}
+
+/// Called by every stub in boot/start.S, with the registers it saved. The
+/// interrupt number indexes a checked array: a number past the table is a
+/// panic here, not a jump through whatever follows it.
+@export("isr_handler")
+@safe("the stub passes the frame it just pushed")
+fn handle(regs: *var Registers) {
+    let handler = handlers[unsafe { regs[0].intNo } as i64]
+    unsafe { handler(regs) }
+}
+
+@safe("reads the frame the stub pushed")
+fn exception(regs: *var Registers) {
+    system::panicScreen(names[unsafe { regs[0].intNo } as i64])
+    loop {}
+}
+
+@safe("the stubs are code in this image; only their addresses are taken")
+pub fn init() {
+    for i in 0..count {
+        idt::set(i, unsafe { stubs[i] as usize }, 8, 142)   // 0x08, 0x8E
+    }
+    for i in 0..32 {
+        install(i, exception)
+    }
+}

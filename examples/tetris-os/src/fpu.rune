@@ -1,0 +1,15 @@
+// The x87 floating-point unit, switched on: the sound mixer is all doubles.
+// From fpu.c.
+import std::asm
+
+@safe("sets the control registers' FPU bits; touches no memory")
+pub fn init() {
+    unsafe { asm::run("clts", "") }
+    var cr0 = unsafe { asm::value<u32>("mov %cr0, $0", "=r") }
+    cr0 = (cr0 & (4294967295 ^ 4)) | 2         // no emulation; monitor
+    unsafe { asm::run("mov $0, %cr0", "r", cr0) }
+    var cr4 = unsafe { asm::value<u32>("mov %cr4, $0", "=r") }
+    cr4 = cr4 | (3 << 9)                       // OSFXSR, OSXMMEXCPT
+    unsafe { asm::run("mov $0, %cr4", "r", cr4) }
+    unsafe { asm::run("fninit", "") }
+}

@@ -1,0 +1,18 @@
+// The PC speaker, which the game does not use — the SoundBlaster plays the
+// music — but the original has it, so it is here. From speaker.c.
+import tetris::port
+
+/// Starts the speaker at about `hz`. As in the original, the divisor is
+/// worked out and then a fixed one written, which is what it played.
+pub fn play(hz: u32) {
+    let divisor = 1193180 / hz
+    port::outb(67, 182)             // 0x43 <- 0xB6: channel 2, square wave
+    port::outb(66, 140)             // 0x42
+    port::outb(66, 140)
+    let t = port::inb(97)           // 0x61
+    if t != (t | 3) { port::outb(97, t | 3) }
+}
+
+pub fn pause() {
+    port::outb(97, port::inb(97) & 252)
+}

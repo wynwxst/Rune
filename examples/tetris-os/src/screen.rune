@@ -1,0 +1,96 @@
+// Mode 13h: 320x200 pixels, a byte each, at 0xA0000 — drawn into one of two
+// buffers in memory and copied out whole, so a frame is never seen half
+// drawn. The palette is set so a byte is RRRGGGBB. From screen.h/screen.c.
+import tetris::port
+
+pub let width: i64 = 320
+pub let height: i64 = 200
+let size: i64 = 64000
+
+/// The two buffers, drawn into by turns.
+global var buffers: [2:[64000:u8]] = [[0; 64000]; 2]
+global var back: i64 = 0
+
+/// The colour with red, green and blue levels `r` (0-7), `g` (0-7), `b`
+/// (0-3): COLOR() in the original.
+pub fn colour(r: i64, g: i64, b: i64) -> u8 {
+    (((r & 7) << 5) | ((g & 7) << 2) | (b & 3)) as u8
+}
+
+pub fn red(c: u8) -> i64 { ((c >> 5) & 7) as i64 }
+pub fn green(c: u8) -> i64 { ((c >> 2) & 7) as i64 }
+pub fn blue(c: u8) -> i64 { (c & 3) as i64 }
+
+fn clamp(v: i64, low: i64, high: i64) -> i64 {
+    if v < low { low } else if v > high { high } else { v }
+}
+
+/// `c` made brighter (or, with `d` below zero, darker) by `d` on each
+/// channel: COLOR_ADD.
+pub fn add(c: u8, d: i64) -> u8 {
+    colour(clamp(red(c) + d, 0, 7), clamp(green(c) + d, 0, 7),
+           clamp(blue(c) + d, 0, 3))
+}
+
+/// One pixel of the frame being drawn. Checked, like every index: a pixel
+/// off the screen is a panic, not a write into whatever follows the buffer.
+pub fn set(c: u8, x: i64, y: i64) {
+    buffers[back][y * width + x] = c
+}
+
+/// A filled rectangle.
+pub fn fill(c: u8, x: i64, y: i64, w: i64, h: i64) {
+    for yy in y..(y + h) {
+        let row = yy * width + x
+        for xx in 0..w {
+            buffers[back][row + xx] = c
+        }
+    }
+}
+
+/// `count` bytes from `source`, as one row of pixels at `x`, `y`.
+@safe("reads exactly `count` bytes of the caller's sprite")
+pub fn blit(source: *u8, count: i64, x: i64, y: i64) {
+    let row = y * width + x
+    for i in 0..count {
+        buffers[back][row + i] = unsafe { source[i] }
+    }
+}
+
+pub fn clear(c: u8) {
+    for i in 0..size { buffers[back][i] = c }
+}
+
+/// Shows the frame that was drawn, and starts drawing the other.
+@safe("copies one screen's worth of bytes to the VGA memory at 0xA0000")
+pub fn swap() {
+    let vga = unsafe { 655360 as *var u8 }       // 0xA0000
+    let frame = unsafe { &var buffers[back][0] as *var u8 }
+    for i in 0..size {
+        unsafe { vga[i] = frame[i] }
+    }
+    back = 1 - back
+}
+
+/// The palette: colour `i` is RRRGGGBB, and 255 is white.
+pub fn init() {
+    port::outb(966, 255)            // 0x3C6: palette mask
+    port::outb(968, 0)              // 0x3C8: write from colour 0
+    for i in 0..255 {
+        port::outb(969, ((((i >> 5) & 7) * 32) / 4) as u8)   // 0x3C9
+        port::outb(969, ((((i >> 2) & 7) * 32) / 4) as u8)
+        port::outb(969, (((i & 3) * 64) / 4) as u8)
+    }
+    port::outb(969, 63)
+    port::outb(969, 63)
+    port::outb(969, 63)
+}
+
+/// How many bytes before `text`'s NUL: strlen.
+@safe("a CString ends at its NUL, and nothing past it is read")
+pub fn length(text: CString) -> i64 {
+    let bytes = unsafe { text as *u8 }
+    var n: i64 = 0
+    while unsafe { bytes[n] } != 0 { n += 1 }
+    n
+}

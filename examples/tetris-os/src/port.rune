@@ -1,0 +1,37 @@
+// I/O ports and the interrupt flag: util.h's inline assembly, as Rune
+// functions over `std::asm`.
+import std::asm
+
+@safe("a port write reaches a device, never Rune memory")
+pub fn outb(port: u16, value: u8) {
+    unsafe { asm::run("outb %al, %dx", "{al},{dx}", value, port) }
+}
+
+@safe("a port write reaches a device, never Rune memory")
+pub fn outw(port: u16, value: u16) {
+    unsafe { asm::run("outw %ax, %dx", "{ax},{dx}", value, port) }
+}
+
+@safe("a port read reaches a device, never Rune memory")
+pub fn inb(port: u16) -> u8 {
+    unsafe { asm::value<u8>("inb %dx, %al", "={al},{dx}", port) }
+}
+
+@safe("a port read reaches a device, never Rune memory")
+pub fn inw(port: u16) -> u16 {
+    unsafe { asm::value<u16>("inw %dx, %ax", "={ax},{dx}", port) }
+}
+
+/// Interrupts off.
+@safe("changes the interrupt flag only")
+pub fn cli() { unsafe { asm::run("cli", "~{memory}") } }
+
+/// Interrupts on.
+@safe("changes the interrupt flag only")
+pub fn sti() { unsafe { asm::run("sti", "~{memory}") } }
+
+/// Stops the processor for good.
+@safe("stops the processor; touches no memory")
+pub fn halt() -> Never {
+    loop { unsafe { asm::run("cli; hlt", "") } }
+}

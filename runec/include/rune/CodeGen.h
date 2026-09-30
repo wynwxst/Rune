@@ -357,6 +357,8 @@ private:
   std::vector<GlobalVarDecl *> DeferredGlobals;
   std::set<FunctionDecl *> OfferedBodies;
   bool isZeroInitialiser(Expr *e, Type *t);
+  llvm::Constant *constantValueOf(Expr *e, Type *t);
+  std::map<GlobalVarDecl *, llvm::Constant *> FoldedGlobals;
   void resolveWeakDefinitions();
   /// `@weak` definitions another in this module replaces; never emitted.
   std::set<FunctionDecl *> ReplacedDefinitions;

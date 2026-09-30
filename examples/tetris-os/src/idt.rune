@@ -1,0 +1,45 @@
+// The interrupt descriptor table. From idt.c; `idt_load`, which was
+// assembly in start.S, is `lidt` through `std::asm` here.
+import std::asm
+
+/// One gate: where the handler is, which segment it runs in, and what kind
+/// of gate it is. Eight bytes, laid out as the processor reads them — no
+/// field needs padding, so the natural layout is the packed one.
+pub struct Entry {
+    pub offsetLow: u16
+    pub selector: u16
+    pub zero: u8
+    pub kind: u8
+    pub offsetHigh: u16
+}
+
+global var entries: [256:Entry] = [Entry { offsetLow: 0, selector: 0, zero: 0, kind: 0, offsetHigh: 0 }; 256]
+
+/// What `lidt` reads: a 16-bit limit, then a 32-bit base, six bytes in all.
+/// A struct would be padded to eight, so it is spelled out as bytes.
+global var pointer: [6:u8] = [0; 6]
+
+/// Gate `index` sends interrupts to `handler`, the address of an entry stub.
+pub fn set(index: i64, handler: usize, selector: u16, flags: u8) {
+    entries[index] = Entry {
+        offsetLow: (handler & 65535) as u16,
+        selector: selector,
+        zero: 0,
+        kind: flags | 96,
+        offsetHigh: ((handler >> 16) & 65535) as u16,
+    }
+}
+
+@safe("hands the processor the address of a table that lives for ever")
+pub fn init() {
+    let limit = (256 * 8 - 1) as u16
+    let base = unsafe { &var entries[0] as *var u8 as usize }
+    pointer[0] = (limit & 255) as u8
+    pointer[1] = (limit >> 8) as u8
+    pointer[2] = (base & 255) as u8
+    pointer[3] = ((base >> 8) & 255) as u8
+    pointer[4] = ((base >> 16) & 255) as u8
+    pointer[5] = ((base >> 24) & 255) as u8
+    let p = unsafe { &var pointer[0] as *var u8 }
+    unsafe { asm::run("lidt ($0)", "r,~{memory}", p) }
+}

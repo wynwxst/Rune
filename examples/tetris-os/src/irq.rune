@@ -1,0 +1,62 @@
+// Hardware interrupts: the two 8259 PICs remapped to interrupts 32-47, a
+// handler per line, and the end-of-interrupt each one needs. From irq.c.
+import tetris::isr
+import tetris::port
+
+let pic1: u16 = 32              // 0x20
+let pic1Data: u16 = 33
+let pic2: u16 = 160             // 0xA0
+let pic2Data: u16 = 161
+let endOfInterrupt: u8 = 32
+
+fn ignore(regs: *var isr::Registers) {}
+
+global var handlers: [16:@cfunction(*var isr::Registers) -> ()] = [ignore; 16]
+
+@safe("reads the frame the stub pushed")
+fn stub(regs: *var isr::Registers) {
+    let n = unsafe { regs[0].intNo } as i64
+    if n >= 32 && n <= 47 {
+        let handler = handlers[n - 32]
+        unsafe { handler(regs) }
+    }
+    // The original sends the second PIC its EOI from 0x40, which no line
+    // reaches; 40 (IRQ 8) is where the second PIC's lines begin.
+    if n >= 40 { port::outb(pic2, endOfInterrupt) }
+    port::outb(pic1, endOfInterrupt)
+}
+
+fn remap() {
+    let mask1 = port::inb(pic1Data)
+    let mask2 = port::inb(pic2Data)
+    port::outb(pic1, 17)            // ICW1: initialise, ICW4 follows
+    port::outb(pic2, 17)
+    port::outb(pic1Data, 32)        // first PIC from interrupt 32
+    port::outb(pic2Data, 40)        // second from 40
+    port::outb(pic1Data, 4)         // the second is on line 2
+    port::outb(pic2Data, 2)
+    port::outb(pic1Data, 1)         // 8086 mode
+    port::outb(pic2Data, 1)
+    port::outb(pic1Data, mask1)
+    port::outb(pic2Data, mask2)
+}
+
+fn clearMask(line: i64) {
+    let p = if line < 8 { pic1Data } else { pic2Data }
+    let bit = (1 << ((line % 8) as u8)) as u8
+    port::outb(p, port::inb(p) & (255 ^ bit))
+}
+
+pub fn install(line: i64, handler: @cfunction(*var isr::Registers) -> ()) {
+    port::cli()
+    handlers[line] = handler
+    clearMask(line)
+    port::sti()
+}
+
+pub fn init() {
+    remap()
+    for i in 0..16 {
+        isr::install(32 + i, stub)
+    }
+}

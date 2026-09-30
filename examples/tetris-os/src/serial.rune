@@ -1,0 +1,53 @@
+// A log on the first serial port. Not in the original: QEMU hands COM1 to
+// whoever started it, which is how a machine with no screen attached — a
+// test — hears what the kernel is doing.
+import tetris::port
+
+let com1: u16 = 1016    // 0x3F8
+
+pub fn init() {
+    port::outb(com1 + 1, 0)     // no interrupts
+    port::outb(com1 + 3, 128)   // divisor follows
+    port::outb(com1, 3)         // 115200 / 3 baud
+    port::outb(com1 + 1, 0)
+    port::outb(com1 + 3, 3)     // 8 bits, no parity, one stop bit
+    port::outb(com1 + 2, 199)   // FIFO on, cleared
+    port::outb(com1 + 4, 11)
+}
+
+pub fn byte(b: u8) {
+    while (port::inb(com1 + 5) & 32) == 0 {}
+    port::outb(com1, b)
+}
+
+@safe("a CString ends at its NUL, and nothing past it is read")
+pub fn print(text: CString) {
+    let bytes = unsafe { text as *u8 }
+    var i: i64 = 0
+    while unsafe { bytes[i] } != 0 {
+        byte(unsafe { bytes[i] })
+        i += 1
+    }
+}
+
+pub fn line(text: CString) {
+    print(text)
+    byte(10)
+}
+
+pub fn number(value: i64) {
+    var digits: [20:u8] = [0; 20]
+    var n = if value < 0 { 0 - value } else { value }
+    var count: i64 = 0
+    while true {
+        digits[count] = (48 + n % 10) as u8
+        n = n / 10
+        count += 1
+        if n == 0 { break }
+    }
+    if value < 0 { byte(45) }
+    while count > 0 {
+        count -= 1
+        byte(digits[count])
+    }
+}

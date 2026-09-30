@@ -230,9 +230,12 @@ division and nil check is inserted, the Zombie borrow checker proves every
 borrow, and a failed check goes to the `@panicHandler`. Classes, `Unique<T>`
 and optionals work, on the program's own heap; `String`, `std::io` and
 threads are refused at compile time. `bare-x86`, `bare-x86_64`, `bare-arm64`
-and `bare-riscv64` build with clang and ld.lld, and
+and `bare-riscv64` build with clang and ld.lld.
 [`examples/toyos`](examples/toyos/README.md) is a multiboot kernel that QEMU
-boots with `rune run`.
+boots with `rune run`, and [`examples/tetris-os`](examples/tetris-os/README.md)
+is jdah's TETRIS-OS ported from C — its own boot sector, interrupts, VGA mode
+13h, a SoundBlaster 16 playing the theme, and the game — all Rune but the boot
+sector and the interrupt stubs.
 
 ### Incremental and concurrent builds
 

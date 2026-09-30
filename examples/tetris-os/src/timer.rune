@@ -1,0 +1,22 @@
+// The programmable interval timer, ticking 363 times a second — a whole
+// divisor of its 1.19 MHz clock. From timer.c.
+import tetris::irq
+import tetris::isr
+import tetris::port
+
+pub let ticksPerSecond: i64 = 363
+
+global var ticks: u64 = 0
+
+pub fn get() -> u64 { ticks }
+
+fn tick(regs: *var isr::Registers) { ticks += 1 }
+
+pub fn init() {
+    port::outb(67, 54)                          // 0x43 <- 0x36: channel 0, square wave
+    let divisor = (1193131.666 / (ticksPerSecond as f64)) as u16
+    port::outb(64, (divisor & 255) as u8)       // 0x40
+    port::outb(64, (divisor >> 8) as u8)
+    ticks = 0
+    irq::install(0, tick)
+}

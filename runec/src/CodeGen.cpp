@@ -3266,10 +3266,30 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
 /// pay nothing for the reading. Anything whose value needs the program to be
 /// running — a string, a call, an object — is left to the initialiser.
 Constant *CodeGen::constantInitialiserFor(GlobalVarDecl *g) {
-  if (!g || g->IsMutable || !g->Init || !g->Ty)
+  if (!g || !g->Init || !g->Ty)
     return nullptr;
-  Expr *e = g->Init.get();
-  // Sema folds `-1` into the literal, but a `-` may still be standing here.
+  auto it = FoldedGlobals.find(g);
+  if (it != FoldedGlobals.end())
+    return it->second;
+  Constant *c = constantValueOf(g->Init.get(), g->Ty);
+  FoldedGlobals[g] = c;
+  return c;
+}
+
+/// `e` as a `t`, when that is known without running anything: a number, a
+/// `bool`, a string as a `CString`, a top-level function as a `@cfunction`,
+/// and arrays and structs made of those. Null for anything else, which is
+/// then left to the generated initialiser.
+///
+/// This is what puts a table in the image rather than in code that builds it
+/// at start-up: a font, a score table, an IDT's handlers. Built by code, each
+/// is an aggregate made on the stack and stored whole — tens of kilobytes of
+/// stack for a program whose stack may be a few, and time spent before
+/// anything runs.
+Constant *CodeGen::constantValueOf(Expr *e, Type *t) {
+  if (!e || !t)
+    return nullptr;
+  t = t->canonical();
   bool negate = false;
   if (auto *u = dyn_cast<UnaryExpr>(e))
     if (u->Op == UnaryOp::Neg) {
@@ -3277,23 +3297,88 @@ Constant *CodeGen::constantInitialiserFor(GlobalVarDecl *g) {
       e = u->Operand.get();
     }
   if (auto *lit = dyn_cast<IntLitExpr>(e)) {
-    if (!g->Ty->isInt())
+    if (!t->isInt())
       return nullptr;
     int64_t v = static_cast<int64_t>(lit->Value);
     if (negate || lit->IsNegated)
       v = -v;
-    return ConstantInt::get(lower(g->Ty), static_cast<uint64_t>(v),
-                            g->Ty->isSigned());
+    return ConstantInt::get(lower(t), static_cast<uint64_t>(v), t->isSigned());
   }
   if (auto *lit = dyn_cast<FloatLitExpr>(e)) {
-    if (!g->Ty->isFloat())
+    if (!t->isFloat())
       return nullptr;
-    return ConstantFP::get(lower(g->Ty), negate ? -lit->Value : lit->Value);
+    return ConstantFP::get(lower(t), negate ? -lit->Value : lit->Value);
   }
+  if (negate)
+    return nullptr;
   if (auto *lit = dyn_cast<BoolLitExpr>(e)) {
-    if (!g->Ty->isBool() || negate)
+    if (!t->isBool())
       return nullptr;
-    return ConstantInt::get(lower(g->Ty), lit->Value ? 1 : 0);
+    return ConstantInt::get(lower(t), lit->Value ? 1 : 0);
+  }
+  if (auto *lit = dyn_cast<StringLitExpr>(e)) {
+    if (!t->is(TypeKind::CString))
+      return nullptr;
+    return dyn_cast<Constant>(emitStringLiteral(lit->Value, /*asCString=*/true));
+  }
+  if (auto *ref = dyn_cast<DeclRefExpr>(e)) {
+    // A top-level function where a C function pointer is wanted is its
+    // address, which the linker fills in.
+    auto *fn = ref->Resolved ? dyn_cast<FunctionDecl>(ref->Resolved) : nullptr;
+    if (!fn || !t->is(TypeKind::CFunction) || !fn->Generics.empty() ||
+        fn->Parent || fn->Flavour == FunctionFlavour::Closure)
+      return nullptr;
+    return declareFunction(fn);
+  }
+  if (auto *arr = dyn_cast<ArrayLitExpr>(e)) {
+    if (!t->is(TypeKind::Array) || !t->element())
+      return nullptr;
+    auto *arrTy = dyn_cast<ArrayType>(lower(t));
+    if (!arrTy)
+      return nullptr;
+    std::vector<Constant *> elems;
+    if (arr->RepeatCount) {
+      if (arr->Elements.size() != 1)
+        return nullptr;
+      Constant *one = constantValueOf(arr->Elements[0].get(), t->element());
+      if (!one)
+        return nullptr;
+      if (one->isNullValue())
+        return ConstantAggregateZero::get(arrTy);
+      elems.assign(arrTy->getNumElements(), one);
+    } else {
+      if (arr->Elements.size() != arrTy->getNumElements())
+        return nullptr;
+      for (const ExprPtr &el : arr->Elements) {
+        Constant *c = constantValueOf(el.get(), t->element());
+        if (!c)
+          return nullptr;
+        elems.push_back(c);
+      }
+    }
+    return ConstantArray::get(arrTy, elems);
+  }
+  if (auto *lit = dyn_cast<StructLitExpr>(e)) {
+    if (!t->is(TypeKind::Struct) || lit->Base || !t->nominal())
+      return nullptr;
+    auto *stTy = dyn_cast<StructType>(lower(t));
+    std::vector<FieldDecl *> fields = allFieldsOf(t->nominal());
+    if (!stTy || stTy->getNumElements() != fields.size() ||
+        lit->Fields.size() != fields.size())
+      return nullptr;
+    std::vector<Constant *> elems(fields.size(), nullptr);
+    for (const StructLitField &f : lit->Fields) {
+      if (!f.Value || f.FieldIndex >= fields.size())
+        return nullptr;
+      Constant *c = constantValueOf(f.Value.get(), fields[f.FieldIndex]->Ty);
+      if (!c)
+        return nullptr;
+      elems[f.FieldIndex] = c;
+    }
+    for (Constant *c : elems)
+      if (!c)
+        return nullptr;
+    return ConstantStruct::get(stTy, elems);
   }
   return nullptr;
 }
@@ -3346,7 +3431,10 @@ GlobalVariable *CodeGen::declareGlobal(GlobalVarDecl *g) {
                 : (g->IsPublic ? GlobalValue::WeakODRLinkage
                                : GlobalValue::InternalLinkage);
   Constant *folded = isForeign ? nullptr : constantInitialiserFor(g);
-  auto *gv = new GlobalVariable(*M, ty, /*isConstant=*/folded != nullptr,
+  // A `global var` with a known value starts as that value and stays
+  // writable; a `let` is a constant.
+  auto *gv = new GlobalVariable(*M, ty,
+                                /*isConstant=*/folded != nullptr && !g->IsMutable,
                                 linkage, nullptr, name);
   if (!isForeign && g->IsPublic)
     isAncillary(g) ? setDiscardableLinkage(gv, name)

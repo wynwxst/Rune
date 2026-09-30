@@ -1,0 +1,96 @@
+// The keyboard: scancodes from the 8042 on IRQ 1, turned into which keys
+// and which characters are down. From keyboard.h/keyboard.c.
+import tetris::irq
+import tetris::isr
+import tetris::port
+import tetris::system
+import tetris::timer
+
+pub let keyLeft: i64 = 75       // 0x4B
+pub let keyRight: i64 = 77      // 0x4D
+pub let keyUp: i64 = 72         // 0x48
+pub let keyDown: i64 = 80       // 0x50
+
+let release: u16 = 128          // the bit a release sets in a scancode
+let modAlt: u16 = 512
+let modCtrl: u16 = 1024
+let modShift: u16 = 2048
+let modCapsLock: u16 = 4096
+let modNumLock: u16 = 8192
+let modScrollLock: u16 = 16384
+
+/// The US layout, unshifted and shifted: scancode to character. Codes from
+/// 128 up are keys with no character: the function keys, Home, End and the
+/// rest.
+let layout: [2:[128:u8]] = [
+    [
+        0, 27, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 45, 61, 8, 9,
+        113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 91, 93, 10, 0, 97, 115,
+        100, 102, 103, 104, 106, 107, 108, 59, 39, 96, 0, 92, 122, 120, 99, 118,
+        98, 110, 109, 44, 46, 47, 0, 0, 0, 32, 0, 128, 129, 130, 131, 132,
+        133, 134, 135, 136, 137, 0, 0, 146, 72, 148, 45, 75, 53, 77, 43, 147,
+        80, 149, 144, 145, 0, 0, 0, 138, 139, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    [
+        0, 27, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 8, 9,
+        81, 87, 69, 82, 84, 89, 85, 73, 79, 80, 123, 125, 10, 0, 65, 83,
+        68, 70, 71, 72, 74, 75, 76, 58, 34, 126, 0, 124, 90, 88, 67, 86,
+        66, 78, 77, 60, 62, 63, 0, 0, 0, 32, 0, 128, 129, 130, 131, 132,
+        133, 134, 135, 136, 137, 0, 0, 146, 72, 148, 45, 75, 53, 77, 43, 147,
+        80, 149, 144, 145, 0, 0, 0, 138, 139, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+]
+
+global var mods: u16 = 0
+global var keys: [128:bool] = [false; 128]
+/// Indexed by the character a key makes. The original's array held 128, but
+/// the function keys and the navigation keys make codes from 128 to 149, so
+/// pressing F1 wrote past its end. Here that write would be a checked index,
+/// and a panic; the array is big enough instead.
+global var chars: [256:bool] = [false; 256]
+
+/// The keyboard's first scancode seeds the random numbers: when a person
+/// presses a key is as random as this machine gets.
+global var seeded: bool = false
+
+pub fn key(scancode: i64) -> bool { keys[scancode] }
+pub fn char(c: u8) -> bool { chars[c as i64] }
+
+fn setMod(bit: u16, down: bool) {
+    mods = if down { mods | bit } else { mods & (65535 ^ bit) }
+}
+
+fn handler(regs: *var isr::Registers) {
+    let scancode = port::inb(96) as u16      // 0x60
+    if !seeded {
+        system::seed(((scancode as u32) * 17).$wrappingAdd(timer::get() as u32))
+        seeded = true
+    }
+    let code = scancode & 127
+    let down = (scancode & release) == 0
+    if code == 56 {                                         // 0x38
+        setMod(modAlt, down)
+    } else if code == 29 {                                  // 0x1D
+        setMod(modCtrl, down)
+    } else if code == 42 || code == 54 {
+        setMod(modShift, down)
+    } else if code == 58 {
+        setMod(modCapsLock, down)
+    } else if code == 69 {
+        setMod(modNumLock, down)
+    } else if code == 70 {
+        setMod(modScrollLock, down)
+    }
+
+    keys[code as i64] = down
+    let shifted = if (mods & modShift) != 0 { 1 } else { 0 }
+    chars[layout[shifted][code as i64] as i64] = down
+}
+
+pub fn init() {
+    irq::install(1, handler)
+}

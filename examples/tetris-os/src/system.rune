@@ -1,0 +1,31 @@
+// Randomness, and the screen a panic ends on. From system.c.
+import tetris::screen
+import tetris::font
+
+global var rseed: u32 = 1
+global var rx: u32 = 123456789
+global var ry: u32 = 362436069
+global var rz: u32 = 521288629
+global var rw: u32 = 88675123
+
+pub fn seed(s: u32) { rseed = s }
+
+/// xorshift128, stirred by the seed. Every step is meant to wrap, so it says
+/// so: under `--safety full` a plain `*` that overflowed would panic.
+pub fn rand() -> u32 {
+    rx = rx.$wrappingMul((23786259 as u32).$wrappingSub(rseed))
+    let t = rx ^ (rx << 11)
+    rx = ry
+    ry = rz
+    rz = rw
+    rw = rw ^ (rw >> 19) ^ t ^ (t >> 8)
+    rw
+}
+
+/// A dark red screen with `message` in the middle, and nothing after it.
+pub fn panicScreen(message: CString) {
+    screen::clear(screen::colour(7, 0, 0))
+    font::str(message, (screen::width - font::width(message)) / 2,
+              screen::height / 2 - 4, screen::colour(7, 7, 3))
+    screen::swap()
+}

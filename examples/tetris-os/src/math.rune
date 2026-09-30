@@ -1,0 +1,21 @@
+// What the sound mixer needs of <math.h>. From math.c: `sin` is still the
+// x87's own `fsin`; `fmod`, which was an `fprem` loop, is written out in
+// Rune, since nothing here needs its last bit of precision.
+import std::asm
+
+pub let pi: f64 = 3.14159265358979323846264338327950
+
+pub fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+/// `x - m * trunc(x / m)`, for the magnitudes the mixer uses.
+pub fn fmod(x: f64, m: f64) -> f64 {
+    let whole = (x / m) as i64
+    x - m * (whole as f64)
+}
+
+@safe("fsin reads and writes the top of the FPU stack and nothing else")
+pub fn sin(x: f64) -> f64 {
+    unsafe { asm::value<f64>("fsin", "={st},{st}", x) }
+}
+
+pub fn cos(x: f64) -> f64 { sin(x + pi / 2.0) }
