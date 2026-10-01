@@ -514,18 +514,17 @@ bool linkExecutable(const std::string &objPath,
   if (opts.DebugInfo && !isWindows && !isWasm && !opts.Freestanding)
     own("-rdynamic");
 
-  // What WASI leaves out, the SDK emulates, and the runtime asks for those
-  // emulations when it is compiled; here is where they are linked. With the
-  // `-threads` flavour the threads are real: every thread is an instance of
-  // its own, so the memory has to come from outside — imported, shared, and
-  // with a ceiling it can grow to (the whole of wasm32's 4 GB).
+  // With the `-threads` flavour the threads are real: every thread is an
+  // instance of its own, so the memory has to come from outside — imported,
+  // shared, and with a ceiling it can grow to (the whole of wasm32's 4 GB).
+  // Without it the runtime answers the thread calls itself
+  // (rune_single_threaded.h), so no emulation library is linked: not every
+  // WASI SDK has one.
   if (isWasm && !opts.Freestanding) {
     if (triple.str().find("threads") != std::string::npos) {
       own("-pthread");
       own("-Wl,--import-memory,--export-memory,"
           "--max-memory=4294967296");
-    } else {
-      own("-lwasi-emulated-pthread");
     }
     // wasm-ld reserves 64 KB of stack unless told otherwise; a native main
     // thread has 8 MB, and Rune code is written expecting about that.

@@ -58,6 +58,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include "rune_single_threaded.h"
 #include <unistd.h>
 #if !defined(__wasi__)
 #include <sys/mman.h>

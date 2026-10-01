@@ -1661,6 +1661,7 @@ int64_t rune_monotonic_ns(void) {
 
 #include <errno.h>
 #include <pthread.h>
+#include "rune_single_threaded.h"
 #include <sched.h>
 #include <time.h>
 #include <unistd.h>

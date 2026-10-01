@@ -1725,6 +1725,11 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
     if (!stale && fs::exists(coreSrc, ec) &&
         fs::last_write_time(coreSrc, ec) > out)
       stale = true;
+    // The headers the C half is compiled with count too.
+    for (const fs::path &h : {cRoot / "include" / "rune_runtime.h",
+                              cRoot / "src" / "rune_single_threaded.h"})
+      if (!stale && fs::exists(h, ec) && fs::last_write_time(h, ec) > out)
+        stale = true;
   }
   if (!stale)
     return dir.string();
