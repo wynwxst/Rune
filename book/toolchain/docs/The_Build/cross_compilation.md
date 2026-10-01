@@ -181,10 +181,13 @@ that name on a wasm triple.
 
 **Linking.** `linkExecutable` leaves out `-rdynamic` (there is no dynamic
 linker to export to), refuses `--shared`, asks for an 8 MB stack
-(`wasm-ld` reserves 64 KB otherwise), and adds what WASI leaves out: the SDK's
-`-lwasi-emulated-pthread` for plain `wasm32-wasip1`, or `-pthread` with an
-imported, exported, 4 GB-ceilinged memory for `-threads`, where every thread is
-an instance of its own sharing that memory.
+(`wasm-ld` reserves 64 KB otherwise), and for `-threads` adds `-pthread` with
+an imported, exported, 4 GB-ceilinged memory, where every thread is an
+instance of its own sharing that memory. Plain `wasm32-wasip1` links nothing
+beyond libc: the runtime answers `pthread_create`, `_join` and `_detach`
+itself there (`rune_single_threaded.h`), failing as a machine out of threads
+would, because `libwasi-emulated-pthread` is missing from older SDKs and
+from Homebrew's wasi-libc.
 
 **The C runtime.** `rune_runtime.c` and `rune_task.c` define
 `RUNE_SINGLE_THREADED` and `_WASI_EMULATED_PTHREAD` on WASI without
