@@ -183,6 +183,9 @@ standard streams, files, the clock, the environment, arguments, and C and C++
 halves of a package. `std::net` and `std::process` commands do not, because
 WASI cannot open a socket or start a process; threads, and tasks that have to
 wait, need `wasm-threads`.
+[`examples/wasm-wordfreq`](examples/wasm-wordfreq/README.md) is a small WASI
+program to start from: arguments, a file, collections, and a `.wasm` that runs
+anywhere a WASI runtime does.
 
 A toolchain somewhere unusual, or a target that is not built in, goes in the
 manifest — as a foreign target with a key or two changed, or from scratch:

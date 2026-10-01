@@ -1,0 +1,101 @@
+// wordfreq: the most common words in a text file.
+//
+//     rune run -- sample.txt          # top 10
+//     rune run -- sample.txt 3        # top 3
+//
+// An ordinary Rune program. Built for WebAssembly it is a WASI module: it
+// reads its arguments and the file through WASI, and sees only the
+// directories its runtime grants it (`wasmtime --dir=.`, which `rune run`
+// passes). The same source builds natively, unchanged.
+import std::io
+import std::process
+import std::text
+import std::dictionary
+import std::collections::vector
+
+struct Count { word: String, times: i64 }
+
+/// Splits `line` into lower-case words: runs of letters, digits and `'`.
+fn wordsOf(line: &String) -> vector::Vector<String> {
+    var words = vector::Vector<String>()
+    let lowered = text::lower(line)
+    var start = -1                      // where the word being read began
+    var i = 0
+    while i <= lowered.$length() {
+        let inWord = if i < lowered.$length() {
+            let b = lowered.$byteAt(i)
+            (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 39
+        } else { false }
+        if inWord && start < 0 {
+            start = i
+        } elif !inWord && start >= 0 {
+            words.push(lowered.$substring(start, i))
+            start = -1
+        }
+        i += 1
+    }
+    words
+}
+
+/// True when `a` ranks above `b`: more often, or as often and first
+/// alphabetically.
+fn ranksAbove(a: &Count, b: &Count) -> bool {
+    a.times > b.times || (a.times == b.times && a.word < b.word)
+}
+
+fn main() -> i64 {
+    let args = process::arguments()
+    if args.length() < 1 {
+        io::eprintln("usage: wordfreq <file> [how many]")
+        return 2
+    }
+    let path = args.look(0).$clone()
+    let top = if args.length() > 1 { args.look(1).$toInt() ?? 10 } else { 10 }
+
+    let contents = match io::readToString(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            // Under WASI a file outside the directories the runtime granted
+            // is as good as missing.
+            io::eprintln("wordfreq: cannot read " + path)
+            return 1
+        }
+    }
+
+    var counts = dictionary::Map<String, i64>()
+    var total = 0
+    for line in text::splitLines(&contents) {
+        for w in wordsOf(line) {
+            let seen = counts.atOr(w, 0)
+            counts.put(w.$clone(), seen + 1)
+            total += 1
+        }
+    }
+
+    var all = vector::Vector<Count>()
+    for w in counts.keysOf() {
+        let times = counts.atOr(w, 0)
+        all.push(Count { word: w.$clone(), times: times })
+    }
+    io::println(path + ": " + total.$str() + " words, " +
+                counts.length().$str() + " different")
+    // The top `top`, best first: each round picks the best not yet shown.
+    var shown = vector::Vector<bool>()
+    for c in all { shown.push(false) }
+    var round = 0
+    while round < top && round < all.length() {
+        var best = -1
+        var i = 0
+        while i < all.length() {
+            if !shown.get(i) && (best < 0 || ranksAbove(all.look(i), all.look(best))) {
+                best = i
+            }
+            i += 1
+        }
+        shown.set(best, true)
+        let c = all.look(best)
+        io::println("  " + c.times.$str() + "\t" + c.word)
+        round += 1
+    }
+    0
+}

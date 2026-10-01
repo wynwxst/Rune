@@ -131,6 +131,22 @@ def webassembly(tmp, env):
           code == 0 and not os.path.exists(os.path.join(hello, "target", "wasi")),
           out)
 
+    # The WebAssembly example, as its README runs it: arguments and a file
+    # through WASI, and nothing outside the directory it was granted.
+    example = os.path.join(tmp, "wasm-wordfreq")
+    shutil.copytree(os.path.join(ROOT, "examples", "wasm-wordfreq"), example,
+                    ignore=shutil.ignore_patterns("target"))
+    code, out = rune(["run", "--", "sample.txt", "3"], example, env)
+    check("examples/wasm-wordfreq runs under WASI",
+          code == 0 and "sample.txt: 60 words, 20 different" in out and
+          "10\tit" in out, out)
+    module = os.path.join(example, "target", "wasm", "debug", "wordfreq.wasm")
+    r = subprocess.run(["wasmtime", "run", "--dir=.", module, "/etc/hostname"],
+                       cwd=example, capture_output=True, text=True, timeout=60)
+    check("it cannot read outside the directory it was granted",
+          r.returncode == 1 and "cannot read /etc/hostname" in r.stderr,
+          r.stdout + r.stderr)
+
     # C and C++ halves cross along with the Rune.
     code, out = rune(["test", "-C", os.path.join(ROOT, "examples/project/ffi"),
                       "--target", "wasm"], tmp, env)

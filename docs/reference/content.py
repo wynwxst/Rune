@@ -14107,6 +14107,12 @@ In Rune.toml
 $ rune build --target web
 $ rune test --target pi             # built, then run under qemu"""),
 
+        P("[`examples/wasm-wordfreq`](examples/wasm-wordfreq/README.md) is a "
+          "whole package built this way: `[build] target = \"wasm\"` makes "
+          "WebAssembly its default, and `rune run -- sample.txt` counts the "
+          "words in a file under wasmtime, which lets it read only the "
+          "directory it was started in."),
+
         H("Where the output goes"),
         P("A cross build gets a directory of its own, named after the target, "
           "so host and cross artefacts never overwrite each other and "

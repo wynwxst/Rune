@@ -1,0 +1,10 @@
+[package]
+name = "wordfreq"
+version = "0.1.0"
+edition = "2026"
+description = "Word frequencies of a text file, built for WebAssembly and run under WASI."
+
+[build]
+# `rune build` and `rune run` mean WebAssembly here, without `--target`.
+# Remove this line and the same source builds as a native program.
+target = "wasm"

@@ -63,3 +63,5 @@ In Rune.toml
 $ rune build --target web
 $ rune test --target pi             # built, then run under qemu
 ```
+
+[`examples/wasm-wordfreq`](examples/wasm-wordfreq/README.md) is a whole package built this way: `[build] target = "wasm"` makes WebAssembly its default, and `rune run -- sample.txt` counts the words in a file under wasmtime, which lets it read only the directory it was started in.
