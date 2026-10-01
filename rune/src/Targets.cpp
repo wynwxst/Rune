@@ -345,7 +345,7 @@ static bool fillFromForeign(const ForeignTarget &f, const TargetSpec *spec,
   const bool linkerGiven = spec && !spec->Linker.empty();
   // The target's own flags, and its toolchain's only while that toolchain is
   // the one in use. `default-flags = false` keeps none of them.
-  if (!spec || spec->DefaultFlags) {
+  if (!spec || spec->DefaultFlags != 0) {
     out.CFlags = f.CFlags;
     out.LinkArgs = f.LinkArgs;
     if (!ccGiven)
@@ -447,7 +447,13 @@ static void overlay(const TargetSpec &spec, ResolvedTarget &out) {
   take(out.Runner, spec.Runner);
   take(out.Linker, spec.Linker);
   take(out.LinkerKind, spec.LinkerKind);
-  out.DefaultFlags = spec.DefaultFlags;
+  // Unsaid, a table from scratch — a `triple`, no `base` — is raw: nothing
+  // of the build's own anywhere, only what the table says.
+  const bool fromScratch = !spec.Triple.empty() && spec.Base.empty();
+  out.DefaultFlags = spec.DefaultFlags == -1 ? !fromScratch : spec.DefaultFlags == 1;
+  // A target with no defaults gets a runtime of its own, compiled with its
+  // flags alone; one cached for the same triple was compiled with others.
+  out.OwnRuntime = !out.DefaultFlags;
   auto append = [](std::vector<std::string> &into,
                    const std::vector<std::string> &from) {
     into.insert(into.end(), from.begin(), from.end());
@@ -599,7 +605,9 @@ static void printEntry(const std::string &name, const std::string &triple,
     std::cout << "        " << c("\x1b[2m") << "link-args " << list(t.LinkArgs)
               << c("\x1b[0m") << "\n";
   if (!t.DefaultFlags)
-    std::cout << "        " << c("\x1b[2m") << "no default flags"
+    std::cout << "        " << c("\x1b[2m")
+              << "raw: no flags of the build's own; its runtime is built in "
+                 "target/" << t.Name << "/runtime"
               << c("\x1b[0m") << "\n";
   if (!t.Runner.empty())
     std::cout << "      " << c("\x1b[32m") << "✓ " << c("\x1b[0m")

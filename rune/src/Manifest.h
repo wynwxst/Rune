@@ -63,9 +63,12 @@ struct TargetSpec {
   /// `linker-kind`: `"driver"` or `"ld"` — how link flags are spelled for
   /// it. Worked out from `linker`'s name when not given.
   std::string LinkerKind;
-  /// `default-flags = false`: none of the flags a foreign target would add
-  /// on its own, to compiles or to the link. Only what the table says.
-  bool DefaultFlags = true;
+  /// `default-flags`: whether the build adds flags of its own, to compiles,
+  /// to the runtime or to the link. -1 when the table does not say: then a
+  /// table with a `triple` of its own (no `base`) is *raw* — it gets none,
+  /// and its runtime is built for it alone — and one starting from a
+  /// foreign target keeps that target's.
+  int DefaultFlags = -1;
 };
 
 /// An extra executable declared with `[[bin]]`.

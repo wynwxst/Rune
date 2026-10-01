@@ -10,6 +10,7 @@ Building for a machine that is not the one you are on. The compiler already emit
 - [Naming a target in the manifest](naming_a_target_in_the_manifest.md)
 - [Where the output goes](where_the_output_goes.md)
 - [The runtime](the_runtime.md)
+- [Raw targets](raw_targets.md)
 - [Running what you built](running_what_you_built.md)
 - [C and C++ sources](c_and_c_plus_plus_sources.md)
 - [What does not cross](what_does_not_cross.md)

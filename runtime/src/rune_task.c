@@ -158,14 +158,21 @@ void rune_ctx_switch(void **saveSp, void *loadSp);
 void rune_ctx_trampoline(void);
 void rune_ctx_entry(void *task);
 
+/* The switch is top-level assembly, in the middle of a file the compiler is
+ * still writing. On ELF it pushes `.text` and pops back, so whatever section
+ * the compiler was in — debug information, with `-g` — is where it carries
+ * on; leaving it in another breaks GNU as. The `.note.GNU-stack` marking a
+ * non-executable stack is the compiler's to emit for the file. */
 #if defined(__APPLE__)
 #define RUNE_SYM(name) "_" #name
 #define RUNE_FN_TYPE(name)
 #define RUNE_ASM_SECTION ".text\n"
+#define RUNE_ASM_END ""
 #else
 #define RUNE_SYM(name) #name
 #define RUNE_FN_TYPE(name) ".type " #name ",@function\n"
-#define RUNE_ASM_SECTION ".text\n"
+#define RUNE_ASM_SECTION ".pushsection .text\n"
+#define RUNE_ASM_END ".popsection\n"
 #endif
 
 #if defined(__aarch64__)
@@ -210,9 +217,7 @@ __asm__(
     "  mov  x30, #0\n"
     "  bl   " RUNE_SYM(rune_ctx_entry) "\n"
     "  brk  #0\n"
-#if !defined(__APPLE__)
-    ".section .note.GNU-stack,\"\",%progbits\n"
-#endif
+    RUNE_ASM_END
 );
 
 #define RUNE_CTX_FRAME 160
@@ -256,9 +261,7 @@ __asm__(
     "  xorq  %rbp, %rbp\n"
     "  call  " RUNE_SYM(rune_ctx_entry) "\n"
     "  ud2\n"
-#if !defined(__APPLE__)
-    ".section .note.GNU-stack,\"\",@progbits\n"
-#endif
+    RUNE_ASM_END
 );
 
 static void fiber_layout(RuneFiber *f, char *top, void *task) {

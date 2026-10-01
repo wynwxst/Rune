@@ -198,8 +198,15 @@ sdk = "../toolchains/wasi-sdk"
 triple = "aarch64-unknown-linux-gnu"
 cc = "aarch64-linux-gnu-gcc"
 sysroot = "/opt/pi-sysroot"
+c-flags = ["-O2"]
+link-args = ["-lm"]
 runner = "qemu-aarch64 -L /opt/pi-sysroot"
 ```
+
+A table with a `triple` of its own like `pi` is *raw*: the build adds no
+flags of its own anywhere, and compiles the runtime for it alone, in
+`target/pi/runtime/`, with exactly its `cc` and `c-flags`
+(`default-flags = true` brings the defaults back).
 
 The reference's *Cross compilation* section has the rest, including driving
 `runec` by hand.

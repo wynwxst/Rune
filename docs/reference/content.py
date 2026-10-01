@@ -14062,11 +14062,14 @@ sdk = "../toolchains/wasi-sdk"
 base = "wasm"
 runner = "wasmer run --dir=."
 
-# A target from scratch: everything named.
+# A target from scratch: everything named, and nothing added — see "Raw
+# targets" below. The runtime needs libm, so the link says so.
 [target.pi]
 triple = "aarch64-unknown-linux-gnu"
 cc = "aarch64-linux-gnu-gcc"
 sysroot = "/opt/pi-sysroot"
+c-flags = ["-O2", "-fPIC"]
+link-args = ["-lm"]
 # How to run one of its binaries on *this* machine. Without it, `rune run`
 # and `rune test` build and stop, rather than pretend.
 runner = "qemu-aarch64 -L /opt/pi-sysroot"''', mode="frag",
@@ -14082,7 +14085,9 @@ runner = "qemu-aarch64 -L /opt/pi-sysroot"''', mode="frag",
            ["`linker-kind`", "`\"driver\"` or `\"ld\"`: how `linker` takes "
             "flags; worked out from its name when not given"],
            ["`default-flags`", "`false`: add no flags of the build's own "
-            "to compiles or links \u2014 only what this table says"],
+            "to compiles, the runtime or links \u2014 only what this table "
+            "says. The default for a table with a `triple` of its own; "
+            "`true` for one starting from a foreign target"],
            ["`cxx`", "the C++ driver; derived from `cc` when absent"],
            ["`ar`", "the archiver; derived from `cc` when absent"],
            ["`sysroot`", "passed as `--sysroot`"],
@@ -14138,6 +14143,40 @@ target/pi/debug/report             # --target pi"""),
 ○ Preparing runtime for x86_64-w64-mingw32
 ○ Compiling report v0.1.0
 ● Finished debug profile"""),
+
+        H("Raw targets"),
+        P("A table with a `triple` of its own \u2014 no `base`, not named after "
+          "a foreign target \u2014 is **raw**: the configuration is entirely "
+          "the table's. The build adds no flag of its own anywhere:"),
+        T(["Step", "Command"],
+          [["The runtime", "`<cc> -c <c-flags> -I<runtime headers> -o ... "
+            "<source>`, built in the project, in `target/<name>/runtime/`"],
+           ["`c-sources`", "`<cc> -c <c-flags> <package c-flags> -o ... "
+            "<source>` \u2014 no `-fPIC`, `-O`, `-g` or `-std` of the build's "
+            "choosing"],
+           ["The link", "`<linker> <objects> -o <output> <runtime> "
+            "<link-args> -L... -l...` \u2014 no `-lm`, `-rdynamic`, "
+            "`-nostdlib`"]]),
+        P("The runtime is a raw target's own, even when one for the same "
+          "triple is already cached in `~/.rune/runtime/`: that one was "
+          "compiled with flags this target did not ask for. It is built "
+          "again whenever its command lines, its sources or the toolchain "
+          "change \u2014 a new `c-flags` is a new runtime."),
+        S("""[target.x]
+triple = "x86_64-unknown-linux-gnu"
+cc = "cc"
+c-flags = ["-O1", "-g"]
+link-args = ["-lm"]
+runner = "env\"""", mode="frag", title="Rune.toml"),
+        SH("""$ rune build --target x -v
+\u25cb Preparing runtime for x86_64-unknown-linux-gnu (target/x/runtime)
+  'cc' -c '-O1' '-g' -I'.../runtime/include' -o '.../target/x/runtime/rune_runtime.o' ...
+\u25cb link: 'cc' '.../target/x/debug/app.o' '-o' '.../target/x/debug/app' '.../target/x/runtime/libruneruntime.a' '-lm'"""),
+        N("`default-flags = true` in the table brings the build's flags "
+          "back, and the shared runtime with them; `default-flags = false` "
+          "makes a table that starts from a foreign target raw too. "
+          "`runtime-dir` still names a prebuilt runtime instead of either.",
+          label="Either way"),
 
         H("Running what you built"),
         P("A binary for another machine cannot simply be started. With a "

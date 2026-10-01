@@ -476,13 +476,18 @@ bool buildNativeSources(const Manifest &m, const Options &opts,
                             (half.IsCxx ? ".cxx.o" : ".o"));
       objects.push_back(obj.string());
 
+      // A raw target (no default flags) gets `-c`, `-o` and what it and the
+      // package said: no position independence, optimisation, debug info or
+      // language standard of the build's choosing.
+      const bool raw = opts.Target.Active && !opts.Target.DefaultFlags;
       std::string cmd = quote(half.Driver) + " -c";
-      if (wantsPic(opts.Target))
+      if (!raw && wantsPic(opts.Target))
         cmd += " -fPIC";
-      if (half.IsCxx)
+      if (half.IsCxx && (!raw || !m.CxxStandard.empty()))
         cmd += " -std=" + quote(m.CxxStandard.empty() ? std::string("c++17")
                                                       : m.CxxStandard);
-      cmd += opts.Release ? " -O2" : " -O0 -g";
+      if (!raw)
+        cmd += opts.Release ? " -O2" : " -O0 -g";
       if (opts.Target.Active && opts.Target.Cc.empty() &&
           opts.Target.DefaultFlags)
         cmd += " --target=" + quote(opts.Target.Triple);
@@ -1700,10 +1705,21 @@ void primeToolchainCache(const Options &opts) {
 /// object format. Building it here means a cross build needs no more setup
 /// than a working cross toolchain.
 ///
+/// A target with no flags of the build's own (`ResolvedTarget::OwnRuntime`)
+/// is different: its runtime is built in the project, in
+/// `target/<name>/runtime/`, with the command lines it would be compiled with
+/// and nothing else — `cc -c <c-flags> -I<runtime headers> -o <obj> <src>` —
+/// and built again whenever those lines, the runtime's sources or the
+/// toolchain change. A runtime cached for the same triple is never used for
+/// it: that one was compiled with flags this target asked not to have.
+///
 /// Returns the directory holding the archive, or "" when it could not be
 /// built.
-std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
-  fs::path dir = runeHome() / "runtime" / t.Triple;
+std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts,
+                             const fs::path &projectRoot) {
+  const bool own = t.OwnRuntime;
+  fs::path dir = own ? projectRoot / "target" / t.Name / "runtime"
+                     : runeHome() / "runtime" / t.Triple;
   fs::path archive = dir / "libruneruntime.a";
   fs::path root(RUNE_TOOLCHAIN_ROOT);
   fs::path cRoot = root / "runtime";
@@ -1715,7 +1731,48 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
       (cRoot / "src" / "rune_unicode_data.c").string()};
 
   std::error_code ec;
-  bool stale = !fs::exists(archive, ec);
+  // The command that compiles one C source of the runtime for this target.
+  const std::string cc = t.Cc.empty() ? std::string("cc") : t.Cc;
+  auto compileCommand = [&](const std::string &src, const fs::path &obj) {
+    std::string cmd = quote(cc) + " -c";
+    if (!own) {
+      cmd += " -O2";
+      if (wantsPic(t))
+        cmd += " -fPIC";
+      // A driver chosen for the target already knows its target; a generic
+      // one has to be told, exactly as at link time.
+      if (t.Cc.empty() && t.DefaultFlags)
+        cmd += " --target=" + quote(t.Triple);
+    }
+    // Asked for by the table, in so many words.
+    if (!t.Sysroot.empty())
+      cmd += " --sysroot=" + quote(t.Sysroot);
+    for (const std::string &f : t.CFlags)
+      cmd += " " + quote(f);
+    cmd += " -I" + quote((cRoot / "include").string());
+    cmd += " -o " + quote(obj.string()) + " " + quote(src);
+    return cmd;
+  };
+
+  // A runtime of the target's own is rebuilt when anything that went into
+  // it changes, the command lines included: a new `c-flags` is a new runtime.
+  pm::FingerprintStore stamps(dir);
+  pm::Fingerprint ownFp;
+  if (own) {
+    for (const std::string &src : sources) {
+      ownFp.add(compileCommand(src, dir / (fs::path(src).stem().string() + ".o")));
+      ownFp.addFile(src);
+    }
+    ownFp.add(archiverFor(t));
+    ownFp.addFile((cRoot / "include" / "rune_runtime.h").string());
+    ownFp.addFile((cRoot / "src" / "rune_single_threaded.h").string());
+    ownFp.addFile(coreSrc.string());
+    ownFp.add(pm::toolchainFingerprint(findCompiler(), RUNE_DEFAULT_STDLIB_DIR).hex());
+    if (stamps.isFresh(archive, ownFp))
+      return dir.string();
+  }
+
+  bool stale = own || !fs::exists(archive, ec);
   if (!stale) {
     auto out = fs::last_write_time(archive, ec);
     for (const std::string &src : sources) {
@@ -1742,26 +1799,15 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
       return "";
     }
 
-  status("Preparing", "runtime for " + t.Triple);
+  status("Preparing", "runtime for " + t.Triple +
+                         (own ? " (target/" + t.Name + "/runtime)" : ""));
   fs::create_directories(dir, ec);
+  fs::remove(archive, ec);   // `ar rcs` adds to an archive that is there
 
-  std::string cc = t.Cc.empty() ? std::string("cc") : t.Cc;
   std::vector<std::string> objects;
   for (const std::string &src : sources) {
     fs::path obj = dir / (fs::path(src).stem().string() + ".o");
-    std::string cmd = quote(cc) + " -c -O2";
-    if (wantsPic(t))
-      cmd += " -fPIC";
-    // A driver chosen for the target already knows its target; a generic one
-    // has to be told, exactly as at link time.
-    if (t.Cc.empty() && t.DefaultFlags)
-      cmd += " --target=" + quote(t.Triple);
-    if (!t.Sysroot.empty())
-      cmd += " --sysroot=" + quote(t.Sysroot);
-    for (const std::string &f : t.CFlags)
-      cmd += " " + quote(f);
-    cmd += " -I" + quote((cRoot / "include").string());
-    cmd += " -o " + quote(obj.string()) + " " + quote(src);
+    std::string cmd = compileCommand(src, obj);
     if (runCommand(cmd, opts.Verbose) != 0) {
       failLine("could not compile the runtime for " + t.Triple);
       if (t.Cc.empty())
@@ -1800,6 +1846,8 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts) {
     note("name the archiver with `ar = \"...\"` in [target." + t.Name + "]");
     return "";
   }
+  if (own)
+    stamps.record(archive, ownFp);
   return dir.string();
 }
 
@@ -2727,7 +2775,8 @@ int main(int argc, char **argv) {
         // A cross build needs a runtime built for its target. One named in
         // the manifest is taken as given; otherwise it is built and cached.
         if (opts.Target.RuntimeDir.empty() && !opts.Freestanding) {
-          opts.Target.RuntimeDir = ensureRuntimeFor(opts.Target, opts);
+          opts.Target.RuntimeDir = ensureRuntimeFor(
+              opts.Target, opts, fs::absolute(root.Root).lexically_normal());
           if (opts.Target.RuntimeDir.empty())
             return 1;
         }

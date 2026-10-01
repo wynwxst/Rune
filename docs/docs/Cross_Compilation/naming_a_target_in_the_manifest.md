@@ -20,11 +20,14 @@ sdk = "../toolchains/wasi-sdk"
 base = "wasm"
 runner = "wasmer run --dir=."
 
-# A target from scratch: everything named.
+# A target from scratch: everything named, and nothing added — see "Raw
+# targets" below. The runtime needs libm, so the link says so.
 [target.pi]
 triple = "aarch64-unknown-linux-gnu"
 cc = "aarch64-linux-gnu-gcc"
 sysroot = "/opt/pi-sysroot"
+c-flags = ["-O2", "-fPIC"]
+link-args = ["-lm"]
 # How to run one of its binaries on *this* machine. Without it, `rune run`
 # and `rune test` build and stop, rather than pretend.
 runner = "qemu-aarch64 -L /opt/pi-sysroot"
@@ -37,7 +40,7 @@ runner = "qemu-aarch64 -L /opt/pi-sysroot"
 | `cc` | the C compiler for the runtime and `c-sources`; also what links, unless `linker` says otherwise |
 | `linker` | what links: a compiler (`i686-elf-gcc`) or a linker (`i686-elf-ld`, `ld.lld`), with any arguments of its own, or `"build-script"` |
 | `linker-kind` | `"driver"` or `"ld"`: how `linker` takes flags; worked out from its name when not given |
-| `default-flags` | `false`: add no flags of the build's own to compiles or links — only what this table says |
+| `default-flags` | `false`: add no flags of the build's own to compiles, the runtime or links — only what this table says. The default for a table with a `triple` of its own; `true` for one starting from a foreign target |
 | `cxx` | the C++ driver; derived from `cc` when absent |
 | `ar` | the archiver; derived from `cc` when absent |
 | `sysroot` | passed as `--sysroot` |

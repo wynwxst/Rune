@@ -125,7 +125,23 @@ target before anything can link. `ensureRuntimeFor` does that on demand and
 caches the result under `~/.rune/runtime/<triple>/`, which is why the first
 cross build of a session prints `Preparing runtime for …` and later ones do
 not. It compiles with the target's `cc`, `c-flags` and sysroot, and with
-`-fPIC` everywhere but WebAssembly (`wantsPic`).
+`-O2` and `-fPIC` everywhere but WebAssembly (`wantsPic`).
+
+A **raw** target is the exception. `TargetSpec::DefaultFlags` is tri-state:
+unset, a table with a `triple` of its own and no `base` resolves to
+`DefaultFlags = false`, and any target with `DefaultFlags` false gets
+`OwnRuntime`. `ensureRuntimeFor` then builds into the project's
+`target/<name>/runtime/`, never `~/.rune/runtime/`, with `compileCommand`
+reduced to `cc -c <c-flags> -I<headers> -o <obj> <src>` (plus `--sysroot`
+when the table names one), and decides freshness by a fingerprint of those
+command lines, the sources and headers, the archiver and the toolchain
+rather than by timestamps. `buildNativeSources` drops `-fPIC`, `-O`, `-g`
+and the default `-std` for such a target, and `runec` is passed
+`--no-default-link-args`.
+
+The runtime's own assembly (the fiber switch in `rune_task.c`) brackets
+itself in `.pushsection .text` / `.popsection` on ELF, so a raw `-g` build
+with GCC, which keeps writing debug sections around it, assembles.
 
 ## Places the target matters inside the compiler
 

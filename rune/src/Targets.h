@@ -103,6 +103,12 @@ struct ResolvedTarget {
   /// False: the compiler adds no link flags of its own either
   /// (`runec --no-default-link-args`).
   bool DefaultFlags = true;
+  /// The runtime is built for this target alone, in the project's
+  /// `target/<name>/runtime/`, with exactly the target's `cc` and `c-flags`
+  /// — never taken from `~/.rune/runtime`, where one for the same triple
+  /// was built with the build's own flags. Set for a target with no
+  /// default flags.
+  bool OwnRuntime = false;
 
   /// Enough to name what a build produces. Parsing the whole triple here
   /// would mean linking LLVM into the package driver for two questions.

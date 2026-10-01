@@ -566,6 +566,7 @@ Building for a machine that is not the one you are on. The compiler already emit
 - [Naming a target in the manifest](Cross_Compilation/naming_a_target_in_the_manifest.md)
 - [Where the output goes](Cross_Compilation/where_the_output_goes.md)
 - [The runtime](Cross_Compilation/the_runtime.md)
+- [Raw targets](Cross_Compilation/raw_targets.md)
 - [Running what you built](Cross_Compilation/running_what_you_built.md)
 - [C and C++ sources](Cross_Compilation/c_and_c_plus_plus_sources.md)
 - [What does not cross](Cross_Compilation/what_does_not_cross.md)

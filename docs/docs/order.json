@@ -481,6 +481,7 @@
   "naming_a_target_in_the_manifest.md",
   "where_the_output_goes.md",
   "the_runtime.md",
+  "raw_targets.md",
   "running_what_you_built.md",
   "c_and_c_plus_plus_sources.md",
   "what_does_not_cross.md",

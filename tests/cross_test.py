@@ -99,6 +99,48 @@ def resolution(tmp, env):
     write(manifest, original)
 
 
+def raw_target(tmp, env):
+    """A `[target.x]` with a triple of its own is raw: its runtime is built in
+    the project, in target/x/runtime, with the table's `cc` and `c-flags` and
+    nothing else — even for a triple with a runtime already cached — and the
+    link carries only what the table says."""
+    machine = subprocess.run(["cc", "-dumpmachine"], capture_output=True,
+                             text=True).stdout.strip()
+    if not machine:
+        print("skip raw target: no `cc` here")
+        return
+    rune(["new", "rawpkg"], tmp, env)
+    project = os.path.join(tmp, "rawpkg")
+    manifest = os.path.join(project, "Rune.toml")
+    with open(manifest, "a") as f:
+        f.write('\n[target.x]\ntriple = "%s"\ncc = "cc"\n'
+                'c-flags = ["-O1", "-DFROM_THE_TABLE"]\nlink-args = ["-lm"]\n'
+                'runner = "env"\n' % machine)
+    code, out = rune(["run", "--target", "x", "-v"], project, env)
+    check("a raw target builds and runs", code == 0 and "Hello from rawpkg!" in out, out)
+    check("its runtime is built in the project",
+          os.path.isfile(os.path.join(project, "target", "x", "runtime",
+                                      "libruneruntime.a")), out)
+    compiles = [l.strip() for l in out.splitlines() if "-I" in l and " -c " in l]
+    check("the runtime is compiled with the table's flags and nothing else",
+          compiles and all(l.startswith("'cc' -c '-O1' '-DFROM_THE_TABLE' -I")
+                           for l in compiles), "\n".join(compiles) or out)
+    link = [l for l in out.splitlines() if "link: " in l]
+    check("the link carries only what the table says",
+          link and link[0].rstrip().endswith("'-lm'") and "-rdynamic" not in link[0],
+          "\n".join(link) or out)
+    code, out = rune(["build", "--target", "x"], project, env)
+    check("an unchanged raw runtime is not built again",
+          code == 0 and "Preparing" not in out, out)
+    with open(manifest) as f:
+        text = f.read()
+    with open(manifest, "w") as f:
+        f.write(text.replace('"-DFROM_THE_TABLE"', '"-DFROM_THE_TABLE", "-g"'))
+    code, out = rune(["run", "--target", "x"], project, env)
+    check("a raw runtime is built again when its flags change",
+          code == 0 and "Preparing runtime" in out and "Hello from rawpkg!" in out, out)
+
+
 def find_sdk():
     for p in [os.environ.get("WASI_SDK_PATH", ""), "/opt/wasi-sdk"]:
         if p and os.path.isfile(os.path.join(p, "bin", "clang")):
@@ -191,6 +233,7 @@ def main():
     env = dict(os.environ, RUNE_HOME=os.path.join(tmp, "home"))
     try:
         resolution(tmp, env)
+        raw_target(tmp, env)
         webassembly(tmp, env)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

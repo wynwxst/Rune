@@ -271,7 +271,7 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
       t.LinkArgs = stringList(v.find("link-args"));
       if (const TomlValue *x = v.find("linker")) t.Linker = x->stringOr("");
       if (const TomlValue *x = v.find("linker-kind")) t.LinkerKind = x->stringOr("");
-      if (const TomlValue *x = v.find("default-flags")) t.DefaultFlags = x->boolOr(true);
+      if (const TomlValue *x = v.find("default-flags")) t.DefaultFlags = x->boolOr(true) ? 1 : 0;
       if (!t.LinkerKind.empty() && t.LinkerKind != "driver" && t.LinkerKind != "ld") {
         error = manifestPath.string() + ": [target." + t.Name +
                 "] `linker-kind` is \"" + t.LinkerKind +
