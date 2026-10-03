@@ -2731,14 +2731,45 @@ Value *CodeGen::emitLoop(LoopExpr *l, Value *slot, Type *slotType) {
 
 /// The receiver a method wants: the slot's address for `&self` / `&var self`,
 /// and the value itself for a receiver taken by value.
+///
+/// A slot that holds a borrow — `for v in items` with `items: &var
+/// Vector<T>` — is read through to what the method takes, as a method call
+/// on that borrow would be: a shared borrow of an object is the object, but
+/// a `&var` names the object's slot, so handing the borrow over as it is
+/// would give `iterate` a pointer to a handle where it wants the handle.
 Value *CodeGen::selfArgumentFor(FunctionDecl *m, Value *slot, Type *slotType) {
   Type *selfParam = nullptr;
   for (const Param &p : m->Params)
     if (p.IsSelf)
       selfParam = p.Ty;
-  if (selfParam && selfParam->is(TypeKind::Pointer))
-    return slot;
-  return B->CreateLoad(lower(slotType), slot);
+  if (!slotType->is(TypeKind::Pointer) || slotType->isRawPointer() ||
+      slotType == selfParam) {
+    if (selfParam && selfParam->is(TypeKind::Pointer))
+      return slot;
+    return B->CreateLoad(lower(slotType), slot);
+  }
+
+  Value *self = B->CreateLoad(PtrTy, slot);
+  Type *t = slotType;
+  if (selfParam && selfParam->is(TypeKind::Pointer)) {
+    // The method wants an address: stop at the last borrow.
+    while (t->is(TypeKind::Pointer) && !t->isRawPointer() && t != selfParam &&
+           t->pointee() && t->pointee()->is(TypeKind::Pointer) &&
+           !t->pointee()->isRawPointer()) {
+      self = B->CreateLoad(PtrTy, self);
+      t = t->pointee();
+    }
+    return self;
+  }
+  // The method wants the value — for a class, the handle — so read through
+  // every borrow that is not already the object itself.
+  while (t && t->is(TypeKind::Pointer) && !t->isRawPointer() &&
+         t != selfParam && t->pointee()) {
+    if (!handleBorrow(t))
+      self = B->CreateLoad(lower(t->pointee()), self);
+    t = t->pointee();
+  }
+  return self;
 }
 
 /// `for value in iterator`, driven by `Iterator::next` rather than by an
