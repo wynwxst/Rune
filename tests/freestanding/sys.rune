@@ -59,4 +59,4 @@ fn allocate(size: usize, align: usize) -> *var u8 {
 }
 
 @deallocator
-fn release(block: *var u8) { live -= 1 }
+fn release(block: *var u8, size: usize, align: usize) { live -= 1 }

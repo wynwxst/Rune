@@ -5946,9 +5946,9 @@ void Sema::checkRuntimeHook(FunctionDecl *fn, const Attribute &a) {
     wantResult = Types.voidType();
     spelled = "fn(bytes: *u8, count: usize)";
   } else {
-    want = {bytes};
+    want = {bytes, Types.usize(), Types.usize()};
     wantResult = Types.voidType();
-    spelled = "fn(block: *var u8)";
+    spelled = "fn(block: *var u8, size: usize, align: usize)";
   }
   bool ok = fn->Params.size() == want.size() && !fn->Parent &&
             fn->Generics.empty();

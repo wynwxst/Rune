@@ -52,6 +52,10 @@ public:
 
   /// Emits everything Sema collected. Returns false if an error was reported.
   bool run();
+  /// For `--tiers`: the modules whose generic bodies are walked, and the
+  /// answer per `module|owner|name` — `bare`, or the symbol it needs.
+  std::vector<Module *> TierModules;
+  std::map<std::string, std::string> Tiers;
 
   llvm::Module &module() { return *M; }
   llvm::LLVMContext &context() { return *Ctx; }
@@ -395,6 +399,7 @@ private:
   /// means is decided by linkage: see `setDiscardableLinkage`.
   void pruneUnreachable();
   void releaseUnusedRuntime();
+  void reportTiers();
   void exportCAdapters();
   /// True when a place expression is rooted in something with storage of its
   /// own — a local, `self`, a global — rather than in a value a call just

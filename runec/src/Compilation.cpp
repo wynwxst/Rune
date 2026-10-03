@@ -1321,6 +1321,16 @@ static std::string programDirective(const std::string &text,
 
 int compileWithOptions(const CompilerOptions &given) {
   CompilerOptions opts = given;
+  // `--tiers` builds the standard library as a freestanding program would
+  // see it — the `runtime == "none"` definitions, the freestanding runtime
+  // compiled in — and stops after code generation.
+  if (opts.TierReport) {
+    opts.Freestanding = true;
+    opts.NoEntry = true;
+    opts.Output = OutputKind::Object;
+    if (opts.ModuleName.empty())
+      opts.ModuleName = "tiers";
+  }
   PhaseTimer timer(opts.TimeReport);
   SourceManager sm;
   DiagnosticEngine diags(sm);
@@ -1812,10 +1822,31 @@ int compileWithOptions(const CompilerOptions &given) {
   opts.LinksRuneLibraries = !libraryObjects.empty();
   CodeGen cg(sm, diags, typeCtx, sema.result(), opts);
   bool generated = false;
+  if (opts.TierReport)
+    for (auto &m : modules)
+      cg.TierModules.push_back(m.get());
   timer.phase("codegen", [&] { generated = cg.run(); });
   if (!generated) {
     diags.statusFail("Build failed.");
     return 1;
+  }
+  if (opts.TierReport) {
+    if (opts.TierOut) {
+      *opts.TierOut = cg.Tiers;
+    } else {
+      for (const auto &[key, need] : cg.Tiers) {
+        size_t a = key.find('|'), b = key.find('|', a + 1);
+        std::string owner = key.substr(a + 1, b - a - 1);
+        std::string name = key.substr(0, a) + "::" +
+                           (owner.empty() ? "" : owner + "::") +
+                           key.substr(b + 1);
+        std::cout << (need == "bare" ? "bare    " : "hosted  ") << name;
+        if (need != "bare")
+          std::cout << "  (" << need << ")";
+        std::cout << "\n";
+      }
+    }
+    return 0;
   }
   std::unique_ptr<llvm::Module> llvmModule = cg.takeModule();
 
@@ -1946,6 +1977,19 @@ int compileWithOptions(const CompilerOptions &given) {
       return "";
     };
 
+    // The standard library's functions, each with whether a bare-metal
+    // program has it — worked out by building the library as one would.
+    std::map<std::string, std::string> tiers;
+    if (opts.DocsStdlib) {
+      CompilerOptions t;
+      t.TierReport = true;
+      t.TierOut = &tiers;
+      t.StdlibDir = opts.StdlibDir;
+      t.RunetimeDir = opts.RunetimeDir;
+      t.NoColor = true;
+      compileWithOptions(t);
+    }
+
     auto record = [&](const char *kind, const Decl *d, const std::string &mod,
                       const std::string &owner, const std::string &sig,
                       const std::string &base) {
@@ -1954,6 +1998,11 @@ int compileWithOptions(const CompilerOptions &given) {
       out << "name " << d->Name << "\n";
       if (!owner.empty()) out << "owner " << owner << "\n";
       if (!sig.empty()) out << "sig " << text(sig) << "\n";
+      auto tier = tiers.find(mod + "|" + owner + "|" + d->Name);
+      if (tier != tiers.end())
+        out << "tier " << (tier->second == "bare" ? std::string("bare")
+                                                   : "hosted " + tier->second)
+            << "\n";
       if (!base.empty()) out << "base " << base << "\n";
       out << "public " << (d->IsPublic ? 1 : 0) << "\n";
       if (!d->Doc.empty()) out << "doc " << text(d->Doc) << "\n";

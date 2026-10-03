@@ -180,7 +180,7 @@ fn releaseShared<T>(raw: *var u8) {
     if !mem::isNull(task) {
         unsafe { rune_task_free(task) }
     }
-    mem::allocator.deallocate(raw)
+    mem::allocator.deallocate(raw, mem::size_of::<Shared<T>>())
 }
 
 //===--------------------------------------------------------------------===//
@@ -433,7 +433,7 @@ fn jobTrampoline<A, R>(raw: *var u8) -> *var u8 {
     // The argument was retained for this thread when the job was built.
     unsafe { mem::release(argument) }
     unsafe { rune_task_complete_remote(job[0].task) }
-    mem::allocator.deallocate(raw)
+    mem::allocator.deallocate(raw, mem::size_of::<Job<A, R>>())
     mem::noBlock()
 }
 
@@ -446,7 +446,7 @@ fn offloadTrampoline<R>(raw: *var u8) -> *var u8 {
     // once the completion is posted the other thread may finish and count
     // what is still live, and nothing of this job should be.
     unsafe { rune_task_complete_remote(job[0].task) }
-    mem::allocator.deallocate(raw)
+    mem::allocator.deallocate(raw, mem::size_of::<Offload<R>>())
     mem::noBlock()
 }
 
@@ -610,7 +610,7 @@ fn waitAny<T>(futures: &vector::Vector<Future<T>>) -> i64 {
         i += 1
     }
     let index = unsafe { rune_task_wait_any(raw, count) }
-    mem::allocator.deallocate(raw)
+    mem::allocator.deallocate(raw, count as usize * mem::size_of::<*var u8>())
     index
 }
 
@@ -627,7 +627,7 @@ fn waitEither(a: *var u8, b: *var u8) -> i64 {
         tasks[1] = b
     }
     let index = unsafe { rune_task_wait_any(raw, 2) }
-    mem::allocator.deallocate(raw)
+    mem::allocator.deallocate(raw, 2 * mem::size_of::<*var u8>())
     index
 }
 

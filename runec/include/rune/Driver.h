@@ -152,6 +152,11 @@ struct CompilerOptions {
   /// artefact. They may call the freestanding runtime by name, so its entry
   /// points have to survive even where this module does not call them.
   bool LinksRuneLibraries = false;
+  /// `--tiers`: build the standard library freestanding and say, for every
+  /// function, whether it works there (`bare`) or what it needs from a hosted
+  /// build. `TierOut`, when set, receives the answers instead of stdout.
+  bool TierReport = false;
+  std::map<std::string, std::string> *TierOut = nullptr;
   /// `--runtime none` (or `@runtime(none)` at the top of a file): build a
   /// freestanding program. Nothing hosted is linked — no C library, no
   /// `libruneruntime.a` — and what the generated code needs of a runtime

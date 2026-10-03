@@ -1,6 +1,7 @@
 //===- CodeGen.cpp - Types, ARC, declarations and statements ---*- C++ -*-===//
 
 #include "rune/CodeGen.h"
+#include "rune/ASTWalk.h"
 #include "rune/CxxInterop.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -4453,6 +4454,15 @@ bool CodeGen::run() {
   for (FunctionDecl *fn : Sema.Functions)
     if (!fn->hasAttr("intrinsic") && !isAncillary(fn))
       emitFunctionBody(fn);
+  // `--tiers` asks about all of the standard library, so all of it is built.
+  // Whatever building it all eagerly turns up is not this report's to say.
+  if (Opts.TierReport) {
+    Diags.beginSpeculation();
+    for (FunctionDecl *fn : Sema.Functions)
+      if (!fn->hasAttr("intrinsic") && isAncillary(fn) && !fn->WhereUnmet)
+        emitFunctionBody(fn);
+    Diags.endSpeculation();
+  }
 
   emitEntryPoint();
 
@@ -4474,6 +4484,10 @@ bool CodeGen::run() {
   emitReachedBodies();
   if (Opts.Freestanding)
     emitBorrowedGlobalInitialisers();
+  if (Opts.TierReport) {
+    reportTiers();
+    return true;
+  }
 
   if (Opts.Freestanding && Opts.Output != OutputKind::Library)
     reportHostedRuntimeUses();
@@ -4579,6 +4593,180 @@ void CodeGen::releaseUnusedRuntime() {
       continue;
     setDiscardableLinkage(f, name.str());
   }
+}
+
+/// What each standard library function needs on a freestanding build. A
+/// function is `bare` when nothing it reaches — through calls, vtables,
+/// descriptors, function pointers — is left only declared; otherwise the
+/// answer is the first such symbol: something the C library or the hosted
+/// runtime defines and a bare-metal program does not have. A generic's body
+/// exists only once instantiated, so for one never instantiated here its own
+/// calls are followed as written.
+void CodeGen::reportTiers() {
+  std::map<const llvm::Function *, std::string> memo;
+  std::set<const llvm::Function *> busy;
+  std::set<const llvm::Value *> seenConst;
+  std::function<std::string(const llvm::Function *)> needs;
+  std::function<std::string(const llvm::Value *)> refs =
+      [&](const llvm::Value *v) -> std::string {
+    if (auto *f = dyn_cast<llvm::Function>(v))
+      return needs(f);
+    if (auto *gv = dyn_cast<llvm::GlobalVariable>(v)) {
+      if (!gv->hasInitializer() || !seenConst.insert(gv).second)
+        return "";
+      return refs(gv->getInitializer());
+    }
+    if (auto *c = dyn_cast<llvm::Constant>(v)) {
+      if (isa<llvm::ConstantData>(c) || !seenConst.insert(c).second)
+        return "";
+      for (const llvm::Use &op : c->operands()) {
+        std::string r = refs(op.get());
+        if (!r.empty())
+          return r;
+      }
+    }
+    return "";
+  };
+  needs = [&](const llvm::Function *f) -> std::string {
+    auto it = memo.find(f);
+    if (it != memo.end())
+      return it->second;
+    if (f->isIntrinsic())
+      return "";
+    if (f->isDeclaration())
+      return memo[f] = f->getName().str();
+    if (!busy.insert(f).second)
+      return "";
+    std::string found;
+    for (const llvm::BasicBlock &bb : *f) {
+      for (const llvm::Instruction &in : bb) {
+        for (const llvm::Use &op : in.operands())
+          if (!isa<llvm::BasicBlock>(op.get()) &&
+              (found = refs(op.get()), !found.empty()))
+            break;
+        if (!found.empty())
+          break;
+      }
+      if (!found.empty())
+        break;
+    }
+    busy.erase(f);
+    return memo[f] = found;
+  };
+
+  auto key = [](const FunctionDecl *fn) {
+    std::string owner;
+    if (fn->OwnerType && fn->OwnerType->nominal()) {
+      NominalDecl *nd = fn->OwnerType->nominal();
+      if (nd->GenericTemplate)
+        nd = nd->GenericTemplate;
+      owner = static_cast<Decl *>(nd)->Name;
+    } else if (fn->Parent && isa<NominalDecl>(fn->Parent)) {
+      owner = fn->Parent->Name;
+    }
+    return fn->ModulePath + "|" + owner + "|" + fn->Name;
+  };
+  auto note = [&](const FunctionDecl *fn, const std::string &need) {
+    std::string &slot = Tiers[key(fn)];
+    // One instantiation that needs a hosted build is enough to say so.
+    if (slot.empty() || slot == "bare")
+      slot = need.empty() ? "bare" : need;
+  };
+  for (auto &[decl, f] : Functions)
+    if (decl && f && !f->isDeclaration() && isAncillary(decl))
+      note(decl, needs(f));
+
+  // Generic templates. An instantiation the library made says it best;
+  // otherwise the template's own calls are followed by name, as written —
+  // its body is only checked once instantiated, so nothing is resolved yet.
+  // A call to a module's `extern` function nothing here defines is a need.
+  std::map<std::string, const FunctionDecl *> byName; // module|name
+  for (Module *m : TierModules)
+    for (auto &d : m->Decls) {
+      if (auto *fn = dyn_cast<FunctionDecl>(d.get()))
+        byName[m->Name + "|" + fn->Name] = fn;
+      if (auto *ex = dyn_cast<ExternDecl>(d.get()))
+        for (auto &fn : ex->Functions)
+          byName[m->Name + "|" + fn->Name] = fn.get();
+    }
+  auto lastSegment = [](const std::string &path) {
+    size_t at = path.rfind("::");
+    return at == std::string::npos ? path : path.substr(at + 2);
+  };
+  std::map<const FunctionDecl *, std::string> templ;
+  std::function<std::string(const FunctionDecl *, const std::string &)>
+      templateNeeds = [&](const FunctionDecl *fn,
+                          const std::string &module) -> std::string {
+    auto it = templ.find(fn);
+    if (it != templ.end())
+      return it->second;
+    templ[fn] = "";
+    for (FunctionDecl *inst : fn->Instantiations) {
+      auto f = Functions.find(inst);
+      if (f != Functions.end() && f->second && !f->second->isDeclaration())
+        return templ[fn] = needs(f->second);
+    }
+    auto external = [&](const FunctionDecl *t) -> std::string {
+      std::string sym = t->MangledName.empty() ? t->Name : t->MangledName;
+      llvm::Function *def = M->getFunction(sym);
+      return !def || def->isDeclaration() ? sym : "";
+    };
+    std::string found;
+    std::function<void(const Node *)> walk = [&](const Node *n) {
+      if (!n || !found.empty())
+        return;
+      if (auto *c = dyn_cast<CallExpr>(n)) {
+        const FunctionDecl *t = c->Target;
+        if (!t)
+          if (auto *r = dyn_cast<DeclRefExpr>(c->Callee.get())) {
+            if (r->Path.size() == 1) {
+              auto hit = byName.find(module + "|" + r->Path[0]);
+              if (hit != byName.end())
+                t = hit->second;
+            } else if (r->Path.size() >= 2) {
+              // `thread::spawn` from another module: the module whose last
+              // segment is the qualifier.
+              for (Module *m : TierModules)
+                if (lastSegment(m->Name) == r->Path[r->Path.size() - 2]) {
+                  auto hit = byName.find(m->Name + "|" + r->Path.back());
+                  if (hit != byName.end())
+                    t = hit->second;
+                }
+            }
+          }
+        if (t) {
+          auto f = Functions.find(const_cast<FunctionDecl *>(t));
+          if (t->IsExtern)
+            found = external(t);
+          else if (f != Functions.end() && f->second &&
+                   !f->second->isDeclaration())
+            found = needs(f->second);
+          else if (t->Body && t != fn)
+            found = templateNeeds(t, t->ModulePath);
+        }
+      }
+      forEachChild(n, walk);
+    };
+    if (fn->Body)
+      walk(fn->Body.get());
+    return templ[fn] = found;
+  };
+  std::function<void(const Node *, const std::string &)> collect =
+      [&](const Node *n, const std::string &module) {
+    if (!n)
+      return;
+    if (auto *fn = dyn_cast<FunctionDecl>(n)) {
+      if (fn->Body && fn->IsPublic && !Tiers.count(key(fn)) &&
+          !fn->hasAttr("intrinsic"))
+        note(fn, templateNeeds(fn, module));
+      return;
+    }
+    forEachChild(n, [&](const Node *c) { collect(c, module); });
+  };
+  for (Module *m : TierModules)
+    for (auto &d : m->Decls)
+      if (Sema.isAncillary(d->ModulePath))
+        collect(d.get(), m->Name);
 }
 
 void CodeGen::pruneUnreachable() {

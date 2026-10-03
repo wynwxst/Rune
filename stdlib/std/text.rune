@@ -28,7 +28,9 @@ pub class CodePoints {
         self.capacity = 0
     }
 
-    fn deinit(self) { mem::allocator.deallocate(self.block) }
+    fn deinit(self) {
+        mem::allocator.deallocate(self.block, self.capacity as usize * mem::size_of<i64>())
+    }
 
     pub fn length(&self) -> i64 { self.count }
     pub fn isEmpty(&self) -> bool { self.count == 0 }
@@ -51,7 +53,8 @@ pub class CodePoints {
             var grown = self.capacity * 2
             if grown < 8 { grown = 8 }
             let bytes = grown as usize * mem::size_of<i64>()
-            let block = mem::allocator.reallocate(self.block, bytes)
+            let block = mem::allocator.reallocate(
+                self.block, self.capacity as usize * mem::size_of<i64>(), bytes)
             if mem::isNull(block) { return }
             self.block = block
             self.capacity = grown

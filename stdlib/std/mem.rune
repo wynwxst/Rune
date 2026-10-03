@@ -12,8 +12,8 @@ import std::collections::vector
 
 extern "C" {
     fn rune_raw_alloc(size: u64) -> *var u8
-    fn rune_raw_realloc(block: *var u8, size: u64) -> *var u8
-    fn rune_raw_free(block: *var u8)
+    fn rune_raw_realloc(block: *var u8, oldSize: u64, size: u64) -> *var u8
+    fn rune_raw_free(block: *var u8, size: u64)
     fn rune_raw_copy(dst: *var u8, src: *u8, size: u64)
     fn rune_raw_zero(block: *var u8, size: u64)
     fn rune_raw_is_zero(block: *u8, size: u64) -> bool
@@ -83,12 +83,15 @@ pub mark Allocator {
     /// A block of at least `bytes`, or a null pointer if none can be had.
     fn allocate(&self, bytes: usize) -> *var u8
 
-    /// Returns a block. Passing a null pointer is allowed and does nothing.
-    fn deallocate(&self, block: *var u8)
+    /// Returns a block, saying how big it was — what `allocate` was asked
+    /// for. Passing a null pointer is allowed and does nothing. Knowing the
+    /// size is what lets an allocator keep no header of its own: a slab
+    /// allocator finds the slab from it.
+    fn deallocate(&self, block: *var u8, bytes: usize)
 
-    /// Grows or shrinks a block, preserving its contents up to the smaller of
-    /// the two sizes. The old pointer is invalid afterwards.
-    fn reallocate(&self, block: *var u8, bytes: usize) -> *var u8
+    /// Grows or shrinks a block of `oldBytes`, preserving its contents up to
+    /// the smaller of the two sizes. The old pointer is invalid afterwards.
+    fn reallocate(&self, block: *var u8, oldBytes: usize, bytes: usize) -> *var u8
 }
 
 /// The allocator backing every other one: the process heap.
@@ -101,13 +104,13 @@ bind Allocator to SystemAllocator {
     }
 
     @safe("the runtime ignores a null block")
-    fn deallocate(&self, block: *var u8) {
-        unsafe { rune_raw_free(block) }
+    fn deallocate(&self, block: *var u8, bytes: usize) {
+        unsafe { rune_raw_free(block, bytes as u64) }
     }
 
     @safe("the runtime copies the contents it can keep")
-    fn reallocate(&self, block: *var u8, bytes: usize) -> *var u8 {
-        unsafe { rune_raw_realloc(block, bytes as u64) }
+    fn reallocate(&self, block: *var u8, oldBytes: usize, bytes: usize) -> *var u8 {
+        unsafe { rune_raw_realloc(block, oldBytes as u64, bytes as u64) }
     }
 }
 
@@ -429,7 +432,7 @@ pub struct Box<T> {
     fn deinit(&self) {
         if isNull(self.block) { return }
         unsafe { drop_at<T>(self.block as *var T) }
-        allocator.deallocate(self.block)
+        allocator.deallocate(self.block, size_of<T>())
     }
 
     /// The value where it lies, borrowed for as long as the box is. This is
@@ -561,7 +564,9 @@ pub struct Rc<T> {
         rcSetStrong(self.block, n)
         if n > 0 { return }
         unsafe { drop_at<T>(offset(self.block, rcValueOffset<T>()) as *var T) }
-        if rcWeakCount(self.block) == 0 { allocator.deallocate(self.block) }
+        if rcWeakCount(self.block) == 0 {
+            allocator.deallocate(self.block, rcValueOffset<T>() + size_of<T>())
+        }
     }
 
     /// The value where it lies, borrowed for as long as this owner is.
@@ -649,7 +654,9 @@ pub struct Weak<T> {
         if isNull(self.block) { return }
         let n = rcWeakCount(self.block) - 1
         rcSetWeak(self.block, n)
-        if n == 0 && rcStrong(self.block) == 0 { allocator.deallocate(self.block) }
+        if n == 0 && rcStrong(self.block) == 0 {
+            allocator.deallocate(self.block, rcValueOffset<T>() + size_of<T>())
+        }
     }
 
     /// An owner of the value, or nothing when the value has gone.
@@ -740,7 +747,7 @@ pub class Buffer<T> {
             unsafe { drop_at<T>(&var (self.block as *var T)[i] as *var T) }
             i += 1
         }
-        allocator.deallocate(self.block)
+        allocator.deallocate(self.block, self.count as usize * size_of<T>())
     }
 
     //=== Size ===========================================================//

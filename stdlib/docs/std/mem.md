@@ -141,7 +141,7 @@ fn main() -> i64 {
     let view = unsafe { mem::slice_of<i64>(slots, 4) }
     io::println(view.$length())
     io::println(slice::fold(view, 0, ||(a: i64, n: i64) -> i64 { a + n }))
-    mem::allocator.deallocate(block)
+    mem::allocator.deallocate(block, 4 * mem::size_of<i64>())
 
     let v = vec!(1, 2, 3)
     io::println(slice::join(v.asSlice(), "+"))

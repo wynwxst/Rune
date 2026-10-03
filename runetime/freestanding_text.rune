@@ -20,7 +20,7 @@
 extern "C" {
     fn rune_alloc(size: u64, info: *var u8) -> *var u8
     fn rune_raw_alloc(size: u64) -> *var u8
-    fn rune_raw_free(block: *var u8)
+    fn rune_raw_free(block: *var u8, size: u64)
     fn rune_raw_copy(dst: *var u8, src: *u8, size: u64)
     fn rune_make_immortal(obj: *var u8)
     fn rune_panic_bounds(index: i64, length: i64, location: CString)
@@ -98,7 +98,7 @@ fn stringDeinit(obj: *var u8) {
     let s = unsafe { obj as *var StringObject }
     let block = unsafe { s[0].data }
     if unsafe { block as usize } != 0 {
-        unsafe { rune_raw_free(block) }
+        unsafe { rune_raw_free(block, (s[0].capacity + 1) as u64) }
     }
     unsafe { s[0].data = 0 as *var u8 }
 }

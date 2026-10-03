@@ -193,6 +193,7 @@ fn scheduling() {
                        "round-robin: 10 units of work in 3 turns of 2")
     }
     console::check(heap::bytesInUse == 0, "every process reaped, every byte back")
+    console::check(heap::sizeMismatches == 0, "every block came back with its own size")
     console::print("       heap: ")
     console::printNumber(heap::allocations)
     console::print(" allocations, ")

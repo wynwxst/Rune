@@ -44,7 +44,7 @@ pub class Vector<T> {
 
     fn deinit(self) {
         self.clear()
-        mem::allocator.deallocate(self.block)
+        mem::allocator.deallocate(self.block, self.capacity * mem::size_of<T>())
     }
 
     //=== Size ===========================================================//
@@ -286,7 +286,8 @@ pub class Vector<T> {
         if grown < 4 { grown = 4 }
         if grown < wanted { grown = wanted }
         let bytes = grown as usize * mem::size_of<T>()
-        let block = mem::allocator.reallocate(self.block, bytes)
+        let block = mem::allocator.reallocate(self.block,
+                                              self.capacity * mem::size_of<T>(), bytes)
         if mem::isNull(block) {
             process::panic("Vector: out of memory")
             return

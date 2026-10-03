@@ -1,6 +1,8 @@
 // Raw memory, and the layers that make it unnecessary.
 //
-//     runec -o memory examples/memory.rune && ./memory
+//     runec --memory arc -o memory examples/memory.rune && ./memory
+//
+// Reference counting: part of what it shows is two names sharing one value.
 
 import std::io
 import std::mem
@@ -95,11 +97,12 @@ fn allocator() {
     io::println("  four cells total " + total.$str())
 
     // Growing keeps what fits.
-    let bigger = mem::allocator.reallocate(block, 8 * mem::size_of<i64>())
+    let bigger = mem::allocator.reallocate(block, count as usize * mem::size_of<i64>(),
+                                           8 * mem::size_of<i64>())
     let grown = unsafe { bigger as *var i64 }
     let kept = unsafe { grown[0] }
     io::println("  after growing, cell 0 is still " + kept.$str())
-    mem::allocator.deallocate(bigger)
+    mem::allocator.deallocate(bigger, 8 * mem::size_of<i64>())
 }
 
 //===--------------------------------------------------------------------===//

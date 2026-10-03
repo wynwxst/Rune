@@ -341,13 +341,13 @@ pub fn rawAlloc(size: u64) -> *var u8 { unsafe { malloc(size as usize) } }
 
 @export("rune_raw_realloc")
 @safe("realloc accepts a null block and treats it as a fresh allocation")
-pub fn rawRealloc(block: *var u8, size: u64) -> *var u8 {
+pub fn rawRealloc(block: *var u8, oldSize: u64, size: u64) -> *var u8 {
     unsafe { realloc(block, size as usize) }
 }
 
 @export("rune_raw_free")
 @safe("free ignores a null block")
-pub fn rawFree(block: *var u8) { unsafe { free(block) } }
+pub fn rawFree(block: *var u8, size: u64) { unsafe { free(block) } }
 
 @export("rune_raw_copy")
 @safe("the caller sizes both blocks; that is where the invariant lives")

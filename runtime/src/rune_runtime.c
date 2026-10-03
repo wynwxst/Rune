@@ -894,7 +894,7 @@ RuneString *rune_read_line_checked(int8_t *more) {
     saw_any = 1;
     if (len + 1 >= cap) {
       cap *= 2;
-      buf = (char *)rune_raw_realloc(buf, cap);
+      buf = (char *)rune_raw_realloc(buf, cap / 2, cap);
     }
     buf[len++] = (char)c;
   }
@@ -905,7 +905,7 @@ RuneString *rune_read_line_checked(int8_t *more) {
   if (more)
     *more = (int8_t)(saw_any || c == '\n');
   RuneString *s = rune_string_from_bytes(buf, (int64_t)len);
-  rune_raw_free(buf);
+  rune_raw_free(buf, cap);
   return s;
 }
 
@@ -939,7 +939,7 @@ RuneString *rune_read_stdin_exact(int64_t count, int8_t *ok) {
   if (ok)
     *ok = (int8_t)(got == (size_t)count);
   RuneString *s = rune_string_from_bytes(buf, (int64_t)got);
-  rune_raw_free(buf);
+  rune_raw_free(buf, (uint64_t)count + 1);
   return s;
 }
 

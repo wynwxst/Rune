@@ -451,11 +451,11 @@ pub class File {
         if mem::isNull(block) { return nil }
         let got = unsafe { fgets(block, cap as i32, self.handle) }
         if mem::isNull(got) {
-            mem::allocator.deallocate(block)
+            mem::allocator.deallocate(block, cap as usize)
             return nil
         }
         var line = unsafe { rune_string_from_cstr(block as CString) }
-        mem::allocator.deallocate(block)
+        mem::allocator.deallocate(block, cap as usize)
         // fgets keeps the newline; callers almost never want it.
         let n = line.$length()
         if n > 0 && line.$byteAt(n - 1) == 10 {
@@ -478,7 +478,7 @@ pub class File {
         // Terminate it where the read actually stopped.
         unsafe { (block as *var u8)[read as i64] = 0 }
         let text = unsafe { rune_string_from_cstr(block as CString) }
-        mem::allocator.deallocate(block)
+        mem::allocator.deallocate(block, (size + 1) as usize)
         text
     }
 
@@ -709,7 +709,7 @@ pub class Bytes {
     }
 
     fn deinit(self) {
-        mem::allocator.deallocate(self.block)
+        mem::allocator.deallocate(self.block, self.capacity as usize)
         self.block = mem::noBlock()
         self.count = 0
         self.capacity = 0
@@ -739,7 +739,8 @@ pub class Bytes {
         if wanted <= self.capacity { return }
         var next = if self.capacity == 0 { 32 } else { self.capacity }
         while next < wanted { next *= 2 }
-        let grown = mem::allocator.reallocate(self.block, next as usize)
+        let grown = mem::allocator.reallocate(self.block, self.capacity as usize,
+                                              next as usize)
         if mem::isNull(grown) {
             process::panic("out of memory growing a byte buffer")
         }

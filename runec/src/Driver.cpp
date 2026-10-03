@@ -27,6 +27,8 @@ OUTPUT
     --shared             Emit a native shared library (.dylib/.so/.dll)
     --emit-docs          Emit a documentation sidecar (.rdoc)
     --docs-stdlib        With --emit-docs: cover the standard library's modules
+    --tiers              Say which standard library functions work on bare
+                         metal (`@runtime(none)`) and what the rest need
     --check              Type-check only; produce no output
 
 CODE GENERATION
@@ -333,6 +335,7 @@ int runCompilerMain(int argc, char **argv) {
     if (a == "-v" || a == "--verbose") { opts.Verbose = true; continue; }
     if (a == "--time") { opts.TimeReport = true; continue; }
     if (a == "--docs-stdlib") { opts.DocsStdlib = true; continue; }
+    if (a == "--tiers") { opts.TierReport = true; continue; }
     if (!a.empty() && a[0] == '-') {
       std::cerr << "runec: unknown option '" << a << "'\n"
                 << "       run `runec --help` for the list of options\n";
@@ -343,7 +346,8 @@ int runCompilerMain(int argc, char **argv) {
 
   // Documenting the standard library needs no input of its own: the
   // library is read whether or not anything imports it.
-  if (opts.Inputs.empty() && !(opts.DocsStdlib && opts.Output == OutputKind::Docs)) {
+  if (opts.Inputs.empty() && !(opts.DocsStdlib && opts.Output == OutputKind::Docs) &&
+      !opts.TierReport) {
     std::cerr << "runec: no input files\n";
     printUsage(std::cerr);
     return 2;

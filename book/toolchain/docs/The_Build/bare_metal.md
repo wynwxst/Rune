@@ -100,15 +100,26 @@ in the image (`.rune.strconst`) instead of a `rune_string_literal` call, and
 in `+` a string literal checks after the other side so it can become a
 `String`.
 
+**Tiers.** `runec --tiers` compiles the whole standard library freestanding
+(`TierReport` forces every function's body, under speculation so the eager
+build's own complaints stay quiet) and `CodeGen::reportTiers` walks the IR:
+a function is `bare` when nothing it reaches through calls, vtables,
+descriptors or function pointers is left only declared, and otherwise names
+the first such symbol. A generic template uses an instantiation the library
+made, or its own calls resolved by name. `--emit-docs --docs-stdlib` runs the
+same analysis in-process and writes a `tier` line per function, which
+`rune-doc` shows as a **bare metal** / **hosted** badge; `bare_metal_test.py`
+checks that every module builds and that known answers hold.
+
 ## In `runetime/freestanding.rune`
 
 Everything the code generator calls, as `@export`ed Rune: the panic entry
 points (formatting into a static buffer, since a panic may be the heap
 running out), `rune_alloc` / `rune_drop` over the hooks, `$clone`, `is`,
 `Any`, hashing, `memcpy` and friends, the raw blocks `std::mem` is built on
-(`rune_raw_alloc`, `_realloc`, `_free`, `_is_zero` — each block keeps its size
-in a 16-byte header, because `@deallocator` is never told one and a realloc
-has to know how much to copy), and `__divdi3` and its three siblings
+(`rune_raw_alloc`, `_realloc`, `_free`, `_is_zero` — with no header: every
+caller passes the size back, `std::mem`'s `Allocator` included, and `rune_drop`
+reads an object's from its `TypeInfo`, so `@deallocator` is told both), and `__divdi3` and its three siblings
 under `@Config(pointer_width == "32")` — written with shifts and subtraction,
 since a `/` there would call itself. Everything a program might want to
 replace is `@weak`.

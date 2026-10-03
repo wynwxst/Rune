@@ -86,9 +86,16 @@ fn handOut(at: usize) -> *var u8 {
     unsafe { (regionStart() + at + 16) as *var u8 }
 }
 
+/// Every block comes back with the size it was asked for and the alignment
+/// it was given, so a heap with no header could find its slab from them.
+/// This one has headers, which lets it check what it is told: a block may
+/// be up to one split's worth bigger than asked, when it was not worth
+/// splitting.
+pub global var sizeMismatches: i64 = 0
+
 @deallocator
 @safe("checks that the block is one of ours before touching it")
-fn release(block: *var u8) {
+fn release(block: *var u8, size: usize, align: usize) {
     let address = unsafe { block as usize }
     let start = regionStart()
     if address < start + 16 || address >= start + carved { return }
@@ -97,6 +104,9 @@ fn release(block: *var u8) {
     if unsafe { h[0].magic } != headerMagic() || unsafe { h[0].used } == 0 {
         return
     }
+    let had = unsafe { h[0].size } as usize
+    let asked = roundUp(if size == 0 { 1 as usize } else { size })
+    if had < asked || had >= asked + 32 || align != 16 { sizeMismatches += 1 }
     unsafe { h[0].used = 0 }
     frees += 1
     bytesInUse -= unsafe { h[0].size } as i64

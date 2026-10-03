@@ -7,7 +7,7 @@
 //
 //     @panicHandler  fn(message: CString, location: CString) -> Never
 //     @allocator     fn(size: usize, align: usize) -> *var u8
-//     @deallocator   fn(block: *var u8)
+//     @deallocator   fn(block: *var u8, size: usize, align: usize)
 //     @output        fn(bytes: *u8, count: usize)
 //
 // Each has a `@weak` default here that a program's own replaces. The default
@@ -67,7 +67,7 @@ fn defaultAllocate(size: usize, align: usize) -> *var u8 {
 /// Without an allocator nothing was allocated, so there is nothing to free.
 @export("rune_heap_free")
 @weak
-fn defaultFree(block: *var u8) {}
+fn defaultFree(block: *var u8, size: usize, align: usize) {}
 
 //===--------------------------------------------------------------------===//
 // Memory, byte by byte
@@ -288,9 +288,7 @@ fn immortalMark() -> i64 { 4611686018427387904 }   // 1 << 62
 @export("rune_alloc")
 @safe("the allocator hands back at least `size` bytes, or null")
 pub fn alloc(size: u64, info: *var u8) -> *var u8 {
-    var want = size as usize
-    let header = 16 as usize
-    if want < header { want = header }
+    let want = objectBytes(size)
     let block = defaultAllocate(want, 16 as usize)
     if isNull(block) {
         defaultPanicHandler("out of memory", "runetime/freestanding.rune")
@@ -321,15 +319,24 @@ pub fn drop(obj: *var u8, checked: bool) {
     }
     unsafe { o[0].refcount = 0 }
     let info = unsafe { o[0].typeinfo }
+    // What `alloc` asked for: the descriptor says how big an object of its
+    // type is, which is what the `@deallocator` is told.
+    var size: u64 = 0
     if !isNull(info) {
         let ti = unsafe { info as *var TypeInfo }
+        size = unsafe { ti[0].size }
         let d = unsafe { ti[0].deinit }
         if !isNull(d) {
             let run = unsafe { d as @cfunction(*var u8) -> () }
             unsafe { run(obj) }
         }
     }
-    defaultFree(obj)
+    defaultFree(obj, objectBytes(size), 16 as usize)
+}
+
+/// An object is never smaller than its header.
+fn objectBytes(size: u64) -> usize {
+    if size < 16 { 16 as usize } else { size as usize }
 }
 
 @export("rune_make_immortal")
@@ -382,47 +389,29 @@ pub fn isKindOf(obj: *var u8, info: *var u8) -> i32 {
 pub fn anyIs(obj: *var u8, info: *var u8) -> i32 { isKindOf(obj, info) }
 
 /// Raw memory, for code that manages its own: `mem::allocator`, and so
-/// `Vector`, `Map` and the rest of `std::collections`.
-///
-/// Growing a block means copying what it held, and `@deallocator` is told
-/// only where a block is, never how big — so each raw block carries its size
-/// in a header of its own, ahead of what the caller sees. Sixteen bytes of
-/// it, which keeps the caller's part aligned as the allocator's was.
-fn rawHeader() -> usize { 16 as usize }
-
+/// `Vector`, `Map` and the rest of `std::collections`. Every caller says how
+/// big a block is when it gives it back, so the program's `@deallocator` is
+/// told the size and alignment and nothing keeps a header.
 @export("rune_raw_alloc")
-@safe("the header is inside the block the allocator handed back")
-pub fn rawAlloc(size: u64) -> *var u8 {
-    let block = defaultAllocate(size as usize + rawHeader(), 16 as usize)
-    if isNull(block) { return block }
-    unsafe { (block as *var u64)[0] = size }
-    unsafe { (block as usize + rawHeader()) as *var u8 }
-}
-
-/// The block the allocator handed out, from the address its caller holds.
-@safe("only raw blocks reach here, and each has its header before it")
-fn rawBase(block: *var u8) -> *var u8 {
-    unsafe { (block as usize - rawHeader()) as *var u8 }
-}
+pub fn rawAlloc(size: u64) -> *var u8 { defaultAllocate(size as usize, 16 as usize) }
 
 @export("rune_raw_free")
-pub fn rawFree(block: *var u8) {
-    if !isNull(block) { defaultFree(rawBase(block)) }
+pub fn rawFree(block: *var u8, size: u64) {
+    if !isNull(block) { defaultFree(block, size as usize, 16 as usize) }
 }
 
-/// A block of `size` holding what `block` did, up to the smaller of the two;
-/// `block` is gone afterwards. A null `block` is a fresh allocation, as C's
-/// `realloc` has it.
+/// A block of `size` holding what `block` (of `oldSize`) did, up to the
+/// smaller of the two; `block` is gone afterwards. A null `block` is a fresh
+/// allocation, as C's `realloc` has it.
 @export("rune_raw_realloc")
-@safe("copies no more than either block holds, by the size in its header")
-pub fn rawRealloc(block: *var u8, size: u64) -> *var u8 {
+@safe("copies no more than either block holds")
+pub fn rawRealloc(block: *var u8, oldSize: u64, size: u64) -> *var u8 {
     if isNull(block) { return rawAlloc(size) }
-    let old = unsafe { (rawBase(block) as *var u64)[0] }
     let fresh = rawAlloc(size)
     if isNull(fresh) { return fresh }
-    let keep = if old < size { old } else { size }
+    let keep = if oldSize < size { oldSize } else { size }
     if keep != 0 { memcpy(fresh, unsafe { block as *u8 }, keep as usize) }
-    rawFree(block)
+    rawFree(block, oldSize)
     fresh
 }
 

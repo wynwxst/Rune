@@ -7282,7 +7282,7 @@ fn main() -> i64 {
     }
     io::println(total.$str())
 
-    mem::allocator.deallocate(block)
+    mem::allocator.deallocate(block, 4 as usize * mem::size_of<i64>())
     0
 }""", mode="run", title="Indexing raw memory"),
         N("A store through a raw pointer is raw in the other sense too: no "
@@ -7466,7 +7466,7 @@ fn sumOfSquares(count: i64) -> i64 {
         i += 1
     }
     let total = unsafe { sumUnchecked(cells, count) }
-    mem::allocator.deallocate(block)
+    mem::allocator.deallocate(block, count as usize * mem::size_of<i64>())
     total
 }
 
@@ -10804,7 +10804,7 @@ fn main() -> i64 {
     }
     io::println(total.$str())
 
-    mem::allocator.deallocate(block)
+    mem::allocator.deallocate(block, 4 as usize * mem::size_of<i64>())
     0
 }""", mode="run", title="Using the allocator directly"),
         N("`p[n]` on a raw pointer is offset arithmetic with nothing to check "
@@ -11186,7 +11186,7 @@ pub class Arena {
         self.handed = 0
     }
 
-    fn deinit(self) { mem::allocator.deallocate(self.block) }
+    fn deinit(self) { mem::allocator.deallocate(self.block, self.size) }
 
     pub fn handedOut(&self) -> i64 { self.handed }
     pub fn usedBytes(&self) -> i64 { self.used as i64 }
@@ -11213,11 +11213,11 @@ bind mem::Allocator to Arena {
     }
 
     /// An arena frees in one go, so a single block going back is a no-op.
-    fn deallocate(&self, block: *var u8) {}
+    fn deallocate(&self, block: *var u8, bytes: usize) {}
 
     /// Growing in place is not something a bump allocator can do; hand back a
     /// fresh block and let the caller copy.
-    fn reallocate(&self, block: *var u8, bytes: usize) -> *var u8 {
+    fn reallocate(&self, block: *var u8, oldBytes: usize, bytes: usize) -> *var u8 {
         self.allocate(bytes)
     }
 }
@@ -11247,8 +11247,8 @@ fn main() -> i64 {
     0
 }""", mode="run", title="A bump allocator"),
         N("The three methods are the whole contract: `allocate` returns a "
-          "block or null, `deallocate` takes one back, and `reallocate` "
-          "resizes. Nothing else in the language needs to know which allocator "
+          "block or null, `deallocate` takes one back and is told how big it "
+          "was, and `reallocate` resizes one, told its old size too. Nothing else in the language needs to know which allocator "
           "it is talking to.", label="Three methods"),
 
         H("Built-in methods and the `$` sigil"),
@@ -14387,6 +14387,16 @@ fn kernelMain(magic: u32, info: u32) -> Never {
 4 ║ fn greet() { let name = io::readLine() }
        ^^^^^ ERROR: 'greet' needs the hosted runtime, and this program is built without one [E0542]
     ─  note: it uses standard input, which needs an operating system to read from"""),
+        P("Which is which is not left to finding out: every function in the "
+          "standard library's reference carries a badge — **bare metal** or "
+          "**hosted**, with what a hosted one needs — and `runec --tiers` "
+          "prints the same list, worked out by building the whole library "
+          "as a `@runtime(none)` program would see it."),
+        SH("""$ runec --tiers | grep std::io::
+bare    std::io::print
+bare    std::io::println
+hosted  std::io::readLine  (rune_read_line)
+..."""),
         H("Strings"),
         P("A string literal nothing asks to be a `String` is a `CString`: it "
           "can be named, stored in a table and handed to a function without "
@@ -14426,8 +14436,10 @@ fn greet(name: String) {
             "every object a class, a closure or a `Unique` makes, and every "
             "block `std::mem` hands a container",
             "panics: *this program allocates, and declares no @allocator*"],
-           ["`@deallocator`", "`fn(block: *var u8)`",
-            "every object whose one owner is done with it",
+           ["`@deallocator`", "`fn(block: *var u8, size: usize, align: usize)`",
+            "every object whose one owner is done with it, and every block "
+            "`std::mem` gives back — told the size and alignment it was "
+            "allocated with, so it needs no header of its own",
             "nothing — without an allocator nothing was allocated"],
            ["`@output`", "`fn(bytes: *u8, count: usize)`",
             "`print`, `println!` and the rest of `std::io`'s output, and the "
@@ -14446,7 +14458,7 @@ fn allocate(size: usize, align: usize) -> *var u8 {
 }
 
 @deallocator
-fn release(block: *var u8) {}""", mode="frag",
+fn release(block: *var u8, size: usize, align: usize) {}""", mode="frag",
           title="The smallest allocator: a bump pointer that never frees"),
 
         H("Safety on bare metal"),
@@ -14475,9 +14487,9 @@ fn release(block: *var u8) {}""", mode="frag",
            ["Memory", "`memcpy`, `memmove`, `memset`, `memcmp` — LLVM emits "
             "calls to them for large copies whatever the target"],
            ["Raw memory", "`rune_raw_alloc`, `_realloc`, `_free` and "
-            "`_is_zero`, which `std::mem` is built on. Each block carries "
-            "its size in 16 bytes ahead of it, since `@deallocator` is never "
-            "told one and growing a block has to copy it"],
+            "`_is_zero`, which `std::mem` is built on. Every caller says how "
+            "big a block is when it gives it back, so no block carries a "
+            "header and `@deallocator` is told the size"],
            ["32-bit targets", "`__divdi3`, `__udivdi3`, `__moddi3` and "
             "`__umoddi3`: 64-bit division, which a 32-bit processor does "
             "with a library call"],

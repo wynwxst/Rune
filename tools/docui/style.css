@@ -480,6 +480,21 @@ blockquote p:last-child { margin-bottom: 0; }
   color: var(--ink-faint);
 }
 
+/* Where a standard library function runs: everywhere, or hosted only. */
+.tier {
+  margin-left: .6rem;
+  padding: .05rem .4rem;
+  border-radius: .3rem;
+  font-family: var(--mono);
+  font-size: .64rem;
+  font-weight: 500;
+  letter-spacing: .03em;
+  vertical-align: middle;
+  border: 1px solid currentColor;
+}
+.tier.bare { color: #2f8a4f; }
+.tier.hosted { color: var(--ink-faint); }
+
 .group {
   margin: 2.2rem 0 .2rem;
   font-family: var(--mono);

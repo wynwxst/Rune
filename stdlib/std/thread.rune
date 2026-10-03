@@ -99,11 +99,15 @@ fn trampoline<A, R>(raw: *var u8) -> *var u8 {
 pub class Handle<R> {
     thread: *var u8
     box: *var u8
+    // How big the task box is: it holds the argument too, whose type the
+    // handle never learns, and the allocator is told what it gets back.
+    boxBytes: usize
     joined: bool
 
-    fn init(self, thread: *var u8, box: *var u8) {
+    fn init(self, thread: *var u8, box: *var u8, boxBytes: usize) {
         self.thread = thread
         self.box = box
+        self.boxBytes = boxBytes
         self.joined = false
     }
 
@@ -130,7 +134,7 @@ pub class Handle<R> {
         unsafe { rune_thread_join(self.thread) }
         unsafe { rune_thread_dispose(self.thread) }
         if !self.joined { unsafe { mem::drop_at<R>(self.box as *var R) } }
-        mem::allocator.deallocate(self.box)
+        mem::allocator.deallocate(self.box, self.boxBytes)
     }
 }
 
@@ -161,10 +165,10 @@ pub fn spawn<A: Send, R: Send>(entry: @cfunction(A) -> R,
     let started = unsafe { rune_thread_start(trampoline::<A, R>, raw) }
     if mem::isNull(started) {
         unsafe { mem::drop_at<A>(&var task[0].argument as *var A) }
-        mem::allocator.deallocate(raw)
+        mem::allocator.deallocate(raw, mem::size_of::<Task<A, R>>())
         process::panic("cannot start a thread")
     }
-    Handle::<R>(started, raw)
+    Handle::<R>(started, raw, mem::size_of::<Task<A, R>>())
 }
 
 /// How many threads this machine runs at once. One when it cannot be found —
@@ -261,7 +265,7 @@ pub class Mutex<T> {
     @safe("the mutex is going away: nothing else holds it, or the lock")
     fn deinit(self) {
         unsafe { mem::drop_at<T>(self.cell as *var T) }
-        mem::allocator.deallocate(self.cell)
+        mem::allocator.deallocate(self.cell, mem::size_of<T>())
         unsafe { rune_mutex_dispose(self.handle) }
     }
 }
@@ -368,7 +372,7 @@ pub class Channel<T: Send> {
             unsafe { mem::store<T>(dest, mem::take<T>(self.slot(i))) }
             i += 1
         }
-        mem::allocator.deallocate(self.block)
+        mem::allocator.deallocate(self.block, self.capacity as usize * mem::size_of<T>())
         unsafe {
             (&self.block as *var *var u8)[0] = fresh
             (&self.head as *var i64)[0] = 0
@@ -459,7 +463,7 @@ pub class Channel<T: Send> {
             unsafe { mem::drop_at<T>(self.slot(i)) }
             i += 1
         }
-        mem::allocator.deallocate(self.block)
+        mem::allocator.deallocate(self.block, self.capacity as usize * mem::size_of<T>())
         unsafe { rune_cond_dispose(self.ready) }
         unsafe { rune_mutex_dispose(self.lock) }
     }

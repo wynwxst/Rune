@@ -22,7 +22,7 @@ Invoked by CTest as `rune_bare_metal`; run it by hand with
 
     python3 tests/bare_metal_test.py build/bin
 """
-import os, platform, shutil, subprocess, sys, tempfile
+import os, platform, re, shutil, subprocess, sys, tempfile
 
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build/bin")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +80,54 @@ def freestanding(tmp):
         check(f"{name}: exits {status}{' saying so' if text else ''}",
               run.returncode == status and text in run.stdout,
               f"exit {run.returncode}\n{run.stdout}{run.stderr}")
+
+
+def tiers():
+    """The whole standard library, built as a `@runtime(none)` program would
+    see it: every module has to compile that way, and `runec --tiers` says
+    which functions work on bare metal. The answers the documentation's
+    badges show are checked against what is known."""
+    r = subprocess.run([os.path.join(BIN, "runec"), "--tiers", "--no-color"],
+                       capture_output=True, text=True)
+    check("every module of the standard library builds freestanding",
+          r.returncode == 0 and r.stderr.strip() == "", r.stderr[-3000:])
+    tier = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            tier[parts[1]] = parts[0]
+    stdlib = os.path.join(ROOT, "stdlib", "std")
+    modules = set()
+    for base, _, files in os.walk(stdlib):
+        for f in files:
+            # A module of marks, intrinsics and macros has nothing to place.
+            if f.endswith(".rune") and re.search(
+                    r"^pub fn [^\n]*\{", open(os.path.join(base, f)).read(), re.M):
+                rel = os.path.relpath(os.path.join(base, f), stdlib)[:-5]
+                modules.add("std::" + rel.replace(os.sep, "::"))
+    reported = set()
+    for name in tier:
+        parts = name.split("::")
+        for cut in range(1, len(parts)):
+            reported.add("::".join(parts[:cut]))
+    missing = sorted(m for m in modules if m not in reported)
+    check("every module has its functions placed", not missing, ", ".join(missing))
+    expect = {
+        "std::collections::vector::Vector::push": "bare",
+        "std::dictionary::Map::put": "bare",
+        "std::io::println": "bare",
+        "std::fmt::fixed": "bare",
+        "std::process::panic": "bare",
+        "std::json::write": "bare",
+        "std::random::seeded": "bare",
+        "std::io::readLine": "hosted",
+        "std::thread::spawn": "hosted",
+        "std::process::exit": "hosted",
+        "std::random::new": "hosted",
+    }
+    wrong = [f"{k}: {tier.get(k, 'missing')}, not {v}" for k, v in expect.items()
+             if tier.get(k) != v]
+    check("bare metal and hosted where they are known to be", not wrong, "\n".join(wrong))
 
 
 def toyos(tmp):
@@ -325,6 +373,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="rune-bare-")
     try:
         freestanding(tmp)
+        tiers()
         toyos(tmp)
         gnu_toolchain(tmp)
         tetris(tmp)

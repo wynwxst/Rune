@@ -46,6 +46,9 @@ class Entry {
     pub isPublic: bool
     pub doc: String
     pub decl: String
+    /// The standard library's: `bare` when a `@runtime(none)` program has
+    /// it, `hosted <symbol>` when it needs what that names. Empty elsewhere.
+    pub tier: String
 
     fn init(self) {
         self.kind = ""
@@ -57,6 +60,7 @@ class Entry {
         self.isPublic = false
         self.doc = ""
         self.decl = ""
+        self.tier = ""
     }
 }
 
@@ -151,6 +155,7 @@ fn readSidecar(src: String) -> vector::Vector<Entry> {
         elif k == "public" { cur.isPublic = v == "1" }
         elif k == "doc" { cur.doc = unescape(v) }
         elif k == "decl" { cur.decl = unescape(v) }
+        elif k == "tier" { cur.tier = v }
     }
     if seen { out.push(cur) }
     out
@@ -723,9 +728,23 @@ fn endSection() {
 /// A member with nothing written about it is one line — its signature already
 /// names it, and a heading above that would say the same word twice. One with
 /// prose gets the heading, because that is what a reader scans for.
-fn member(id: String, name: String, kind: String, sig: String, doc: String) {
+/// Where a standard library function runs: on bare metal too, or only with
+/// the hosted runtime — and if so, what of it the function needs.
+fn tierBadge(tier: &String) -> String {
+    if tier.$isEmpty() { return "" }
+    if *tier == "bare" {
+        return "<span class=\"tier bare\" title=\"works in a @runtime(none) program\">bare metal</span>"
+    }
+    let needs = if tier.$length() > 7 { tier.$substring(7, tier.$length()) } else { "" }
+    "<span class=\"tier hosted\" title=\"needs the hosted runtime: " + attr(needs) +
+        "\">hosted</span>"
+}
+
+fn member(id: String, name: String, kind: String, sig: String, doc: String,
+          tier: String = "") {
     entryCount += 1
     let bare = doc.$isEmpty()
+    let badge = tierBadge(&tier)
     body += "<div class=\"member" + (if bare { " terse" } else { "" }) +
             "\" id=\"" + id + "\">\n"
     if !bare {
@@ -733,6 +752,7 @@ fn member(id: String, name: String, kind: String, sig: String, doc: String) {
         if !kind.$isEmpty() {
             body += "<span class=\"tag\">" + attr(kind) + "</span>"
         }
+        body += badge
         body += "</h4>\n"
     }
     if !sig.$isEmpty() {
@@ -740,6 +760,7 @@ fn member(id: String, name: String, kind: String, sig: String, doc: String) {
         if bare && !kind.$isEmpty() {
             body += "<span class=\"tag\">" + attr(kind) + "</span>"
         }
+        if bare { body += badge }
         body += "</p>\n"
     } elif bare {
         body += "<p class=\"sig\"><span class=\"name\">" + attr(name) +
@@ -796,7 +817,7 @@ fn renderMembers(list: vector::Vector<Entry>, label: String, tag: String,
             shown = e.name + " to " + e.owner
         }
         member(prefix + "-" + seen.$str() + "-" + slug(shown), shown, tag,
-               e.sig, e.doc)
+               e.sig, e.doc, e.tier)
     }
 }
 
