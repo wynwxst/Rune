@@ -1,0 +1,11 @@
+// EXPECT-ERROR: cannot compare 'Shape' with 'Shape'
+// Only a payload-free enum compares directly; one that carries payloads says
+// what equal means with `bind operator::eq`, as a struct does.
+import std::io
+
+enum Shape { Circle(i64), Rect { w: i64, h: i64 } }
+
+fn main() -> i64 {
+    io::println(Shape::Circle(1) == Shape::Circle(2))
+    0
+}

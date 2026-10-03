@@ -1081,8 +1081,24 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
                       (lt->isPointerLike() && rt->isPointerLike() &&
                        !lt->isAny() && !rt->isAny()) ||
                       (lt->is(TypeKind::Enum) && lt == rt &&
-                       reinterpret_cast<EnumDecl *>(lt->nominal())->IsSimple) ||
-                      (isOptionType(lt) && lt == rt);
+                       reinterpret_cast<EnumDecl *>(lt->nominal())->IsSimple);
+    // Two `Option`s are equal when both are `None`, or both are `Some` of
+    // equal payloads — so the payload type has to say what equal means.
+    if (!comparable && isOptionType(lt) && lt == rt) {
+      if (!equalityDefined(lt, b->PayloadEq)) {
+        Type *inner = lt;
+        while (isOptionType(inner) && optionPayload(inner))
+          inner = optionPayload(inner);
+        Diags.error(b->OpRange, "cannot compare '{}' with '{}'",
+                    lt->toString(), rt->toString())
+            .note(fmt("its payload '{}' has no `==`; implement it with "
+                      "`bind operator::eq to {}`",
+                      inner->toString(), inner->toString())
+                      .c_str())
+            .code(323);
+      }
+      return Types.boolType();
+    }
     if (comparable) {
       if (lt->isNumeric() && rt->isNumeric() && !promote(lt, rt)) {
         Diags.error(b->OpRange, "cannot compare '{}' with '{}'", lt->toString(),
@@ -1171,6 +1187,40 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
                   lt->toString())
                .c_str());
   return Types.errorType();
+}
+
+bool Sema::equalityDefined(Type *t, FunctionDecl *&eq) {
+  eq = nullptr;
+  if (!t || t->isError())
+    return false;
+  if (isOptionType(t))
+    return optionPayload(t) && equalityDefined(optionPayload(t), eq);
+  // A borrow of plain data compares as the value it points at, the way the
+  // operands of a top-level `==` are read through.
+  if (t->is(TypeKind::Pointer) && !t->isRawPointer() && !t->isWeakPointer()) {
+    Type *inner = t->pointee();
+    if (inner && (inner->isNumeric() || inner->isBool() ||
+                  inner->is(TypeKind::Char) || inner->is(TypeKind::String)))
+      return true;
+  }
+  auto bound = [&]() {
+    if (FunctionDecl *impl = lookupOperator(t, "eq", t)) {
+      ensureTemplateSignature(impl);
+      eq = impl;
+      return true;
+    }
+    return false;
+  };
+  // A class says what comparing it means, or compares by identity.
+  if (t->is(TypeKind::Class) && bound())
+    return true;
+  if (t->isNumeric() || t->isBool() || t->is(TypeKind::Char) ||
+      t->is(TypeKind::String) || t->is(TypeKind::CString) ||
+      (t->isPointerLike() && !t->isAny()) ||
+      (t->is(TypeKind::Enum) &&
+       reinterpret_cast<EnumDecl *>(t->nominal())->IsSimple))
+    return true;
+  return bound();
 }
 
 Type *Sema::checkAssign(AssignExpr *a) {

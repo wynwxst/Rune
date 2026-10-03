@@ -1961,6 +1961,12 @@ Value *CodeGen::emitBinary(BinaryExpr *b) {
   Value *l = emitRValue(b->LHS.get());
   Value *r = emitRValue(b->RHS.get());
 
+  // Options compare their payloads, not just which variant they hold.
+  if (isComparison(b->Op) && isOptionType(lt) && lt == rt) {
+    Value *eq = emitEquality(l, r, lt, b->PayloadEq);
+    return b->Op == BinaryOp::Eq ? eq : B->CreateNot(eq);
+  }
+
   if (lt->is(TypeKind::Enum) && rt->is(TypeKind::Enum)) {
     // Simple enums compare by discriminant.
     Value *lAddr = createEntryAlloca(lower(lt), "enum.l");
@@ -2055,6 +2061,86 @@ Value *CodeGen::emitBinary(BinaryExpr *b) {
     break;
   }
   return l;
+}
+
+Value *CodeGen::emitEquality(Value *l, Value *r, Type *t, FunctionDecl *eq) {
+  if (isOptionType(t)) {
+    // Equal when both are `None`, or both are `Some` of equal payloads.
+    Function *f = fs().Fn;
+    Type *payloadTy = optionPayload(t);
+    int someIndex = variantIndexNamed(t, "Some");
+    Value *lSome = emitVariantTest(l, t, "Some");
+    Value *rSome = emitVariantTest(r, t, "Some");
+    // Not both `Some`: equal exactly when neither is.
+    Value *sameVariant = B->CreateICmpEQ(lSome, rSome);
+    BasicBlock *entryBB = B->GetInsertBlock();
+    auto *bothBB = BasicBlock::Create(*Ctx, "opteq.some", f);
+    auto *doneBB = BasicBlock::Create(*Ctx, "opteq.done", f);
+    B->CreateCondBr(B->CreateAnd(lSome, rSome), bothBB, doneBB);
+
+    B->SetInsertPoint(bothBB);
+    Value *lp = emitVariantPayload(l, t, someIndex, 0, payloadTy);
+    Value *rp = emitVariantPayload(r, t, someIndex, 0, payloadTy);
+    Value *payloadEq = emitEquality(lp, rp, payloadTy, eq);
+    bothBB = B->GetInsertBlock();
+    B->CreateBr(doneBB);
+
+    B->SetInsertPoint(doneBB);
+    PHINode *phi = B->CreatePHI(B->getInt1Ty(), 2);
+    phi->addIncoming(sameVariant, entryBB);
+    phi->addIncoming(payloadEq, bothBB);
+    return phi;
+  }
+
+  if (eq) {
+    Function *fn = declareFunction(eq);
+    Type *selfParam = nullptr, *rhsParam = nullptr;
+    for (const Param &p : eq->Params) {
+      if (p.IsSelf)
+        selfParam = p.Ty;
+      else if (!rhsParam)
+        rhsParam = p.Ty;
+    }
+    // As for an overloaded operator above: a slot borrow wants an address.
+    auto pass = [&](Value *v, Type *param) -> Value * {
+      if (param && param->is(TypeKind::Pointer) && !handleBorrow(param)) {
+        Value *slot = createEntryAlloca(lower(t), "eq.arg");
+        B->CreateStore(v, slot);
+        return slot;
+      }
+      return param ? coerce(v, t, param) : v;
+    };
+    return B->CreateCall(fn, {pass(l, selfParam), pass(r, rhsParam)});
+  }
+
+  // A borrow of plain data compares as the value behind it.
+  if (t->is(TypeKind::Pointer) && !t->isRawPointer() && !t->isWeakPointer() &&
+      t->pointee() &&
+      (t->pointee()->isNumeric() || t->pointee()->isBool() ||
+       t->pointee()->is(TypeKind::Char) ||
+       t->pointee()->is(TypeKind::String))) {
+    Type *inner = t->pointee();
+    return emitEquality(B->CreateLoad(lower(inner), l),
+                        B->CreateLoad(lower(inner), r), inner, nullptr);
+  }
+
+  if (t->is(TypeKind::String)) {
+    Value *cmp = B->CreateCall(
+        runtimeFn("rune_string_compare", B->getInt32Ty(), {PtrTy, PtrTy}),
+        {l, r});
+    return B->CreateICmpEQ(cmp, B->getInt32(0));
+  }
+
+  if (t->is(TypeKind::Enum))
+    return B->CreateICmpEQ(emitEnumTag(l, t), emitEnumTag(r, t));
+
+  if (t->isPointerLike() && !t->isNumeric())
+    return B->CreateICmpEQ(B->CreatePtrToInt(l, B->getInt64Ty()),
+                           B->CreatePtrToInt(r, B->getInt64Ty()));
+
+  if (t->isFloat())
+    return B->CreateFCmpOEQ(l, r);
+  return B->CreateICmpEQ(l, r);
 }
 
 Value *CodeGen::emitAssign(AssignExpr *a) {
@@ -3160,10 +3246,23 @@ void CodeGen::emitPatternTest(Pattern *pat, Value *addr, Type *t,
   case NodeKind::TuplePat: {
     auto *tp = cast<TuplePattern>(pat);
     for (size_t i = 0; i < tp->Elements.size() && i < t->tupleElements().size();
-         ++i)
-      emitPatternTest(tp->Elements[i].get(),
-                      B->CreateStructGEP(lower(t), addr, static_cast<unsigned>(i)),
-                      t->tupleElements()[i], fail);
+         ++i) {
+      Pattern *sub = tp->Elements[i].get();
+      Value *at =
+          B->CreateStructGEP(lower(t), addr, static_cast<unsigned>(i));
+      Type *elem = t->tupleElements()[i];
+      // `match (x, y)` of two borrows tests what they point at, just as
+      // `match x` does: a name binds the borrow itself, anything that looks
+      // inside reads through it first.
+      bool looksInside =
+          sub && sub->Kind != NodeKind::WildcardPat &&
+          !(sub->Kind == NodeKind::BindingPat &&
+            !cast<BindingPattern>(sub)->isVariantTest());
+      if (looksInside && elem->is(TypeKind::Pointer) && !elem->isRawPointer() &&
+          !elem->isWeakPointer())
+        at = subjectThroughBorrows(B->CreateLoad(PtrTy, at), elem);
+      emitPatternTest(sub, at, elem, fail);
+    }
     return;
   }
 

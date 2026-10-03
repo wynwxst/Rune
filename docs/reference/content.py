@@ -1047,7 +1047,11 @@ fn main() -> i64 {
 
         H("Comparison"),
         P("Comparison yields a `bool`. Numbers, `bool`, `Character`, `String`, "
-          "`CString`, pointers and payload-free enums all compare directly."),
+          "`CString`, pointers and payload-free enums all compare directly. "
+          "Two `Option`s are equal when both are `None`, or both are `Some` of "
+          "equal payloads, so `T?` has `==` exactly when `T` does. Structs, "
+          "tuples and enums that carry payloads say what equal means with "
+          "`bind operator::eq`."),
         S("""import std::io
 
 enum Colour { Red, Green, Blue }

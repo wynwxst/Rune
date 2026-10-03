@@ -1,0 +1,101 @@
+// FLAGS: --memory arc
+// EXPECT: false
+// EXPECT: true
+// EXPECT: true
+// EXPECT: false
+// EXPECT: true
+// EXPECT: true
+// EXPECT: false
+// EXPECT: true
+// EXPECT: false
+// EXPECT: false
+// EXPECT: true
+// EXPECT: false
+// EXPECT: true
+// EXPECT: false
+// EXPECT: true
+// EXPECT: true
+// EXPECT: false
+// EXPECT: true
+// EXPECT: false
+// EXPECT: false
+// EXPECT: true
+// EXPECT: true
+// EXPECT: false
+// EXPECT: 1 x
+// `==` on two Options compares the payloads, not only the variant: it used
+// to read the discriminant alone, so `Some(1) == Some(2)` was true. The
+// payload compares with its own `==` — builtin, or a `bind operator::eq` —
+// and a tuple of borrows matches variant patterns through the borrows, which
+// is how such an `eq` is written. (B6_zombie_option_equality is this, owned.)
+import std::io
+
+enum Shape {
+    Circle(i64),
+    Rect { w: i64, h: i64 },
+    Label(String, i64),
+    Empty,
+}
+
+bind operator::eq to Shape {
+    fn eq(&self, rhs: &Shape) -> bool {
+        match (self, rhs) {
+            (Shape::Circle(a), Shape::Circle(b)) => a == b,
+            (Shape::Rect { w: aw, h: ah }, Shape::Rect { w: bw, h: bh }) => aw == bw && ah == bh,
+            (Shape::Label(a, x), Shape::Label(b, y)) => a == b && x == y,
+            (Shape::Empty, Shape::Empty) => true,
+            _ => false,
+        }
+    }
+}
+
+fn main() -> i64 {
+    let a: i64? = 1
+    let b: i64? = 2
+    let c: i64? = 1
+    let n: i64? = nil
+    io::println(a == b)
+    io::println(a == c)
+    io::println(a != b)
+    io::println(a == n)
+    io::println(n == n)
+    io::println(a == Some(1))
+
+    let s: String? = "x"
+    let t: String? = "y"
+    let u: String? = "x"
+    io::println(s == t)
+    io::println(s == u)
+    io::println(s != u)
+
+    let nested: Option<Option<i64>> = Some(Some(3))
+    let other: Option<Option<i64>> = Some(Option::<i64>::None)
+    io::println(nested == other)
+    io::println(nested == Some(Some(3)))
+
+    // NaN equals nothing, through an Option too; `!=` stays `!(==)`.
+    let f: f64? = 0.0 / 0.0
+    io::println(f == f)
+    io::println(f != f)
+
+    let p = Shape::Rect { w: 2, h: 3 }
+    let q = Shape::Rect { w: 2, h: 4 }
+    io::println(p == q)
+    io::println(Shape::Circle(1) == Shape::Circle(1))
+    io::println(Shape::Empty == Shape::Empty)
+    io::println(Shape::Empty == Shape::Circle(0))
+    io::println(Shape::Label("a", 1) == Shape::Label("a", 1))
+    io::println(Shape::Label("a", 1) == Shape::Label("b", 1))
+
+    let ps: Shape? = Shape::Rect { w: 2, h: 3 }
+    let qs: Shape? = Shape::Rect { w: 2, h: 4 }
+    let rs: Shape? = Shape::Rect { w: 2, h: 3 }
+    io::println(ps == qs)
+    io::println(ps == rs)
+    io::println(ps != qs)
+    io::println(ps == nil)
+
+    // Nothing was moved or released by comparing.
+    io::println((a ?? 0).$str() + " " + (s ?? "none"))
+    0
+}

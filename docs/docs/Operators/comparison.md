@@ -1,6 +1,6 @@
 # Comparison
 
-Comparison yields a `bool`. Numbers, `bool`, `Character`, `String`, `CString`, pointers and payload-free enums all compare directly.
+Comparison yields a `bool`. Numbers, `bool`, `Character`, `String`, `CString`, pointers and payload-free enums all compare directly. Two `Option`s are equal when both are `None`, or both are `Some` of equal payloads, so `T?` has `==` exactly when `T` does. Structs, tuples and enums that carry payloads say what equal means with `bind operator::eq`.
 
 **Comparing every comparable thing**
 

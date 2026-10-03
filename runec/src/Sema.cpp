@@ -8341,10 +8341,38 @@ void Sema::checkPattern(Pattern *p, Type *scrutinee, bool declaresBindings,
           .note(fmt("the value has type '{}'", scrutinee->toString()).c_str())
           .code(256);
     }
-    for (size_t i = 0; i < t->Elements.size(); ++i)
-      checkPattern(t->Elements[i].get(),
-                   i < elems.size() ? elems[i] : Types.errorType(),
-                   declaresBindings, isMutable);
+    // An element that is a borrow is looked through by anything that looks
+    // inside it, as `match x` looks through a borrowed `x`; a name binds
+    // the borrow itself. (CodeGen reads through on the same rule.)
+    auto looksInside = [&](Pattern *sub, Type *et) {
+      if (!sub || sub->Kind == NodeKind::WildcardPat)
+        return false;
+      if (sub->Kind != NodeKind::BindingPat)
+        return true;
+      auto *b = cast<BindingPattern>(sub);
+      if (b->Sub || (declaresBindings && !b->MustBeVariant))
+        return false;
+      if (b->MustBeVariant)
+        return true;
+      // A bare name that is a unit variant of the enum behind the borrow.
+      while (et->is(TypeKind::Pointer) && et->pointee())
+        et = et->pointee();
+      if (!et->is(TypeKind::Enum) || et->isOpaque())
+        return false;
+      for (const auto &v :
+           reinterpret_cast<EnumDecl *>(et->nominal())->Variants)
+        if (v->Name == b->Name && v->Shape == VariantShape::Unit)
+          return true;
+      return false;
+    };
+    for (size_t i = 0; i < t->Elements.size(); ++i) {
+      Type *et = i < elems.size() ? elems[i] : Types.errorType();
+      if (looksInside(t->Elements[i].get(), et))
+        while (et->is(TypeKind::Pointer) && !et->isRawPointer() &&
+               !et->isWeakPointer() && et->pointee())
+          et = et->pointee();
+      checkPattern(t->Elements[i].get(), et, declaresBindings, isMutable);
+    }
     break;
   }
 
