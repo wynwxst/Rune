@@ -1477,6 +1477,11 @@ int compileWithOptions(const CompilerOptions &given) {
           continue;
         }
       }
+      // A library that *is* the module being compiled — the unit or package
+      // an editor is checking, whose last build sits on the import path — is
+      // that module's old self, not something it imports.
+      if (!opts.ModuleName.empty() && lib.ModuleName == opts.ModuleName)
+        continue;
       // The object code inside bakes in one memory model — retains and
       // releases, or their absence and the moved-in argument convention —
       // so a library from the other model would link and then miscount.

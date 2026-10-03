@@ -97,6 +97,45 @@ try:
     text = open(os.path.join(other, "Rune.toml")).read()
     check("ws init finds the packages already there",
           rc == 0 and '"app"' in text and '"libs/util"' in text, out + text)
+
+    # Local units: folders under src/, each compiled on its own.
+    rc, out = rune("new", "units", cwd=tmp)
+    pkg = os.path.join(tmp, "units")
+    os.makedirs(os.path.join(pkg, "src", "unit"))
+    os.makedirs(os.path.join(pkg, "src", "unit2"))
+    open(os.path.join(pkg, "src", "unit", "hello.rune"), "w").write(
+        'pub fn hello() -> String { "hello" }\n')
+    open(os.path.join(pkg, "src", "unit2", "bye.rune"), "w").write(
+        'import unit::hello\npub fn bye() -> String { hello::hello() + " and bye" }\n')
+    open(os.path.join(pkg, "src", "main.rune"), "w").write(
+        "import std::io\nimport unit::hello\nimport unit2::bye\n"
+        "fn main() -> i64 {\n    io::println(hello::hello())\n"
+        "    io::println(bye::bye())\n    0\n}\n")
+    rc, out = rune("build", cwd=pkg)
+    check("units compile before the package, in import order",
+          rc == 0 and out.find("units::unit (unit)") < out.find("units::unit2 (unit)")
+          < out.find("Compiling units v"), out)
+    rc, out = rune("run", cwd=pkg)
+    check("main imports unit::hello and unit2::bye",
+          rc == 0 and "hello\nhello and bye" in out, out)
+    rc, out = rune("build", cwd=pkg)
+    check("a second build compiles nothing", rc == 0 and "Compiling" not in out, out)
+    with open(os.path.join(pkg, "src", "unit2", "bye.rune"), "a") as f:
+        f.write("// edited\n")
+    rc, out = rune("build", cwd=pkg)
+    check("editing one unit leaves the units it imports alone",
+          rc == 0 and "unit2 (unit)" in out and "units::unit (unit)" not in out, out)
+    open(os.path.join(pkg, "src", "unit", "loop.rune"), "w").write(
+        "import unit2::bye\npub fn x() -> String { bye::bye() }\n")
+    rc, out = rune("build", cwd=pkg)
+    check("units importing one another in a circle are named",
+          rc != 0 and "in a circle" in out, out)
+    os.remove(os.path.join(pkg, "src", "unit", "loop.rune"))
+    os.makedirs(os.path.join(pkg, "src", "bad-name"))
+    open(os.path.join(pkg, "src", "bad-name", "x.rune"), "w").write("pub fn x() {}\n")
+    rc, out = rune("build", cwd=pkg)
+    check("a folder that is not a name cannot be a unit",
+          rc != 0 and "is not a name" in out, out)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

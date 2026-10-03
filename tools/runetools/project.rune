@@ -538,6 +538,13 @@ pub class Project {
                 let found = packageModule(root, name, rest)
                 if !found.$isEmpty() { return found }
             }
+            // A local unit: `import net::http` is `src/net/http.rune`, and
+            // `import net` is `src/net/net.rune`.
+            let unitDir = join(join(root, "src"), first)
+            if io::isDirectory(unitDir) {
+                let p = join(unitDir, (if rest.$isEmpty() { first.$clone() } else { rest.$clone() }) + ".rune")
+                if io::exists(p) || self.overlays.holds(p) { return p }
+            }
             if self.manifest(mid).deps.peek(first) is Some(dep) {
                 let depDir = dep.$clone()
                 let depManifest = self.manifestFor(join(depDir, "Rune.toml"))
@@ -1468,11 +1475,30 @@ pub fn compileCommand(p: &var Project, runec: &String, path: &String, overlay: &
     }
     let lib = join(join(root, "src"), "lib.rune")
     let hasLib = io::exists(lib)
-    // Every file under src/, sorted into roots and the components compiled
-    // into each root.
+    // A file in a folder under src/ belongs to that local unit, which is
+    // compiled on its own under the folder's name; the other units are the
+    // libraries `rune build` left in deps/.
+    let srcDir = join(root, "src") + "/"
+    if path.$find(srcDir) == 0 {
+        let rel = path.$substring(srcDir.$length(), path.$length())
+        let slash = rel.$find("/")
+        if slash > 0 {
+            let unit = rel.$substring(0, slash)
+            cmd.arg("--module")
+            cmd.arg(unit.$clone())
+            cmd.arg(path.$clone())
+            for f in sourcesUnder(join(join(root, "src"), unit)) {
+                if f != path { cmd.arg(f.$clone()) }
+            }
+            return cmd
+        }
+    }
+    // Every file directly in src/, sorted into roots and the components
+    // compiled into each root. Those in folders are units of their own.
     var components = vector::Vector<String>()
     var ownIsRoot = false
     for f in sourcesUnder(join(root, "src")) {
+        if f.$substring(srcDir.$length(), f.$length()).$find("/") >= 0 { continue }
         let id = p.load(f)
         if id < 0 { continue }
         let isRoot = isRootModule(p.module(id)) || f == lib

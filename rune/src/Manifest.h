@@ -93,6 +93,16 @@ struct OutputRoot {
   OutputKind Kind = OutputKind::Component;
 };
 
+/// A local unit: a folder directly under `src/`, compiled on its own into a
+/// library the rest of the package imports. `src/net/http.rune` is module
+/// `net::http`; `src/net/net.rune`, when there is one, is `net` itself.
+struct LocalUnit {
+  std::string Name;                 ///< the folder's name
+  std::string Dir;                  ///< absolute
+  std::vector<std::string> Sources; ///< every .rune under it
+  std::vector<std::string> Uses;    ///< other units it imports
+};
+
 struct Manifest {
   // [package]
   std::string Name = "unnamed";
@@ -106,7 +116,10 @@ struct Manifest {
   std::string Root;             ///< directory containing Rune.toml
   std::string LibraryRoot;      ///< src/lib.rune, empty when absent
   std::string BinaryRoot;       ///< src/main.rune, empty when absent
-  std::vector<std::string> Sources;   ///< every .rune under src/
+  std::vector<std::string> Sources;   ///< the .rune files directly in src/
+  /// The folders under src/, each a unit compiled before the package's own
+  /// files, in an order where a unit comes after those it imports.
+  std::vector<LocalUnit> Units;
   std::vector<std::string> TestFiles; ///< every .rune under tests/
   std::vector<BinaryTarget> Binaries;
   /// Every file under `src/` that declares its own output, discovered by

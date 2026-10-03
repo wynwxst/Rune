@@ -4,6 +4,7 @@
 #include "Toml.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -325,9 +326,57 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
     }
   }
 
-  // Layout discovery.
+  // Layout discovery. The files directly in src/ are the package's own; each
+  // folder under it is a unit of its own.
   fs::path src = root / "src";
-  collectRuneFiles(src, out.Sources);
+  {
+    std::vector<std::string> all;
+    collectRuneFiles(src, all);
+    std::map<std::string, size_t> unitIndex;
+    for (const std::string &f : all) {
+      std::error_code rec;
+      fs::path rel = fs::relative(fs::path(f), src, rec);
+      auto first = rel.begin();
+      if (rec || rel.parent_path().empty()) {
+        out.Sources.push_back(f);
+        continue;
+      }
+      std::string name = first->string();
+      auto it = unitIndex.find(name);
+      if (it == unitIndex.end()) {
+        LocalUnit u;
+        u.Name = name;
+        u.Dir = (src / name).string();
+        it = unitIndex.emplace(name, out.Units.size()).first;
+        out.Units.push_back(std::move(u));
+      }
+      out.Units[it->second].Sources.push_back(f);
+    }
+    // Which units each one imports: `import other` or `import other::x`.
+    for (LocalUnit &u : out.Units) {
+      for (const std::string &f : u.Sources) {
+        std::ifstream in(f);
+        std::string line;
+        while (std::getline(in, line)) {
+          size_t at = line.find_first_not_of(" \t");
+          if (at == std::string::npos || line.compare(at, 7, "import ") != 0)
+            continue;
+          at = line.find_first_not_of(" \t", at + 7);
+          if (at == std::string::npos)
+            continue;
+          size_t end = at;
+          while (end < line.size() &&
+                 (std::isalnum(static_cast<unsigned char>(line[end])) ||
+                  line[end] == '_'))
+            ++end;
+          std::string head = line.substr(at, end - at);
+          if (head != u.Name && unitIndex.count(head) &&
+              std::find(u.Uses.begin(), u.Uses.end(), head) == u.Uses.end())
+            u.Uses.push_back(head);
+        }
+      }
+    }
+  }
   collectRuneFiles(root / "tests", out.TestFiles);
 
   // Every file that declares an output of its own becomes a target. A file

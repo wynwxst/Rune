@@ -39,6 +39,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <set>
@@ -931,6 +932,107 @@ bool runBuildScript(const PackageNode &node, const Options &opts,
   return true;
 }
 
+/// Compiles the package's local units — the folders under `src/` — each into
+/// a library of its own in `depsDir`, where everything else the package
+/// compiles already looks. A unit comes after the units it imports, and is
+/// compiled again only when its files, or a unit it imports, change. The
+/// libraries are recorded with the package's inputs, so a package depending
+/// on this one is handed them too.
+bool buildLocalUnits(PackageNode &node, const fs::path &depsDir,
+                     const Options &opts) {
+  const Manifest &m = node.M;
+  if (m.Units.empty())
+    return true;
+  pm::FingerprintStore stamps(buildDir(m, opts));
+  std::map<std::string, size_t> index;
+  for (size_t i = 0; i < m.Units.size(); ++i)
+    index[m.Units[i].Name] = i;
+  for (const LocalUnit &u : m.Units) {
+    bool word = !u.Name.empty() &&
+                !std::isdigit(static_cast<unsigned char>(u.Name[0]));
+    for (char ch : u.Name)
+      word = word && (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_');
+    if (!word) {
+      failLine("src/" + u.Name + "/ cannot be a unit of '" + m.Name +
+               "': a unit is named after its folder, and '" + u.Name +
+               "' is not a name");
+      note("rename the folder to letters, digits and `_`");
+      return false;
+    }
+    if (u.Name == m.Name) {
+      failLine("src/" + u.Name + "/ has the package's own name");
+      note("a unit's modules would collide with the package's; rename the "
+           "folder");
+      return false;
+    }
+    for (const Dependency &d : m.Dependencies)
+      if (d.Name == u.Name) {
+        failLine("src/" + u.Name + "/ has the same name as the dependency '" +
+                 d.Name + "'");
+        note("`import " + u.Name + "` could mean either; rename the folder");
+        return false;
+      }
+  }
+
+  // Each unit, after the units it uses. A circle is reported by name.
+  std::vector<int> state(m.Units.size(), 0);
+  std::vector<size_t> order;
+  std::string circle;
+  std::function<void(size_t)> visit = [&](size_t i) {
+    if (state[i] == 2)
+      return;
+    if (state[i] == 1) {
+      if (circle.empty())
+        circle = m.Units[i].Name;
+      return;
+    }
+    state[i] = 1;
+    for (const std::string &used : m.Units[i].Uses)
+      visit(index[used]);
+    state[i] = 2;
+    order.push_back(i);
+  };
+  for (size_t i = 0; i < m.Units.size(); ++i)
+    visit(i);
+  if (!circle.empty()) {
+    failLine("the units of '" + m.Name + "' import one another in a circle, "
+             "through '" + circle + "'");
+    note("a unit is compiled before those that import it, so one of them has "
+         "to give way: move what both need into a third unit");
+    return false;
+  }
+
+  DependencyInputs made;
+  for (size_t i : order) {
+    const LocalUnit &u = m.Units[i];
+    fs::path out = depsDir / (u.Name + outputKindSuffix(OutputKind::Library));
+    std::string cmd = quote(findCompiler()) + emitFlagFor(OutputKind::Library) +
+                      " --module " + quote(u.Name);
+    appendBuildFlags(cmd, m, opts, node.Config);
+    appendScriptConfig(cmd, node.Script);
+    cmd += " -I " + quote(depsDir.string());
+    cmd += " -o " + quote(out.string());
+    for (const std::string &src : u.Sources)
+      cmd += " " + quote(src);
+    std::vector<std::string> deps = u.Sources;
+    deps.push_back((fs::path(m.Root) / "Rune.toml").string());
+    for (const std::string &used : u.Uses)
+      deps.push_back((depsDir / (used + outputKindSuffix(OutputKind::Library)))
+                         .string());
+    for (const std::string &lib : node.Inputs.Libraries)
+      deps.push_back(lib);
+    pm::Fingerprint fp = stepFingerprint(cmd, deps);
+    if (!stamps.isFresh(out, fp)) {
+      if (!runStep("Compiling", m.Name + "::" + u.Name + " (unit)", cmd, opts))
+        return false;
+      stamps.record(out, fp);
+    }
+    made.Libraries.push_back(out.string());
+  }
+  node.Inputs.merge(made);
+  return true;
+}
+
 bool buildPackageLibrary(PackageNode &node, std::vector<PackageNode> &nodes,
                          const Options &opts) {
   const Manifest &m = node.M;
@@ -949,6 +1051,8 @@ bool buildPackageLibrary(PackageNode &node, std::vector<PackageNode> &nodes,
     return false;
   if (!node.ScriptExe.empty() &&
       !runBuildScript(node, opts, "prepare", "", "", node.Script))
+    return false;
+  if (!buildLocalUnits(node, depsDir, opts))
     return false;
 
   if (m.producesLibrary()) {
@@ -2375,6 +2479,23 @@ int commandDoc(const Options &opts) {
         cmd += " " + quote(src);
     if (runCommand(cmd, opts.Verbose) != 0) {
       failLine("could not read " + r.Name);
+      return 1;
+    }
+    parts.push_back(part.string());
+  }
+  // Each local unit is documented as the library it is built as.
+  for (const LocalUnit &u : m.Units) {
+    fs::path part = target / (u.Name + ".rdoc.part");
+    std::string cmd = quote(compiler) + " --emit-docs --module " +
+                      quote(u.Name);
+    cmd += " --safety " + m.Safety;
+    cmd += " --memory " + opts.Memory;
+    cmd += " -I " + quote((target / "deps").string());
+    cmd += " -o " + quote(part.string());
+    for (const std::string &src : u.Sources)
+      cmd += " " + quote(src);
+    if (runCommand(cmd, opts.Verbose) != 0) {
+      failLine("could not read the unit " + u.Name);
       return 1;
     }
     parts.push_back(part.string());
