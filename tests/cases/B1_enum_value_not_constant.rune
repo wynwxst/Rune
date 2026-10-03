@@ -1,7 +1,9 @@
 // EXPECT-ERROR: the value of variant 'Both' is not a constant number
 //
-// A variant's value is a literal. Anything else used to be ignored without a
-// word, leaving the variant with whatever value came next.
-enum Flags { One = 1, Two = 2, Both = 1 + 2 }
+// A variant's value is a number, or arithmetic on numbers and the variants
+// before it. A call is neither — and anything else used to be ignored
+// without a word, leaving the variant with whatever value came next.
+fn three() -> i64 { 3 }
+enum Flags { One = 1, Two = 2, Both = three() }
 
 fn main() -> i64 { 0 }

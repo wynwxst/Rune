@@ -3305,8 +3305,9 @@ bool Sema::evalConstInt(const Expr *e, int64_t &out) {
 //===----------------------------------------------------------------------===//
 
 namespace {
-/// A variant's declared value, when it is a constant: a number, perhaps
-/// negated. Anything else is not a value an enum can have.
+/// A variant's declared value, when it is a constant: a number, or integer
+/// arithmetic on numbers and on the variants declared before it — `1 << 3`,
+/// `Read | Write`, `AF_ISO`. Anything else is not a value an enum can have.
 struct VariantConstant {
   bool Ok = false;
   bool IsFloat = false;
@@ -3315,31 +3316,97 @@ struct VariantConstant {
   std::string Suffix;
 };
 
-VariantConstant variantConstant(Expr *e) {
+/// `earlier` answers a bare name, or `Enum::Name`, with the value of a
+/// variant already given one; anything it does not know is not a constant.
+VariantConstant variantConstant(
+    Expr *e,
+    const std::function<VariantConstant(const DeclRefExpr *)> &earlier) {
   VariantConstant c;
-  bool negate = false;
-  while (e && isa<UnaryExpr>(e)) {
-    auto *u = cast<UnaryExpr>(e);
-    if (u->Op != UnaryOp::Neg)
-      return c;
-    negate = !negate;
-    e = u->Operand.get();
-  }
   if (!e)
     return c;
   if (auto *i = dyn_cast<IntLitExpr>(e)) {
     c.Ok = true;
     c.Suffix = i->Suffix;
     c.Int = static_cast<int64_t>(i->Value);
-    if (negate != i->IsNegated)
+    if (i->IsNegated)
       c.Int = -c.Int;
     c.Float = static_cast<double>(c.Int);
     c.IsFloat = c.Suffix == "f32" || c.Suffix == "f64";
-  } else if (auto *f = dyn_cast<FloatLitExpr>(e)) {
+    return c;
+  }
+  if (auto *f = dyn_cast<FloatLitExpr>(e)) {
     c.Ok = true;
     c.IsFloat = true;
     c.Suffix = f->Suffix;
-    c.Float = negate ? -f->Value : f->Value;
+    c.Float = f->Value;
+    return c;
+  }
+  if (auto *r = dyn_cast<DeclRefExpr>(e))
+    return earlier(r);
+  if (auto *u = dyn_cast<UnaryExpr>(e)) {
+    VariantConstant v = variantConstant(u->Operand.get(), earlier);
+    if (!v.Ok)
+      return c;
+    if (u->Op == UnaryOp::Neg) {
+      v.Int = -v.Int;
+      v.Float = -v.Float;
+      return v;
+    }
+    if (u->Op == UnaryOp::BitNot && !v.IsFloat) {
+      v.Int = ~v.Int;
+      v.Float = static_cast<double>(v.Int);
+      return v;
+    }
+    return c;
+  }
+  if (auto *b = dyn_cast<BinaryExpr>(e)) {
+    VariantConstant l = variantConstant(b->LHS.get(), earlier);
+    VariantConstant r = variantConstant(b->RHS.get(), earlier);
+    if (!l.Ok || !r.Ok)
+      return c;
+    c.Ok = true;
+    c.Suffix = !l.Suffix.empty() ? l.Suffix : r.Suffix;
+    if (l.IsFloat || r.IsFloat) {
+      c.IsFloat = true;
+      double x = l.IsFloat ? l.Float : static_cast<double>(l.Int);
+      double y = r.IsFloat ? r.Float : static_cast<double>(r.Int);
+      switch (b->Op) {
+      case BinaryOp::Add: c.Float = x + y; break;
+      case BinaryOp::Sub: c.Float = x - y; break;
+      case BinaryOp::Mul: c.Float = x * y; break;
+      case BinaryOp::Div: c.Float = x / y; break;
+      default: return VariantConstant{};
+      }
+      return c;
+    }
+    // Two's complement arithmetic, as the tag will hold it; a shift past
+    // the width, or a division by zero, is not a value.
+    uint64_t x = static_cast<uint64_t>(l.Int), y = static_cast<uint64_t>(r.Int);
+    switch (b->Op) {
+    case BinaryOp::Add: c.Int = static_cast<int64_t>(x + y); break;
+    case BinaryOp::Sub: c.Int = static_cast<int64_t>(x - y); break;
+    case BinaryOp::Mul: c.Int = static_cast<int64_t>(x * y); break;
+    case BinaryOp::Div:
+    case BinaryOp::Rem:
+      if (r.Int == 0 || (l.Int == INT64_MIN && r.Int == -1))
+        return VariantConstant{};
+      c.Int = b->Op == BinaryOp::Div ? l.Int / r.Int : l.Int % r.Int;
+      break;
+    case BinaryOp::BitAnd: c.Int = l.Int & r.Int; break;
+    case BinaryOp::BitOr: c.Int = l.Int | r.Int; break;
+    case BinaryOp::BitXor: c.Int = l.Int ^ r.Int; break;
+    case BinaryOp::Shl:
+    case BinaryOp::Shr:
+      if (r.Int < 0 || r.Int > 63)
+        return VariantConstant{};
+      c.Int = b->Op == BinaryOp::Shl ? static_cast<int64_t>(x << r.Int)
+                                     : l.Int >> r.Int;
+      break;
+    default:
+      return VariantConstant{};
+    }
+    c.Float = static_cast<double>(c.Int);
+    return c;
   }
   return c;
 }
@@ -3351,16 +3418,42 @@ void Sema::assignVariantValues(EnumDecl *e) {
   std::vector<VariantConstant> values(e->Variants.size());
   bool anyFloat = false;
   bool f32 = false;
+  // What each variant before the current one comes to, for a value that
+  // names one: written, or one more than the variant before it.
+  std::vector<VariantConstant> settled(e->Variants.size());
+  size_t current = 0;
+  auto earlier = [&](const DeclRefExpr *r) -> VariantConstant {
+    const std::string &name = r->Path.empty() ? std::string() : r->Path.back();
+    bool qualified = r->Path.size() == 2 && r->Path[0] == e->Name;
+    if (r->Path.size() != 1 && !qualified)
+      return VariantConstant{};
+    for (size_t j = 0; j < current; ++j)
+      if (e->Variants[j]->Name == name)
+        return settled[j];
+    return VariantConstant{};
+  };
   for (size_t i = 0; i < e->Variants.size(); ++i) {
     EnumVariantDecl *v = e->Variants[i].get();
-    if (!v->Discriminant)
+    current = i;
+    if (!v->Discriminant) {
+      // One more than the variant before it, when that one was a number.
+      if (i == 0) {
+        settled[i].Ok = true;
+      } else if (settled[i - 1].Ok && !settled[i - 1].IsFloat) {
+        settled[i] = settled[i - 1];
+        settled[i].Int += 1;
+        settled[i].Float = static_cast<double>(settled[i].Int);
+      }
       continue;
-    values[i] = variantConstant(v->Discriminant.get());
+    }
+    values[i] = variantConstant(v->Discriminant.get(), earlier);
+    settled[i] = values[i];
     if (!values[i].Ok) {
       Diags.error(v->Discriminant->Range,
                   "the value of variant '{}' is not a constant number", v->Name)
-          .note("a variant's value is written as a literal: `Low = -1`, "
-                "`Ratio = 1.5`")
+          .note("a variant's value is a number, or arithmetic on numbers and "
+                "the variants before it: `Low = -1`, `Write = 1 << 1`, "
+                "`Both = Read | Write`")
           .code(400);
       continue;
     }
