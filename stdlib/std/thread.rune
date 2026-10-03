@@ -212,21 +212,16 @@ pub fn sleep(duration: time::Time) {
 /// `Counter`.
 @sync("every read and write of the value happens with the lock held")
 pub class Mutex<T> {
-    // The value lives in a block of its own, reached through a raw pointer:
-    // the methods take `&self`, and writing a field through a shared borrow
-    // is something only a pointer that is not a borrow can do. The lock is
-    // what makes that sound.
-    cell: *var u8
+    // The methods take `&self`, so the value sits in a `Cell`, which can be
+    // changed through a shared borrow; the lock is what makes that sound
+    // across threads, where a `Cell` alone would race.
+    value: mem::Cell<T>
     handle: *var u8
 
-    @safe("the block is sized for one T, and the value is stored once")
     fn init(self, initial: T) {
-        self.cell = mem::allocator.allocate(mem::size_of<T>())
+        self.value = mem::cell(initial)
         self.handle = unsafe { rune_mutex_new() }
-        if mem::isNull(self.cell) || mem::isNull(self.handle) {
-            process::panic("cannot create a mutex")
-        }
-        unsafe { mem::store<T>(self.cell as *var T, initial) }
+        if mem::isNull(self.handle) { process::panic("cannot create a mutex") }
     }
 
     /// Runs `body` on what is inside, with the lock held, and stores what it
@@ -239,7 +234,7 @@ pub class Mutex<T> {
     pub fn withLock(&self, body: @cfunction(T) -> T) {
         unsafe { rune_mutex_lock(self.handle) }
         defer unsafe { rune_mutex_unlock(self.handle) }
-        let slot = unsafe { self.cell as *var T }
+        let slot = unsafe { self.value.asPtr() }
         unsafe { mem::store<T>(slot, body(mem::take<T>(slot))) }
     }
 
@@ -248,8 +243,7 @@ pub class Mutex<T> {
     pub fn get(&self) -> T where T: mem::Clone {
         unsafe { rune_mutex_lock(self.handle) }
         defer unsafe { rune_mutex_unlock(self.handle) }
-        let slot = unsafe { self.cell as *var T }
-        unsafe { &slot[0] }.$clone()
+        self.value.get()
     }
 
     /// Replaces what is inside, with the lock held.
@@ -257,15 +251,11 @@ pub class Mutex<T> {
     pub fn set(&self, next: T) {
         unsafe { rune_mutex_lock(self.handle) }
         defer unsafe { rune_mutex_unlock(self.handle) }
-        let slot = unsafe { self.cell as *var T }
-        unsafe { mem::drop_at<T>(slot) }
-        unsafe { mem::store<T>(slot, next) }
+        self.value.set(next)
     }
 
     @safe("the mutex is going away: nothing else holds it, or the lock")
     fn deinit(self) {
-        unsafe { mem::drop_at<T>(self.cell as *var T) }
-        mem::allocator.deallocate(self.cell, mem::size_of<T>())
         unsafe { rune_mutex_dispose(self.handle) }
     }
 }
@@ -327,23 +317,22 @@ pub class Arc<T: Sync> {
 @sync("every touch of the queue happens with the lock held")
 pub class Channel<T: Send> {
     // A ring of `capacity` slots in a block of its own, `count` of them live
-    // from `head` on. Every field is plain data, so the methods — which take
-    // `&self`, for threads that share the channel — write them through raw
-    // pointers with the lock held, as `atomic::Counter` writes its number.
-    block: *var u8
-    head: i64
-    count: i64
-    capacity: i64
-    closed: bool
+    // from `head` on. The methods take `&self`, for threads that share the
+    // channel, so what changes is in `Cell`s — changed with the lock held.
+    block: mem::Cell<*var u8>
+    head: mem::Cell<i64>
+    count: mem::Cell<i64>
+    capacity: mem::Cell<i64>
+    closed: mem::Cell<bool>
     lock: *var u8
     ready: *var u8
 
     fn init(self) {
-        self.block = mem::noBlock()
-        self.head = 0
-        self.count = 0
-        self.capacity = 0
-        self.closed = false
+        self.block = mem::cell(mem::noBlock())
+        self.head = mem::cell<i64>(0)
+        self.count = mem::cell<i64>(0)
+        self.capacity = mem::cell<i64>(0)
+        self.closed = mem::cell(false)
         self.lock = unsafe { rune_mutex_new() }
         self.ready = unsafe { rune_cond_new() }
         if mem::isNull(self.lock) || mem::isNull(self.ready) {
@@ -351,33 +340,36 @@ pub class Channel<T: Send> {
         }
     }
 
+    /// The ring's block. A raw pointer is not `Clone`, so it is read
+    /// straight out of its cell rather than through `get`.
+    @safe("a pointer is plain data: reading it copies nothing it owns")
+    fn ring(&self) -> *var u8 { unsafe { self.block.asPtr()[0] } }
+
     /// The slot `i` places after the oldest value.
     @safe("the index is reduced into the ring, which the caller has sized")
     fn slot(&self, i: i64) -> *var T {
-        let at = (self.head + i) % self.capacity
-        unsafe { mem::offset(self.block, at as usize * mem::size_of<T>()) as *var T }
+        let at = (self.head.get() + i) % self.capacity.get()
+        unsafe { mem::offset(self.ring(), at as usize * mem::size_of<T>()) as *var T }
     }
 
     /// Room for one more: a ring twice the size, the values moved across in
     /// order so the oldest is first again.
     @safe("called with the lock held; each live value is moved exactly once")
     fn grow(&self) {
-        var size = self.capacity * 2
+        var size = self.capacity.get() * 2
         if size < 8 { size = 8 }
         let fresh = mem::allocator.allocate(size as usize * mem::size_of<T>())
         if mem::isNull(fresh) { process::panic("Channel: out of memory") }
         var i: i64 = 0
-        while i < self.count {
+        while i < self.count.get() {
             let dest = unsafe { mem::offset(fresh, i as usize * mem::size_of<T>()) as *var T }
             unsafe { mem::store<T>(dest, mem::take<T>(self.slot(i))) }
             i += 1
         }
-        mem::allocator.deallocate(self.block, self.capacity as usize * mem::size_of<T>())
-        unsafe {
-            (&self.block as *var *var u8)[0] = fresh
-            (&self.head as *var i64)[0] = 0
-            (&self.capacity as *var i64)[0] = size
-        }
+        mem::allocator.deallocate(self.ring(), self.capacity.get() as usize * mem::size_of<T>())
+        self.block.replace(fresh)
+        self.head.set(0)
+        self.capacity.set(size)
     }
 
     /// Puts `value` at the back of the queue and wakes a waiting receiver.
@@ -388,10 +380,10 @@ pub class Channel<T: Send> {
     pub fn send(&self, value: T) {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
-        if self.closed { process::panic("send on a closed channel") }
-        if self.count == self.capacity { self.grow() }
-        unsafe { mem::store<T>(self.slot(self.count), value) }
-        unsafe { (&self.count as *var i64)[0] = self.count + 1 }
+        if self.closed.get() { process::panic("send on a closed channel") }
+        if self.count.get() == self.capacity.get() { self.grow() }
+        unsafe { mem::store<T>(self.slot(self.count.get()), value) }
+        self.count.set(self.count.get() + 1)
         unsafe { rune_cond_signal(self.ready) }
     }
 
@@ -400,10 +392,8 @@ pub class Channel<T: Send> {
     @safe("called with the lock held, and only while a value is queued")
     fn takeNext(&self) -> T {
         let value = unsafe { mem::take<T>(self.slot(0)) }
-        unsafe {
-            (&self.head as *var i64)[0] = (self.head + 1) % self.capacity
-            (&self.count as *var i64)[0] = self.count - 1
-        }
+        self.head.set((self.head.get() + 1) % self.capacity.get())
+        self.count.set(self.count.get() - 1)
         value
     }
 
@@ -417,10 +407,10 @@ pub class Channel<T: Send> {
         defer unsafe { rune_mutex_unlock(self.lock) }
         // A wait can wake for no reason, so the condition is a loop rather
         // than an `if`: what matters is the queue, not the wake-up.
-        while self.count == 0 && !self.closed {
+        while self.count.get() == 0 && !self.closed.get() {
             unsafe { rune_cond_wait(self.ready, self.lock) }
         }
-        if self.count == 0 { return nil }
+        if self.count.get() == 0 { return nil }
         self.takeNext()
     }
 
@@ -429,7 +419,7 @@ pub class Channel<T: Send> {
     pub fn tryReceive(&self) -> T? {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
-        if self.count == 0 { return nil }
+        if self.count.get() == 0 { return nil }
         self.takeNext()
     }
 
@@ -441,7 +431,7 @@ pub class Channel<T: Send> {
     pub fn close(&self) {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
-        unsafe { (&self.closed as *var bool)[0] = true }
+        self.closed.set(true)
         unsafe { rune_cond_broadcast(self.ready) }
     }
 
@@ -450,20 +440,20 @@ pub class Channel<T: Send> {
     pub fn pending(&self) -> i64 {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
-        self.count
+        self.count.get()
     }
 
     @safe("nothing else can be holding the lock: the channel is going away")
-    pub fn isClosed(&self) -> bool { self.closed }
+    pub fn isClosed(&self) -> bool { self.closed.get() }
 
     @safe("the channel is going away: nothing else holds it, or the lock")
     fn deinit(self) {
         var i: i64 = 0
-        while i < self.count {
+        while i < self.count.get() {
             unsafe { mem::drop_at<T>(self.slot(i)) }
             i += 1
         }
-        mem::allocator.deallocate(self.block, self.capacity as usize * mem::size_of<T>())
+        mem::allocator.deallocate(self.ring(), self.capacity.get() as usize * mem::size_of<T>())
         unsafe { rune_cond_dispose(self.ready) }
         unsafe { rune_mutex_dispose(self.lock) }
     }

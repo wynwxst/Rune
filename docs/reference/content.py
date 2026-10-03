@@ -7935,6 +7935,38 @@ fn main() -> i64 {
           "which is the whole point — anything that compiles under `zombie` "
           "compiles under `arc` too."),
 
+        H("Changing a value through a shared borrow"),
+        P("A shared borrow promises that nothing changes underneath it — "
+          "with one exception the language makes on purpose. A `mem::Cell<T>` "
+          "can be changed through `&self`: `set` and `replace` work on a cell "
+          "that is only lent out, so a hit counter in a struct that is passed "
+          "around by `&`, or the cursor of an allocator every container "
+          "shares, can still move. What keeps that sound is what a cell never "
+          "does: hand out a borrow of what is inside. `get` gives a copy and "
+          "`replace` gives the old value back, so there is no reference into "
+          "the cell for a change to pull the rug from under."),
+        S('''import std::io
+import std::mem
+
+struct Stats { hits: mem::Cell<i64> }
+
+fn record(s: &Stats) { s.hits.set(s.hits.get() + 1) }
+
+fn main() -> i64 {
+    let stats = Stats { hits: mem::cell<i64>(0) }
+    record(&stats)
+    record(&stats)
+    io::println(stats.hits.get().$str())               // 2
+    io::println(stats.hits.replace(10).$str())         // 2, and now 10
+    0
+}''', mode="run", memory="zombie", title="A counter behind a shared borrow"),
+        P("A cell is one thread's: two threads setting one would race. "
+          "`thread::Mutex` and `atomic::Counter` are built on it, and are "
+          "what to share across threads. A cell is also what a method on "
+          "`&self` should reach for rather than casting `&self.field` to a "
+          "`*var T` and writing through it: the cast is unsafe, and says "
+          "nothing the cell does not."),
+
         H("When a borrow has to wait for run time"),
         P("Sometimes two parts of a program genuinely reach one value and the "
           "compiler cannot see that only one touches it at a time. "
@@ -10663,6 +10695,10 @@ fn main() -> i64 {
             "reference that does not keep it alive; `w.get()` answers "
             "`Rc<T>?`"],
            ["`shared`", "`<T>(value: T) -> Rc<T>`", "an `Rc`, type inferred"],
+           ["`Cell<T>`", "`struct`", "a value changed through `&self`: "
+            "`get` copies it out, `set` and `replace` change it; one "
+            "thread's"],
+           ["`cell`", "`<T>(value: T) -> Cell<T>`", "a cell, type inferred"],
            ["`replace`", "`<T>(place: &var T, value: T) -> T`", "puts `value` "
             "there and hands back what was there"],
            ["`take`", "`<T>(place: &var T) -> T`", "the same, leaving the "
@@ -11184,20 +11220,20 @@ import std::mem
 pub class Arena {
     block: *var u8
     size: usize
-    used: usize
-    handed: i64
+    used: mem::Cell<usize>
+    handed: mem::Cell<i64>
 
     fn init(self, size: usize) {
         self.block = mem::allocator.allocate(size)
         self.size = size
-        self.used = 0
-        self.handed = 0
+        self.used = mem::cell<usize>(0)
+        self.handed = mem::cell<i64>(0)
     }
 
     fn deinit(self) { mem::allocator.deallocate(self.block, self.size) }
 
-    pub fn handedOut(&self) -> i64 { self.handed }
-    pub fn usedBytes(&self) -> i64 { self.used as i64 }
+    pub fn handedOut(&self) -> i64 { self.handed.get() }
+    pub fn usedBytes(&self) -> i64 { self.used.get() as i64 }
 }
 
 bind mem::Allocator to Arena {
@@ -11205,18 +11241,16 @@ bind mem::Allocator to Arena {
     /// `mem::isNull` is for.
     ///
     /// `Allocator` hands out memory through `&self` — every container shares
-    /// one — so the cursor is moved through a raw pointer to it, as an
-    /// atomic counter changes its number. An arena is one thread's.
+    /// one — so the cursor lives in a `mem::Cell`, which can change through a
+    /// shared borrow. An arena is one thread's, as a `Cell` is.
     @safe("the cursor never passes the size checked on the line above")
     fn allocate(&self, bytes: usize) -> *var u8 {
         // Keep every block 8-aligned, as the system allocator would.
         let need = (bytes + 7) / 8 * 8
-        if self.used + need > self.size { return mem::noBlock() }
-        let at = self.used
-        unsafe {
-            (&self.used as *var usize)[0] = at + need
-            (&self.handed as *var i64)[0] = self.handed + 1
-        }
+        let at = self.used.get()
+        if at + need > self.size { return mem::noBlock() }
+        self.used.set(at + need)
+        self.handed.set(self.handed.get() + 1)
         unsafe { (self.block as u64 + at as u64) as *var u8 }
     }
 
