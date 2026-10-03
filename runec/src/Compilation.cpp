@@ -345,9 +345,11 @@ bool writeMachineCode(llvm::Module &m, const std::string &path,
       ctx.getDiagnosticHandler();
   ctx.setDiagnosticHandler(std::move(handler));
   pm.run(m);
+  // Read before the handler goes: putting the previous one back destroys it.
+  const bool failed = seen->Failed;
   ctx.setDiagnosticHandler(std::move(previous));
   out->close();
-  if (seen->Failed) {
+  if (failed) {
     // Whatever was written is not an object anyone should link.
     std::filesystem::remove(path, ec);
     return false;

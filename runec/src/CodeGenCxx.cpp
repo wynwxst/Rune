@@ -286,12 +286,9 @@ CodeGen::CxxArg CodeGen::classifyCxxArgument(Type *t, unsigned &intRegs,
     return coerceTo(StructType::get(*Ctx, parts));
   }
   case Arch::AArch64: {
-    if (size > 16) {
-      ++intRegs;
-      return indirect(CxxArg::Indirect, 8);
-    }
     // A homogeneous floating-point aggregate rides in the vector registers,
-    // one per member, up to four.
+    // one per member, up to four — so up to 32 bytes of `double`s, which is
+    // why this is asked before the size is: four doubles are not "large".
     bool hfa = !leaves.empty() && leaves.size() <= 4;
     for (const Leaf &l : leaves)
       hfa = hfa && isFloatLeaf(l.Ty) && l.Ty == leaves[0].Ty;
@@ -299,6 +296,10 @@ CodeGen::CxxArg CodeGen::classifyCxxArgument(Type *t, unsigned &intRegs,
                            dl.getTypeAllocSize(leaves[0].Ty).getFixedValue()) {
       sseRegs += static_cast<unsigned>(leaves.size());
       return coerceTo(ArrayType::get(leaves[0].Ty, leaves.size()));
+    }
+    if (size > 16) {
+      ++intRegs;
+      return indirect(CxxArg::Indirect, 8);
     }
     if (size <= 8) {
       ++intRegs;
