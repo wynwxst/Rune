@@ -148,6 +148,17 @@ fn theStandardLibrary() {
         console::check(seen.length() == 4 && members == 6,
                        "a Set, iterated")
     }
+    {
+        // 80 MB: more than the kernel heap has. The answer is no, not a
+        // panic, and what was there is untouched.
+        var frames = vector::Vector<i64>()
+        frames.push(7)
+        let refused = !frames.tryReserve(10000000)
+        let handedBack = match frames.tryPush(8) { Ok(_) => true, Err(_) => false }
+        console::check(refused && handedBack && frames.length() == 2 &&
+                       *frames.look(0) == 7,
+                       "an allocation too big is refused, not a panic")
+    }
     console::check(heap::bytesInUse == 0, "every container handed its memory back")
 }
 

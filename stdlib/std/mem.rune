@@ -463,6 +463,17 @@ pub struct Box<T> {
     pub fn duplicate(&self) -> Box<T> { boxed<T>(self.look().$clone()) }
 }
 
+/// `mem::tryBoxed(v)` — the same, or, with no memory for it, `v` handed
+/// back rather than a panic.
+pub fn tryBoxed<T>(value: T) -> Result<Box<T>, T> {
+    let bytes = size_of<T>()
+    let block = allocator.allocate(bytes)
+    if isNull(block) { return Err(value) }
+    zero(block, bytes)
+    unsafe { store<T>(block as *var T, value) }
+    Ok(Box<T> { block: block })
+}
+
 /// `mem::boxed(v)` — a `T` on the heap, owned by the box it hands back.
 pub fn boxed<T>(value: T) -> Box<T> {
     let bytes = size_of<T>()

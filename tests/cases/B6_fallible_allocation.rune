@@ -1,0 +1,24 @@
+// EXPECT: pushed ab
+// EXPECT: refused true, kept 1
+// EXPECT: boxed 42
+// `tryReserve`, `tryPush` and `mem::tryBoxed` answer instead of panicking
+// when there is no memory, and hand back what they could not keep.
+import std::io
+import std::mem
+import std::collections::vector
+
+fn main() -> i64 {
+    var v = vector::Vector<String>()
+    match v.tryPush("a" + "b") {
+        Ok(_) => io::println("pushed " + v.look(0)),
+        Err(s) => io::println("handed back " + s),
+    }
+    // 2^58 elements of eight bytes: no allocator has that.
+    let refused = !v.tryReserve(288230376151711744)
+    io::println("refused " + refused.$str() + ", kept " + v.length().$str())
+    match mem::tryBoxed(41) {
+        Ok(b) => io::println("boxed " + (*b.look() + 1).$str()),
+        Err(n) => io::println("no box for " + n.$str()),
+    }
+    0
+}

@@ -278,22 +278,53 @@ pub class Vector<T> {
 
     //=== Storage ========================================================//
 
-    /// Makes room for at least `wanted` elements.
-    @safe("the new block is sized for `wanted` elements before the count moves")
+    /// Makes room for at least `wanted` elements. Running out of memory is
+    /// a panic; `tryReserve` is the form that answers instead.
     pub fn reserve(&var self, wanted: i64) {
-        if wanted <= self.capacity as i64 { return }
+        if !self.tryReserve(wanted) { process::panic("Vector: out of memory") }
+    }
+
+    /// Makes room for at least `wanted` elements, or says it could not:
+    /// `false` leaves the vector exactly as it was. What a kernel calls
+    /// where running out of memory is something to handle, not to die of.
+    ///
+    ///     if !frames.tryReserve(n) { return Err(Error::NoMemory) }
+    @safe("the new block is sized for `wanted` elements before the count moves")
+    pub fn tryReserve(&var self, wanted: i64) -> bool {
+        if wanted <= self.capacity as i64 { return true }
         var grown = self.capacity as i64 * 2
         if grown < 4 { grown = 4 }
         if grown < wanted { grown = wanted }
-        let bytes = grown as usize * mem::size_of<T>()
-        let block = mem::allocator.reallocate(self.block,
-                                              self.capacity * mem::size_of<T>(), bytes)
-        if mem::isNull(block) {
-            process::panic("Vector: out of memory")
-            return
+        var block = mem::allocator.reallocate(self.block,
+                                              self.capacity * mem::size_of<T>(),
+                                              grown as usize * mem::size_of<T>())
+        if mem::isNull(block) && grown > wanted {
+            // Doubling was too much to ask: exactly what was wanted may fit.
+            grown = wanted
+            block = mem::allocator.reallocate(self.block,
+                                              self.capacity * mem::size_of<T>(),
+                                              grown as usize * mem::size_of<T>())
         }
+        if mem::isNull(block) { return false }
         self.block = block
         self.capacity = grown as usize
+        true
+    }
+
+    /// Appends `value`, or — when there is no memory for it — hands it back
+    /// untouched, so nothing is lost:
+    ///
+    ///     match queue.tryPush(packet) {
+    ///         Ok(_) => {},
+    ///         Err(p) => drop(p),            // still ours to deal with
+    ///     }
+    @safe("the slot written is below the count, which tryReserve() has covered")
+    pub fn tryPush(&var self, value: T) -> Result<(), T> {
+        if !self.tryReserve(self.count as i64 + 1) { return Err(value) }
+        let slot = unsafe { self.block as *var T }
+        unsafe { mem::store<T>(&var slot[self.count as i64] as *var T, value) }
+        self.count += 1
+        Ok(())
     }
 }
 

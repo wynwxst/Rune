@@ -10657,6 +10657,8 @@ fn main() -> i64 {
            ["`Box<T>`", "`class`", "one `T` on the heap with a single owner "
             "— the same reach-through, no sharing"],
            ["`boxed`", "`<T>(value: T) -> Box<T>`", "a box, type inferred"],
+           ["`tryBoxed`", "`<T>(value: T) -> Result<Box<T>, T>`",
+            "the same, or the value handed back when there is no memory"],
            ["`Rc<T>` / `Weak<T>`", "`class`", "a counted value and a "
             "reference that does not keep it alive; `w.get()` answers "
             "`Rc<T>?`"],
@@ -11074,6 +11076,11 @@ fn main() -> i64 {
            ["`clear`", "`(&var self)`", "drops every element, keeps the "
             "storage"],
            ["`reserve`", "`(&var self, wanted: i64)`", "room for `wanted`"],
+           ["`tryReserve`", "`(&var self, wanted: i64) -> bool`",
+            "the same, or `false` and the vector untouched when there is no "
+            "memory — for a kernel, where that is to be handled, not died of"],
+           ["`tryPush`", "`(&var self, value: T) -> Result<(), T>`",
+            "appends, or hands `value` back as `Err` when there is no memory"],
            ["`asSlice`", "`(&self) -> [T]`", "every element as a slice over "
             "the vector's own storage — no copy"],
            ["`v[i]` / `v[i] = x`", "", "the direct forms — **abort** out of "
