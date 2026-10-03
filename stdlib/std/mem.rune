@@ -490,6 +490,62 @@ pub fn tryBoxed<T>(value: T) -> Result<Box<T>, T> {
     Ok(Box<T> { block: block })
 }
 
+//===--------------------------------------------------------------------===//
+// Cell: a value changed through a shared borrow
+//===--------------------------------------------------------------------===//
+
+/// A value that can be changed through `&self`, on one thread.
+///
+/// A shared borrow normally means nothing changes underneath it. A `Cell`
+/// is the exception the language makes on purpose: `set` and `replace` work
+/// through `&self`, so a counter in a struct that is only ever lent out, or
+/// a cursor several readers share, can still move. What keeps that sound is
+/// what a `Cell` never does — hand out a borrow of what is inside. `get`
+/// gives a copy and `replace` gives the old value back, so there is never a
+/// reference into the cell for a change to pull the rug from under.
+///
+///     struct Stats { hits: mem::Cell<i64> }
+///     fn record(s: &Stats) { s.hits.set(s.hits.get() + 1) }
+///
+/// A `Cell` is not `Sync`: two threads changing one would race. Share
+/// across threads through a `thread::Mutex`, or `atomic::Counter` for a
+/// number — both of which are built on this.
+@interior
+pub struct Cell<T> {
+    value: T
+
+    /// A copy of what is inside.
+    pub fn get(&self) -> T where T: Clone { self.value.$clone() }
+
+    /// Replaces what is inside, destroying what was there.
+    @safe("nothing ever borrows the inside of a cell, so nothing sees it change")
+    pub fn set(&self, next: T) {
+        let slot = unsafe { &self.value as *var T }
+        unsafe {
+            drop_at<T>(slot)
+            store<T>(slot, next)
+        }
+    }
+
+    /// Puts `next` in and hands back what was there.
+    @safe("nothing ever borrows the inside of a cell, so nothing sees it change")
+    pub fn replace(&self, next: T) -> T {
+        let slot = unsafe { &self.value as *var T }
+        let old = unsafe { take<T>(slot) }
+        unsafe { store<T>(slot, next) }
+        old
+    }
+
+    /// The address of what is inside, for code that reaches it through a
+    /// raw pointer by design: an atomic instruction, a value a lock guards.
+    /// Whatever is done through it is the caller's to justify.
+    @unsafe
+    pub fn asPtr(&self) -> *var T { &self.value as *var T }
+}
+
+/// `mem::cell(v)` — a `Cell` holding `v`.
+pub fn cell<T>(value: T) -> Cell<T> { Cell<T> { value: value } }
+
 /// `mem::boxed(v)` — a `T` on the heap, owned by the box it hands back.
 pub fn boxed<T>(value: T) -> Box<T> {
     let bytes = size_of<T>()

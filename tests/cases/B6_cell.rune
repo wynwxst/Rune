@@ -1,0 +1,24 @@
+// EXPECT: was none
+// EXPECT: was ab
+// EXPECT: 2 cd
+// EXPECT: false true
+// SAFETY: full
+// mem::Cell changes through &self, hands out copies never borrows, and is
+// Send but not Sync.
+import std::io
+import std::mem
+import std::reflect
+struct Stats { hits: mem::Cell<i64>, last: mem::Cell<String> }
+fn record(s: &Stats, what: String) {
+    s.hits.set(s.hits.get() + 1)
+    let old = s.last.replace(what)
+    io::println("was " + old)
+}
+fn main() -> i64 {
+    let s = Stats { hits: mem::cell(0), last: mem::cell("none" + "") }
+    record(&s, "a" + "b")
+    record(&s, "c" + "d")
+    io::println(s.hits.get().$str() + " " + s.last.get())
+    io::println(reflect::isSync<mem::Cell<i64>>().$str() + " " + reflect::isSend<mem::Cell<i64>>().$str())
+    0
+}

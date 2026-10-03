@@ -17,6 +17,7 @@
 // needs them to be one moment needs a lock.
 
 import std::io
+import std::mem
 
 //===--------------------------------------------------------------------===//
 // The compiler's own
@@ -64,21 +65,23 @@ fn rawCompareExchange(slot: *var i64, expected: i64, desired: i64) -> bool
 ///     io::println(served.load().$str())
 @sync("every read and write is a single indivisible instruction")
 pub class Counter {
-    var value: i64
+    // A cell: changed through `&self`, and reached by address here because
+    // the change has to be one indivisible instruction.
+    value: mem::Cell<i64>
 
-    fn init(self, initial: i64) { self.value = initial }
+    fn init(self, initial: i64) { self.value = mem::cell(initial) }
 
     /// The value now. Another thread may change it the instant after, so
     /// what this is good for is reporting, not deciding — decide with
     /// `compareExchange`.
     @safe("an atomic read of a number this object owns")
     pub fn load(&self) -> i64 {
-        unsafe { rawLoad(&self.value as *i64) }
+        unsafe { rawLoad(self.value.asPtr()) }
     }
 
     @safe("an atomic write to a number this object owns")
     pub fn store(&self, next: i64) {
-        unsafe { rawStore(&self.value as *var i64, next) }
+        unsafe { rawStore(self.value.asPtr(), next) }
     }
 
     /// Adds `delta` and hands back the value as it was **before**.
@@ -87,12 +90,12 @@ pub class Counter {
     /// count: each caller gets a number nobody else got.
     @safe("an atomic read-modify-write of a number this object owns")
     pub fn add(&self, delta: i64) -> i64 {
-        unsafe { rawAdd(&self.value as *var i64, delta) }
+        unsafe { rawAdd(self.value.asPtr(), delta) }
     }
 
     @safe("an atomic read-modify-write of a number this object owns")
     pub fn sub(&self, delta: i64) -> i64 {
-        unsafe { rawSub(&self.value as *var i64, delta) }
+        unsafe { rawSub(self.value.asPtr(), delta) }
     }
 
     /// Adds one; hands back the value before. `next()` reads better where the
@@ -104,7 +107,7 @@ pub class Counter {
     /// Replaces the value, handing back what was there.
     @safe("an atomic read-modify-write of a number this object owns")
     pub fn exchange(&self, next: i64) -> i64 {
-        unsafe { rawExchange(&self.value as *var i64, next) }
+        unsafe { rawExchange(self.value.asPtr(), next) }
     }
 
     /// Stores `desired`, but only while the value is still `expected`.
@@ -116,7 +119,7 @@ pub class Counter {
     @safe("an atomic compare-and-swap of a number this object owns")
     pub fn compareExchange(&self, expected: i64, desired: i64) -> bool {
         unsafe {
-            rawCompareExchange(&self.value as *var i64, expected, desired)
+            rawCompareExchange(self.value.asPtr(), expected, desired)
         }
     }
 
@@ -164,26 +167,26 @@ bind io::Display to Counter {
 @sync("every read and write is a single indivisible instruction")
 pub class Flag {
     // Held as a number because that is what the instructions work on.
-    var raised: i64
+    raised: mem::Cell<i64>
 
-    fn init(self, initial: bool) { self.raised = if initial { 1 } else { 0 } }
+    fn init(self, initial: bool) { self.raised = mem::cell(if initial { 1 } else { 0 }) }
 
     @safe("an atomic read of a number this object owns")
     pub fn isRaised(&self) -> bool {
-        unsafe { rawLoad(&self.raised as *i64) } != 0
+        unsafe { rawLoad(self.raised.asPtr()) } != 0
     }
 
     /// Raises the flag, and says whether it was this call that raised it.
     /// Exactly one caller ever gets `true`.
     @safe("an atomic exchange of a number this object owns")
     pub fn raise(&self) -> bool {
-        unsafe { rawExchange(&self.raised as *var i64, 1) } == 0
+        unsafe { rawExchange(self.raised.asPtr(), 1) } == 0
     }
 
     /// Lowers it, and says whether it had been raised.
     @safe("an atomic exchange of a number this object owns")
     pub fn lower(&self) -> bool {
-        unsafe { rawExchange(&self.raised as *var i64, 0) } != 0
+        unsafe { rawExchange(self.raised.asPtr(), 0) } != 0
     }
 }
 

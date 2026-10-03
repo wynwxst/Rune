@@ -2517,6 +2517,21 @@ Value *CodeGen::emitCast(CastExpr *c) {
     auto *ref = cast<DeclRefExpr>(c->Operand.get());
     return declareFunction(cast<FunctionDecl>(ref->Resolved));
   }
+  // `&place as *var T`, where `T` is the place's own type and that type is
+  // a handle — a `String`, a class: the address of the place, which is
+  // what a `*var String` is. A borrow of a handle is the handle itself, so
+  // casting it would give the object, not the slot holding it, and a write
+  // through the result would land inside the object.
+  if (auto *borrow = dyn_cast<BorrowExpr>(c->Operand.get())) {
+    Type *placeTy = borrow->Operand->Ty;
+    Type *target = c->Ty;
+    if (placeTy && target && target->is(TypeKind::Pointer) &&
+        target->isRawPointer() && target->pointee() &&
+        placeTy->isHeapHandle() &&
+        target->pointee()->canonical() == placeTy->canonical() &&
+        movedPlaceOf(borrow->Operand.get()))
+      return emitLValue(borrow->Operand.get());
+  }
   Value *v = emitRValue(c->Operand.get());
   Type *from = c->Operand->Ty;
   Type *to = c->Ty;

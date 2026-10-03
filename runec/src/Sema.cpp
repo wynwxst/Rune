@@ -5873,6 +5873,9 @@ bool Sema::isBuiltinDecorator(const std::string &name) {
       "Config", "config",
       // `@Convention("C")` on a struct or enum: checked by `checkConventions`.
       "Convention",
+      // `@interior` on `mem::Cell`: changed through a shared borrow, so not
+      // `Sync` whatever it holds (`typeIsThreadSafe`).
+      "interior",
       // The linter's: `@lint(allow(unused-variable))`. The compiler reads
       // nothing in it — the arguments are rule names, not expressions to
       // check — and only has to know the name.
@@ -6232,6 +6235,10 @@ bool typeIsThreadSafe(Type *t, bool wantSync,
     // its own access is taken at its word.
     if (nd->hasAttr("sync"))
       return true;
+    // A cell is changed through `&self`: two threads holding `&` to one
+    // would race. It may still move to another thread whole.
+    if (wantSync && nd->hasAttr("interior"))
+      return false;
     // A class is a reference, and `let` fixes the binding rather than the
     // object: any holder of one can write to its fields. So passing a class
     // to a thread does not hand it over, it hands out a second way to reach
