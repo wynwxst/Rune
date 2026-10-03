@@ -1393,6 +1393,15 @@ int compileWithOptions(const CompilerOptions &given) {
   // answered by a Rune file compiled into the program, for its target, the
   // way Rust builds `core` for the target it is compiling for. A library is
   // compiled without it: the program that links the library brings one.
+  for (const auto &kv : opts.ConfigValues)
+    if (kv.first == "freestanding_type" && kv.second != "full" &&
+        kv.second != "minimal") {
+      diags.error(SourceRange(), "`freestanding_type` is '{}'", kv.second)
+          .note("it is `full`, the whole freestanding runtime, or `minimal`, "
+                "only what a program cannot run without")
+          .code(545);
+      return 1;
+    }
   if (opts.Freestanding && opts.Output != OutputKind::Library &&
       opts.Output != OutputKind::Docs && opts.Output != OutputKind::None) {
     // The core — panics, the heap, memory — and `String`, numbers as text,

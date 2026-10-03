@@ -305,6 +305,11 @@ ConfigSet ConfigSet::forOptions(const CompilerOptions &opts) {
   cfg.Values["overflow_checks"] = opts.overflowChecksEnabled() ? "on" : "off";
   for (const auto &kv : cfg.Values)
     cfg.Builtin.insert(kv.first);
+  // How much of the freestanding runtime a `@runtime(none)` program brings:
+  // `full`, or `minimal` — what the generated code cannot run without. A
+  // package chooses, with `[config] freestanding_type = "minimal"` or
+  // `--cfg freestanding_type=minimal`, so it is not one of the builtins.
+  cfg.Values["freestanding_type"] = "full";
 
   if (opts.DebugInfo)
     cfg.Flags.insert("debug");

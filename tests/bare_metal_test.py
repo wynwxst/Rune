@@ -82,6 +82,52 @@ def freestanding(tmp):
               f"exit {run.returncode}\n{run.stdout}{run.stderr}")
 
 
+def minimal(tmp):
+    """`freestanding_type = "minimal"`: the runtime keeps only what a program
+    cannot run without, and says so when a program needs more. Objects only,
+    so it runs on every host."""
+    runec = os.path.join(BIN, "runec")
+    sizes = {}
+    for kind in ("full", "minimal"):
+        obj = os.path.join(tmp, f"minimal_{kind}.o")
+        r = subprocess.run([runec, "--no-color", "-O2", "-c", "--cfg",
+                            f"freestanding_type={kind}", "-o", obj,
+                            os.path.join(CASES, "minimal.rune")],
+                           capture_output=True, text=True)
+        check(f"minimal.rune compiles with freestanding_type={kind}",
+              r.returncode == 0, r.stderr[-3000:])
+        if r.returncode != 0:
+            return
+        sizes[kind] = os.path.getsize(obj)
+        symbols = subprocess.run(["nm", obj], capture_output=True,
+                                 text=True).stdout
+        if kind == "minimal":
+            check("the minimal runtime leaves out floats as text and hashing",
+                  "rune_string_from_f64" not in symbols and
+                  "rune_hash_mix" not in symbols, symbols[-2000:])
+        else:
+            check("the full runtime has floats as text",
+                  "rune_string_from_f64" in symbols, symbols[-2000:])
+    check("the minimal runtime makes a smaller program",
+          sizes["minimal"] < sizes["full"], str(sizes))
+    r = subprocess.run([runec, "--no-color", "-c", "--cfg",
+                        "freestanding_type=minimal", "-o",
+                        os.path.join(tmp, "minimal_float.o"),
+                        os.path.join(CASES, "minimal_float.rune")],
+                       capture_output=True, text=True)
+    check("a float as text on the minimal runtime is refused, saying why",
+          r.returncode != 0 and
+          "needs more of the runtime than `freestanding_type = \"minimal\"` keeps"
+          in r.stderr and "floats as text" in r.stderr, r.stderr[-3000:])
+    r = subprocess.run([runec, "--no-color", "-c", "--cfg",
+                        "freestanding_type=tiny", "-o",
+                        os.path.join(tmp, "tiny.o"),
+                        os.path.join(CASES, "minimal.rune")],
+                       capture_output=True, text=True)
+    check("an unknown freestanding_type is refused",
+          r.returncode != 0 and "E0545" in r.stderr, r.stderr[-3000:])
+
+
 def tiers():
     """The whole standard library, built as a `@runtime(none)` program would
     see it: every module has to compile that way, and `runec --tiers` says
@@ -373,6 +419,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="rune-bare-")
     try:
         freestanding(tmp)
+        minimal(tmp)
         tiers()
         toyos(tmp)
         gnu_toolchain(tmp)

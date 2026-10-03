@@ -16,6 +16,11 @@
 // big integers and the shortest digits that read back as the same double are
 // chosen from it. Parsing rounds correctly the same way. Not reentrant: the
 // scratch space is global, as a kernel's stack is small.
+//
+// With `freestanding_type = "minimal"` a `String` can be made, joined,
+// compared and printed, and integers and booleans become text;
+// floats as text, text as numbers, hashing, `$substring`, `$repeat`,
+// `$find` and walking characters are left out (see freestanding.rune).
 
 extern "C" {
     fn rune_alloc(size: u64, info: *var u8) -> *var u8
@@ -208,6 +213,7 @@ pub fn concat(a: *var u8, b: *var u8) -> *var u8 {
     obj
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_substring")
 @safe("the range is checked against the length before the copy")
 pub fn substring(s: *var u8, start: i64, end: i64, location: CString) -> *var u8 {
@@ -218,6 +224,7 @@ pub fn substring(s: *var u8, start: i64, end: i64, location: CString) -> *var u8
     fromBytes(unsafe { (stringData(s) as usize + start as usize) as *u8 }, end - start)
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_repeat")
 @safe("each copy lands inside the block sized for all of them")
 pub fn repeat(s: *var u8, timesIn: i64) -> *var u8 {
@@ -247,6 +254,7 @@ pub fn repeat(s: *var u8, timesIn: i64) -> *var u8 {
 @export("rune_string_length")
 pub fn length(s: *var u8) -> i64 { stringLength(s) }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_char_count")
 @safe("reads the bytes below the length")
 pub fn charCount(s: *var u8) -> i64 {
@@ -307,9 +315,11 @@ fn fnv(p: *u8, n: i64) -> u64 {
     h
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_cstring_hash")
 pub fn cstringHash(p: *u8) -> u64 { fnv(p, cLength(p)) }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_hash")
 pub fn stringHash(s: *var u8) -> u64 { fnv(stringData(s), stringLength(s)) }
 
@@ -345,6 +355,7 @@ fn decodeAt(p: *u8, len: i64, at: i64, next: *var i64) -> u32 {
 }
 
 /// `i` counts characters, not bytes.
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_char_at")
 @safe("every byte read is below the length")
 pub fn charAt(s: *var u8, i: i64, next: *var i64, location: CString) -> u32 {
@@ -363,6 +374,7 @@ pub fn charAt(s: *var u8, i: i64, next: *var i64, location: CString) -> u32 {
     decodeAt(p, bytes, at, next)
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_char_after")
 @safe("past the end it reads nothing")
 pub fn charAfter(s: *var u8, at: i64, next: *var i64) -> u32 {
@@ -374,6 +386,7 @@ pub fn charAfter(s: *var u8, at: i64, next: *var i64) -> u32 {
     decodeAt(stringData(s), len, at, next)
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_find")
 @safe("every comparison stays inside both strings")
 pub fn find(hay: *var u8, needle: *var u8) -> i64 {
@@ -470,6 +483,7 @@ pub fn fromBool(v: i8) -> *var u8 {
     textString()
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_from_char")
 pub fn fromChar(cp: u32) -> *var u8 {
     textReset()
@@ -491,6 +505,7 @@ pub fn fromChar(cp: u32) -> *var u8 {
     textString()
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_from_ptr")
 pub fn fromPointer(p: *u8) -> *var u8 {
     textReset()
@@ -993,12 +1008,14 @@ fn formatFixed(v: f64, placesIn: i64) {
     }
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_from_f64")
 pub fn fromF64(v: f64) -> *var u8 {
     formatDouble(v)
     textString()
 }
 
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_from_f64_fixed")
 pub fn fromF64Fixed(v: f64, places: i64) -> *var u8 {
     formatFixed(v, places)
@@ -1018,6 +1035,7 @@ fn setOk(ok: *var i8, v: bool) {
 
 /// As C's `strtoll` with base 10, and true only when the whole string was
 /// the number.
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_to_i64")
 @safe("reads below the length")
 pub fn toI64(s: *var u8, ok: *var i8) -> i64 {
@@ -1127,6 +1145,7 @@ fn matchWord(p: *u8, at: i64, len: i64, word: CString) -> bool {
 /// As C's `strtod` for decimal text — `inf`, `infinity` and `nan` too — and
 /// true only when the whole string was the number. Correctly rounded: the
 /// digits are an exact fraction, divided out in big integers.
+@Config(!(freestanding_type == "minimal"))
 @export("rune_string_to_f64")
 @safe("reads below the length")
 pub fn toF64(s: *var u8, ok: *var i8) -> f64 {

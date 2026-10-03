@@ -18,6 +18,14 @@
 // Every safety check the compiler inserts — bounds, overflow, division by
 // zero, nil, an unmatched `match`, a checked drop — still happens; this file
 // only decides where a failed one goes, which is the panic handler.
+//
+// `freestanding_type = "minimal"` (in `[config]`, or `--cfg`) keeps only
+// what a program cannot run without: the hooks, the memory functions, the
+// panics, objects and raw blocks. Whatever is marked
+// `@Config(!(freestanding_type == "minimal"))` — copying class objects, `Any`
+// and class tests, hashing, and in freestanding_text.rune floats as text,
+// text as numbers and the string searching and slicing — is left out, and a
+// program that needs one of them is told which at compile time (E0542).
 
 //===--------------------------------------------------------------------===//
 // The hooks, and their defaults
@@ -349,6 +357,7 @@ pub fn makeImmortal(obj: *var u8) {
 
 /// A copy of an object of exactly its own type, made by the class's `clone`
 /// — which is what `$clone()` means under single ownership.
+@Config(!(freestanding_type == "minimal"))
 @export("rune_clone_object")
 @safe("calls the clone the compiler generated for the object's own type")
 pub fn cloneObject(obj: *var u8) -> *var u8 {
@@ -369,6 +378,7 @@ pub fn cloneObject(obj: *var u8) -> *var u8 {
 
 /// Whether `obj` is an instance of the class `info` describes, or of one
 /// derived from it: the walk up the chain of base classes.
+@Config(!(freestanding_type == "minimal"))
 @export("rune_is_kind_of")
 @safe("follows the type descriptors the compiler emitted")
 pub fn isKindOf(obj: *var u8, info: *var u8) -> i32 {
@@ -385,6 +395,7 @@ pub fn isKindOf(obj: *var u8, info: *var u8) -> i32 {
 
 /// `Any`'s question. A descriptor is one symbol for the whole program, so
 /// comparing addresses is the answer.
+@Config(!(freestanding_type == "minimal"))
 @export("rune_any_is")
 pub fn anyIs(obj: *var u8, info: *var u8) -> i32 { isKindOf(obj, info) }
 
@@ -445,6 +456,7 @@ pub fn rawZero(block: *var u8, size: u64) {
 
 /// Mixes one value into a running hash, as the hosted runtime does
 /// (splitmix64's finaliser), so a hash is the same number on either.
+@Config(!(freestanding_type == "minimal"))
 @export("rune_hash_mix")
 pub fn hashMix(accIn: u64, v: u64) -> u64 {
     var acc = accIn

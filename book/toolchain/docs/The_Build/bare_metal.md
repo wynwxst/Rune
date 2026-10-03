@@ -127,6 +127,22 @@ replace is `@weak`.
 Adding something the code generator calls means adding it here too, or
 freestanding programs that reach it fail with E0542.
 
+### The minimal subset
+
+`freestanding_type` is a `@Config` key every build knows, `full` unless a
+package's `[config]` or `--cfg` says `minimal` (`ConfigSet::forOptions`; any
+other value is E0545 in `Compilation.cpp`). The runtime's optional exports —
+`rune_clone_object`, `rune_is_kind_of`, `rune_any_is`, `rune_hash_mix`, and in
+`freestanding_text.rune` floats as text, text as numbers, the string hashes
+and the string searching and slicing — carry
+`@Config(!(freestanding_type == "minimal"))`, so under `minimal` they are
+never declared. A program that calls one then has an undefined `rune_*`
+symbol, which `reportHostedRuntimeUses` already turns into E0542 against the
+function responsible; `minimalLeavesOut` in `CodeGen.cpp` names the feature
+and says the full runtime has it. That table and the `@Config` marks have to
+agree: moving a function in or out of the minimal set means changing both.
+`minimal()` in `tests/bare_metal_test.py` checks both directions.
+
 ## In `rune`
 
 `[build] runtime = "none"` and `entry = "none"`, or the directives in any

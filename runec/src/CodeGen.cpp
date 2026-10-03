@@ -4226,12 +4226,40 @@ static const char *hostedFeatureOf(llvm::StringRef name) {
   return "the hosted runtime";
 }
 
+/// What `freestanding_type = "minimal"` leaves out of the freestanding
+/// runtime, by symbol; null for what the minimal runtime keeps, or what no
+/// freestanding runtime has. Kept in step with the `@Config` marks in
+/// runetime/.
+static const char *minimalLeavesOut(llvm::StringRef name) {
+  if (name.starts_with("rune_string_from_f64"))
+    return "floats as text";
+  if (name == "rune_string_to_i64" || name == "rune_string_to_f64")
+    return "text as numbers (`$toInt`, `$toFloat`)";
+  if (name == "rune_string_substring" || name == "rune_string_repeat" ||
+      name == "rune_string_find" || name.starts_with("rune_string_char_") ||
+      name == "rune_string_from_char" || name == "rune_string_from_ptr")
+    return "taking strings apart: `$substring`, `$repeat`, `$find`, and "
+           "characters";
+  if (name == "rune_clone_object")
+    return "`$clone()` of a class object";
+  if (name == "rune_is_kind_of" || name == "rune_any_is")
+    return "`Any`, and testing what class an object is";
+  if (name == "rune_hash_mix" || name == "rune_string_hash" ||
+      name == "rune_cstring_hash")
+    return "hashing";
+  return nullptr;
+}
+
 /// A freestanding program links nothing but itself and the Rune-written
 /// runtime compiled in with it, so a call into the hosted runtime would be an
 /// undefined symbol at link time — reported by the linker, in the linker's
 /// terms, far from its cause. Here it is reported against the function that
 /// makes it.
 void CodeGen::reportHostedRuntimeUses() {
+  bool minimal = false;
+  for (const auto &kv : Opts.ConfigValues)
+    if (kv.first == "freestanding_type")
+      minimal = kv.second == "minimal";
   std::map<const llvm::Function *, FunctionDecl *> declOf;
   for (auto &[decl, f] : Functions)
     declOf[f] = decl;
@@ -4281,6 +4309,18 @@ void CodeGen::reportHostedRuntimeUses() {
       }
     if (attributed)
       continue;
+    if (const char *left = minimal ? minimalLeavesOut(callee.getName()) : nullptr) {
+      auto d = Diags.error(SourceRange(), "this program needs '{}', which the "
+                                          "minimal freestanding runtime leaves "
+                                          "out", callee.getName().str());
+      d.note("it is {}", left);
+      if (!generated.empty())
+        d.note("it is called from '{}', which the compiler generated",
+               generated);
+      d.note("`freestanding_type = \"full\"` (the default) has it");
+      d.code(542);
+      continue;
+    }
     auto d = Diags.error(SourceRange(), "this program needs '{}' from the "
                                         "hosted runtime, and is built "
                                         "without one",
@@ -4291,7 +4331,25 @@ void CodeGen::reportHostedRuntimeUses() {
              generated);
     d.code(542);
   }
-  for (const auto &[fn, symbol] : needs)
+  // One report per function and per thing it needs: `hashing` is three
+  // symbols, and a generic instantiated twice is two declarations at one
+  // place.
+  std::set<std::pair<uint32_t, std::string>> said;
+  for (const auto &[fn, symbol] : needs) {
+    const char *left = minimal ? minimalLeavesOut(symbol) : nullptr;
+    std::string what = left ? left : hostedFeatureOf(symbol);
+    if (!said.insert({fn->NameRange.begin().raw(), what}).second)
+      continue;
+    if (left) {
+      Diags.error(fn->NameRange, "'{}' needs more of the runtime than "
+                                 "`freestanding_type = \"minimal\"` keeps",
+                  fn->Name)
+          .note("it uses {}, which the minimal freestanding runtime leaves out",
+                left)
+          .note("`freestanding_type = \"full\"` (the default) has it")
+          .code(542);
+      continue;
+    }
     Diags.error(fn->NameRange, "'{}' needs the hosted runtime, and this "
                                "program is built without one",
                 fn->Name)
@@ -4299,6 +4357,7 @@ void CodeGen::reportHostedRuntimeUses() {
         .note("`@runtime(none)` links only the program and the freestanding "
               "runtime compiled with it")
         .code(542);
+  }
 }
 
 /// Two definitions of one symbol in this module: a `@weak` default and the
