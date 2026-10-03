@@ -1,6 +1,7 @@
 //===- CodeGenExpr.cpp - Lowering expressions and patterns -----*- C++ -*-===//
 
 #include "rune/CodeGen.h"
+#include "rune/Zombie.h"
 #include "rune/CxxInterop.h"
 
 #include <llvm/IR/Constants.h>
@@ -2814,6 +2815,17 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
   if (iterTy->isRefCounted())
     B->CreateStore(Constant::getNullValue(lower(iterTy)), iterSlot);
   bool borrowedCursor = false;
+  // How the loop holds its subject: the checker's decision, or — where it
+  // did not run on this body — the same rule, worked out here.
+  ForExpr::Hold hold = f->SubjectHold;
+  if (hold == ForExpr::Hold::Undecided) {
+    if (!movedPlaceOf(f->Sequence.get()))
+      hold = ForExpr::Hold::Owned;
+    else if (!f->IterateMethod && zombie::cursorIsCopied(f->Sequence->Ty))
+      hold = ForExpr::Hold::Copied;
+    else
+      hold = ForExpr::Hold::Borrowed;
+  }
 
   if (f->IterateMethod) {
     // The sequence is a container. Keep it alive in a slot of its own for as
@@ -2825,8 +2837,9 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
     Value *sv = emitRValue(f->Sequence.get());
     if (zombie()) {
       // The container is borrowed for the loop when it is somebody's
-      // place, and owned by the loop when it was made for it.
-      if (movedPlaceOf(f->Sequence.get())) {
+      // place, and owned by the loop when it was made for it — as the
+      // borrow checker decided (`ForExpr::SubjectHold`).
+      if (hold == ForExpr::Hold::Borrowed) {
         B->CreateStore(sv, seqSlot);
       } else {
         adopt(sv);
@@ -2844,24 +2857,28 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
                                  declareFunction(f->IterateMethod), {self}),
                    iterSlot);
   } else {
-    // The sequence is the cursor. The loop advances a copy of it, which is
-    // what a value type means; a class iterator is shared, and advances.
-    // Under Zombie the cursor moves into the loop.
-    Value *iv = emitRValue(f->Sequence.get());
-    if (zombie()) {
-      // A class cursor that is somebody's place is driven where it is, as
-      // the checker has it (`lowerFor`): the handle is the same object
-      // either way, so the loop borrows it rather than taking it — taking
-      // it would free the object when the loop ends, under a name the
-      // program goes on using.
-      if (iterTy->is(TypeKind::Class) && movedPlaceOf(f->Sequence.get()))
-        borrowedCursor = true;
-      else
-        takeOwnership(f->Sequence.get(), iv, iterTy);
+    // The sequence is the cursor. Under counting the loop advances a copy
+    // of a value type and shares a class. Under single ownership it does
+    // what the borrow checker decided: drives somebody's cursor where it is
+    // (a class's handle is that object; a value is driven in its place),
+    // advances a copy of plain data, or owns a cursor made for it.
+    const bool viaPointer = f->Sequence->Ty && f->Sequence->Ty->is(TypeKind::Pointer);
+    if (hold == ForExpr::Hold::Borrowed && !viaPointer &&
+        !iterTy->is(TypeKind::Class)) {
+      iterSlot = emitLValue(f->Sequence.get());
+      borrowedCursor = true;
     } else {
-      emitRetain(iv, iterTy);
+      Value *iv = emitRValue(f->Sequence.get());
+      if (zombie()) {
+        if (hold == ForExpr::Hold::Borrowed && !viaPointer)
+          borrowedCursor = true;
+        else if (hold == ForExpr::Hold::Owned || viaPointer)
+          takeOwnership(f->Sequence.get(), iv, iterTy);
+      } else {
+        emitRetain(iv, iterTy);
+      }
+      B->CreateStore(iv, iterSlot);
     }
-    B->CreateStore(iv, iterSlot);
   }
   if (!borrowedCursor)
     fs().Scopes.back().Locals.push_back({iterSlot, iterTy});

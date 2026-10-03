@@ -60,6 +60,11 @@ void dumpBody(const Body &body, std::ostream &os);
 bool carriesReference(Type *t);
 /// True when a value of `t` has to be destroyed under Zombie.
 bool needsDrop(Type *t);
+/// True when a `for` loop over a cursor of type `t` that is somebody's place
+/// advances a copy of it rather than driving it where it is: plain data,
+/// nothing owned, nothing borrowed. The one rule both the borrow checker
+/// and the code generator ask, in either memory model.
+bool cursorIsCopied(Type *t);
 
 /// Where the checker's time went in the last `checkProgram`, in
 /// milliseconds of thread time, and how many bodies took each route. For

@@ -173,6 +173,11 @@ std::string Body::spell(PlaceId p) const {
 /// a closure (its captures may be borrows), or an aggregate containing one.
 /// Such a value has an origin. Reference-counted handles do not count on
 /// their own: what they own is theirs.
+bool cursorIsCopied(Type *t) {
+  return t && !t->is(TypeKind::Pointer) && !t->isHeapHandle() &&
+         !needsDrop(t) && !carriesReference(t);
+}
+
 bool carriesReference(Type *t) {
   std::set<Type *> seen;
   std::function<bool(Type *)> go = [&](Type *x) -> bool {
@@ -2588,6 +2593,7 @@ PlaceId Lowerer::lowerFor(ForExpr *f) {
     if (f->IterateMethod) {
       // `iterate(&self)`: borrows the sequence for as long as the cursor
       // lives. A sequence that is a temporary is kept in a slot of its own.
+      f->SubjectHold = seqIsPlace ? ForExpr::Hold::Borrowed : ForExpr::Hold::Owned;
       if (!seqIsPlace && seq != kNone) {
         LocalId slot = newTemp(seqTy, f->Sequence->Range, "seq");
         StatementTemps.pop_back();
@@ -2626,12 +2632,23 @@ PlaceId Lowerer::lowerFor(ForExpr *f) {
       emit(std::move(s));
     } else {
       // The sequence is its own cursor: driven where it is when it is a
-      // place, or from a slot when it was made here.
-      if (seqIsPlace) {
+      // place — unless it is plain data, when the loop advances a copy and
+      // leaves the place alone — or from a slot when it was made here.
+      const bool plainData = cursorIsCopied(seqTy);
+      if (seqIsPlace && !plainData) {
+        f->SubjectHold = ForExpr::Hold::Borrowed;
         iterPlace = seq;
         if (seqTy && isTrackedRef(seqTy))
           iterPlace = project(seq, Projection::Deref);
+      } else if (seqIsPlace) {
+        f->SubjectHold = ForExpr::Hold::Copied;
+        iter = newTemp(seqTy, f->Sequence->Range, "iter");
+        StatementTemps.pop_back();
+        declareIn(iter);
+        iterPlace = place(iter);
+        assignInto(iterPlace, seq, f->Sequence.get(), f->Sequence->Range);
       } else {
+        f->SubjectHold = ForExpr::Hold::Owned;
         iter = newTemp(seqTy, f->Sequence->Range, "iter");
         StatementTemps.pop_back();
         declareIn(iter);

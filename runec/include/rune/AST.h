@@ -768,6 +768,16 @@ struct ForExpr : Expr {
   Type *IterType = nullptr;
   /// `Option<Item>`, which is what `next` hands back.
   Type *NextResult = nullptr;
+  /// How the loop holds what it walks, decided once — by the Zombie
+  /// borrow checker, as it lowers the loop — and carried out exactly so by
+  /// the code generator, so the two can never disagree about who owns it:
+  ///   Borrowed  somebody's place, walked (or driven) where it is;
+  ///   Owned     made for the loop, which destroys it at the end;
+  ///   Copied    a plain-data cursor that is somebody's place: the loop
+  ///             advances a copy, and the place is left as it was.
+  /// `Undecided` where the checker did not run (reference counting).
+  enum class Hold : uint8_t { Undecided, Borrowed, Owned, Copied };
+  Hold SubjectHold = Hold::Undecided;
   ForExpr() : Expr(NodeKind::For) {}
 };
 

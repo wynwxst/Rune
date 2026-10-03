@@ -1,0 +1,37 @@
+// EXPECT: words ab cd ef
+// EXPECT: cursor left at 3
+// SAFETY: full
+// A cursor that owns what it walks, looped over by name, is driven where it
+// is: the borrow checker says so, and the code generator does what the
+// checker decided, so the name still holds the cursor — advanced — after the
+// loop. Code generation used to move it into the loop and free it.
+import std::io
+import std::collections::vector
+
+struct Words {
+    items: vector::Vector<String>
+    at: i64
+}
+
+bind Iterator to Words {
+    type Item = String
+    fn next(&var self) -> String? {
+        if self.at >= self.items.length() { return nil }
+        let w = self.items.get(self.at)
+        self.at += 1
+        w
+    }
+}
+
+fn main() -> i64 {
+    var items = vector::Vector<String>()
+    items.push("a" + "b")
+    items.push("c" + "d")
+    items.push("e" + "f")
+    var cursor = Words { items: items, at: 0 }
+    var all = "words"
+    for w in cursor { all += " " + w }
+    io::println(all)
+    io::println("cursor left at " + cursor.at.$str())
+    0
+}
