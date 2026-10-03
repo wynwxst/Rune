@@ -239,6 +239,71 @@ const FnSummary &summaryFor(const FunctionDecl *fn, const SummaryTable &table,
   return scratch;
 }
 
+/// `place` restated without the temporaries a call's arguments are made of:
+/// `(*tmp).f` where `tmp = &var (*o).entries` is `(*o).entries.f`. Only a
+/// local borrowed into exactly once is seen through, so the answer is the one
+/// place it can have pointed at.
+static PlaceId throughReborrows(Body &body, PlaceId place) {
+  for (int depth = 0; depth < 8; ++depth) {
+    const Place p = body.Places.get(place);
+    const Local &root = body.Locals[p.Root];
+    if (root.K == Local::Param || root.K == Local::Capture || p.Proj.empty() ||
+        p.Proj[0].K != Projection::Deref)
+      return place;
+    const Stmt *def = nullptr;
+    unsigned writes = 0;
+    for (const Block &b : body.Blocks)
+      for (const Stmt &st : b.Stmts) {
+        if (st.Dst == kNone || body.Places.get(st.Dst).Root != p.Root)
+          continue;
+        if (st.K != Stmt::Assign && st.K != Stmt::Borrow &&
+            st.K != Stmt::Call)
+          continue;
+        ++writes;
+        def = &st;
+      }
+    if (writes != 1 || def->K != Stmt::Borrow || def->Src == kNone ||
+        !body.Places.get(def->Dst).Proj.empty())
+      return place;
+    Place next = body.Places.get(def->Src);
+    next.Proj.insert(next.Proj.end(), p.Proj.begin() + 1, p.Proj.end());
+    place = body.Places.intern(next);
+  }
+  return place;
+}
+
+/// The fields from a parameter's borrowed value down to `place`, then on
+/// through `more` — the path a `from p.a.b` clause names. False when the way
+/// there is not plain fields behind the parameter's borrow: an index, a
+/// dereference of something the parameter owns, or nothing borrowed at all.
+static bool paramPathTo(Body &body, PlaceId place,
+                        const std::vector<unsigned> &more,
+                        std::vector<unsigned> &path) {
+  const Place &p = body.Places.get(place);
+  const Local &root = body.Locals[p.Root];
+  if (root.K != Local::Param && root.K != Local::Capture)
+    return false;
+  bool afterDeref = root.RefLike;
+  Place prefix{p.Root, {}};
+  for (const Projection &pr : p.Proj) {
+    if (pr.K == Projection::Deref) {
+      Type *pt = placeType(body, body.Places.intern(prefix));
+      if (!pt || !pt->is(TypeKind::Pointer) || pt->isRawPointer())
+        return false;
+      afterDeref = true;
+    } else if (pr.K != Projection::Field || !afterDeref) {
+      return false;
+    } else {
+      path.push_back(pr.Arg);
+    }
+    prefix.Proj.push_back(pr);
+  }
+  if (!afterDeref)
+    return false;
+  path.insert(path.end(), more.begin(), more.end());
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Applying summaries to calls
 //===----------------------------------------------------------------------===//
@@ -472,6 +537,11 @@ void applySummaries(Body &body, const SummaryTable &table,
           // What the argument carries: the origin of the value itself — for
           // a borrowed argument, of the place it was borrowed from.
           PlaceId holder = covered[pi].empty() ? arg : covered[pi].front().Place;
+          // Through a temporary reborrow — `mem::replace(&var self.vals, …)`
+          // hands the call `tmp = &var self.vals` — to the place it was taken
+          // from: what the value carries is what `self.vals` carried, not
+          // the `&var` borrow that reached it, which ends with the call.
+          holder = throughReborrows(body, holder);
           OriginId ho = originOf(holder);
           if (ho != kNone && ho != into)
             s.Subsets.push_back({ho, into});
@@ -506,8 +576,10 @@ void applySummaries(Body &body, const SummaryTable &table,
                                           Projection{Projection::Deref, 0});
           bool throughShared = false;
           PlaceId walk = pointee;
+          std::vector<unsigned> toShared;
           for (unsigned f : e.Path) {
             walk = body.Places.project(walk, Projection{Projection::Field, f});
+            toShared.push_back(f);
             Type *ft = placeType(body, walk);
             if (ft && ft->is(TypeKind::Pointer) && !ft->isRawPointer() &&
                 !ft->isWeakPointer() && !ft->isMutablePointer()) {
@@ -519,6 +591,29 @@ void applySummaries(Body &body, const SummaryTable &table,
             PlaceId holder =
                 covered[pi].empty() ? pointee : covered[pi].front().Place;
             OriginId ho = originOf(holder);
+            // Held by one of this function's own parameters: the result
+            // looks at what the caller lent through that one field —
+            // `self.entries.source`, not all of `self` — and saying so is
+            // what lets this function's own `from` clause name the field.
+            // A placeholder conflicts with nothing, so the iterator stays
+            // free to be borrowed again.
+            std::vector<unsigned> path;
+            PlaceId lent = throughReborrows(body, pointee);
+            OriginId lo = originOf(lent);
+            if (lo != kNone && body.Origins[lo].K == Origin::Placeholder &&
+                paramPathTo(body, lent, toShared, path)) {
+              Loan l;
+              l.Placeholder = true;
+              l.Param = body.Origins[lo].Param;
+              l.PlaceholderPath = path;
+              l.Range = s.Range;
+              l.At = Location{bi, si};
+              LoanId id = static_cast<LoanId>(body.Loans.size());
+              body.Loans.push_back(l);
+              s.Issues.push_back(id);
+              body.HasBorrows = true;
+              continue;
+            }
             if (ho != kNone && ho != into)
               s.Subsets.push_back({ho, into});
             continue;

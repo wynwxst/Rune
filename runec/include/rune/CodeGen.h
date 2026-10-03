@@ -478,6 +478,7 @@ private:
   FunctionDecl *userCloneOf(Type *t);
   llvm::Value *emitUserClone(FunctionDecl *user, llvm::Value *v, Type *t);
   bool containsUserClone(Type *t, std::set<Type *> &seen);
+  bool cloneUnavailable(Type *t, std::set<Type *> &seen);
   /// The value an immutable global is worth already, or null when it takes
   /// a running program to work it out.
   llvm::Constant *constantInitialiserFor(GlobalVarDecl *g);

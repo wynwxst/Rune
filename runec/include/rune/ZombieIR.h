@@ -168,6 +168,10 @@ struct Loan {
   /// parameter it stands for. Such a loan is never "taken" anywhere.
   bool Placeholder = false;
   unsigned Param = 0;
+  /// A placeholder narrowed to one place under the parameter — `from
+  /// self.entries.source` — rather than standing for all of what it lent.
+  /// Empty for the parameter's own placeholder.
+  std::vector<unsigned> PlaceholderPath;
   /// Set for the synthetic loan of the global origin.
   bool Global = false;
   /// When a view narrows a receiver borrow, the loan covers these places

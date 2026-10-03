@@ -1460,6 +1460,55 @@ bool CodeGen::containsUserClone(Type *t, std::set<Type *> &seen) {
   }
 }
 
+/// True when copying `t` part by part would call a `clone` this program
+/// never has: one whose `where` the instantiation fails — `Buffer<T>::clone`
+/// needs `T: Clone`, and a closure is not — or one nothing asked Sema for.
+/// The walk is `containsUserClone`'s, stopping at a class, whose copy is
+/// asked of the object at run time instead.
+bool CodeGen::cloneUnavailable(Type *t, std::set<Type *> &seen) {
+  if (!t)
+    return false;
+  t = t->canonical();
+  if (!seen.insert(t).second)
+    return false;
+  if (FunctionDecl *user = userCloneOf(t)) {
+    if (KnownFunctions.empty())
+      KnownFunctions.insert(Sema.Functions.begin(), Sema.Functions.end());
+    return user->WhereUnmet || !user->Body || !KnownFunctions.count(user);
+  }
+  switch (t->kind()) {
+  case TypeKind::Tuple:
+    for (Type *e : t->tupleElements())
+      if (cloneUnavailable(e, seen))
+        return true;
+    return false;
+  case TypeKind::Array:
+  case TypeKind::Slice:
+    return cloneUnavailable(t->element(), seen);
+  case TypeKind::Struct:
+  case TypeKind::Enum: {
+    NominalDecl *nd = t->nominal();
+    if (!nd)
+      return false;
+    for (FieldDecl *f : allFieldsOf(nd))
+      if (cloneUnavailable(f->Ty, seen))
+        return true;
+    if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd)))
+      for (const auto &var : e->Variants) {
+        for (const auto &tt : var->TupleTypes)
+          if (tt->Resolved && cloneUnavailable(tt->Resolved, seen))
+            return true;
+        for (const auto &fd : var->Fields)
+          if (cloneUnavailable(fd->Ty, seen))
+            return true;
+      }
+    return false;
+  }
+  default:
+    return false;
+  }
+}
+
 Value *CodeGen::emitClone(Value *v, Type *t) {
   if (!v || !t)
     return v;
@@ -1583,15 +1632,25 @@ FunctionDecl *CodeGen::userCloneOf(Type *t) {
 /// by it; otherwise field by field.
 Function *CodeGen::objectCloneFor(Type *t) {
   FunctionDecl *user = userCloneOf(t);
-  if (!user)
+  if (!user) {
+    // Field by field — unless a field's own `clone` does not exist here,
+    // when the object cannot be copied at all and the slot stays empty.
+    std::set<Type *> seen;
+    if (NominalDecl *nd = t->nominal())
+      for (FieldDecl *f : allFieldsOf(nd))
+        if (cloneUnavailable(f->Ty, seen))
+          return nullptr;
     return cloneFnFor(t);
+  }
   // A generic's own `clone` exists for this instantiation only if something
   // asked Sema for it. When nothing did there is no body to point at, and a
   // field-by-field copy would be wrong for exactly the types that write
   // their own — so the slot stays empty and a copy made at run time says so.
   if (KnownFunctions.empty())
     KnownFunctions.insert(Sema.Functions.begin(), Sema.Functions.end());
-  if (!user->Body || !KnownFunctions.count(user))
+  // Nor does one whose `where` this instantiation fails: `Vector<dyn Node>`
+  // has no `clone`, since a `dyn Node` cannot be copied.
+  if (!user->Body || !KnownFunctions.count(user) || user->WhereUnmet)
     return nullptr;
   std::string name = "rune.oclone." + typeSymbolFor(t->nominal());
   if (Function *f = M->getFunction(name))
@@ -2768,9 +2827,12 @@ GlobalVariable *CodeGen::boxInfoFor(Type *concrete) {
   }
 
   // Under single ownership a box can be copied — out of an `Any`, or a
-  // `dyn` — into a new box of its own, the value inside cloned.
+  // `dyn` — into a new box of its own, the value inside cloned. Not when the
+  // value holds a part with no `clone` here — a `Vector<dyn Node>`, say:
+  // the slot stays empty, and a copy asked for at run time says so.
   Function *clone = nullptr;
-  if (zombie()) {
+  std::set<Type *> cloneSeen;
+  if (zombie() && !cloneUnavailable(concrete, cloneSeen)) {
     auto *ft = FunctionType::get(PtrTy, {PtrTy}, false);
     clone = Function::Create(ft, GlobalValue::LinkOnceODRLinkage,
                              "rune.box.clone." + symbol, *M);

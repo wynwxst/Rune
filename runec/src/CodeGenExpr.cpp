@@ -2790,6 +2790,7 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
   Value *iterSlot = createEntryAlloca(lower(iterTy), "iter");
   if (iterTy->isRefCounted())
     B->CreateStore(Constant::getNullValue(lower(iterTy)), iterSlot);
+  bool borrowedCursor = false;
 
   if (f->IterateMethod) {
     // The sequence is a container. Keep it alive in a slot of its own for as
@@ -2824,14 +2825,34 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
     // what a value type means; a class iterator is shared, and advances.
     // Under Zombie the cursor moves into the loop.
     Value *iv = emitRValue(f->Sequence.get());
-    if (zombie())
-      takeOwnership(f->Sequence.get(), iv, iterTy);
-    else
+    if (zombie()) {
+      // A class cursor that is somebody's place is driven where it is, as
+      // the checker has it (`lowerFor`): the handle is the same object
+      // either way, so the loop borrows it rather than taking it — taking
+      // it would free the object when the loop ends, under a name the
+      // program goes on using.
+      if (iterTy->is(TypeKind::Class) && movedPlaceOf(f->Sequence.get()))
+        borrowedCursor = true;
+      else
+        takeOwnership(f->Sequence.get(), iv, iterTy);
+    } else {
       emitRetain(iv, iterTy);
+    }
     B->CreateStore(iv, iterSlot);
   }
-  fs().Scopes.back().Locals.push_back({iterSlot, iterTy});
-  emitStatementCleanup();
+  if (!borrowedCursor)
+    fs().Scopes.back().Locals.push_back({iterSlot, iterTy});
+  // What the sequence was made from — `mk()` in `for x in mk().iterate()` —
+  // lives as long as the loop, since the cursor may be borrowing it. It goes
+  // when the loop does, after the cursor: first in the scope, last out.
+  {
+    std::vector<OwnedSlot> &locals = fs().Scopes.back().Locals;
+    std::vector<OwnedSlot> kept;
+    for (auto &t : fs().Temps)
+      kept.push_back({t.first, t.second});
+    locals.insert(locals.begin(), kept.begin(), kept.end());
+    fs().Temps.clear();
+  }
 
   // What `next` hands back each turn. It is owned, and released either at the
   // end of the turn that consumed it or on the way out.

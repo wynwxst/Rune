@@ -1,0 +1,34 @@
+// EXPECT: a1
+// EXPECT: b2
+// EXPECT: b2
+// EXPECT: c3
+// EXPECT: zipped 41 52
+// SAFETY: full
+// A `for` over a cursor borrowed from a temporary — `mk().iterate()`, or
+// `vec!(...)` zipped with another — keeps the temporary for the whole loop,
+// as the cursor borrows it, and drops it once after the loop, whichever way
+// the loop is left. The checker used to drop it before the first turn and
+// refuse the loop (E0280).
+import std::io
+import std::collections::vector
+fn mk() -> vector::Vector<String> {
+    var v = vector::Vector<String>()
+    v.push("a" + "1"); v.push("b" + "2"); v.push("c" + "3")
+    v
+}
+fn firstB() -> String {
+    for w in mk().iterate() { if w.$length() > 0 && *w == "b2" { return w.$clone() } }
+    "none"
+}
+fn nums() -> vector::Vector<i64> { var v = vector::Vector<i64>(); v.push(4); v.push(5); v }
+
+fn main() -> i64 {
+    for w in mk().iterate() { if *w == "b2" { break }; io::println(w) }
+    io::println(firstB())
+    var n = 0
+    for w in mk().iterate() { n += 1; if n == 1 { continue }; io::println(w) }
+    var zipped = "zipped"
+    for (a, b) in nums().zip(vec!(1, 2).iterate()) { zipped += " " + a.$str() + b.$str() }
+    io::println(zipped)
+    0
+}

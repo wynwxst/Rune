@@ -927,6 +927,7 @@ void LoanAnalysis::collectResult() {
           return;
         FromEntry e;
         e.Param = l.Param;
+        e.Path = l.PlaceholderPath;
         if (seen.insert({e.Param, e.Path}).second)
           Out.ResultFrom.push_back(e);
         return;

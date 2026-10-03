@@ -2526,6 +2526,7 @@ PlaceId Lowerer::lowerLoop(Expr *e) {
 
 PlaceId Lowerer::lowerFor(ForExpr *f) {
   // The sequence is evaluated once and kept for the loop's duration.
+  const size_t outerTemps = StatementTemps.size();
   PlaceId seq = lowerPlace(f->Sequence.get());
   bool seqIsPlace = seq != kNone;
   if (seq == kNone)
@@ -2596,6 +2597,17 @@ PlaceId Lowerer::lowerFor(ForExpr *f) {
     declareIn(slot);
     assignInto(place(slot), seq, f->Sequence.get(), f->Sequence->Range);
     seq = place(slot);
+  }
+  // What the sequence was made from — `mk()` in `for x in mk().iterate()` —
+  // lives as long as the loop, since the cursor may borrow it: it joins the
+  // loop's scope, ahead of the cursor, so it is dropped after it. CodeGen's
+  // `emitIteratorFor` keeps it exactly as long.
+  if (f->NextMethod) {
+    std::vector<LocalId> kept(StatementTemps.begin() + outerTemps,
+                              StatementTemps.end());
+    StatementTemps.resize(outerTemps);
+    std::vector<LocalId> &locals = Scopes.back().Locals;
+    locals.insert(locals.begin(), kept.begin(), kept.end());
   }
   endStatementTemps();
 

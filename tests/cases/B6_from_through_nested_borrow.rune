@@ -1,0 +1,44 @@
+// EXPECT: set total 6
+// EXPECT: two at once 6
+// EXPECT: nested 3
+// `-> &T from self.entries.source`, where `entries` is a struct and `source`
+// a shared borrow inside it. The call that produces the result says it
+// borrows `from i.source` of its argument; seen from the caller, that is the
+// caller's own `entries.source`, and the clause has to be read that way —
+// not as "somewhere in `self`", which is more than the signature allows.
+// `dictionary::SetIter::next` is written exactly so, which made a `for` over
+// a `Set` refuse to compile.
+import std::io
+import std::dictionary
+
+class Cell { pub var v: i64 = 3 }
+struct Inner { source: &Cell }
+struct Outer { entries: Inner }
+
+fn innerNext(i: &var Inner) -> (&i64 from i.source) { &i.source.v }
+fn outerNext(o: &var Outer) -> (&i64 from o.entries.source) {
+    innerNext(&var o.entries)
+}
+
+fn main() -> i64 {
+    var s = dictionary::Set<i64>()
+    s.add(1)
+    s.add(2)
+    s.add(3)
+    var total: i64 = 0
+    for x in s { total += *x }
+    io::println("set total " + total.$str())
+
+    // The items outlive the call that handed them over, so two can be held
+    // at once while the cursor is borrowed again.
+    var it = s.iterate()
+    let a = it.next()
+    let b = it.next()
+    let c = it.next()
+    io::println("two at once " + (*a.unwrap() + *b.unwrap() + *c.unwrap()).$str())
+
+    let cell = Cell()
+    var o = Outer { entries: Inner { source: &cell } }
+    io::println("nested " + (*outerNext(&var o)).$str())
+    0
+}

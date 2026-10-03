@@ -1,0 +1,48 @@
+// EXPECT: struct, after the loop: 3
+// EXPECT: class, after the loop: 0
+// EXPECT: a temporary cursor: 3 turns
+// SAFETY: full
+// A class that is its own iterator, looped over by name, is driven where it
+// is — the checker's view — so the name still holds it afterwards. Code
+// generation used to take the cursor into the loop and free it at the end,
+// leaving `shared` naming a freed object. A cursor made for the loop is the
+// loop's, and goes with it.
+import std::io
+
+struct Ticks { pub left: i64 }
+class Cursor {
+    pub left: i64
+    fn init(self, left: i64) { self.left = left }
+}
+
+bind Iterator to Ticks {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.left <= 0 { return nil }
+        self.left -= 1
+        self.left
+    }
+}
+bind Iterator to Cursor {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.left <= 0 { return nil }
+        self.left -= 1
+        self.left
+    }
+}
+
+fn main() -> i64 {
+    var value = Ticks { left: 3 }
+    for _ in value { }
+    io::println("struct, after the loop: " + value.left.$str())
+
+    let shared = Cursor(3)
+    for _ in shared { }
+    io::println("class, after the loop: " + shared.left.$str())
+
+    var turns = 0
+    for _ in Cursor(3) { turns += 1 }
+    io::println("a temporary cursor: " + turns.$str() + " turns")
+    0
+}

@@ -1,0 +1,46 @@
+// EXPECT: 20 routes, r7 says hello
+// EXPECT: <ul><li>a</li><li>b</li></ul>
+// A type with a part that cannot be copied — a `Map` of closures, whose
+// `Buffer<@function()>` has no `clone`; a `dyn Node` holding a struct with
+// a `Vector<dyn Node>` in it — gets no copy of its own either. Its
+// descriptor's copy slot stays empty rather than pointing at a `clone` that
+// was never emitted (an IR verification failure), and the checker no longer
+// mistakes what `mem::replace` hands back for a borrow of the place it
+// replaced, which refused growing the map at all.
+import std::io
+import std::dictionary
+import std::collections::vector
+
+fn hello() -> String { "hello" }
+
+mark Node {
+    fn render(&self) -> String
+}
+
+struct Item { text: String }
+bind Node to Item {
+    fn render(&self) -> String { "<li>" + self.text + "</li>" }
+}
+
+struct List { items: vector::Vector<dyn Node> }
+bind Node to List {
+    fn render(&self) -> String {
+        var out = "<ul>"
+        for i in self.items { out += i.render() }
+        out + "</ul>"
+    }
+}
+
+fn main() -> i64 {
+    var routes = dictionary::Map<String, @function() -> String>()
+    for i in 0..20 { routes["r" + i.$str()] = hello }
+    let say = routes["r7"]
+    io::println(routes.length().$str() + " routes, r7 says " + say())
+
+    var items = vector::Vector<dyn Node>()
+    items.push(Item { text: "a" })
+    items.push(Item { text: "b" })
+    let list: dyn Node = List { items: items }
+    io::println(list.render())
+    0
+}
