@@ -6711,13 +6711,6 @@ NominalDecl *Sema::cloneDuplicatesObligation(Type *t, std::set<Type *> &seen) {
 void Sema::checkClonable(Type *t, SourceRange at) {
   if (!t || t->isError() || userClone(t))
     return;
-  // Not from inside a library. `Option<T>` clones its payload in `expect`
-  // and `filter`, and every instantiation of it is checked whether or not
-  // the program ever calls those — so a `Descriptor?` would be refused for a
-  // copy nothing makes. What the library does with a `T` it was handed is
-  // the library's business; what this program writes is checked below.
-  if (CurModule && Result.isAncillary(CurModule->Name))
-    return;
   std::set<Type *> seen;
   NominalDecl *bad = cloneDuplicatesObligation(t, seen);
   if (!bad)

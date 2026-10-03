@@ -5,7 +5,7 @@ import std::io
 import std::mem
 
 fn main() -> i64 {
-    var buffer = mem::Buffer<i64>(size: 100, fill: 20)
+    var buffer = mem::filled<i64>(100, 20)
     io::println("Buffer[5] = " + buffer[5].$str())
     buffer[100]                     // out of range: this aborts
     0

@@ -1,0 +1,15 @@
+// EXPECT-ERROR: 'Fd' does not have the mark 'Clone'
+// `Box::get` hands back a copy, so it is there only for a `T` that can be
+// copied; a box of something with an owner per value is read with `look`.
+import std::mem
+
+struct Fd {
+    n: i64
+    fn deinit(&self) { }
+}
+
+fn main() -> i64 {
+    let b = mem::boxed(Fd { n: 5 })
+    let copy = b.get()
+    0
+}

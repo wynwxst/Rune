@@ -9959,24 +9959,24 @@ fn main() -> i64 {
            ["`isNil`", "`(&self) -> bool`", "true when `None`"],
            ["`isSuchThat`", "`(&self, @function(T) -> bool) -> bool`",
             "true when present *and* it passes"],
-           ["`or`", "`(&self, fallback: T) -> T`", "the value, or the fallback"],
-           ["`orElse`", "`(&self, @function() -> T) -> T`",
+           ["`or`", "`(self, fallback: T) -> T`", "the value, or the fallback"],
+           ["`orElse`", "`(self, @function() -> T) -> T`",
             "same, producing the fallback only if needed"],
-           ["`unwrap`", "`(&self) -> T`", "the value; **aborts** on `None`"],
-           ["`expect`", "`(&self, message: CString) -> T`", "same, with your "
+           ["`unwrap`", "`(self) -> T`", "the value; **aborts** on `None`"],
+           ["`expect`", "`(self, message: CString) -> T`", "same, with your "
             "message"],
-           ["`map`", "`<U>(&self, @function(T) -> U) -> Option<U>`",
+           ["`map`", "`<U>(self, @function(T) -> U) -> Option<U>`",
             "the value transformed; empty passes through"],
-           ["`mapOr`", "`<U>(&self, fallback: U, @function(T) -> U) -> U`",
+           ["`mapOr`", "`<U>(self, fallback: U, @function(T) -> U) -> U`",
             "`map` then `or`, in one step"],
            ["`andThen`",
-            "`<U>(&self, @function(T) -> Option<U>) -> Option<U>`",
+            "`<U>(self, @function(T) -> Option<U>) -> Option<U>`",
             "`map` for a function that may itself come up empty"],
-           ["`filter`", "`(&self, @function(T) -> bool) -> Option<T>`",
+           ["`filter`", "`(self, @function(T) -> bool) -> Option<T>`",
             "the value, but only if it passes"],
-           ["`otherwise`", "`(&self, other: Option<T>) -> Option<T>`",
+           ["`otherwise`", "`(self, other: Option<T>) -> Option<T>`",
             "this one if present, else the other; stays an `Option`"],
-           ["`zip`", "`<U>(&self, Option<U>) -> Option<(T, U)>`",
+           ["`zip`", "`<U>(self, Option<U>) -> Option<(T, U)>`",
             "both as a pair, or nothing"],
            ["`take`", "`(&var self) -> Option<T>`",
             "hands the value over and leaves this one empty"],
@@ -10013,25 +10013,25 @@ fn main() -> i64 {
            ["`isOk` / `isErr`", "`(&self) -> bool`", "which one it is"],
            ["`isSuchThat`", "`(&self, @function(T) -> bool) -> bool`",
             "succeeded *and* the value passes"],
-           ["`or`", "`(&self, fallback: T) -> T`", "the value, or the fallback"],
-           ["`orElse`", "`(&self, @function() -> T) -> T`",
+           ["`or`", "`(self, fallback: T) -> T`", "the value, or the fallback"],
+           ["`orElse`", "`(self, @function() -> T) -> T`",
             "same, producing the fallback only if needed"],
-           ["`recover`", "`(&self, @function(E) -> T) -> T`",
+           ["`recover`", "`(self, @function(E) -> T) -> T`",
             "the value, or what the error is turned into"],
-           ["`unwrap`", "`(&self) -> T`", "the value; **aborts** on `Err`"],
-           ["`expect`", "`(&self, message: CString) -> T`", "same, with your "
+           ["`unwrap`", "`(self) -> T`", "the value; **aborts** on `Err`"],
+           ["`expect`", "`(self, message: CString) -> T`", "same, with your "
             "message"],
-           ["`unwrapErr`", "`(&self) -> E`", "the error; **aborts** on `Ok`"],
-           ["`map`", "`<U>(&self, @function(T) -> U) -> Result<U, E>`",
+           ["`unwrapErr`", "`(self) -> E`", "the error; **aborts** on `Ok`"],
+           ["`map`", "`<U>(self, @function(T) -> U) -> Result<U, E>`",
             "the value transformed; an error passes through"],
-           ["`mapErr`", "`<F>(&self, @function(E) -> F) -> Result<T, F>`",
+           ["`mapErr`", "`<F>(self, @function(E) -> F) -> Result<T, F>`",
             "the error transformed — a conversion local to one call, when "
             "a `bind As` would be too wide"],
            ["`andThen`",
-            "`<U>(&self, @function(T) -> Result<U, E>) -> Result<U, E>`",
+            "`<U>(self, @function(T) -> Result<U, E>) -> Result<U, E>`",
             "what `?` does, without the early return"],
-           ["`ok`", "`(&self) -> Option<T>`", "the success as an `Option`"],
-           ["`error`", "`(&self) -> Option<E>`", "the failure as an `Option`"],
+           ["`ok`", "`(self) -> Option<T>`", "the success as an `Option`"],
+           ["`error`", "`(self) -> Option<E>`", "the failure as an `Option`"],
            ["`ok` / `err`", "`<T, E>(...) -> Result<T, E>`", "constructors"],
            ["`from`", "`<T, E>(Option<T>, error: E) -> Result<T, E>`",
             "an empty lookup made into one that says why"],
@@ -10819,8 +10819,9 @@ fn main() -> i64 {
           "array's length is part of its type, so it cannot be decided at run "
           "time; a `Buffer` can. Reading and writing both go through `[]`."),
         T(["Member", "Signature", "Does"],
-          [["`Buffer<T>`", "`(size: i64, fill: T)`", "`size` slots, each "
-            "holding `fill`"],
+          [["`Buffer<T>`", "`(size: i64)`", "`size` zeroed slots"],
+           ["`mem::filled`", "`<T: Clone>(size: i64, value: T) -> Buffer<T>`",
+            "`size` slots, each holding a copy of `value`"],
            ["`length`", "`(&self) -> i64`", "how many, fixed for its life"],
            ["`isEmpty`", "`(&self) -> bool`", ""],
            ["`holds`", "`(&self, index: i64) -> bool`", "is that a slot?"],
@@ -10847,7 +10848,7 @@ fn main() -> i64 {
 import std::mem
 
 fn main() -> i64 {
-    var b = mem::Buffer<i64>(size: 4, fill: 0)
+    var b = mem::filled<i64>(4, 0)
     b[0] = 10
     b[1] = 20
     b[2] = b[0] + b[1]
@@ -10864,17 +10865,17 @@ fn main() -> i64 {
 import std::mem
 
 fn main() -> i64 {
-    var b = mem::Buffer<i64>(size: 2, fill: 0)
+    var b = mem::filled<i64>(2, 0)
     io::println("about to read past the end")
     io::println(b[5].$str())
     0
 }""", mode="panic", title="Past the end aborts"),
-        N("The `fill` is required rather than optional. A buffer with "
-          "uninitialised slots would hand out whatever the allocator left "
-          "there — the one thing a safe container must not do — so every slot "
-          "holds a real value from the moment it exists. For a "
-          "reference-counted `T` the buffer owns one reference per slot and "
-          "gives them all back.", label="Why a fill"),
+        N("A buffer never hands out whatever the allocator left there — the "
+          "one thing a safe container must not do: a new one is zeroed, and "
+          "`mem::filled` writes a copy of its value into every slot. Copies, "
+          "so `filled` asks for a `T` that can be copied; a buffer of `Box`es "
+          "or `File`s starts zeroed and is written slot by slot.",
+          label="Never uninitialised"),
 
         H("std::dictionary"),
         P("Keyed lookup: a `Map` from keys to values, and a `Set` of keys "

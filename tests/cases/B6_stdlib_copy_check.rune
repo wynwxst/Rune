@@ -1,0 +1,35 @@
+// EXPECT: 6
+// EXPECT: still there 3
+// SAFETY: full
+// The copy check now runs inside the standard library too: a generic type
+// instantiated with something that cannot be copied — it runs a `deinit`
+// and has no `clone` — compiles, because every method that would copy a `T`
+// says `where T: Clone` and is left out, and the takers move instead.
+import std::io
+import std::mem
+import std::dictionary
+import std::collections::vector
+import std::thread
+
+struct Fd {
+    pub n: i64
+    fn deinit(&self) { }
+}
+
+fn main() -> i64 {
+    let o: Fd? = Fd { n: 1 }
+    let r: Result<Fd, Fd> = Ok(Fd { n: 2 })
+    var v = vector::Vector<Fd>()
+    v.push(Fd { n: 3 })
+    var m = dictionary::Map<i64, Fd>()
+    m.put(1, Fd { n: 4 })
+    let b = mem::boxed(Fd { n: 5 })
+    let buf = mem::Buffer<Fd>(2)
+    let h = mem::Handle<Fd>(Fd { n: 6 })
+    let rc = mem::shared(Fd { n: 7 })
+    let mu = thread::Mutex<Fd>(Fd { n: 9 })
+    let chan = thread::Channel<Fd>()
+    io::println(o.unwrap().n + r.unwrap().n + v.look(0).n)
+    io::println("still there " + v.look(0).n.$str())
+    0
+}

@@ -56,23 +56,28 @@ pub enum Result<T, E> {
     }
 
     //=== Getting the value out ============================================//
+    //
+    // Each of these takes the result itself and hands its contents on, as
+    // `Option`'s do: nothing is copied, so they work for a `T` or an `E`
+    // that cannot be — a `Box`, a `File`. Ask first with `isOk`, or match,
+    // to keep the result.
 
     /// The value, or `fallback` when this is an error.
     ///
     /// `fallback` is evaluated whether or not it is needed. Use `orElse` when
     /// producing it is expensive, and `recover` when the error itself should
     /// have a say in what replaces it.
-    pub fn or(&self, fallback: T) -> T {
+    pub fn or(self, fallback: T) -> T {
         match self {
-            Result::Ok(v) => v.$clone(),
+            Result::Ok(v) => v,
             Result::Err(e) => fallback,
         }
     }
 
     /// The value, or what `produce` returns when this is an error.
-    pub fn orElse(&self, produce: @function() -> T) -> T {
+    pub fn orElse(self, produce: @function() -> T) -> T {
         match self {
-            Result::Ok(v) => v.$clone(),
+            Result::Ok(v) => v,
             Result::Err(e) => produce(),
         }
     }
@@ -83,18 +88,18 @@ pub enum Result<T, E> {
     ///         warn(e)
     ///         8080
     ///     })
-    pub fn recover(&self, repair: @function(E) -> T) -> T {
+    pub fn recover(self, repair: @function(E) -> T) -> T {
         match self {
-            Result::Ok(v) => v.$clone(),
-            Result::Err(e) => repair(e.$clone()),
+            Result::Ok(v) => v,
+            Result::Err(e) => repair(e),
         }
     }
 
     /// The value. Aborts when this is an error.
     @safe("the runtime prints the location and aborts; it never returns")
-    pub fn unwrap(&self) -> T {
+    pub fn unwrap(self) -> T {
         match self {
-            Result::Ok(v) => v.$clone(),
+            Result::Ok(v) => v,
             Result::Err(e) => rune_panic_unwrap("Result", "Result::unwrap"),
         }
     }
@@ -104,9 +109,9 @@ pub enum Result<T, E> {
     /// Prefer this to `unwrap` wherever the reason it should have succeeded
     /// can be written down: the message is what the traceback leads with.
     @safe("the runtime prints the message and aborts; it never returns")
-    pub fn expect(&self, message: CString) -> T {
+    pub fn expect(self, message: CString) -> T {
         match self {
-            Result::Ok(v) => v.$clone(),
+            Result::Ok(v) => v,
             Result::Err(e) => rune_panic_unwrap(message, "Result::expect"),
         }
     }
@@ -115,10 +120,10 @@ pub enum Result<T, E> {
     ///
     /// The mirror of `unwrap`, for a test that means to check the failure.
     @safe("the runtime prints the location and aborts; it never returns")
-    pub fn unwrapErr(&self) -> E {
+    pub fn unwrapErr(self) -> E {
         match self {
             Result::Ok(v) => rune_panic_unwrap("Result", "Result::unwrapErr"),
-            Result::Err(e) => e.$clone(),
+            Result::Err(e) => e,
         }
     }
 
@@ -129,10 +134,10 @@ pub enum Result<T, E> {
     ///     let lines = readFile(path).map(||(text: String) -> i64 {
     ///         text.$length()
     ///     })
-    pub fn map<U>(&self, f: @function(T) -> U) -> Result<U, E> {
+    pub fn map<U>(self, f: @function(T) -> U) -> Result<U, E> {
         match self {
-            Result::Ok(v) => Result::<U, E>::Ok(f(v.$clone())),
-            Result::Err(e) => Result::<U, E>::Err(e.$clone()),
+            Result::Ok(v) => Result::<U, E>::Ok(f(v)),
+            Result::Err(e) => Result::<U, E>::Err(e),
         }
     }
 
@@ -144,10 +149,10 @@ pub enum Result<T, E> {
     ///     store(path).mapErr(||(e: io::FileError) -> SaveError {
     ///         SaveError::Disk(e)
     ///     })
-    pub fn mapErr<F>(&self, f: @function(E) -> F) -> Result<T, F> {
+    pub fn mapErr<F>(self, f: @function(E) -> F) -> Result<T, F> {
         match self {
-            Result::Ok(v) => Result::<T, F>::Ok(v.$clone()),
-            Result::Err(e) => Result::<T, F>::Err(f(e.$clone())),
+            Result::Ok(v) => Result::<T, F>::Ok(v),
+            Result::Err(e) => Result::<T, F>::Err(f(e)),
         }
     }
 
@@ -159,28 +164,28 @@ pub enum Result<T, E> {
     ///     open(path).andThen(||(f: io::File) -> Result<String, io::FileError> {
     ///         f.readToString()
     ///     })
-    pub fn andThen<U>(&self, f: @function(T) -> Result<U, E>) -> Result<U, E> {
+    pub fn andThen<U>(self, f: @function(T) -> Result<U, E>) -> Result<U, E> {
         match self {
-            Result::Ok(v) => f(v.$clone()),
-            Result::Err(e) => Result::<U, E>::Err(e.$clone()),
+            Result::Ok(v) => f(v),
+            Result::Err(e) => Result::<U, E>::Err(e),
         }
     }
 
     //=== Crossing over to Option ==========================================//
 
     /// The value as an option, discarding any error.
-    pub fn ok(&self) -> option::Option<T> {
+    pub fn ok(self) -> option::Option<T> {
         match self {
-            Result::Ok(v) => option::Option::<T>::Some(v.$clone()),
+            Result::Ok(v) => option::Option::<T>::Some(v),
             Result::Err(e) => option::Option::<T>::None,
         }
     }
 
     /// The error as an option, discarding any value.
-    pub fn error(&self) -> option::Option<E> {
+    pub fn error(self) -> option::Option<E> {
         match self {
             Result::Ok(v) => option::Option::<E>::None,
-            Result::Err(e) => option::Option::<E>::Some(e.$clone()),
+            Result::Err(e) => option::Option::<E>::Some(e),
         }
     }
 }

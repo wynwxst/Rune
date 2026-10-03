@@ -318,7 +318,7 @@ pub class Handle<T> {
 
     /// A copy of the value: a share under counting, a clone under single
     /// ownership.
-    pub fn get(&self) -> T { self.value.$clone() }
+    pub fn get(&self) -> T where T: Clone { self.value.$clone() }
 
     /// The value where it lies, borrowed for as long as the handle is.
     ///
@@ -374,7 +374,7 @@ pub class Handle<T> {
 
     /// A second handle on a value of its own, cloned from this one. Where a
     /// plain copy of a handle shares the value, this one does not.
-    pub fn duplicate(&self) -> Handle<T> { Handle<T>(self.value.$clone()) }
+    pub fn duplicate(&self) -> Handle<T> where T: Clone { Handle<T>(self.value.$clone()) }
 }
 
 // Two handles are equal when the values they hold are, whatever `T` is: the
@@ -395,7 +395,7 @@ bind<T: io::Display> io::Display to Handle<T> {
 // operator written as punctuation.
 bind<T> operator::"*" to Handle<T> {
     @alias("Asterisk")
-    fn deref(&self) -> T { self.value.$clone() }
+    fn deref(&self) -> T where T: Clone { self.value.$clone() }
 
     @alias("AsteriskEquals")
     fn derefSet(&var self, value: T) { self.value = value }
@@ -446,7 +446,7 @@ pub struct Box<T> {
     }
 
     /// A copy of the value.
-    pub fn get(&self) -> T { self.look().$clone() }
+    pub fn get(&self) -> T where T: Clone { self.look().$clone() }
 
     /// Replaces the value, destroying what was there.
     pub fn set(&var self, value: T) { *self.touch() = value }
@@ -460,7 +460,23 @@ pub struct Box<T> {
     }
 
     /// A second box over a clone of the value.
-    pub fn duplicate(&self) -> Box<T> { boxed<T>(self.look().$clone()) }
+    pub fn duplicate(&self) -> Box<T> where T: Clone { boxed<T>(self.look().$clone()) }
+}
+
+/// `size` slots each holding a copy of `value` — copies, so only of a `T`
+/// that can be copied: one value in every slot is what a buffer of a type
+/// with an owner per value cannot be.
+///
+///     var row = mem::filled<i64>(8, 0)
+@safe("each slot below the count is written once, with a copy of its own")
+pub fn filled<T>(size: i64, value: T) -> Buffer<T> where T: Clone {
+    var b = Buffer<T>(size)
+    var i: i64 = 0
+    while i < b.count {
+        unsafe { store<T>(&var (b.block as *var T)[i] as *var T, value.$clone()) }
+        i += 1
+    }
+    b
 }
 
 /// `mem::tryBoxed(v)` — the same, or, with no memory for it, `v` handed
@@ -487,7 +503,7 @@ pub fn boxed<T>(value: T) -> Box<T> {
 // A box behaves like a pointer: `*b` reads the value, `*b = v` writes it.
 bind<T> operator::"*" to Box<T> {
     @alias("Asterisk")
-    fn deref(&self) -> T { self.look().$clone() }
+    fn deref(&self) -> T where T: Clone { self.look().$clone() }
 
     @alias("AsteriskEquals")
     fn derefSet(&var self, value: T) { *self.touch() = value }
@@ -586,7 +602,7 @@ pub struct Rc<T> {
     }
 
     /// A copy of the value.
-    pub fn get(&self) -> T { self.look().$clone() }
+    pub fn get(&self) -> T where T: Clone { self.look().$clone() }
 
     /// How many owners there are, this one included.
     pub fn strongCount(&self) -> i64 {
@@ -621,7 +637,7 @@ bind<T> Clone to Rc<T> {}
 
 bind<T> operator::"*" to Rc<T> {
     @alias("Asterisk")
-    fn deref(&self) -> T { self.look().$clone() }
+    fn deref(&self) -> T where T: Clone { self.look().$clone() }
 }
 
 bind<T> operator::eq to Rc<T> {
@@ -698,9 +714,9 @@ bind<T> Clone to Weak<T> {}
 ///     b[2] = 7
 ///     io::println(b[2].$str())
 ///
-///     var c = buffer::Buffer<i64>(4, 1)       // four slots holding 1
+///     var c = mem::filled<i64>(4, 1)          // four slots holding 1
 ///
-/// Leaving the fill out zeroes the storage, which means two different things
+/// A new buffer's storage is zeroed, which means two different things
 /// depending on `T`, and both are safe:
 ///
 /// * For a value type — an integer, a float, `bool`, a struct of those — all
@@ -717,7 +733,7 @@ pub class Buffer<T> {
     block: *var u8
     count: i64
 
-    fn init(self, size: i64, fill: T? = nil) {
+    fn init(self, size: i64) {
         self.count = if size > 0 { size } else { 0 }
         if self.count == 0 {
             self.block = noBlock()
@@ -730,24 +746,9 @@ pub class Buffer<T> {
             self.count = 0
             return
         }
-        // Zero first, unconditionally: it is what an absent fill means, and it
-        // is also the state a fill overwrites, so nothing is ever read before
-        // it is written.
+        // Zeroed: nothing is ever read before it is written. `filled`
+        // overwrites the zeros with a value.
         zero(self.block, bytes)
-        match fill {
-            Some(value) => {
-                var i = 0
-                while i < self.count {
-                    // A fresh copy per slot: a share of the one value under
-                    // counting, an independent clone under single ownership.
-                    unsafe {
-                        store<T>(&var (self.block as *var T)[i] as *var T, value.$clone())
-                    }
-                    i += 1
-                }
-            }
-            None => {}
-        }
     }
 
     fn deinit(self) {
@@ -1046,7 +1047,7 @@ pub struct Ref<T> {
 }
 bind<T> operator::"*" to Ref<T> {
     @alias("Asterisk")
-    fn deref(&self) -> T { self.owner.value.$clone() }
+    fn deref(&self) -> T where T: Clone { self.owner.value.$clone() }
 }
 
 /// The mutable borrow handed out by `Checked::borrowVar`: read or write it with
@@ -1076,7 +1077,7 @@ pub struct RefVar<T> {
 }
 bind<T> operator::"*" to RefVar<T> {
     @alias("Asterisk")
-    fn deref(&self) -> T { self.owner.value.$clone() }
+    fn deref(&self) -> T where T: Clone { self.owner.value.$clone() }
 
     @alias("AsteriskEquals")
     fn derefSet(&var self, value: T) { self.write(value) }
@@ -1186,7 +1187,7 @@ pub class Arena<T> {
     }
 
     /// The value a handle names, or nothing when the handle is stale.
-    pub fn get(&self, slot: Slot) -> T? {
+    pub fn get(&self, slot: Slot) -> T? where T: Clone {
         if !self.liveAt(slot) { return nil }
         self.values.read(slot.index)
     }

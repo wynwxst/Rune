@@ -11,7 +11,7 @@ import std::process
 import std::mem
 
 fn main() -> i64 {
-    var b = mem::Buffer<i64>(size: 4, fill: 0)
+    var b = mem::filled<i64>(4, 0)
     io::println("length " + b.length().$str() +
                 " empty " + b.isEmpty().$str())
 
@@ -29,7 +29,7 @@ fn main() -> i64 {
     // gives them all back.
     let before = process::liveObjectCount()
     {
-        var names = mem::Buffer<String>(size: 3, fill: "-")
+        var names = mem::filled<String>(3, "-")
         names[0] = "ada"
         names[1] = "grace"
         io::println(names[0] + " " + names[1] + " " + names[2])

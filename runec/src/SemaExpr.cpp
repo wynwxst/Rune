@@ -3534,7 +3534,18 @@ Type *Sema::checkMatch(MatchExpr *m, Type *expected, bool discardBranches) {
     st = st->pointee();
   Type *result = nullptr;
 
+  // Each arm starts from what the scrutinee left: a move in one arm is not a
+  // move in the next. Afterwards a name is gone if any arm that finishes
+  // gave it away.
+  const std::map<VarDecl *, Expr *> movedBefore = MovedFrom;
+  std::map<VarDecl *, Expr *> movedAfter = movedBefore;
+  struct SettleMoves {
+    std::map<VarDecl *, Expr *> &Moved, &After;
+    ~SettleMoves() { Moved = After; }
+  } settle{MovedFrom, movedAfter};
+
   for (auto &arm : m->Arms) {
+    MovedFrom = movedBefore;
     pushScope(ScopeKind::Block);
     checkPattern(arm.Pat.get(), st, /*declaresBindings=*/false,
                  /*isMutable=*/false);
@@ -3549,6 +3560,9 @@ Type *Sema::checkMatch(MatchExpr *m, Type *expected, bool discardBranches) {
     ValueDiscarded = discardBranches;
     Type *bt = checkExpr(arm.Body.get(), expected ? expected : result);
     popScope();
+    if (!(bt && bt->isNever()))
+      for (const auto &[v, e] : MovedFrom)
+        movedAfter.emplace(v, e);
     if (discardBranches) {
       // Nothing wants the value, so the arms have nothing to agree on.
       result = Types.voidType();

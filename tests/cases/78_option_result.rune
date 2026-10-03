@@ -59,11 +59,13 @@ fn main() -> i64 {
 
     ok = parse("12")
     bad = parse("xy")
-    io::println(ok.map(||(v: i64) -> i64 { v * 2 }).or(-1).$str())
-    io::println(bad.mapErr(||(e: String) -> String { "bad: " + e }).error().unwrap())
-    io::println(ok.andThen(||(v: i64) -> Result<String, String> { "n=" + v.$str() }).or("?"))
-    io::println(bad.recover(||(e: String) -> i64 { e.$length() }).$str())
-    io::println(bad.orElse(||() -> i64 { 5 }).$str())
+    // Each of these takes the result and hands its contents on, so one that
+    // is used again is copied first.
+    io::println(ok.$clone().map(||(v: i64) -> i64 { v * 2 }).or(-1).$str())
+    io::println(bad.$clone().mapErr(||(e: String) -> String { "bad: " + e }).error().unwrap())
+    io::println(ok.$clone().andThen(||(v: i64) -> Result<String, String> { "n=" + v.$str() }).or("?"))
+    io::println(bad.$clone().recover(||(e: String) -> i64 { e.$length() }).$str())
+    io::println(bad.$clone().orElse(||() -> i64 { 5 }).$str())
     io::println(ok.isSuchThat(||(v: i64) -> bool { v > 10 }).$str())
     io::println(bad.unwrapErr())
     io::println(result::from::<i64, String>(option::none::<i64>(), "empty").unwrapErr())
