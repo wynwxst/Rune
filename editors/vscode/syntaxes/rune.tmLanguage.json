@@ -499,7 +499,7 @@
         },
         {
           "name": "storage.modifier.rune",
-          "match": "\\b(pub|var|let|mut|global|extern|unsafe|async|weak|uniq|move|dyn|some|ref)\\b"
+          "match": "\\b(pub|var|let|mut|global|extern|unsafe|async|weak|uniq|move|dyn|some)\\b|\\btake\\b(?=\\s+(?:var\\s+)?[A-Za-z_])"
         },
         {
           "name": "keyword.other.rune",

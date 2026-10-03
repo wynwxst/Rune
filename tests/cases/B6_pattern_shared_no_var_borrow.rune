@@ -1,0 +1,8 @@
+// EXPECT-ERROR: it was matched through a shared borrow
+fn poke(o: &i64?) {
+    match o {
+        Some(n) => { let r = &var n; *r = 1 }
+        None => {}
+    }
+}
+fn main() -> i64 { 0 }

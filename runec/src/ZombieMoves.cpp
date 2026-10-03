@@ -308,6 +308,26 @@ void MoveAnalysis::checkMoveOutOf(const Stmt &s, const PlaceAccess &a) {
     d.code(274);
     return;
   }
+  if (whole && root.RefLike && root.Var && root.Var->PatternBorrow) {
+    // A pattern binding borrows what it matched unless it says `take`.
+    VarDecl *v = root.Var;
+    auto d = Diags.error(a.Range, "cannot move '{}': the pattern only borrows "
+                         "what it matched", v->Name);
+    d.note("a binding in a `match`, `if ... is` or `while ... is` borrows "
+           "unless it is written `take name`");
+    if (v->ZombieMatchedThroughBorrow) {
+      d.note("what was matched is itself reached through a borrow, so it is "
+             "not this function's to take");
+      d.related(v->NameRange, fmt("'{}' is bound here", v->Name),
+                "copy it with `$clone()`, or match a value this function owns");
+    } else {
+      d.related(v->NameRange, fmt("'{}' is bound here", v->Name),
+                fmt("write `take {}` to move it out of what was matched",
+                    v->Name));
+    }
+    d.code(274);
+    return;
+  }
   if (whole && root.RefLike) {
     auto d = Diags.error(a.Range, "cannot move '{}' out of a borrow",
                          B.spell(a.Place));

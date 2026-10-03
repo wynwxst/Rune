@@ -2501,28 +2501,46 @@ PatternPtr Parser::parsePatternPrimary() {
     return sp;
   }
 
-  // `ref name` / `ref var name`: a binding that borrows the part it matched,
-  // where it is, instead of taking or copying it — the way to hand out a
-  // reference into an enum's payload. The word is contextual: only `ref`
-  // followed by a name or `var` is read this way, so `ref` is still a name.
-  if (check(Tok::Identifier) && cur().Text == "ref" &&
+  // A binding borrows what it matched, where it is. `take name` — or
+  // `` `name ``, its short form, which `rune fmt` spells out — takes it
+  // instead: the matched part is moved into the binding. The word is
+  // contextual, as `ref` was: only `take` followed by a name or `var` reads
+  // this way, so `take` is still a name (`mem::take`).
+  const bool backtick = check(Tok::Backtick);
+  const bool takeWord =
+      check(Tok::Identifier) && cur().Text == "take" &&
       (peek(1).is(Tok::Identifier) || peek(1).is(Tok::KwVar) ||
-       peek(1).is(Tok::KwMut))) {
+       peek(1).is(Tok::KwMut));
+  const bool refWord =
+      check(Tok::Identifier) && cur().Text == "ref" &&
+      (peek(1).is(Tok::Identifier) || peek(1).is(Tok::KwVar) ||
+       peek(1).is(Tok::KwMut));
+  if (backtick || takeWord || refWord) {
+    SourceRange word = cur().Range;
     advance();
-    auto b = makeNode<BindingPattern>(here());
-    b->ByRef = true;
-    if (check(Tok::KwVar) || check(Tok::KwMut)) {
-      b->IsMutable = true; // `ref var`: the borrow may write
-      advance();
+    PatternPtr inner = parsePattern();
+    auto *b = inner ? dyn_cast<BindingPattern>(inner.get()) : nullptr;
+    if (refWord) {
+      std::string name = b ? b->Name : std::string("name");
+      Diags.error(word, "`ref` is gone: a pattern borrows what it matches")
+          .note(fmt("write `{}` to borrow it where it is, or `take {}` to "
+                    "move it out", name, name)
+                    .c_str())
+          .code(131);
+      return inner;
     }
-    if (check(Tok::Identifier)) {
-      b->Name = cur().Text;
-      advance();
-    } else {
-      expect(Tok::Identifier, "a pattern binding");
+    if (!b) {
+      Diags.error(word, "`{}` goes before a name the pattern binds",
+                  backtick ? "`" : "take")
+          .note("it says that binding takes what it matched rather than "
+                "borrowing it")
+          .code(131);
+      return inner;
     }
+    b->Takes = true;
+    b->TakeShort = backtick;
     b->Range = rangeFrom(start);
-    return b;
+    return inner;
   }
 
   if (check(Tok::KwVar) || check(Tok::KwMut)) {

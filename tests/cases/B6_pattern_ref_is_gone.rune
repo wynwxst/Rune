@@ -1,0 +1,8 @@
+// EXPECT-ERROR: `ref` is gone: a pattern borrows what it matches
+fn first(o: &String?) -> i64 {
+    match o {
+        Some(ref s) => s.$length(),
+        None => 0,
+    }
+}
+fn main() -> i64 { 0 }

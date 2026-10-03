@@ -537,7 +537,7 @@ std::string spellTokens(const std::vector<Token> &t) {
         tight = true;
       const bool afterTight = prev == Tok::LParen || prev == Tok::LBracket ||
                               prev == Tok::Dot || prev == Tok::ColonColon ||
-                              prev == Tok::Bang;
+                              prev == Tok::Bang || prev == Tok::Backtick;
       if (!tight && !afterTight && (!tok.SpacingKnown || tok.SpaceBefore))
         out += " ";
     }

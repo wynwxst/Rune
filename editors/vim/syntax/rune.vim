@@ -47,7 +47,9 @@ syn keyword runeFlow        return break continue defer await
 syn keyword runeKeyword     fn nextgroup=runeFuncName skipwhite
 syn keyword runeStructure   class struct enum mark nextgroup=runeTypeName skipwhite
 syn keyword runeStructure   type
-syn keyword runeModifier    pub var let mut global extern unsafe async weak uniq move dyn some ref
+syn keyword runeModifier    pub var let mut global extern unsafe async weak uniq move dyn some
+" `take name` in a pattern; `mem::take(...)` is a call, not the word.
+syn match   runeModifier    "\<take\>\ze\s\+\(var\s\+\)\=\h"
 syn keyword runeKeyword     bind to into extend operator where as is super
 syn keyword runeKeyword     macro nextgroup=runeMacroName skipwhite
 syn keyword runeInclude     import nextgroup=runeModPath skipwhite

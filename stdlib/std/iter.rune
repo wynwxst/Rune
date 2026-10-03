@@ -280,7 +280,7 @@ pub mark Iterator {
         var it = self
         var carried = it.next()
         match carried {
-            Option::Some(first) => {
+            Option::Some(take first) => {
                 var running = first
                 loop {
                     match it.next() {

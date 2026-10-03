@@ -155,7 +155,7 @@ pub class Parser {
                 }
                 var value = ""
                 match inline {
-                    Some(v) => value = v,
+                    Some(take v) => value = v,
                     None => {
                         if i >= n { return Error::MissingValue(name) }
                         value = given.get(i)

@@ -15,14 +15,14 @@ global var table: vector::Vector<String>? = nil
 global var calls: vector::Vector<@function() -> ()>? = nil
 
 fn routes() -> vector::Vector<String> {
-    if table is Some(t) { return t }
+    if table is Some(take t) { return t }
     let made = vector::Vector<String>()
     table = made
     made
 }
 
 fn handlers() -> vector::Vector<@function() -> ()> {
-    if calls is Some(t) { return t }
+    if calls is Some(take t) { return t }
     let made = vector::Vector<@function() -> ()>()
     calls = made
     made

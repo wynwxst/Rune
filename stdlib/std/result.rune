@@ -69,7 +69,7 @@ pub enum Result<T, E> {
     /// have a say in what replaces it.
     pub fn or(self, fallback: T) -> T {
         match self {
-            Result::Ok(v) => v,
+            Result::Ok(take v) => v,
             Result::Err(e) => fallback,
         }
     }
@@ -77,7 +77,7 @@ pub enum Result<T, E> {
     /// The value, or what `produce` returns when this is an error.
     pub fn orElse(self, produce: @function() -> T) -> T {
         match self {
-            Result::Ok(v) => v,
+            Result::Ok(take v) => v,
             Result::Err(e) => produce(),
         }
     }
@@ -90,8 +90,8 @@ pub enum Result<T, E> {
     ///     })
     pub fn recover(self, repair: @function(E) -> T) -> T {
         match self {
-            Result::Ok(v) => v,
-            Result::Err(e) => repair(e),
+            Result::Ok(take v) => v,
+            Result::Err(take e) => repair(e),
         }
     }
 
@@ -99,7 +99,7 @@ pub enum Result<T, E> {
     @safe("the runtime prints the location and aborts; it never returns")
     pub fn unwrap(self) -> T {
         match self {
-            Result::Ok(v) => v,
+            Result::Ok(take v) => v,
             Result::Err(e) => rune_panic_unwrap("Result", "Result::unwrap"),
         }
     }
@@ -111,7 +111,7 @@ pub enum Result<T, E> {
     @safe("the runtime prints the message and aborts; it never returns")
     pub fn expect(self, message: CString) -> T {
         match self {
-            Result::Ok(v) => v,
+            Result::Ok(take v) => v,
             Result::Err(e) => rune_panic_unwrap(message, "Result::expect"),
         }
     }
@@ -123,7 +123,7 @@ pub enum Result<T, E> {
     pub fn unwrapErr(self) -> E {
         match self {
             Result::Ok(v) => rune_panic_unwrap("Result", "Result::unwrapErr"),
-            Result::Err(e) => e,
+            Result::Err(take e) => e,
         }
     }
 
@@ -137,7 +137,7 @@ pub enum Result<T, E> {
     pub fn map<U>(self, f: @function(T) -> U) -> Result<U, E> {
         match self {
             Result::Ok(v) => Result::<U, E>::Ok(f(v)),
-            Result::Err(e) => Result::<U, E>::Err(e),
+            Result::Err(take e) => Result::<U, E>::Err(e),
         }
     }
 
@@ -152,7 +152,7 @@ pub enum Result<T, E> {
     pub fn mapErr<F>(self, f: @function(E) -> F) -> Result<T, F> {
         match self {
             Result::Ok(v) => Result::<T, F>::Ok(v),
-            Result::Err(e) => Result::<T, F>::Err(f(e)),
+            Result::Err(take e) => Result::<T, F>::Err(f(e)),
         }
     }
 
@@ -167,7 +167,7 @@ pub enum Result<T, E> {
     pub fn andThen<U>(self, f: @function(T) -> Result<U, E>) -> Result<U, E> {
         match self {
             Result::Ok(v) => f(v),
-            Result::Err(e) => Result::<U, E>::Err(e),
+            Result::Err(take e) => Result::<U, E>::Err(e),
         }
     }
 
@@ -176,7 +176,7 @@ pub enum Result<T, E> {
     /// The value as an option, discarding any error.
     pub fn ok(self) -> option::Option<T> {
         match self {
-            Result::Ok(v) => option::Option::<T>::Some(v),
+            Result::Ok(take v) => option::Option::<T>::Some(v),
             Result::Err(e) => option::Option::<T>::None,
         }
     }
@@ -185,7 +185,7 @@ pub enum Result<T, E> {
     pub fn error(self) -> option::Option<E> {
         match self {
             Result::Ok(v) => option::Option::<E>::None,
-            Result::Err(e) => option::Option::<E>::Some(e),
+            Result::Err(take e) => option::Option::<E>::Some(e),
         }
     }
 }
@@ -221,7 +221,7 @@ pub fn from<T, E>(value: option::Option<T>, error: E) -> Result<T, E> {
 /// arrives anyway.
 pub fn flatten<T, E>(nested: Result<Result<T, E>, E>) -> Result<T, E> {
     match nested {
-        Result::Ok(inner) => inner,
-        Result::Err(e) => Result::<T, E>::Err(e),
+        Result::Ok(take inner) => inner,
+        Result::Err(take e) => Result::<T, E>::Err(e),
     }
 }

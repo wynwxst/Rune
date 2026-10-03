@@ -68,7 +68,7 @@ pub enum Option<T> {
     ///     if self.pending.peek() is Some(job) { job.describe() }
     pub fn peek(&self) -> (&T from self)? {
         match self {
-            Option::Some(ref v) => Some(v),
+            Option::Some(v) => Some(&v),
             Option::None => nil,
         }
     }
@@ -77,7 +77,7 @@ pub enum Option<T> {
     @safe("the runtime prints the location and aborts; it never returns")
     pub fn look(&self) -> &T from self {
         match self {
-            Option::Some(ref v) => v,
+            Option::Some(v) => &v,
             Option::None => rune_panic_unwrap("Option", "Option::look"),
         }
     }
@@ -86,7 +86,7 @@ pub enum Option<T> {
     @safe("the runtime prints the location and aborts; it never returns")
     pub fn touch(&var self) -> &var T from self {
         match self {
-            Option::Some(ref var v) => v,
+            Option::Some(v) => &var v,
             Option::None => rune_panic_unwrap("Option", "Option::touch"),
         }
     }
@@ -104,7 +104,7 @@ pub enum Option<T> {
     /// producing it is expensive.
     pub fn or(self, fallback: T) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(take v) => v,
             Option::None => fallback,
         }
     }
@@ -116,7 +116,7 @@ pub enum Option<T> {
     ///     let name = cached.orElse(||() -> String { readFromDisk() })
     pub fn orElse(self, produce: @function() -> T) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(take v) => v,
             Option::None => produce(),
         }
     }
@@ -125,7 +125,7 @@ pub enum Option<T> {
     @safe("the runtime prints the location and aborts; it never returns")
     pub fn unwrap(self) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(take v) => v,
             Option::None => rune_panic_unwrap("Option", "Option::unwrap"),
         }
     }
@@ -137,7 +137,7 @@ pub enum Option<T> {
     @safe("the runtime prints the message and aborts; it never returns")
     pub fn expect(self, message: CString) -> T {
         match self {
-            Option::Some(v) => v,
+            Option::Some(take v) => v,
             Option::None => rune_panic_unwrap(message, "Option::expect"),
         }
     }
@@ -185,7 +185,7 @@ pub enum Option<T> {
     ///     let positive = count.filter(||(n: i64) -> bool { n > 0 })
     pub fn filter(self, keep: @function(T) -> bool) -> Option<T> where T: mem::Clone {
         match self {
-            Option::Some(v) => if keep(v.$clone()) { Option::<T>::Some(v) } else { Option::<T>::None },
+            Option::Some(take v) => if keep(v.$clone()) { Option::<T>::Some(v) } else { Option::<T>::None },
             Option::None => Option::<T>::None,
         }
     }
@@ -198,7 +198,7 @@ pub enum Option<T> {
     ///     let found = fromFlag.otherwise(fromEnv).otherwise(fromFile)
     pub fn otherwise(self, other: Option<T>) -> Option<T> {
         match self {
-            Option::Some(v) => Option::<T>::Some(v),
+            Option::Some(take v) => Option::<T>::Some(v),
             Option::None => other,
         }
     }
@@ -212,7 +212,7 @@ pub enum Option<T> {
     pub fn zip<U>(self, other: Option<U>) -> Option<(T, U)> {
         match self {
             Option::Some(a) => match other {
-                Option::Some(b) => Option::<(T, U)>::Some((a, b)),
+                Option::Some(take b) => Option::<(T, U)>::Some((a, b)),
                 Option::None => Option::<(T, U)>::None,
             },
             Option::None => Option::<(T, U)>::None,

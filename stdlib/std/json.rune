@@ -343,24 +343,24 @@ extend Value {
     /// Anything that is not an object comes back unchanged.
     pub fn withMember(self, name: String, item: Value) -> Value {
         match self {
-            Value::Object(o) => {
+            Value::Object(take o) => {
                 var target = o
                 target.put(name, item)
                 Value::Object(target)
             },
-            other => other,
+            take other => other,
         }
     }
 
     /// The same array, with `item` on the end.
     pub fn withItem(self, item: Value) -> Value {
         match self {
-            Value::Array(a) => {
+            Value::Array(take a) => {
                 var onto = a
                 onto.push(item)
                 Value::Array(onto)
             },
-            other => other,
+            take other => other,
         }
     }
 }

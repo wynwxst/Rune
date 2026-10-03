@@ -4,7 +4,8 @@
 // left:
 //
 //   1. the linter's style fixes — a `;` that ends nothing, `while true`,
-//      `== true`, a repeated import, trailing whitespace, tab indentation;
+//      `== true`, a repeated import, trailing whitespace, tab indentation —
+//      and `` `name `` in a pattern spelled out as `take name`;
 //   2. what the compiler knows written out: the type of every binding that
 //      has none, and the label of every argument given by position — the
 //      same things an editor shows greyed out as inlay hints;
@@ -615,9 +616,31 @@ pub fn reindent(text: &String) -> String {
     body + "\n"
 }
 
+/// `text` with each `` `name `` — the short way to have a pattern binding
+/// take what it matched — written out as `take name`.
+pub fn spellTakes(text: &String) -> String {
+    let lx = syntax::lex(text.$clone())
+    var out = io::Bytes()
+    var from = 0
+    var i = 0
+    while i < lx.count() {
+        let tok = lx.at(i)
+        if tok.kind == syntax::Kind::Punct && tok.text == "`" &&
+           (lx.isIdent(i + 1) || lx.isText(i + 1, "var")) && lx.at(i + 1).start == tok.end {
+            out.appendText(text.$substring(from, tok.start))
+            out.appendText("take ")
+            from = tok.end
+        }
+        i += 1
+    }
+    out.appendText(text.$substring(from, text.$length()))
+    out.toString()
+}
+
 /// `text` laid out: put in order (unless `reorder` is off) and indented.
 pub fn layout(text: &String, reorder: bool) -> String {
-    let arranged = if reorder { arrange(text) } else { text.$clone() }
+    let spelled = spellTakes(text)
+    let arranged = if reorder { arrange(spelled) } else { spelled }
     reindent(arranged)
 }
 

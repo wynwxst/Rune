@@ -541,6 +541,7 @@ Token Lexer::lexPunctuation() {
   case '@': k = Tok::At; break;
   case '#': k = Tok::Hash; break;
   case '$': k = Tok::Dollar; break;
+  case '`': k = Tok::Backtick; break;
   case '~': k = Tok::Tilde; break;
   case '?': k = two('?', Tok::QuestionQuestion, Tok::Question); break;
   case ':': k = two(':', Tok::ColonColon, Tok::Colon); break;

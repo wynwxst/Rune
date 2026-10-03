@@ -2057,7 +2057,8 @@ SECTIONS.append(Sec(
     "Patterns work in `match`, in `if ... is`, in `for`, and on the left of a "
     "binding.",
     keywords=["match", "pattern", "guard", "wildcard", "or pattern", "range "
-              "pattern", "destructure", "exhaustive", "binding pattern"],
+              "pattern", "destructure", "exhaustive", "binding pattern",
+              "take", "borrow"],
     items=[
         H("Every kind of pattern"),
         S("""import std::io
@@ -2184,7 +2185,7 @@ fn sum(xs: [i64]) -> i64 {
 
 fn command(words: [String]) -> String {
     match words {
-        ["go", ref dir] => "going " + dir,   // `ref`: borrowed, not moved out
+        ["go", dir] => "going " + dir,       // borrowed: `words` keeps it
         ["say", ..rest] => "saying " + rest.$length().$str() + " words",
         [.., "end"] => "ends with end",
         _ => "unknown",
@@ -2239,6 +2240,69 @@ fn main() -> i64 {
 }
 
 fn main() -> i64 { first([1]) }""", mode="diag", title="A length no arm accepts"),
+
+        H("Bindings borrow; `take` moves"),
+        P("A name in the pattern of a `match`, `if ... is` or `while ... is` "
+          "borrows the part it matched, where it is: reading `dir` reads the "
+          "element inside `words`, and `words` still has it afterwards. To "
+          "move the part out instead — to return it, or store it — write "
+          "`take` before the name. `` `name `` is the same thing, short; "
+          "`rune fmt` spells it out."),
+        S("""import std::io
+
+enum Job { Named(String), Blank }
+
+fn describe(j: &Job) -> String {
+    match j {
+        Job::Named(n) => "job " + n,        // borrowed
+        Job::Blank => "no job",
+    }
+}
+
+fn name(j: Job) -> String {
+    match j {
+        Job::Named(take n) => n,            // moved out: `j` is this function's
+        Job::Blank => "",
+    }
+}
+
+fn bump(slot: &var i64?) {
+    if slot is Some(n) {
+        let r = &var n                      // lends the payload itself
+        *r += 1
+    }
+}
+
+fn main() -> i64 {
+    let j = Job::Named("build")
+    io::println(describe(&j))
+    io::println(name(j))
+    var count: i64? = 41
+    bump(&var count)
+    io::println((count ?? 0).$str())
+    0
+}""", mode="run", title="Borrowing, taking, and lending a part"),
+        P("`&name` and `&var name` lend the matched part itself, not a copy, "
+          "so a function can hand out a borrow into what it was given — "
+          "`Option::look` and `touch` are written that way. `&var` needs what "
+          "was matched to be writable: a `&var` borrow, a `var` binding, or "
+          "`&var self`. A `take` moves out of something this function owns; "
+          "out of a borrow it is an error, as any move out of a borrow is, "
+          "and it is not allowed in an arm with a guard, which runs before "
+          "the arm is chosen. When what is matched is a temporary — "
+          "`match parse(text)` — nothing else could reach it, so its parts "
+          "are the bindings' own either way. `let` and `for` patterns take "
+          "apart a value that is theirs, and move as they always have."),
+        S("""enum Job { Named(String), Blank }
+
+fn name(j: Job) -> String {
+    match j {
+        Job::Named(n) => n,
+        Job::Blank => "",
+    }
+}
+
+fn main() -> i64 { 0 }""", mode="diag", title="Moving a borrowed binding"),
 
         H("Bindings in alternatives"),
         P("Alternatives may bind, as long as every one of them binds the same "

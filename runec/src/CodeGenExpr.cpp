@@ -2634,7 +2634,8 @@ Value *CodeGen::emitIf(IfExpr *i, Value *slot, Type *slotType) {
     fs().Scopes.push_back(LexicalScope{});
     if (condTy->is(TypeKind::Pointer)) {
       addr = subjectThroughBorrows(emitRValue(i->Cond.get()), condTy);
-    } else if (zombie() && placeBehindBorrow(i->Cond.get()) &&
+    } else if (zombie() &&
+               (i->ZombieSubjectInPlace || placeBehindBorrow(i->Cond.get())) &&
                (addr = emitLValue(i->Cond.get()))) {
       // Borrowed content: tested where it lies, as `match` does.
     } else {
@@ -2698,7 +2699,8 @@ Value *CodeGen::emitWhile(WhileExpr *w) {
     Value *addr = nullptr;
     if (condTy->is(TypeKind::Pointer)) {
       addr = subjectThroughBorrows(emitRValue(w->Cond.get()), condTy);
-    } else if (zombie() && placeBehindBorrow(w->Cond.get()) &&
+    } else if (zombie() &&
+               (w->ZombieSubjectInPlace || placeBehindBorrow(w->Cond.get())) &&
                (addr = emitLValue(w->Cond.get()))) {
       // Borrowed content: tested where it lies, as `match` does.
     } else {
@@ -2965,7 +2967,7 @@ Value *CodeGen::emitIteratorFor(ForExpr *f) {
   emitPatternBind(f->Binding.get(), elemSlot, elemTy);
   if (moveOnly)
     if (auto *bp = dyn_cast<BindingPattern>(f->Binding.get()))
-      if (!bp->ByRef && bp->Binding && !bp->Binding->ZombieAlias)
+      if (bp->Binding && !bp->Binding->ZombieAlias)
         B->CreateStore(Constant::getNullValue(lower(elemTy)), elemSlot);
 
   LoopFrame frame;
@@ -3206,17 +3208,14 @@ void CodeGen::emitPatternBind(Pattern *pat, Value *addr, Type *t) {
     if (b->isVariantTest() || !b->Binding)
       return;
     Value *slot = declareLocalSlot(b->Binding, b->Name);
-    if (b->ByRef) {
-      // A borrow of the matched part where it is: its address, or — for a
-      // shared borrow of a heap handle, which *is* the handle — the handle.
-      // Nothing is claimed, copied or emptied.
-      Type *refTy = b->Binding->Ty;
-      B->CreateStore(handleBorrow(refTy) ? B->CreateLoad(lower(t), addr) : addr,
-                     slot);
-      if (b->Sub)
-        emitPatternBind(b->Sub.get(), addr, t);
-      return;
-    }
+    // A binding that borrows remembers where the matched part is, so that
+    // `&name` and `&var name` lend it there rather than the binding's copy.
+    // Under Zombie only a view of a place qualifies: what was moved out of a
+    // temporary is the binding's own.
+    b->Binding->PatternPlace =
+        b->Binding->PatternBorrow && (!zombie() || b->Binding->ZombieInPlace)
+            ? addr
+            : nullptr;
     Value *v = B->CreateLoad(lower(t), addr);
     if (zombie()) {
       // The binding takes the value: what it was taken from is emptied —
@@ -3583,11 +3582,13 @@ Value *CodeGen::emitMatch(MatchExpr *m, Value *slot, Type *slotType) {
   bool ownsSubject = false;
   if (scrutTy->is(TypeKind::Pointer)) {
     addr = subjectThroughBorrows(emitRValue(m->Scrutinee.get()), scrutTy);
-  } else if (zombie() && placeBehindBorrow(m->Scrutinee.get()) &&
+  } else if (zombie() &&
+             (m->ZombieSubjectInPlace || placeBehindBorrow(m->Scrutinee.get())) &&
              (addr = emitLValue(m->Scrutinee.get()))) {
-    // A field of something this function only borrows: matched where it
-    // lies. The arms' bindings alias it, which is what the borrow checker
-    // has already checked them as.
+    // A place — a local, or a field of something this function only
+    // borrows: matched where it lies. The arms' bindings alias it, and a
+    // `take` moves its part out of it, which is what the borrow checker has
+    // already checked them as.
   } else {
     addr = createEntryAlloca(lower(scrutTy), "match.subject");
     if (scrutTy->isRefCounted())
@@ -3965,6 +3966,12 @@ Value *CodeGen::emitRValue(Expr *e) {
     // Under Zombie a shared borrow of a class, a `String`, a closure or a
     // mark object is the handle: the object is what is borrowed, and it
     // stays where it is however the handle moves.
+    if (auto *ref = dyn_cast<DeclRefExpr>(b->Operand.get()))
+      if (auto *v = (ref->Resolved ? dyn_cast<VarDecl>(ref->Resolved) : nullptr))
+        if (v->PatternBorrow && v->PatternPlace) {
+          auto *at = static_cast<Value *>(v->PatternPlace);
+          return handleBorrow(e->Ty) ? B->CreateLoad(lower(v->Ty), at) : at;
+        }
     if (handleBorrow(e->Ty))
       return emitRValue(b->Operand.get());
     return emitLValue(b->Operand.get());

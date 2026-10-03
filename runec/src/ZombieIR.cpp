@@ -767,6 +767,9 @@ private:
   void lowerDeferred(const Expr *body);
   void bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r,
                    bool mutableAlias = false);
+  /// Where each borrowing pattern binding found what it matched: `&name`
+  /// and `&var name` lend that place, not the binding's own copy.
+  std::map<VarDecl *, PlaceId> PatternPlaces;
   /// The place a `match`, `if … is` or `while … is` really looks at.
   ///
   /// A scrutinee of reference type is matched *through* the reference, so
@@ -1701,7 +1704,19 @@ PlaceId Lowerer::lower(Expr *e) {
   }
   case NodeKind::Borrow: {
     auto *b = cast<BorrowExpr>(e);
-    PlaceId op = lowerPlace(b->Operand.get());
+    PlaceId op = kNone;
+    // `&name` of a pattern binding that borrows: a borrow of what it matched.
+    if (auto *ref = dyn_cast<DeclRefExpr>(b->Operand.get()))
+      if (auto *v = (ref->Resolved ? dyn_cast<VarDecl>(ref->Resolved) : nullptr))
+        if (v->PatternBorrow) {
+          auto it = PatternPlaces.find(v);
+          if (it != PatternPlaces.end()) {
+            noteUse(place(localFor(v, ref->Range)), ref->Range);
+            op = it->second;
+          }
+        }
+    if (op == kNone)
+      op = lowerPlace(b->Operand.get());
     if (op == kNone)
       op = lower(b->Operand.get());   // `&f()`: a borrow of a temporary
     PlaceId dst = resultTemp(e->Ty, e->Range);
@@ -2425,6 +2440,7 @@ PlaceId Lowerer::lowerIf(IfExpr *i) {
     // `if x is Pat`: the scrutinee is a place when it can be.
     bool owned = true, scrutMutable = false;
     PlaceId scrut = scrutineePlace(i->Cond.get(), owned, scrutMutable);
+    i->ZombieSubjectInPlace = scrut != kNone && !owned;
     if (scrut != kNone) {
       Stmt fr;
       fr.K = Stmt::FakeRead;
@@ -2436,9 +2452,11 @@ PlaceId Lowerer::lowerIf(IfExpr *i) {
     switchTo(scrut, {thenB, elseB}, i->Cond->Range);
     setBlock(thenB);
     pushScope();
-    bindPattern(i->BindingPat.get(), scrut,
-                (owned || !B.Places.throughDeref(scrut)) && !scrutBorrowed,
-                i->BindingPat->Range, scrutMutable);
+    // A binding borrows what it matched — unless it says `take`, or what is
+    // matched is a temporary the `if` owns, which nothing else could reach.
+    (void)scrutBorrowed;
+    bindPattern(i->BindingPat.get(), scrut, owned, i->BindingPat->Range,
+                scrutMutable);
     PlaceId v = lowerBlock(i->Then.get(), dst != kNone);
     if (!Dead && dst != kNone)
       assignInto(dst, v, i->Then->Tail.get(), i->Then->Range);
@@ -2471,6 +2489,7 @@ PlaceId Lowerer::lowerMatch(MatchExpr *m) {
   PlaceId dst = resultTemp(m->Ty, m->Range);
   bool owned = true, scrutMutable = false;
   PlaceId scrut = scrutineePlace(m->Scrutinee.get(), owned, scrutMutable);
+  m->ZombieSubjectInPlace = scrut != kNone && !owned;
   if (scrut != kNone) {
     Stmt fr;
     fr.K = Stmt::FakeRead;
@@ -2482,8 +2501,10 @@ PlaceId Lowerer::lowerMatch(MatchExpr *m) {
   // payload is borrowed content — an alias, never a move — even though the
   // reference local itself carries no `Deref` projection.
   bool scrutBorrowed = m->Scrutinee->Ty && m->Scrutinee->Ty->is(TypeKind::Pointer);
-  bool ownedScrut = (owned || (scrut != kNone && !B.Places.throughDeref(scrut))) &&
-                    !scrutBorrowed;
+  // A binding borrows what it matched — unless it says `take`, or what is
+  // matched is a temporary the `match` owns, which nothing else could reach.
+  bool ownedScrut = owned;
+  (void)scrutBorrowed;
   BlockId join = newBlock();
   // One block per arm; Sema has already made sure one of them matches.
   std::vector<BlockId> arms;
@@ -2533,6 +2554,7 @@ PlaceId Lowerer::lowerLoop(Expr *e) {
     if (w->BindingPat) {
       bool owned = true, scrutMutable = false;
       PlaceId scrut = scrutineePlace(w->Cond.get(), owned, scrutMutable);
+      w->ZombieSubjectInPlace = scrut != kNone && !owned;
       if (scrut != kNone) {
         Stmt fr;
         fr.K = Stmt::FakeRead;
@@ -2544,9 +2566,9 @@ PlaceId Lowerer::lowerLoop(Expr *e) {
       switchTo(scrut, {body, exit}, w->Cond->Range);
       setBlock(body);
       pushScope();
-      bindPattern(w->BindingPat.get(), scrut,
-                  (owned || !B.Places.throughDeref(scrut)) && !scrutBorrowed,
-                  w->BindingPat->Range, scrutMutable);
+      (void)scrutBorrowed;
+      bindPattern(w->BindingPat.get(), scrut, owned, w->BindingPat->Range,
+                  scrutMutable);
       lowerBlock(w->Body.get(), false);
       if (!Dead)
         popScope();
@@ -2944,12 +2966,18 @@ void Lowerer::bindPattern(Pattern *p, PlaceId src, bool owned, SourceRange r,
     }
     Type *st = typeOf(src);
     bool trivially = st && !movesWhenUsed(st);
-    if (owned || trivially || bp->ByRef) {
-      if (bp->ByRef) {
-        borrowInto(place(l), src, bp->IsMutable, false, nullptr, bp->Range);
-      } else {
-        assignInto(place(l), src, nullptr, bp->Range);
-      }
+    // A binding that does not take is a view of the matched place: `&name`
+    // lends that place (see the `Borrow` case), and codegen hands out its
+    // address.
+    if (!owned && !bp->Takes) {
+      PatternPlaces[bp->Binding] = src;
+      bp->Binding->ZombieInPlace = true;
+      bp->Binding->ZombieMatchedThroughBorrow =
+          mutableAlias || B.Places.throughDeref(src) ||
+          (B.Locals[B.Places.get(src).Root].RefLike);
+    }
+    if (owned || trivially || bp->Takes) {
+      assignInto(place(l), src, nullptr, bp->Range);
     } else {
       // Out of borrowed content: an alias. The binding holds the value
       // where it is, as a borrow of the scrutinee place — exclusive when the

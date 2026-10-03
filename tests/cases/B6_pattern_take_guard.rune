@@ -1,0 +1,8 @@
+// EXPECT-ERROR: cannot `take` in an arm with a guard
+fn pick(o: String?) -> String {
+    match o {
+        Some(take s) if s.$length() > 2 => s,
+        _ => "",
+    }
+}
+fn main() -> i64 { 0 }

@@ -470,8 +470,17 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
     }
     // `&value` on a `uniq` is an ordinary borrow of the class: the point of
     // taking one is to reach the object without becoming its second owner.
-    result = Types.pointerTo(TypeContext::stripUniq(inner), b->IsMutable,
-                             /*raw=*/false);
+    // A pattern binding's `&name` lends the matched part itself, and keeps
+    // its type whole where that is what is wanted: `Option<uniq T>::look`
+    // hands out a borrow of the `uniq T` that is there.
+    bool patternPart = false;
+    if (auto *ref = dyn_cast<DeclRefExpr>(b->Operand.get()))
+      if (auto *v = ref->Resolved ? dyn_cast<VarDecl>(ref->Resolved) : nullptr)
+        patternPart = v->PatternBorrow && expected &&
+                      expected->is(TypeKind::Pointer) &&
+                      expected->pointee() == inner;
+    result = Types.pointerTo(patternPart ? inner : TypeContext::stripUniq(inner),
+                             b->IsMutable, /*raw=*/false);
     break;
   }
 
@@ -648,6 +657,7 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
       Type *subject = ct;
       while (subject->is(TypeKind::Pointer))
         subject = subject->pointee();
+      PatternContext pc(*this, scrutineeWritable(w->Cond.get()), false);
       checkPattern(w->BindingPat.get(), subject, /*declaresBindings=*/false,
                    /*isMutable=*/false);
     } else if (!ct->isBool() && !ct->isError()) {
@@ -3313,6 +3323,7 @@ Type *Sema::checkIf(IfExpr *i, Type *expected, bool discardBranches) {
     Type *subject = ct;
     while (subject->is(TypeKind::Pointer))
       subject = subject->pointee();
+    PatternContext pc(*this, scrutineeWritable(i->Cond.get()), false);
     checkPattern(i->BindingPat.get(), subject, /*declaresBindings=*/false,
                  /*isMutable=*/false);
   } else if (!ct->isBool() && !ct->isError()) {
@@ -3547,8 +3558,12 @@ Type *Sema::checkMatch(MatchExpr *m, Type *expected, bool discardBranches) {
   for (auto &arm : m->Arms) {
     MovedFrom = movedBefore;
     pushScope(ScopeKind::Block);
-    checkPattern(arm.Pat.get(), st, /*declaresBindings=*/false,
-                 /*isMutable=*/false);
+    {
+      PatternContext pc(*this, scrutineeWritable(m->Scrutinee.get()),
+                        arm.Guard != nullptr);
+      checkPattern(arm.Pat.get(), st, /*declaresBindings=*/false,
+                   /*isMutable=*/false);
+    }
     if (arm.Guard) {
       Type *gt = checkExpr(arm.Guard.get(), Types.boolType());
       if (!gt->isBool() && !gt->isError())

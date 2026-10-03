@@ -359,7 +359,11 @@ struct WildcardPattern : Pattern {
 struct BindingPattern : Pattern {
   std::string Name;
   bool IsMutable = false;
-  bool ByRef = false;
+  /// `take name` (or `` `name ``): the binding takes what it matched. Without
+  /// it a binding in a `match`, `if ... is` or `while ... is` borrows the
+  /// matched part where it is.
+  bool Takes = false;
+  bool TakeShort = false; ///< written with the backtick
   /// Written `.Red`: the name is something on the type being matched, never
   /// a new binding. Sema says so plainly when there is no such variant.
   bool MustBeVariant = false;
@@ -734,6 +738,9 @@ struct IfExpr : Expr {
   PatternPtr BindingPat;
   std::unique_ptr<BlockExpr> Then;
   ExprPtr Else;             ///< a BlockExpr or a nested IfExpr
+  /// Set by the Zombie lowering when the subject is a place, looked at where
+  /// it is: its bindings borrow it, or `take` their part out of it.
+  bool ZombieSubjectInPlace = false;
   IfExpr() : Expr(NodeKind::If) {}
 };
 
@@ -744,6 +751,9 @@ struct WhileExpr : Expr {
   PatternPtr BindingPat;
   std::unique_ptr<BlockExpr> Body;
   std::string Label;
+  /// Set by the Zombie lowering when the subject is a place, looked at where
+  /// it is: its bindings borrow it, or `take` their part out of it.
+  bool ZombieSubjectInPlace = false;
   WhileExpr() : Expr(NodeKind::While) {}
 };
 
@@ -791,6 +801,9 @@ struct MatchArm {
 struct MatchExpr : Expr {
   ExprPtr Scrutinee;
   std::vector<MatchArm> Arms;
+  /// Set by the Zombie lowering when the subject is a place, looked at where
+  /// it is: its bindings borrow it, or `take` their part out of it.
+  bool ZombieSubjectInPlace = false;
   MatchExpr() : Expr(NodeKind::Match) {}
 };
 
@@ -971,6 +984,17 @@ struct VarDecl : ValueDecl {
   /// array). It holds a copy of the value but owns nothing — never dropped,
   /// never emptied when read.
   bool ZombieAlias = false;
+  /// A pattern binding that borrows what it matched (no `take`). Sema sets
+  /// `PatternWritable` when the scrutinee may be written, which is what lets
+  /// `&var name` borrow the matched part mutably. `ZombieInPlace` is set by
+  /// the Zombie lowering when the binding is a view of the matched place
+  /// rather than a value moved out of a temporary; `PatternPlace` is where
+  /// CodeGen found the matched part, which `&name` hands out.
+  bool PatternBorrow = false;
+  bool PatternWritable = false;
+  bool ZombieInPlace = false;
+  bool ZombieMatchedThroughBorrow = false; ///< so `take` could not help
+  void *PatternPlace = nullptr;
   /// Set by the Zombie borrow checker on a local whose value is handed on
   /// somewhere, so codegen knows the slot may be empty at scope end.
   bool ZombieMoved = false;

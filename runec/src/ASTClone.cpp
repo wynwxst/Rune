@@ -238,7 +238,8 @@ PatternPtr clonePattern(const Pattern *p) {
     auto c = alloc<BindingPattern>(p);
     c->Name = b->Name;
     c->IsMutable = b->IsMutable;
-    c->ByRef = b->ByRef;
+    c->Takes = b->Takes;
+    c->TakeShort = b->TakeShort;
     c->MustBeVariant = b->MustBeVariant;
     c->Sub = clonePattern(b->Sub.get());
     return c;

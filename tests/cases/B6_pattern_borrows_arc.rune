@@ -1,0 +1,75 @@
+// FLAGS: --memory arc
+// EXPECT: going home
+// EXPECT: still have 2 words
+// EXPECT: took north
+// EXPECT: took east
+// EXPECT: x x
+// EXPECT: 42
+// EXPECT: hello, world
+// EXPECT: 7
+// Patterns borrow what they match; `take name`, or `` `name ``, moves it out.
+import std::io
+import std::mem
+import std::collections::vector
+
+fn command(words: [String]) -> String {
+    match words {
+        ["go", dir] => "going " + dir,        // borrowed: `words` keeps it
+        _ => "unknown",
+    }
+}
+
+enum Step { Go(String), Stay }
+
+fn destination(s: Step) -> String {
+    match s {
+        Step::Go(`dir) => dir,                 // short for `take dir`
+        Step::Stay => "here",
+    }
+}
+
+fn destination2(s: Step) -> String {
+    match s {
+        Step::Go(take dir) => dir,
+        Step::Stay => "here",
+    }
+}
+
+fn bump(slot: &var i64?) {
+    match slot {
+        Some(n) => { let r = &var n; *r = 42 }   // lends the payload itself
+        None => {}
+    }
+}
+
+fn greet(slot: &var String?) {
+    if slot is Some(s) { let r = &var s; *r = *r + ", world" }
+}
+
+fn main() -> i64 {
+    let v = vec!("go", "home")
+    io::println(command(v.asSlice()))
+    io::println("still have " + v.length().$str() + " words")
+    io::println("took " + destination(Step::Go("north")))
+    io::println("took " + destination2(Step::Go("east")))
+
+    let o: String? = "x"
+    match o {
+        Some(s) => io::print(s + " "),
+        None => {}
+    }
+    io::println(o ?? "none")              // `o` was only borrowed
+
+    var n: i64? = 1
+    bump(&var n)
+    io::println((n ?? 0).$str())
+
+    var g: String? = "hello"
+    greet(&var g)
+    io::println(g ?? "")
+
+    let cell = mem::cell<i64>(7)
+    let boxed: mem::Cell<i64>? = cell
+    if boxed is Some(c) { io::println(c.get().$str()) }
+    0
+}

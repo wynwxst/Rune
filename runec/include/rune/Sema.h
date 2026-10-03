@@ -781,6 +781,31 @@ private:
   bool isLValue(const Expr *e) const;
   /// Emits "cannot assign to ..." with a related note at the binding site.
   bool requireMutable(Expr *e, const char *action);
+  /// Whether what a `match`, `if ... is` or `while ... is` looks at may be
+  /// written: a `&var` borrow, a `var` binding, `&var self`, or a temporary
+  /// the match owns. Its borrowing bindings may then be lent out mutably.
+  bool scrutineeWritable(const Expr *e);
+  /// Set around checking the pattern of a `match`, `if ... is` or
+  /// `while ... is`, whose bindings borrow unless they say `take`.
+  bool PatternBorrows = false;
+  bool PatternScrutineeWritable = false;
+  bool PatternInGuardedArm = false;
+  struct PatternContext {
+    Sema &S;
+    bool Borrows, Writable, Guarded;
+    PatternContext(Sema &s, bool writable, bool guarded)
+        : S(s), Borrows(s.PatternBorrows), Writable(s.PatternScrutineeWritable),
+          Guarded(s.PatternInGuardedArm) {
+      S.PatternBorrows = true;
+      S.PatternScrutineeWritable = writable;
+      S.PatternInGuardedArm = guarded;
+    }
+    ~PatternContext() {
+      S.PatternBorrows = Borrows;
+      S.PatternScrutineeWritable = Writable;
+      S.PatternInGuardedArm = Guarded;
+    }
+  };
   VarDecl *declareLocal(const std::string &name, Type *ty, bool isMutable,
                         SourceRange range, bool isParam = false);
   /// Records a use of `name` in the innermost closure, if it comes from an

@@ -5329,6 +5329,19 @@ bool Sema::requireMutable(Expr *e, const char *action) {
 
   if (const auto *r = dyn_cast<DeclRefExpr>(root)) {
     auto *v = dyn_cast<VarDecl>(r->Resolved);
+    // `&var name` of a pattern binding lends the part it matched, where it
+    // is: what decides is whether that may be written.
+    if (v && v->PatternBorrow && root == e &&
+        std::string_view(action) == "mutably borrow") {
+      if (v->PatternWritable)
+        return true;
+      Diags.error(e->Range, "cannot mutably borrow '{}': it was matched "
+                  "through a shared borrow", v->Name)
+          .note("match through `&var` — `match &var x`, or in a `&var self` "
+                "method — to lend what a pattern binds for writing")
+          .code(232);
+      return false;
+    }
     if (v && !v->IsMutable) {
       auto d = Diags.error(e->Range, "cannot {} immutable binding '{}'", action,
                            v->Name);
@@ -5360,6 +5373,51 @@ bool Sema::requireMutable(Expr *e, const char *action) {
     return true;
   }
   return true;
+}
+
+bool Sema::scrutineeWritable(const Expr *e) {
+  if (!e)
+    return false;
+  if (const auto *b = dyn_cast<BorrowExpr>(e))
+    return b->IsMutable;
+  if (e->Ty && e->Ty->is(TypeKind::Pointer))
+    return e->Ty->isMutablePointer();
+  if (!isLValue(const_cast<Expr *>(e)))
+    return true; // a temporary: the match's own
+  const Expr *root = e;
+  for (;;) {
+    if (const auto *m = dyn_cast<MemberExpr>(root)) {
+      Type *bt = m->Base->Ty;
+      if (bt && bt->is(TypeKind::Class))
+        return true;
+      if (m->AutoDerefs > 0 && bt && bt->is(TypeKind::Pointer))
+        return bt->isMutablePointer();
+      root = m->Base.get();
+      continue;
+    }
+    if (const auto *i = dyn_cast<IndexExpr>(root)) {
+      Type *bt = i->Base->Ty;
+      if (bt && bt->is(TypeKind::Pointer))
+        return bt->isMutablePointer();
+      root = i->Base.get();
+      continue;
+    }
+    if (const auto *d = dyn_cast<DerefExpr>(root)) {
+      Type *pt = d->Operand->Ty;
+      return pt && pt->is(TypeKind::Pointer) && pt->isMutablePointer();
+    }
+    break;
+  }
+  if (const auto *r = dyn_cast<DeclRefExpr>(root)) {
+    if (auto *v = dyn_cast<VarDecl>(r->Resolved))
+      return v->IsMutable || v->PatternWritable;
+    if (auto *g = dyn_cast<GlobalVarDecl>(r->Resolved))
+      return g->IsMutable;
+    return false;
+  }
+  if (const auto *s = dyn_cast<SelfExpr>(root))
+    return !s->Binding || s->Binding->IsMutable;
+  return false;
 }
 
 void Sema::reportUnsafe(SourceRange range, const std::string &what,
@@ -8548,16 +8606,24 @@ void Sema::checkPattern(Pattern *p, Type *scrutinee, bool declaresBindings,
                        "declared here", "no variant of that name");
       break;
     }
-    // `ref name` is a borrow of what matched, `ref var name` one that may
-    // write through; the binding itself is never reassigned.
-    VarDecl *v =
-        b->ByRef
-            ? declareLocal(b->Name,
-                           Types.pointerTo(scrutinee, b->IsMutable, false),
-                           /*mutable=*/false, b->Range)
-            : declareLocal(b->Name, scrutinee, isMutable || b->IsMutable,
-                           b->Range);
+    VarDecl *v = declareLocal(b->Name, scrutinee, isMutable || b->IsMutable,
+                              b->Range);
     b->Binding = v;
+    // In a `match`, `if ... is` or `while ... is` a binding borrows what it
+    // matched unless it says `take`. A guard runs before the arm is chosen,
+    // so nothing can have been taken by then.
+    if (PatternBorrows && !b->Takes) {
+      v->PatternBorrow = true;
+      v->PatternWritable = PatternScrutineeWritable;
+    } else if (b->Takes && PatternInGuardedArm) {
+      Diags.error(b->Range, "'{}' cannot `take` in an arm with a guard",
+                  b->Name)
+          .note("the guard runs before the arm is chosen, while what it "
+                "looks at may still go to a later arm")
+          .note("drop the guard and test inside the arm, where `take` "
+                "is allowed")
+          .code(316);
+    }
     if (b->Sub)
       checkPattern(b->Sub.get(), scrutinee, declaresBindings, isMutable);
     break;

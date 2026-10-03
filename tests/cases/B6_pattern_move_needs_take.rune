@@ -1,0 +1,10 @@
+// EXPECT-ERROR: the pattern only borrows what it matched
+// Moving a binding out needs `take`: a pattern borrows by default.
+enum Job { Named(String), Blank }
+fn name(j: Job) -> String {
+    match j {
+        Job::Named(n) => n,
+        Job::Blank => "",
+    }
+}
+fn main() -> i64 { name(Job::Blank).$length() }

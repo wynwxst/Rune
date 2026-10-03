@@ -22,7 +22,7 @@ enum Shape {
 fn describe(s: Shape) -> String {
     match s {
         Shape::Nothing => "null",
-        Shape::Named(n) => n,
+        Shape::Named(take n) => n,
     }
 }
 

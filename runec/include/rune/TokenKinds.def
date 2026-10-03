@@ -94,6 +94,7 @@ TOK(QuestionQuestion, "??")
 TOK(Underscore,     "_")
 TOK(Hash,           "#")
 TOK(Dollar,         "$")
+TOK(Backtick,       "`")
 
 // --- Operators --------------------------------------------------------------
 TOK(Plus,           "+")

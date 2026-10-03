@@ -1001,8 +1001,8 @@ fn bindsInPattern(lx: &syntax::Lexed, i: i64) -> bool {
     if !lx.isIdent(i) { return false }
     let name = lx.text(i)
     if name == "_" || !syntax::startsLower(name) && name.$byteAt(0) != 95 { return false }
-    // `ref` and `ref var` are how a pattern borrows, not names.
-    if name == "ref" && (lx.isIdent(i + 1) || lx.isText(i + 1, "var")) { return false }
+    // `take` and `take var` are how a pattern binding moves, not names.
+    if name == "take" && (lx.isIdent(i + 1) || lx.isText(i + 1, "var")) { return false }
     if lx.isText(i - 1, "::") || lx.isText(i - 1, ".") { return false }
     if lx.isText(i + 1, "::") || lx.isText(i + 1, "(") || lx.isText(i + 1, ".") { return false }
     if lx.isText(i + 1, ":") { return false }
@@ -1030,7 +1030,8 @@ fn bindPattern(out: &var vector::Vector<Binding>, lx: &syntax::Lexed, from: i64,
             b.mutable = mutable || lx.isText(i - 1, "var")
             // Only a lone name takes the whole type; a destructured one
             // would need the pattern's shape to know its part.
-            if from == upto || (lx.isText(from, "ref") || lx.isText(from, "var")) &&
+            if from == upto || (lx.isText(from, "take") || lx.isText(from, "`") ||
+                                lx.isText(from, "var")) &&
                     i == upto { b.typeText = typeText.$clone() }
             out.push(b)
         }

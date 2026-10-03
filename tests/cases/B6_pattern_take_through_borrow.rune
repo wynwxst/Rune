@@ -1,0 +1,9 @@
+// EXPECT-ERROR: cannot move
+// `take` moves out of what was matched, which a borrow does not own.
+fn steal(o: &String?) -> String {
+    match o {
+        Some(take s) => s,
+        None => "",
+    }
+}
+fn main() -> i64 { 0 }

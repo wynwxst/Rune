@@ -45,7 +45,7 @@ fn describe(e: AppError) -> String {
         AppError::Parse(ParseError::Empty) => "parse: empty",
         AppError::Parse(ParseError::NotANumber { text }) => "parse: not a number: " + text,
         AppError::Disk(f) => "disk: " + io::describe(f),
-        AppError::Message(m) => m,
+        AppError::Message(take m) => m,
     }
 }
 
