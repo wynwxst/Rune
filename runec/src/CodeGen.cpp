@@ -4489,7 +4489,10 @@ bool CodeGen::run() {
     return true;
   }
 
-  if (Opts.Freestanding && Opts.Output != OutputKind::Library)
+  // Documentation links nothing, and is built without the freestanding
+  // runtime compiled in — every runtime call would look like a hosted one.
+  if (Opts.Freestanding && Opts.Output != OutputKind::Library &&
+      Opts.Output != OutputKind::Docs)
     reportHostedRuntimeUses();
 
   finishDebugInfo();

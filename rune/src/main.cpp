@@ -1691,7 +1691,9 @@ void primeToolchainCache(const Options &opts) {
   }
   if (stale && fs::exists(genSrc, ec)) {
     status("Preparing", "rune-doc");
-    std::string cmd = quote(findCompiler()) + " --stdlib " +
+    // Built the way the toolchain's own build makes it: the tools are
+    // written for reference counting until they are ported.
+    std::string cmd = quote(findCompiler()) + " --memory arc --stdlib " +
                       quote((home / "stdlib").string()) + " -o " +
                       quote(gen.string()) + " " + quote(genSrc.string());
     runCommand(cmd, opts.Verbose);
@@ -1894,7 +1896,7 @@ std::string ensureEditorTool(const std::string &name, const Options &opts) {
     status("Preparing", name);
     // Every file after the first is a module under `runetools`, which is
     // what the tools import: `runetools::syntax`, `runetools::lint`.
-    std::string cmd = quote(findCompiler()) + " --stdlib " +
+    std::string cmd = quote(findCompiler()) + " --memory arc --stdlib " +
                       quote(RUNE_DEFAULT_STDLIB_DIR) +
                       " --module runetools -O2 -o " + quote(bin.string());
     for (const fs::path &p : sources)

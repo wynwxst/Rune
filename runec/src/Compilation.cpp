@@ -1451,11 +1451,31 @@ int compileWithOptions(const CompilerOptions &given) {
       if (it->is_regular_file() && it->path().extension() == ".rul")
         libs.push_back(it->path());
     std::sort(libs.begin(), libs.end());
+    // The library this compile is about to write is not one of its inputs:
+    // its old interface says nothing about the new one, and one left by
+    // another compiler would otherwise stop the very build that replaces it.
+    std::filesystem::path replacing;
+    if (opts.Output == OutputKind::Library)
+      replacing = std::filesystem::weakly_canonical(defaultOutputName(opts), ec);
     for (const auto &libPath : libs) {
+      if (!replacing.empty() &&
+          std::filesystem::weakly_canonical(libPath, ec) == replacing)
+        continue;
       LibraryContents lib;
-      if (!readLibrary(libPath.string(), lib, diags)) {
-        libraryError = true;
-        return;
+      // Read quietly first: a library on the path that this compile does not
+      // import — a sibling output left by another compiler, or one still
+      // being written — must not stop it. What is wrong is said as a
+      // warning; an import of it fails later as a missing module.
+      {
+        DiagnosticEngine probe(sm);
+        probe.setSilent(true);
+        if (!readLibrary(libPath.string(), lib, probe)) {
+          diags.warn(SourceRange(), "skipping '{}': it could not be read as "
+                                    "a library of this compiler's",
+                     libPath.string())
+              .note("rebuilding the package that makes it replaces it");
+          continue;
+        }
       }
       // The object code inside bakes in one memory model — retains and
       // releases, or their absence and the moved-in argument convention —

@@ -49,6 +49,12 @@ struct Token {
   /// True when a newline (or the start of file) precedes this token; used to
   /// give better recovery hints.
   bool AtLineStart = false;
+  /// Set by the lexer: whether whitespace (or a comment) came right before
+  /// this token in the text it was read from. Tokens the compiler makes
+  /// itself leave `SpacingKnown` false. Printing tokens back — a macro's
+  /// expansion in a note, `stringify!` — keeps the spacing that was written.
+  bool SpacingKnown = false;
+  bool SpaceBefore = false;
 
   bool is(Tok k) const { return Kind == k; }
   bool isNot(Tok k) const { return Kind != k; }

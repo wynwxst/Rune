@@ -3749,6 +3749,22 @@ ExprPtr Parser::parsePrimaryExpr() {
     if (check(Tok::ColonColon) && peek(1).is(Tok::Lt)) { // turbofish
       advance();
       generics = parseGenericArgs();
+      // `std::reflect::<Point>fieldName(0)`: the arguments were written
+      // before the name they belong to. Say so, and read on as if they had
+      // been written after it.
+      if (check(Tok::Identifier) && !cur().AtLineStart) {
+        std::string name = cur().Text;
+        std::string written;
+        for (size_t i = 0; i < path.size(); ++i)
+          written += (i ? "::" : "") + path[i];
+        Diags.error(cur().Range, "type arguments go after the name they "
+                                 "belong to")
+            .note("write `{}::{}<...>`, not `{}::<...>{}`", written, name,
+                  written, name)
+            .code(130);
+        path.push_back(name);
+        advance();
+      }
     } else if (check(Tok::Lt)) {
       // `Wrapper<i64> { ... }`, `make<i64>(...)` and `Option<i64>::Some` are
       // generic uses, but `a < b` is a comparison. Speculatively parse the

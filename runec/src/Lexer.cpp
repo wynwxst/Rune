@@ -622,6 +622,12 @@ std::vector<Token> Lexer::tokenize() {
 
     char c = peek();
     Token t;
+    // Whether anything separated this token from the one before: what lets
+    // the tokens be printed back as they were written.
+    const bool spaced = Pos > 0 && (Buf[Pos - 1] == ' ' || Buf[Pos - 1] == '\t' ||
+                                    Buf[Pos - 1] == '\n' || Buf[Pos - 1] == '\r' ||
+                                    (Buf[Pos - 1] == '/' && Pos > 1 &&
+                                     Buf[Pos - 2] == '*'));
     // Whatever `///` lines were just read belong to this token — and so to
     // the declaration it begins.
     std::string doc = takeDoc();
@@ -653,6 +659,8 @@ std::vector<Token> Lexer::tokenize() {
     }
 
     t.AtLineStart = atLineStart || CrossedNewline;
+    t.SpacingKnown = true;
+    t.SpaceBefore = spaced;
     atLineStart = false;
     CrossedNewline = false;
     t.Doc = std::move(doc);

@@ -483,9 +483,9 @@ std::string fmtModuleNote(const std::string &module) {
 
 /// The source text a run of tokens stands for, near enough to read back.
 ///
-/// Spacing is regularised rather than preserved — the tokens are all that
-/// survive lexing — so `x>0` and `x > 0` both come back as `x > 0`. That is
-/// what an assertion wants to print anyway.
+/// Spacing is what was written wherever the lexer recorded it, so
+/// `std::reflect::fieldName<Point>(0)` comes back without spaces in it and
+/// `x > 0` with them; tokens the compiler made itself are spaced by rule.
 std::string spellTokens(const std::vector<Token> &t) {
   std::string out;
   for (size_t i = 0; i < t.size(); ++i) {
@@ -538,7 +538,7 @@ std::string spellTokens(const std::vector<Token> &t) {
       const bool afterTight = prev == Tok::LParen || prev == Tok::LBracket ||
                               prev == Tok::Dot || prev == Tok::ColonColon ||
                               prev == Tok::Bang;
-      if (!tight && !afterTight)
+      if (!tight && !afterTight && (!tok.SpacingKnown || tok.SpaceBefore))
         out += " ";
     }
     out += piece;
