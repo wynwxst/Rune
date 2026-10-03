@@ -1,0 +1,95 @@
+// FLAGS: --memory arc
+// EXPECT: vector param 6
+// EXPECT: vector local 6
+// EXPECT: vector inline 6
+// EXPECT: map param 30
+// EXPECT: set param 3
+// EXPECT: struct param 3
+// EXPECT: after 4
+// `for` over a `&var` borrow of a container. A shared borrow of a class is
+// the handle itself, but a `&var` names the handle's slot, so the loop has to
+// read through it before asking for a cursor — or `iterate` builds one over
+// the slot and the first `next` faults.
+import std::io
+import std::collections::vector
+import std::dictionary
+
+struct S { pub label: String }
+
+fn total(items: &var vector::Vector<S>) -> i64 {
+    var n = 0
+    for it in items { n += it.label.$length() }
+    // The borrow still names the caller's vector afterwards.
+    items.push(S { label: "d" })
+    n
+}
+
+fn mapTotal(m: &var dictionary::Map<String, i64>) -> i64 {
+    var n = 0
+    for (_, v) in m { n += *v }
+    n
+}
+
+fn setCount(s: &var dictionary::Set<String>) -> i64 {
+    var n = 0
+    for it in s { n += it.$length() }
+    n
+}
+
+struct Grid { pub w: i64 }
+struct Cells { pub w: i64, pub at: i64 }
+
+bind Sequence to Grid {
+    type Iter = Cells
+    fn iterate(&self) -> Cells { Cells { w: self.w, at: 0 } }
+}
+
+bind Iterator to Cells {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.at >= self.w { return nil }
+        self.at += 1
+        self.at - 1
+    }
+}
+
+fn gridSum(g: &var Grid) -> i64 {
+    var n = 0
+    for c in g { n += c }
+    n
+}
+
+fn main() -> i64 {
+    var v = vector::Vector<S>()
+    v.push(S { label: "a" })
+    v.push(S { label: "bb" })
+    v.push(S { label: "ccc" })
+    io::println("vector param " + total(&var v).$str())
+    v.pop()
+
+    let r = &var v
+    var n = 0
+    for it in r { n += it.label.$length() }
+    io::println("vector local " + n.$str())
+
+    n = 0
+    for it in &var v { n += it.label.$length() }
+    io::println("vector inline " + n.$str())
+
+    var m = dictionary::Map<String, i64>()
+    m.put("x", 10)
+    m.put("y", 20)
+    io::println("map param " + mapTotal(&var m).$str())
+
+    var s = dictionary::Set<String>()
+    s.add("a")
+    s.add("bb")
+    io::println("set param " + setCount(&var s).$str())
+
+    var g = Grid { w: 3 }
+    io::println("struct param " + gridSum(&var g).$str())
+
+    total(&var v)
+    io::println("after " + v.length().$str())
+    0
+}
