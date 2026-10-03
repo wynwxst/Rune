@@ -30,13 +30,13 @@ pub struct Request {
 }
 
 /// The name half of a header line, and the value half.
-pub fn headerName(line: String) -> String {
+pub fn headerName(line: &String) -> String {
     let colon = line.$find(":")
-    if colon < 0 { return line }
+    if colon < 0 { return line.$clone() }
     line.$substring(0, colon)
 }
 
-pub fn headerValue(line: String) -> String {
+pub fn headerValue(line: &String) -> String {
     let colon = line.$find(":")
     if colon < 0 { return "" }
     trimmed(line.$substring(colon + 1, line.$length()))

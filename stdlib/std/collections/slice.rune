@@ -14,9 +14,16 @@
 // Nothing in this module allocates except where it says so in the return type:
 // a function handing back a `Vector` made one, and a function handing back an
 // `Option` did not.
+//
+// Reading an element borrows it, and handing one out — to a predicate, into
+// a result — copies it. So a function that hands elements out asks
+// `where T: mem::Clone`, and makes each copy with `$clone()`: a `String` is
+// copied, not shared by two owners that would both free it. Plain data is
+// `Clone` without asking, so for numbers none of this shows.
 
 import std::collections::vector
 import std::io
+import std::mem
 
 //===--------------------------------------------------------------------===//
 // Reading
@@ -27,16 +34,18 @@ import std::io
 /// `values[i]` is the direct form and aborts when the index is out of range at
 /// `--safety full`. This is the form to reach for when the index came from
 /// somewhere you do not control.
-pub fn at<T>(values: [T], index: i64) -> T? {
+pub fn at<T>(values: [T], index: i64) -> T? where T: mem::Clone {
     if index < 0 || index >= values.$length() { return nil }
-    values[index]
+    values[index].$clone()
 }
 
 /// The first element, or nothing when empty.
-pub fn first<T>(values: [T]) -> T? { at(values, 0) }
+pub fn first<T>(values: [T]) -> T? where T: mem::Clone { at(values, 0) }
 
 /// The last element, or nothing when empty.
-pub fn last<T>(values: [T]) -> T? { at(values, values.$length() - 1) }
+pub fn last<T>(values: [T]) -> T? where T: mem::Clone {
+    at(values, values.$length() - 1)
+}
 
 //===--------------------------------------------------------------------===//
 // Searching
@@ -47,44 +56,49 @@ pub fn last<T>(values: [T]) -> T? { at(values, values.$length() - 1) }
 //===--------------------------------------------------------------------===//
 
 /// The index of the first element `matches` says yes to, or nothing.
-pub fn indexWhere<T>(values: [T], matches: @function(T) -> bool) -> i64? {
+pub fn indexWhere<T>(values: [T], matches: @function(T) -> bool) -> i64?
+        where T: mem::Clone {
     var i = 0
     while i < values.$length() {
-        if matches(values[i]) { return i }
+        if matches(values[i].$clone()) { return i }
         i += 1
     }
     nil
 }
 
 /// The first element `matches` says yes to, or nothing.
-pub fn firstWhere<T>(values: [T], matches: @function(T) -> bool) -> T? {
+pub fn firstWhere<T>(values: [T], matches: @function(T) -> bool) -> T?
+        where T: mem::Clone {
     match indexWhere(values, matches) {
-        Some(i) => values[i],
+        Some(i) => values[i].$clone(),
         None => nil,
     }
 }
 
 /// True when any element matches.
-pub fn anyOf<T>(values: [T], matches: @function(T) -> bool) -> bool {
+pub fn anyOf<T>(values: [T], matches: @function(T) -> bool) -> bool
+        where T: mem::Clone {
     indexWhere(values, matches).hasValue()
 }
 
 /// True when every element matches. Vacuously true when empty.
-pub fn allOf<T>(values: [T], matches: @function(T) -> bool) -> bool {
+pub fn allOf<T>(values: [T], matches: @function(T) -> bool) -> bool
+        where T: mem::Clone {
     var i = 0
     while i < values.$length() {
-        if !matches(values[i]) { return false }
+        if !matches(values[i].$clone()) { return false }
         i += 1
     }
     true
 }
 
 /// How many elements match.
-pub fn countWhere<T>(values: [T], matches: @function(T) -> bool) -> i64 {
+pub fn countWhere<T>(values: [T], matches: @function(T) -> bool) -> i64
+        where T: mem::Clone {
     var n = 0
     var i = 0
     while i < values.$length() {
-        if matches(values[i]) { n += 1 }
+        if matches(values[i].$clone()) { n += 1 }
         i += 1
     }
     n
@@ -117,37 +131,40 @@ pub fn contains<T: io::Display>(values: [T], wanted: T) -> bool {
 /// The smallest element by `less`, or nothing when empty.
 ///
 ///     slice::minimumBy(scores, ||(a: i64, b: i64) -> bool { a < b })
-pub fn minimumBy<T>(values: [T], less: @function(T, T) -> bool) -> T? {
+pub fn minimumBy<T>(values: [T], less: @function(T, T) -> bool) -> T?
+        where T: mem::Clone {
     if values.$isEmpty() { return nil }
-    var best = values[0]
+    var best = 0
     var i = 1
     while i < values.$length() {
-        if less(values[i], best) { best = values[i] }
+        if less(values[i].$clone(), values[best].$clone()) { best = i }
         i += 1
     }
-    best
+    values[best].$clone()
 }
 
 /// The largest element by `less`, or nothing when empty.
-pub fn maximumBy<T>(values: [T], less: @function(T, T) -> bool) -> T? {
+pub fn maximumBy<T>(values: [T], less: @function(T, T) -> bool) -> T?
+        where T: mem::Clone {
     if values.$isEmpty() { return nil }
-    var best = values[0]
+    var best = 0
     var i = 1
     while i < values.$length() {
-        if less(best, values[i]) { best = values[i] }
+        if less(values[best].$clone(), values[i].$clone()) { best = i }
         i += 1
     }
-    best
+    values[best].$clone()
 }
 
 /// Combines every element into one, left to right.
 ///
 ///     let total = slice::fold(scores, 0, ||(acc: i64, n: i64) -> i64 { acc + n })
-pub fn fold<T, A>(values: [T], start: A, step: @function(A, T) -> A) -> A {
+pub fn fold<T, A>(values: [T], start: A, step: @function(A, T) -> A) -> A
+        where T: mem::Clone {
     var acc = start
     var i = 0
     while i < values.$length() {
-        acc = step(acc, values[i])
+        acc = step(acc, values[i].$clone())
         i += 1
     }
     acc
@@ -161,28 +178,29 @@ pub fn fold<T, A>(values: [T], start: A, step: @function(A, T) -> A) -> A {
 //===--------------------------------------------------------------------===//
 
 /// Every element, in a vector of its own.
-pub fn toVector<T>(values: [T]) -> vector::Vector<T> {
+pub fn toVector<T>(values: [T]) -> vector::Vector<T> where T: mem::Clone {
     vector::from(values)
 }
 
 /// Every element in the opposite order.
-pub fn reversed<T>(values: [T]) -> vector::Vector<T> {
+pub fn reversed<T>(values: [T]) -> vector::Vector<T> where T: mem::Clone {
     let out = vector::Vector<T>()
     out.reserve(values.$length())
     var i = values.$length() - 1
     while i >= 0 {
-        out.push(values[i])
+        out.push(values[i].$clone())
         i -= 1
     }
     out
 }
 
 /// Every element `keep` says yes to, in order.
-pub fn filtered<T>(values: [T], keep: @function(T) -> bool) -> vector::Vector<T> {
+pub fn filtered<T>(values: [T], keep: @function(T) -> bool) -> vector::Vector<T>
+        where T: mem::Clone {
     let out = vector::Vector<T>()
     var i = 0
     while i < values.$length() {
-        if keep(values[i]) { out.push(values[i]) }
+        if keep(values[i].$clone()) { out.push(values[i].$clone()) }
         i += 1
     }
     out
@@ -194,25 +212,19 @@ pub fn filtered<T>(values: [T], keep: @function(T) -> bool) -> vector::Vector<T>
 /// already ordered, and it is quadratic on input that is not. For the sizes a
 /// slice usually holds that is the right trade; sort a `Vector` you built
 /// yourself if it is not.
-pub fn sortedBy<T>(values: [T], less: @function(T, T) -> bool) -> vector::Vector<T> {
+pub fn sortedBy<T>(values: [T], less: @function(T, T) -> bool) -> vector::Vector<T>
+        where T: mem::Clone {
     let out = vector::Vector<T>()
     out.reserve(values.$length())
     var i = 0
     while i < values.$length() {
-        let value = values[i]
-        // Walk back over everything that should come after `value`.
-        var j = out.length()
-        out.push(value)
-        while j > 0 {
-            match out.at(j - 1) {
-                Some(prev) => {
-                    if !less(value, prev) { break }
-                    out.set(j, prev)
-                    out.set(j - 1, value)
-                    j -= 1
-                }
-                None => break,
-            }
+        out.push(values[i].$clone())
+        // Walk the new element back over everything that should come after
+        // it, a swap at a time: each element stays owned by the vector.
+        var j = out.length() - 1
+        while j > 0 && less(out.look(j).$clone(), out.look(j - 1).$clone()) {
+            out.swap(j, j - 1)
+            j -= 1
         }
         i += 1
     }
@@ -241,7 +253,7 @@ bind<T> Iterator to SliceIter<T> {
     type Item = T
     fn next(&var self) -> T? {
         if self.index >= self.source.$length() { return nil }
-        let value = self.source[self.index]
+        let value = self.source[self.index].$clone()
         self.index += 1
         value
     }
@@ -252,7 +264,7 @@ bind<T> Iterator to SliceIter<T> {
 ///     for n in slice::iterate(scores).map(||(n: i64) -> i64 { n * 2 }) { ... }
 ///
 /// A plain `for n in scores` needs none of this.
-pub fn iterate<T>(values: [T]) -> SliceIter<T> {
+pub fn iterate<T>(values: [T]) -> SliceIter<T> where T: mem::Clone {
     SliceIter<T> { source: values, index: 0 }
 }
 

@@ -851,22 +851,22 @@ fn parseObject(c: &var Cursor) -> Result<Value, Error> {
 //===--------------------------------------------------------------------===//
 // A value, back as text
 //===--------------------------------------------------------------------===//
-pub fn compact(v: Value) -> String {
+pub fn compact(v: &Value) -> String {
     var out = ""
-    render(&v, false, 0, &var out)
+    render(v, false, 0, &var out)
     out
 }
 
 /// The same document, laid out to be read: one member or element per line,
 /// two spaces per level.
-pub fn pretty(v: Value) -> String {
+pub fn pretty(v: &Value) -> String {
     var out = ""
-    render(&v, true, 0, &var out)
+    render(v, true, 0, &var out)
     out
 }
 
 /// The same, with a trailing newline — what a file wants.
-pub fn prettyLine(v: Value) -> String { pretty(v) + "\n" }
+pub fn prettyLine(v: &Value) -> String { pretty(v) + "\n" }
 
 fn indent(depth: i64) -> String { "  ".$repeat(depth) }
 
@@ -988,7 +988,7 @@ pub fn hex4(value: i64) -> String {
 /// encoding, and `json::value` would otherwise have to import the module that
 /// imports it.
 bind io::Display to Value {
-    fn display(&self) -> String { compact(self.$clone()) }
+    fn display(&self) -> String { compact(self) }
 }
 
 //===--------------------------------------------------------------------===//
@@ -1003,7 +1003,7 @@ bind io::Display to Value {
 pub fn parse(source: String) -> Result<Value, Error> { parseText(source) }
 
 /// The document as JSON with no space in it.
-pub fn write(doc: Value) -> String { compact(doc) }
+pub fn write(doc: &Value) -> String { compact(doc) }
 
 /// The document in the file at `path`.
 ///
@@ -1011,7 +1011,7 @@ pub fn write(doc: Value) -> String { compact(doc) }
 ///         Ok(doc) => io::println(doc["port"]),
 ///         Err(e)  => io::eprintln(e),
 ///     }
-pub fn load(path: String) -> Result<Value, Error> {
+pub fn load(path: &String) -> Result<Value, Error> {
     match io::readToString(path) {
         Ok(source) => parseText(source),
         Err(cause) => Err(ofFile(cause)),
@@ -1019,7 +1019,7 @@ pub fn load(path: String) -> Result<Value, Error> {
 }
 
 /// Writes `doc` to `path`, laid out to be read. `nil` means it worked.
-pub fn save(path: String, doc: Value) -> Error? {
+pub fn save(path: &String, doc: &Value) -> Error? {
     match io::writeString(path, prettyLine(doc)) {
         Ok(n) => nil,
         Err(cause) => ofFile(cause),
@@ -1027,7 +1027,7 @@ pub fn save(path: String, doc: Value) -> Error? {
 }
 
 /// Writes `doc` to `path` as compact JSON.
-pub fn saveCompact(path: String, doc: Value) -> Error? {
+pub fn saveCompact(path: &String, doc: &Value) -> Error? {
     match io::writeString(path, compact(doc) + "\n") {
         Ok(n) => nil,
         Err(cause) => ofFile(cause),

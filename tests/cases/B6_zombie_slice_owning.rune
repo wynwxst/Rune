@@ -1,0 +1,35 @@
+// EXPECT: reversed b2 d4 a1 c3
+// EXPECT: sorted a1 b2 c3 d4
+// EXPECT: largest d4
+// EXPECT: after b 3
+// EXPECT: iterated x1 y2
+// EXPECT: folded 6
+// SAFETY: full
+// `std::collections::slice` hands elements out — to a predicate, into a
+// result — as copies made with `$clone()`. It used to copy the handle, so
+// under single ownership a `String` ended up with two owners and was dropped
+// while still shared.
+import std::io
+import std::collections::slice
+import std::collections::vector
+
+fn words() -> [4:String] { ["c" + "3", "a" + "1", "d" + "4", "b" + "2"] }
+
+fn spaced(v: vector::Vector<String>) -> String {
+    var out = ""
+    for w in v { out += " " + w }
+    out
+}
+
+fn main() -> i64 {
+    io::println("reversed" + spaced(slice::reversed(words())))
+    io::println("sorted" + spaced(slice::sortedBy(words(), ||(a: String, b: String) -> bool { a < b })))
+    io::println("largest " + (slice::maximumBy(words(), ||(a: String, b: String) -> bool { a < b }) ?? "none"))
+    io::println("after b " + slice::countWhere(words(), ||(w: String) -> bool { w > "b" }).$str())
+    let pair: [2:String] = ["x" + "1", "y" + "2"]
+    var seen = ""
+    for w in slice::iterate(pair) { seen += " " + w }
+    io::println("iterated" + seen)
+    io::println("folded " + slice::fold([1, 2, 3], 0, ||(a: i64, n: i64) -> i64 { a + n }).$str())
+    0
+}

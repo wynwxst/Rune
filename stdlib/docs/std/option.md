@@ -30,7 +30,9 @@ fn main() -> i64 {
 ## Working with one without unwrapping it
 
 A chain of these is one calculation where the unwrapping version is four
-nil checks.
+nil checks. `map`, `andThen` and the rest take the option itself, and with it
+whatever it holds; `peek()` first borrows the contents instead, so the option
+is still there for the next question.
 
 ```rune
 import std::io
@@ -39,9 +41,10 @@ struct Config { pub port: i64?, pub name: String }
 
 fn main() -> i64 {
     let config: Config? = Config { port: 8080, name: "api" }
-    let port = config.andThen(||(c: Config) -> i64? { c.port })
+    let port = config.peek().andThen(||(c: &Config) -> i64? { c.port })
     io::println(port ?? 80)
-    let label = config.map(||(c: Config) -> String { c.name }).or("unnamed")
+    let label = config.peek().map(||(c: &Config) -> String { c.name.$clone() })
+                      .or("unnamed")
     io::println(label)
     let big = port.filter(||(p: i64) -> bool { p > 1024 })
     io::println(big.hasValue())

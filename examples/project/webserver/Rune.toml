@@ -12,6 +12,9 @@ authors = []
 # file descriptors, and the ownership pass is what makes handing one to a
 # worker a move rather than a second owner of the same descriptor.
 safety = "full"
+# Every worker is handed the same queue and counter, which is sharing:
+# reference counting, not single ownership.
+memory = "arc"
 optimize = 0
 debug = true
 warnings-as-errors = false

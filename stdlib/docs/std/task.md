@@ -113,35 +113,31 @@ by value, or belongs to a class.
 
 ## Sharing between tasks
 
-Tasks on one thread take turns, never overlap, so they share a class with no
-lock at all.
+Two tasks can hold the same object: each is handed a `&`. A shared borrow
+cannot change an ordinary class, so what tasks change together is a type that
+changes through `&self` — an `atomic::Counter` here, or a `thread::Mutex`.
 
 ```rune
 import std::io
 import std::task
+import std::atomic
 
-class Counter {
-    var hits: i64
-    fn init(self) { self.hits = 0 }
-    fn bump(&var self) { self.hits += 1 }
-}
-
-async fn touch(c: Counter, times: i64) {
+async fn touch(c: &atomic::Counter, times: i64) {
     var i = 0
     while i < times {
-        c.bump()
+        c.increment()
         task::yieldNow()          // let the other task have a turn
         i += 1
     }
 }
 
 async fn main() -> i64 {
-    let c = Counter()
-    let first = touch(c, 3)
-    let second = touch(c, 3)
+    let c = atomic::Counter(0)
+    let first = touch(&c, 3)
+    let second = touch(&c, 3)
     first.await
     second.await
-    io::println(c.hits)
+    io::println(c.load())
     0
 }
 ```
@@ -219,7 +215,8 @@ async fn mirror(name: String, delay: i64) -> String {
 async fn main() -> i64 {
     let slow = mirror("slow", 30)
     let fast = mirror("fast", 5)
-    let (which, winner) = task::first(vec![slow, fast]).await
+    // A future is a handle: `$clone()` is a second handle to the same task.
+    let (which, winner) = task::first(vec![slow.$clone(), fast]).await
     io::println(which)
     io::println(winner.await)
     io::println(slow.await)            // the loser, collected later
@@ -300,8 +297,9 @@ import std::io
 import std::task
 
 async fn main() -> i64 {
-    let answer = task::pending<i64>()
-    let doubled = async { answer.await * 2 }
+    var answer = task::pending<i64>()
+    let waiting = answer.$clone()        // a second handle, for the block
+    let doubled = async { waiting.await * 2 }
     io::println(doubled.isDone())
     answer.complete(21)
     io::println(doubled.await)

@@ -8,7 +8,9 @@ are read off a type — scalars, `String`, and any struct or tuple of them are
 ## Spawning and joining
 
 `spawn` takes a plain function (a `@cfunction`, not a closure) and one
-argument, and hands back a `Handle` to `join` for the result.
+argument, and hands back a `Handle` to `join` for the result. The argument
+moves to the thread, and the result moves back to whoever joins it — once: a
+second `join` has nothing left to hand over, and aborts.
 
 ```rune
 import std::io
@@ -34,10 +36,17 @@ fn main() -> i64 {
 }
 ```
 
-## Sharing: `Mutex` and `Arc`
+## Sharing: `thread::scope`, `Mutex` and `Arc`
 
-A `Mutex<T>` is reachable only while locked, so it is `Sync` whatever `T`
-is. An `Arc<T>` is one value several threads may read.
+Handing a value to `spawn` hands it over: the thread owns it, and the caller
+does not have it any more. To share one, `thread::scope` takes it in, lends it
+to every thread the body starts as a `&`, and joins them all before the
+value is dropped — so no thread can outlive what it borrowed.
+
+What is shared through a `&` has to be safe to reach from several threads at
+once. A `Mutex<T>` is: it is reachable only while locked, so every method takes
+`&self` and it is `Sync` whatever `T` is. So are `atomic::Counter` and
+`atomic::Flag`. An `Arc<T>` is one value several threads may read.
 
 ```rune
 import std::io
@@ -45,53 +54,64 @@ import std::thread
 
 fn addOne(n: i64) -> i64 { n + 1 }
 
-fn bump(shared: thread::Mutex<i64>) -> i64 {
+fn bump(shared: &thread::Mutex<i64>) -> i64 {
     var i = 0
     while i < 1000 { shared.withLock(addOne); i += 1 }
     0
 }
 
-fn readTable(shared: thread::Arc<[3:i64]>) -> i64 {
+fn readTable(shared: &thread::Arc<[3:i64]>) -> i64 {
     var total = 0
     for v in shared.get() { total += v }
     total
 }
 
 fn main() -> i64 {
-    let total = thread::Mutex<i64>(0)
-    var w = thread::spawn(bump, total)
-    var x = thread::spawn(bump, total)
-    w.join(); x.join()
-    io::println(total.get())
+    let total = thread::scope(thread::Mutex<i64>(0),
+                              ||(s: &thread::Scope<thread::Mutex<i64>>) -> i64 {
+        var w = s.spawn(bump, s.env())
+        var x = s.spawn(bump, s.env())
+        w.join(); x.join()
+        s.env().get()
+    })
+    io::println(total)
 
-    let table = thread::Arc<[3:i64]>([2, 3, 5])
-    var r = thread::spawn(readTable, table)
-    io::println(r.join())
+    let sum = thread::scope(thread::Arc<[3:i64]>([2, 3, 5]),
+                            ||(s: &thread::Scope<thread::Arc<[3:i64]>>) -> i64 {
+        var r = s.spawn(readTable, s.env())
+        r.join()
+    })
+    io::println(sum)
     0
 }
 ```
 
 ## Channels
 
-A `Channel<T>` is a queue between threads. `receive` blocks until a value or
-the close; `tryReceive` does not.
+A `Channel<T>` is a queue between threads, and like a `Mutex` it locks for
+itself, so the threads of a scope share one through `&`. `receive` blocks
+until a value or the close; `tryReceive` does not. A value sent is moved
+through the channel to whoever receives it.
 
 ```rune
 import std::io
 import std::thread
 
-fn consume(line: thread::Channel<i64>) -> i64 {
+fn consume(line: &thread::Channel<i64>) -> i64 {
     var total = 0
     while line.receive() is Some(v) { total += v }
     total
 }
 
 fn main() -> i64 {
-    let line = thread::Channel<i64>()
-    var worker = thread::spawn(consume, line)
-    for i in 1..=100 { line.send(i) }
-    line.close()
-    io::println(worker.join())
+    let total = thread::scope(thread::Channel<i64>(),
+                              ||(s: &thread::Scope<thread::Channel<i64>>) -> i64 {
+        var worker = s.spawn(consume, s.env())
+        for i in 1..=100 { s.env().send(i) }
+        s.env().close()
+        worker.join()
+    })
+    io::println(total)
     0
 }
 ```
