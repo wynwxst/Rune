@@ -33,16 +33,15 @@ Each decorator is called **once, before `main`**, after the globals exist and in
 import std::io
 import std::collections::vector
 
+// Made by the first decorator to run: decorators run before `main`, while
+// globals are still being set, so the list cannot count on being there yet.
 global var table: vector::Vector<String>? = nil
 
-fn routes() -> vector::Vector<String> {
-    if table is Some(t) { return t }
-    let made = vector::Vector<String>()
-    table = made
-    made
+@safe("decorators run one at a time, before main, and nothing else holds the list")
+fn route(path: String, handler: @function() -> ()) {
+    if table.isNil() { table = vector::Vector<String>() }
+    unsafe { table.touch().push(path) }
 }
-
-fn route(path: String, handler: @function() -> ()) { routes().push(path) }
 
 @route("/health")
 fn health() { }
@@ -51,14 +50,9 @@ fn health() { }
 fn version() { }
 
 fn main() -> i64 {
-    let table = routes()
-    let count = table.length()
-    io::println(count.$str() + " registered before main")
-    var i = 0
-    while i < count {
-        io::println("  " + table.get(i))
-        i += 1
-    }
+    let routes = table.look()
+    io::println(routes.length().$str() + " registered before main")
+    for path in routes { io::println("  " + path) }
     0
 }
 ```

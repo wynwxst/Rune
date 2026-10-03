@@ -21,7 +21,7 @@ bind Show to Point {
 struct Loud { text: String }
 
 bind Show to Loud {
-    fn show(&self) -> String { self.text }
+    fn show(&self) -> String { self.text.$clone() }
     fn shout(&self) -> String { self.text.$repeat(3) }   // replaces the default
 }
 

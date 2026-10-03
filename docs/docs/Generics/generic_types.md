@@ -10,7 +10,7 @@ struct Pair<A, B> {
     pub second: B
 
     pub fn swapped(&self) -> Pair<B, A> {
-        Pair<B, A> { first: self.second, second: self.first }
+        Pair<B, A> { first: self.second.$clone(), second: self.first.$clone() }
     }
 }
 
@@ -21,7 +21,7 @@ struct Stack<T> {
     pub fn depth(&self) -> i64 { self.count }
     pub fn top(&self, empty: T) -> T {
         if self.count == 0 { return empty }
-        self.items[self.count - 1]
+        self.items[self.count - 1].$clone()
     }
 }
 

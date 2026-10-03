@@ -20,7 +20,7 @@ class Buffer {
         io::println("  releasing " + self.name)
     }
 
-    pub fn write(&self, amount: i64) {
+    pub fn write(&var self, amount: i64) {
         self.used += amount
     }
 

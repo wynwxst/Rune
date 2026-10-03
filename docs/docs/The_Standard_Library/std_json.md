@@ -5,8 +5,8 @@ Reading and writing JSON. A document is a `json::Value` — one of seven shapes:
 | Name | Signature | Does |
 | --- | --- | --- |
 | `parse` | `(String) -> Result<Value, Error>` | the whole text as one value; anything trailing is an error |
-| `write` / `pretty` | `(Value) -> String` | compact, or laid out one member per line |
-| `load` / `save` | `(path) -> Result<Value, Error>` / `(path, Value) -> Error?` | the same, over a file |
+| `write` / `pretty` | `(&Value) -> String` | compact, or laid out one member per line; the document is borrowed, so it is still there afterwards |
+| `load` / `save` | `(&String) -> Result<Value, Error>` / `(&String, &Value) -> Error?` | the same, over a file |
 | `Value` | `enum` | `Null`, `Bool`, `Int`, `Number`, `Text`, `Array`, `Object` |
 | `Value::asBool` … `asObject` | `(&self) -> T?` | what is inside, if it is that; `asInt` does not round |
 | `Value::get` / `index` | `(&self, String) -> Value?` / `(&self, i64) -> Value?` | a member, or an element |

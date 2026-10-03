@@ -9,7 +9,7 @@ import std::io
 import std::atomic
 import std::thread
 
-fn bump(counter: atomic::Counter) -> i64 {
+fn bump(counter: &atomic::Counter) -> i64 {
     var i = 0
     while i < 100000 { counter.increment(); i += 1 }
     0
@@ -17,25 +17,31 @@ fn bump(counter: atomic::Counter) -> i64 {
 
 /// `raise` sets the flag and says whether *this* call was the one that did,
 /// so exactly one caller out of any number gets `true`.
-fn tryClaim(flag: atomic::Flag) -> i64 {
+fn tryClaim(flag: &atomic::Flag) -> i64 {
     if flag.raise() { return 1 }
     0
 }
 
 fn main() -> i64 {
-    let served = atomic::Counter(0)
-    var a = thread::spawn(bump, served)
-    var b = thread::spawn(bump, served)
-    var c = thread::spawn(bump, served)
-    var d = thread::spawn(bump, served)
-    a.join(); b.join(); c.join(); d.join()
-    println!("{}", served.load())
+    let served = thread::scope(atomic::Counter(0),
+        ||(s: &thread::Scope<atomic::Counter>) -> i64 {
+            var a = s.spawn(bump, s.env())
+            var b = s.spawn(bump, s.env())
+            var c = s.spawn(bump, s.env())
+            var d = s.spawn(bump, s.env())
+            a.join(); b.join(); c.join(); d.join()
+            s.env().load()
+        })
+    println!("{}", served)
 
-    let once = atomic::Flag(false)
-    var w = thread::spawn(tryClaim, once)
-    var x = thread::spawn(tryClaim, once)
-    var y = thread::spawn(tryClaim, once)
-    println!("winners: {}", w.join() + x.join() + y.join())
+    let winners = thread::scope(atomic::Flag(false),
+        ||(s: &thread::Scope<atomic::Flag>) -> i64 {
+            var w = s.spawn(tryClaim, s.env())
+            var x = s.spawn(tryClaim, s.env())
+            var y = s.spawn(tryClaim, s.env())
+            w.join() + x.join() + y.join()
+        })
+    println!("winners: {}", winners)
     0
 }
 ```

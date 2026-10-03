@@ -34,6 +34,6 @@ fn main() -> i64 {
 ```
 
 > [!NOTE]
-> **Why 2**
+> **Why 1**
 >
-> Two live objects inside the scope, not one: the `Node` and the `String` its `label` field holds. Strings are counted as well.
+> One live object inside the scope: the `Node`. Its `label` is a string literal, which lives as long as the program and is never counted; a `String` built at run time would be.

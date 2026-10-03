@@ -33,14 +33,20 @@ pub class Arena {
 bind mem::Allocator to Arena {
     /// Bumps the cursor. Returns null when the arena is full, which is what
     /// `mem::isNull` is for.
+    ///
+    /// `Allocator` hands out memory through `&self` — every container shares
+    /// one — so the cursor is moved through a raw pointer to it, as an
+    /// atomic counter changes its number. An arena is one thread's.
     @safe("the cursor never passes the size checked on the line above")
     fn allocate(&self, bytes: usize) -> *var u8 {
         // Keep every block 8-aligned, as the system allocator would.
         let need = (bytes + 7) / 8 * 8
         if self.used + need > self.size { return mem::noBlock() }
         let at = self.used
-        self.used += need
-        self.handed += 1
+        unsafe {
+            (&self.used as *var usize)[0] = at + need
+            (&self.handed as *var i64)[0] = self.handed + 1
+        }
         unsafe { (self.block as u64 + at as u64) as *var u8 }
     }
 

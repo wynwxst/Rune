@@ -14,9 +14,9 @@ fn main() -> i64 {
         Reading { label: "evening", value: 15.5 },
     ]
 
-    var warmest = readings[0]
+    var warmest = readings[0].$clone()
     for r in readings {
-        if r.value > warmest.value { warmest = r }
+        if r.value > warmest.value { warmest = r.$clone() }
     }
     io::println(warmest.label + " " + warmest.value.$str())
 

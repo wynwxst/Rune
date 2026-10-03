@@ -10,8 +10,8 @@ import std::io
 class Connection {
     name: String
     fn init(self, name: String) {
-        self.name = name
         io::println("open " + name)
+        self.name = name
     }
     fn deinit(self) { io::println("close " + self.name) }
 }

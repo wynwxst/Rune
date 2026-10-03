@@ -59,4 +59,4 @@ fn main() -> i64 {
 > [!NOTE]
 > **How precise it is**
 >
-> A borrow is followed back to the binding it starts from, so two *fields* of the same value count as the same place. Following an index the compiler cannot evaluate would report the same conflicts with less certainty, so it does not try; the diagnostic says as much rather than leaving the reader to guess.
+> A borrow is followed back to the binding it starts from and the fields named on the way, so `&var p.x` and `&var p.y` are different places — the same rule the Zombie checker keeps, so a program it accepts is accepted here too. An index ends the path: `v[i]` stands for all of `v`, since following an index the compiler cannot evaluate would report conflicts with less certainty, not more.

@@ -66,7 +66,7 @@ fn main() -> i64 {
 }
 ```
 
-To share one value, capture something that *is* shared: a class is a reference, so every copy of it names the same object. `mem::Handle<T>` is that, for a single value.
+To share one value, capture something that *is* shared: a class is a reference, so every copy of it names the same object. `mem::Handle<T>` is that, for a single value. That is reference counting — `--memory arc` — and this example is built with it; under single ownership, the default, a value captured is the closure's own.
 
 **Sharing one value with a closure**
 

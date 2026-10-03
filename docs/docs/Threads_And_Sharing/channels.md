@@ -9,7 +9,7 @@ import std::io
 import std::thread
 
 /// Takes values until the channel is closed and empty.
-fn consume(line: thread::Channel<i64>) -> i64 {
+fn consume(line: &thread::Channel<i64>) -> i64 {
     var total = 0
     while true {
         match line.receive() {
@@ -23,16 +23,20 @@ fn consume(line: thread::Channel<i64>) -> i64 {
 fn main() -> i64 {
     // Three consumers on one queue. Each takes what it can, and the three
     // totals add up to the whole.
-    let jobs = thread::Channel<i64>()
-    var a = thread::spawn(consume, jobs)
-    var b = thread::spawn(consume, jobs)
-    var c = thread::spawn(consume, jobs)
+    let sum = thread::scope(thread::Channel<i64>(),
+        ||(s: &thread::Scope<thread::Channel<i64>>) -> i64 {
+            var a = s.spawn(consume, s.env())
+            var b = s.spawn(consume, s.env())
+            var c = s.spawn(consume, s.env())
 
-    var i = 1
-    while i <= 1000 { jobs.send(i); i += 1 }
-    jobs.close()               // no more coming; wake everyone waiting
+            let jobs = s.env()
+            var i = 1
+            while i <= 1000 { jobs.send(i); i += 1 }
+            jobs.close()       // no more coming; wake everyone waiting
 
-    println!("{}", a.join() + b.join() + c.join())
+            a.join() + b.join() + c.join()
+        })
+    println!("{}", sum)
     0
 }
 ```

@@ -21,7 +21,7 @@ mark Measured: Named {              // requires Named as well
 struct Crate { label: String, volume: f64 }
 
 bind Named to Crate {
-    fn name(&self) -> String { self.label }
+    fn name(&self) -> String { self.label.$clone() }
 }
 
 bind Measured to Crate {

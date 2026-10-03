@@ -27,8 +27,9 @@ async fn main() -> i64 {
     let results = task::all(vec![fetch(1), fetch(2), fetch(3)]).await
     for r in results { io::println(r) }
 
-    let answer = task::pending<i64>()
-    let doubled = async { answer.await * 2 }
+    var answer = task::pending<i64>()
+    let waiting = answer.$clone()      // a second handle, for the block
+    let doubled = async { waiting.await * 2 }
     io::println(doubled.isDone())
     answer.complete(21)
     io::println(doubled.await)
@@ -52,7 +53,8 @@ async fn mirror(name: String, delay: i64) -> String {
 async fn main() -> i64 {
     let slow = mirror("slow", 30)
     let fast = mirror("fast", 5)
-    let (which, winner) = task::first(vec![slow, fast]).await
+    // A future is a handle: `$clone()` is a second one to the same task.
+    let (which, winner) = task::first(vec![slow.$clone(), fast]).await
     io::println(which)
     io::println(winner.await)
     // The loser keeps running; nothing cancels it. Here it is collected.

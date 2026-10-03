@@ -13,7 +13,7 @@ pub enum Tree<T> {
 
     pub fn value(&self, fallback: T) -> T {
         match self {
-            Tree::Node(v) => v,
+            Tree::Node(v) => v.$clone(),     // a copy: `self` is only borrowed
             Tree::Leaf => fallback,
         }
     }

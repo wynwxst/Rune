@@ -19,7 +19,7 @@ mark Animal {
 
 bind Animal to Sheep {
     fn new(name: String) -> Self { Sheep { naked: false, name: name } }
-    fn name(&self) -> String { self.name }
+    fn name(&self) -> String { self.name.$clone() }
     fn noise(&self) -> String { if self.naked { "baaaa!" } else { "baaaa?" } }
 }
 
@@ -87,7 +87,7 @@ bind Monoid to String {
 
 fn total<T: Monoid>(values: [T]) -> T {
     var acc: T = Monoid::zero()
-    for v in values { acc = acc.combine(v) }
+    for v in values { acc = acc.combine(v.$clone()) }
     acc
 }
 

@@ -49,7 +49,7 @@ struct Row { pub id: i64, pub name: String }
 
 bind operator::"[]" to Row {
     fn index(&self, at: i64) -> String {
-        if at == 0 { self.id.$str() } else { self.name }
+        if at == 0 { self.id.$str() } else { self.name.$clone() }
     }
     fn indexSet(&var self, at: i64, value: String) {
         if at == 0 { self.id = value.$toInt() ?? 0 } else { self.name = value }
@@ -60,7 +60,7 @@ bind operator::"[]" to Row {
 // brackets is what says which one runs.
 bind operator::"[]" to Row {
     fn index(&self, field: String) -> String {
-        if field == "id" { self.id.$str() } else { self.name }
+        if field == "id" { self.id.$str() } else { self.name.$clone() }
     }
     fn indexSet(&var self, field: String, value: String) {
         if field == "id" { self.id = value.$toInt() ?? 0 } else { self.name = value }

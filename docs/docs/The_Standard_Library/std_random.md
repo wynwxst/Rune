@@ -12,8 +12,8 @@ A `Random` is a generator with its own state. Seeded from a number it repeats ex
 | `Random::between` | `(&var self, low: i64, high: i64) -> i64` | both ends included |
 | `Random::float` / `floatBetween` | `(&var self) -> f64` | `[0, 1)` with 53 bits; or `[low, high)` |
 | `Random::chance` / `coin` | `(&var self, p: f64) -> bool` | true with probability `p`; or evenly |
-| `Random::choose` / `pick` | `<T>(&var self, [T]) -> T?` | one element of a slice, or of a `Vector` |
-| `Random::shuffle` | `<T>(&var self, Vector<T>)` | a uniformly random order, in place |
+| `Random::choose` / `pick` | `<T>(&var self, [T]) -> T?` | one element of a slice, or a copy of one from a borrowed `Vector` |
+| `Random::shuffle` | `<T>(&var self, &var Vector<T>)` | a uniformly random order, in place |
 | `bytes` | `(count: i64) -> Vector<u8>` | straight from the OS — for anything secret |
 | `next`, `below`, `between`, `float`, `chance`, `coin`, `choose`, `shuffle` | free functions | the same, on one shared generator seeded from the OS on first use |
 
@@ -31,7 +31,7 @@ fn main() -> i64 {
 
     var rng = random::new()                   // different every run
     var deck = vec!("A", "K", "Q", "J")
-    rng.shuffle(deck)
+    rng.shuffle(&var deck)
     io::println(deck.length())
     io::println(rng.float() < 1.0)
     io::println(random::bytes(16).length())

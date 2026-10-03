@@ -43,24 +43,15 @@ fn main() -> i64 {
 ```rune
 import std::io
 import std::text
+import std::collections::slice
 
 fn main() -> i64 {
-    var words: [6:String] = ["zebra", "Ápple", "apple", "Banana", "äpple", "APPLE"]
-    var i = 1
-    while i < 6 {
-        var j = i
-        while j > 0 {
-            if text::compare(words[j], words[j - 1]) < 0 {
-                let hold = words[j]
-                words[j] = words[j - 1]
-                words[j - 1] = hold
-            }
-            j -= 1
-        }
-        i += 1
-    }
+    let words: [6:String] = ["zebra", "Ápple", "apple", "Banana", "äpple", "APPLE"]
+    let sorted = slice::sortedBy(words, ||(a: String, b: String) -> bool {
+        text::compare(a, b) < 0
+    })
     var out = ""
-    for w in words { out += w + " " }
+    for w in sorted { out += w + " " }
     io::println(out)
     0
 }

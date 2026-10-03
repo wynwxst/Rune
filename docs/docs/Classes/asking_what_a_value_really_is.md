@@ -11,7 +11,7 @@ class Triangle : Shape { fn init(self) { super.init() }
 class Square : Shape { fn init(self) { super.init() }
     pub fn sides(&self) -> i64 { 4 } }
 
-fn label(s: Shape) -> String {
+fn label(s: &Shape) -> String {
     if s is Triangle { return "triangle" }
     if s is Square { return "square" }
     "shape"

@@ -12,6 +12,8 @@ struct Count { pub n: i64 }
 
 fn main() -> i64 {
     let a = Tally()
+    // Under reference counting (`--memory arc`, as here) `b` is the same
+    // instance; under single ownership, the default, `a` is handed to `b`.
     let b = a                  // the same instance, not a copy
     b.n = 99
     io::println("class:  " + a.n.$str() + " " + b.n.$str())

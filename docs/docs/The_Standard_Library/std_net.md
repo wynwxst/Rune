@@ -42,8 +42,7 @@ fn serve(unused: i64) -> i64 {
         Ok(l) => l,
         Err(e) => { io::eprintln("listen: " + net::describe(e)); return 1 },
     }
-    var slot = port
-    slot.set(listener.port() as i64)
+    port.set(listener.port() as i64)
 
     match listener.accept() {
         Ok(c) => {
@@ -64,14 +63,13 @@ fn serve(unused: i64) -> i64 {
 fn main() -> i64 {
     var server = thread::spawn(serve, 0)
 
-    var slot = port
     var waited = 0
-    while slot.get() == 0 && waited < 200 {
+    while port.get() == 0 && waited < 200 {
         thread::sleep(time::milliseconds(10))
         waited += 1
     }
 
-    match net::connect("127.0.0.1", slot.get() as i32) {
+    match net::connect("127.0.0.1", port.get() as i32) {
         Ok(c) => {
             var conn = c
             conn.setNoDelay(true)

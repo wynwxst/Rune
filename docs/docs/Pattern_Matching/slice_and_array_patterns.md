@@ -25,7 +25,7 @@ fn sum(xs: [i64]) -> i64 {
 
 fn command(words: [String]) -> String {
     match words {
-        ["go", dir] => "going " + dir,
+        ["go", ref dir] => "going " + dir,   // `ref`: borrowed, not moved out
         ["say", ..rest] => "saying " + rest.$length().$str() + " words",
         [.., "end"] => "ends with end",
         _ => "unknown",

@@ -27,7 +27,7 @@ fn kernelMain(magic: u32, info: u32) -> Never {
 }
 ```
 
-The standard library is still there, and still only compiled where it is used, so `T?`, `Result`, `std::asm` and the rest of what is plain Rune work as ever. What reaches the hosted runtime — `String`, `std::io`, threads, tasks, reference counting — is refused at compile time, against the function of yours that reached it:
+The standard library is still there, and still only compiled where it is used, so `T?`, `Result`, `std::asm` and the rest of what is plain Rune work as ever. So do the containers — `Vector`, `Map` and `Set` — which allocate through `std::mem` and so through the program's own `@allocator`. `process::panic` takes the `CString` a literal already is and hands it to the `@panicHandler`. What reaches the hosted runtime — `String`, `std::io`, `std::fmt`, threads, tasks, reference counting — is refused at compile time, against the function of yours that reached it:
 
 ```sh
 ● kernel.rune [4:3..8]

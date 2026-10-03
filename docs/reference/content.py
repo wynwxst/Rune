@@ -2184,7 +2184,7 @@ fn sum(xs: [i64]) -> i64 {
 
 fn command(words: [String]) -> String {
     match words {
-        ["go", dir] => "going " + dir,
+        ["go", ref dir] => "going " + dir,   // `ref`: borrowed, not moved out
         ["say", ..rest] => "saying " + rest.$length().$str() + " words",
         [.., "end"] => "ends with end",
         _ => "unknown",
@@ -2670,7 +2670,10 @@ fn main() -> i64 {
 }""", mode="run", title="Assigning to a capture is a copy"),
         P("To share one value, capture something that *is* shared: a class is "
           "a reference, so every copy of it names the same object. "
-          "`mem::Handle<T>` is that, for a single value."),
+          "`mem::Handle<T>` is that, for a single value. That is reference "
+          "counting — `--memory arc` — and this example is built with it; "
+          "under single ownership, the default, a value captured is the "
+          "closure's own."),
         S("""import std::io
 import std::mem
 
@@ -2681,7 +2684,7 @@ fn main() -> i64 {
     add(7)
     io::println((*total).$str())
     0
-}""", mode="run", title="Sharing one value with a closure"),
+}""", mode="run", title="Sharing one value with a closure", memory="arc"),
 
         H("Passing functions around"),
         P("A named function converts to a function value automatically, so it "
@@ -2789,7 +2792,9 @@ struct Options {
 
 fn main() -> i64 {
     let base = Options { width: 80, height: 24, label: "base" }
-    let wide = Options { width: 120, ..base }
+    // `..base` takes the rest from `base`, moving what it takes; a copy
+    // first leaves `base` whole for the next one.
+    let wide = Options { width: 120, ..base.$clone() }
     let renamed = Options { label: "renamed", ..base }
 
     io::println(wide.width.$str() + "x" + wide.height.$str() + " " + wide.label)
@@ -3154,6 +3159,29 @@ fn main() -> i64 {
     io::println(Status::Ok == Status::Ok)
     0
 }""", mode="run", title="Enums with wire values"),
+        P("A value may also be integer arithmetic on numbers and on the "
+          "variants declared before it — `+ - * / %`, the shifts, `& | ^` "
+          "and `~` — which is how flags and C's aliases are written. Two "
+          "variants with one value are one tag: a `match` takes the first "
+          "arm that names it. A call or a variable is not a constant, and is "
+          "E0400."),
+        S("""import std::io
+
+enum Style {
+    Titled = 1 << 0,
+    Closable = 1 << 1,
+    Resizable = 1 << 3,
+    Standard = Titled | Closable | Resizable,
+}
+
+enum Family { Iso = 7, Osi = Iso, Ecma }    // Osi is Iso; Ecma is 8
+
+fn main() -> i64 {
+    io::println(Style::Standard as i64)
+    io::println(Family::Osi as i64)
+    io::println(Family::Ecma as i64)
+    0
+}""", mode="run", title="Flags, and an alias"),
 
         H("Methods on an enum"),
         S("""import std::io
@@ -3202,7 +3230,7 @@ pub enum Tree<T> {
 
     pub fn value(&self, fallback: T) -> T {
         match self {
-            Tree::Node(v) => v,
+            Tree::Node(v) => v.$clone(),     // a copy: `self` is only borrowed
             Tree::Leaf => fallback,
         }
     }
@@ -3422,7 +3450,7 @@ class Buffer {
         io::println("  releasing " + self.name)
     }
 
-    pub fn write(&self, amount: i64) {
+    pub fn write(&var self, amount: i64) {
         self.used += amount
     }
 
@@ -3453,6 +3481,8 @@ struct Count { pub n: i64 }
 
 fn main() -> i64 {
     let a = Tally()
+    // Under reference counting (`--memory arc`, as here) `b` is the same
+    // instance; under single ownership, the default, `a` is handed to `b`.
     let b = a                  // the same instance, not a copy
     b.n = 99
     io::println("class:  " + a.n.$str() + " " + b.n.$str())
@@ -3462,7 +3492,7 @@ fn main() -> i64 {
     d.n = 99
     io::println("struct: " + c.n.$str() + " " + d.n.$str())
     0
-}""", mode="run", title="Reference semantics versus value semantics"),
+}""", mode="run", title="Reference semantics versus value semantics", memory="arc"),
 
         H("Inheritance and `super`"),
         S("""import std::io
@@ -3563,7 +3593,7 @@ class Triangle : Shape { fn init(self) { super.init() }
 class Square : Shape { fn init(self) { super.init() }
     pub fn sides(&self) -> i64 { 4 } }
 
-fn label(s: Shape) -> String {
+fn label(s: &Shape) -> String {
     if s is Triangle { return "triangle" }
     if s is Square { return "square" }
     "shape"
@@ -3633,7 +3663,7 @@ bind Show to Point {
 struct Loud { text: String }
 
 bind Show to Loud {
-    fn show(&self) -> String { self.text }
+    fn show(&self) -> String { self.text.$clone() }
     fn shout(&self) -> String { self.text.$repeat(3) }   // replaces the default
 }
 
@@ -3679,7 +3709,7 @@ mark Measured: Named {              // requires Named as well
 struct Crate { label: String, volume: f64 }
 
 bind Named to Crate {
-    fn name(&self) -> String { self.label }
+    fn name(&self) -> String { self.label.$clone() }
 }
 
 bind Measured to Crate {
@@ -3782,7 +3812,7 @@ mark Animal {
 
 bind Animal to Sheep {
     fn new(name: String) -> Self { Sheep { naked: false, name: name } }
-    fn name(&self) -> String { self.name }
+    fn name(&self) -> String { self.name.$clone() }
     fn noise(&self) -> String { if self.naked { "baaaa!" } else { "baaaa?" } }
 }
 
@@ -3844,7 +3874,7 @@ bind Monoid to String {
 
 fn total<T: Monoid>(values: [T]) -> T {
     var acc: T = Monoid::zero()
-    for v in values { acc = acc.combine(v) }
+    for v in values { acc = acc.combine(v.$clone()) }
     acc
 }
 
@@ -4063,7 +4093,7 @@ bind Container to Bag {
 bind Container to Names {
     type Item = String
     fn count(&self) -> i64 { 2 }
-    fn first(&self) -> Self::Item { self.values[0] }
+    fn first(&self) -> Self::Item { self.values[0].$clone() }
 }
 
 fn howMany<T: Container>(c: T) -> i64 { c.count() }
@@ -4951,7 +4981,7 @@ struct Row { pub id: i64, pub name: String }
 
 bind operator::"[]" to Row {
     fn index(&self, at: i64) -> String {
-        if at == 0 { self.id.$str() } else { self.name }
+        if at == 0 { self.id.$str() } else { self.name.$clone() }
     }
     fn indexSet(&var self, at: i64, value: String) {
         if at == 0 { self.id = value.$toInt() ?? 0 } else { self.name = value }
@@ -4962,7 +4992,7 @@ bind operator::"[]" to Row {
 // brackets is what says which one runs.
 bind operator::"[]" to Row {
     fn index(&self, field: String) -> String {
-        if field == "id" { self.id.$str() } else { self.name }
+        if field == "id" { self.id.$str() } else { self.name.$clone() }
     }
     fn indexSet(&var self, field: String, value: String) {
         if field == "id" { self.id = value.$toInt() ?? 0 } else { self.name = value }
@@ -5341,7 +5371,7 @@ struct Pair<A, B> {
     pub second: B
 
     pub fn swapped(&self) -> Pair<B, A> {
-        Pair<B, A> { first: self.second, second: self.first }
+        Pair<B, A> { first: self.second.$clone(), second: self.first.$clone() }
     }
 }
 
@@ -5352,7 +5382,7 @@ struct Stack<T> {
     pub fn depth(&self) -> i64 { self.count }
     pub fn top(&self, empty: T) -> T {
         if self.count == 0 { return empty }
-        self.items[self.count - 1]
+        self.items[self.count - 1].$clone()
     }
 }
 
@@ -5777,7 +5807,7 @@ enum ParseError { Empty, NotANumber { text: String } }
 enum AppError { Parse(ParseError), Disk(io::FileError) }
 
 bind ParseError into AppError {
-    fn convert(&self) -> AppError { AppError::Parse(*self) }
+    fn convert(&self) -> AppError { AppError::Parse(self.$clone()) }
 }
 bind io::FileError into AppError {
     fn convert(&self) -> AppError { AppError::Disk(*self) }
@@ -6011,9 +6041,9 @@ fn main() -> i64 {
         Reading { label: "evening", value: 15.5 },
     ]
 
-    var warmest = readings[0]
+    var warmest = readings[0].$clone()
     for r in readings {
-        if r.value > warmest.value { warmest = r }
+        if r.value > warmest.value { warmest = r.$clone() }
     }
     io::println(warmest.label + " " + warmest.value.$str())
 
@@ -6254,24 +6284,15 @@ fn main() -> i64 {
           "of scattering them by byte value."),
         S("""import std::io
 import std::text
+import std::collections::slice
 
 fn main() -> i64 {
-    var words: [6:String] = ["zebra", "Ápple", "apple", "Banana", "äpple", "APPLE"]
-    var i = 1
-    while i < 6 {
-        var j = i
-        while j > 0 {
-            if text::compare(words[j], words[j - 1]) < 0 {
-                let hold = words[j]
-                words[j] = words[j - 1]
-                words[j - 1] = hold
-            }
-            j -= 1
-        }
-        i += 1
-    }
+    let words: [6:String] = ["zebra", "Ápple", "apple", "Banana", "äpple", "APPLE"]
+    let sorted = slice::sortedBy(words, ||(a: String, b: String) -> bool {
+        text::compare(a, b) < 0
+    })
     var out = ""
-    for w in words { out += w + " " }
+    for w in sorted { out += w + " " }
     io::println(out)
     0
 }""", mode="run", title="Sorting by the collation, not by bytes"),
@@ -6346,6 +6367,7 @@ fn main() -> i64 {
 
         H("Comparison and sorting"),
         S("""import std::io
+import std::collections::slice
 
 fn main() -> i64 {
     io::println("abc" == "abc")
@@ -6354,21 +6376,11 @@ fn main() -> i64 {
     io::println("Z" < "a")            // uppercase sorts first
     io::println("ab" < "abc")         // a prefix sorts first
 
-    var names: [4:String] = ["pear", "apple", "fig", "date"]
-    // A simple insertion sort, to show the comparisons at work.
-    for i in 1..4 {
-        var j = i
-        while j > 0 {
-            if names[j] < names[j - 1] {
-                let hold = names[j]
-                names[j] = names[j - 1]
-                names[j - 1] = hold
-            }
-            j -= 1
-        }
-    }
+    let names: [4:String] = ["pear", "apple", "fig", "date"]
+    // `<` is all a sort needs to be told.
+    let sorted = slice::sortedBy(names, ||(a: String, b: String) -> bool { a < b })
     var out = ""
-    for n in names { out += n + " " }
+    for n in sorted { out += n + " " }
     io::println(out)
     0
 }""", mode="run", title="Ordering strings"),
@@ -6582,10 +6594,11 @@ fn main() -> i64 {
     let after = process::liveObjectCount()
     io::println("live after: " + after.$str())
     0
-}""", mode="run", title="One object, two names"),
-        N("Two live objects inside the scope, not one: the `Node` and the "
-          "`String` its `label` field holds. Strings are counted as well.",
-          label="Why 2"),
+}""", mode="run", title="One object, two names", memory="arc"),
+        N("One live object inside the scope: the `Node`. Its `label` is a "
+          "string literal, which lives as long as the program and is never "
+          "counted; a `String` built at run time would be.",
+          label="Why 1"),
 
         H("Deinitialisers"),
         S("""import std::io
@@ -6595,8 +6608,8 @@ fn main() -> i64 {
 class Connection {
     name: String
     fn init(self, name: String) {
-        self.name = name
         io::println("open " + name)
+        self.name = name
     }
     fn deinit(self) { io::println("close " + self.name) }
 }
@@ -6751,7 +6764,7 @@ fn main() -> i64 {
     let after = process::liveObjectCount()
     io::println("balanced " + (before == after).$str())
     0
-}""", mode="run", title="One weak edge, and it frees"),
+}""", mode="run", title="One weak edge, and it frees", memory="arc"),
         N("The rule looks at **types**, not at the objects you actually build. "
           "A forward-linked `class Node { next: Node? }` is reported even when "
           "you only ever build a chain, because nothing in the type stops the "
@@ -6940,7 +6953,7 @@ fn main() -> i64 {
     let remaining = process::liveObjectCount()
     io::println("live after scope: " + remaining.$str())
     0
-}""", mode="run", title="A weak back-reference"),
+}""", mode="run", title="A weak back-reference", memory="arc"),
         S("""import std::io
 
 class Cache {
@@ -6963,7 +6976,7 @@ fn main() -> i64 {
     // `c` is gone, so the weak slot was zeroed for us.
     io::println("after release: " + w.target.hasValue().$str())
     0
-}""", mode="run", title="A weak field zeroes itself"),
+}""", mode="run", title="A weak field zeroes itself", memory="arc"),
         N("`weak` needs an optional type: the field has to be able to hold "
           "`nil`, because that is what it becomes.",
           label="weak implies optional", tone="warn"),
@@ -6986,7 +6999,7 @@ fn main() -> i64 {
     b.next = a      // strong both ways: neither can ever reach zero
     io::println("built a cycle")
     0
-}""", mode="leak", title="A strong cycle is reported at exit",
+}""", mode="leak", title="A strong cycle is reported at exit", memory="arc",
           safety="minimal"),
         N("`process::liveObjectCount()` is the same counter the leak report "
           "uses. It is a legitimate way to assert in a test that a data "
@@ -8399,16 +8412,15 @@ fn main() -> i64 {
         S("""import std::io
 import std::collections::vector
 
+// Made by the first decorator to run: decorators run before `main`, while
+// globals are still being set, so the list cannot count on being there yet.
 global var table: vector::Vector<String>? = nil
 
-fn routes() -> vector::Vector<String> {
-    if table is Some(t) { return t }
-    let made = vector::Vector<String>()
-    table = made
-    made
+@safe("decorators run one at a time, before main, and nothing else holds the list")
+fn route(path: String, handler: @function() -> ()) {
+    if table.isNil() { table = vector::Vector<String>() }
+    unsafe { table.touch().push(path) }
 }
-
-fn route(path: String, handler: @function() -> ()) { routes().push(path) }
 
 @route("/health")
 fn health() { }
@@ -8417,14 +8429,9 @@ fn health() { }
 fn version() { }
 
 fn main() -> i64 {
-    let table = routes()
-    let count = table.length()
-    io::println(count.$str() + " registered before main")
-    var i = 0
-    while i < count {
-        io::println("  " + table.get(i))
-        i += 1
-    }
+    let routes = table.look()
+    io::println(routes.length().$str() + " registered before main")
+    for path in routes { io::println("  " + path) }
     0
 }""", mode="run", title="A registry filled before `main`"),
         T(["Rule", "Why"],
@@ -9255,18 +9262,24 @@ SECTIONS.append(Sec(
            ["`spawn`", "`<A: Send, R: Send>(entry: @cfunction(A) -> R, "
             "argument: A) -> Handle<R>`", "runs `entry(argument)` on a thread"],
            ["`Handle::join`", "`(&var self) -> R`",
-            "waits, and hands back what the thread returned"],
+            "waits, and hands over what the thread returned — once"],
+           ["`scope`", "`<E, R>(env: E, body: @cfunction(&Scope<E>) -> R) -> R`",
+            "lends `env` to the threads `body` starts, and joins them all"],
+           ["`Scope::spawn` / `env`", "`(&self, entry, argument: A from self)` / "
+            "`(&self) -> &E`", "a thread over the environment; the "
+            "environment, borrowed"],
            ["`Mutex<T>`", "`class`", "shared mutable state, reachable only "
             "while locked"],
-           ["`Mutex::withLock`", "`(&var self, body: @cfunction(T) -> T)`",
+           ["`Mutex::withLock`", "`(&self, body: @cfunction(T) -> T)`",
             "replaces the value with `body(value)`, locked"],
-           ["`Mutex::get` / `set`", "`(&self) -> T` / `(&var self, next: T)`",
-            "read and write, locked"],
+           ["`Mutex::get` / `set`", "`(&self) -> T where T: Clone` / `(&self, next: T)`",
+            "read a copy and write, locked"],
            ["`Arc<T: Sync>`", "`class`", "one value several threads may read"],
-           ["`Arc::get`", "`(&self) -> T`", "a copy of what is inside"],
+           ["`Arc::look` / `get`", "`(&self) -> &T` / `(&self) -> T where T: Clone`",
+            "what is inside, borrowed or copied"],
            ["`Channel<T: Send>`", "`class`",
             "a queue between threads; `send`, `receive`, `tryReceive`, "
-            "`close`, `pending`"],
+            "`close`, `pending`, all through `&self`"],
            ["`sleep`", "`(duration: time::Time)`",
             "stops this thread for at least that long"],
            ["`hardwareThreads`", "`() -> i64`",
@@ -9655,7 +9668,7 @@ fn main() -> i64 {
         S(r"""import std::io
 
 /// Reads a file and counts its lines, or explains why it could not.
-fn countLines(path: String) -> Result<i64, io::FileError> {
+fn countLines(path: &String) -> Result<i64, io::FileError> {
     let text = io::readToString(path)?
     var lines = 0
     var i = 0
@@ -9851,8 +9864,7 @@ fn serve(unused: i64) -> i64 {
         Ok(l) => l,
         Err(e) => { io::eprintln("listen: " + net::describe(e)); return 1 },
     }
-    var slot = port
-    slot.set(listener.port() as i64)
+    port.set(listener.port() as i64)
 
     match listener.accept() {
         Ok(c) => {
@@ -9873,14 +9885,13 @@ fn serve(unused: i64) -> i64 {
 fn main() -> i64 {
     var server = thread::spawn(serve, 0)
 
-    var slot = port
     var waited = 0
-    while slot.get() == 0 && waited < 200 {
+    while port.get() == 0 && waited < 200 {
         thread::sleep(time::milliseconds(10))
         waited += 1
     }
 
-    match net::connect("127.0.0.1", slot.get() as i32) {
+    match net::connect("127.0.0.1", port.get() as i32) {
         Ok(c) => {
             var conn = c
             conn.setNoDelay(true)
@@ -10458,9 +10469,10 @@ fn main() -> i64 {
         T(["Name", "Signature", "Does"],
           [["`parse`", "`(String) -> Result<Value, Error>`",
             "the whole text as one value; anything trailing is an error"],
-           ["`write` / `pretty`", "`(Value) -> String`",
-            "compact, or laid out one member per line"],
-           ["`load` / `save`", "`(path) -> Result<Value, Error>` / `(path, Value) -> Error?`",
+           ["`write` / `pretty`", "`(&Value) -> String`",
+            "compact, or laid out one member per line; the document is "
+            "borrowed, so it is still there afterwards"],
+           ["`load` / `save`", "`(&String) -> Result<Value, Error>` / `(&String, &Value) -> Error?`",
             "the same, over a file"],
            ["`Value`", "`enum`",
             "`Null`, `Bool`, `Int`, `Number`, `Text`, `Array`, `Object`"],
@@ -10667,7 +10679,7 @@ fn main() -> i64 {
     alias.set("second")
     io::println(shared.get())
     0
-}""", mode="run", title="A handle"),
+}""", mode="run", title="A handle", memory="arc"),
         P("`look` and `touch` are how a structure built out of handles is "
           "walked. `*h` and `get()` both hand back a **copy** of what the "
           "handle owns — under single ownership that means cloning everything "
@@ -11148,14 +11160,20 @@ pub class Arena {
 bind mem::Allocator to Arena {
     /// Bumps the cursor. Returns null when the arena is full, which is what
     /// `mem::isNull` is for.
+    ///
+    /// `Allocator` hands out memory through `&self` — every container shares
+    /// one — so the cursor is moved through a raw pointer to it, as an
+    /// atomic counter changes its number. An arena is one thread's.
     @safe("the cursor never passes the size checked on the line above")
     fn allocate(&self, bytes: usize) -> *var u8 {
         // Keep every block 8-aligned, as the system allocator would.
         let need = (bytes + 7) / 8 * 8
         if self.used + need > self.size { return mem::noBlock() }
         let at = self.used
-        self.used += need
-        self.handed += 1
+        unsafe {
+            (&self.used as *var usize)[0] = at + need
+            (&self.handed as *var i64)[0] = self.handed + 1
+        }
         unsafe { (self.block as u64 + at as u64) as *var u8 }
     }
 
@@ -12984,25 +13002,31 @@ import std::thread
 fn addOne(n: i64) -> i64 { n + 1 }
 
 /// Four of these run at once against the same counter.
-fn bumpAThousand(shared: thread::Mutex<i64>) -> i64 {
+fn bumpAThousand(shared: &thread::Mutex<i64>) -> i64 {
     var i = 0
     while i < 1000 { shared.withLock(addOne); i += 1 }
     0
 }
 
 fn main() -> i64 {
-    let total = thread::Mutex<i64>(0)
-
-    var a = thread::spawn(bumpAThousand, total)
-    var b = thread::spawn(bumpAThousand, total)
-    var c = thread::spawn(bumpAThousand, total)
-    var d = thread::spawn(bumpAThousand, total)
-    a.join(); b.join(); c.join(); d.join()
-
-    println!("{}", total.get())
+    // The scope lends the mutex to every thread it starts, and joins them
+    // before it lets go of it.
+    let total = thread::scope(thread::Mutex<i64>(0),
+        ||(s: &thread::Scope<thread::Mutex<i64>>) -> i64 {
+            var a = s.spawn(bumpAThousand, s.env())
+            var b = s.spawn(bumpAThousand, s.env())
+            var c = s.spawn(bumpAThousand, s.env())
+            var d = s.spawn(bumpAThousand, s.env())
+            a.join(); b.join(); c.join(); d.join()
+            s.env().get()
+        })
+    println!("{}", total)
     0
 }''', mode="run", title="Four threads, one counter"),
-        P("`withLock` takes a `fn` from the value to what it should become, "
+        P("Every method of a `Mutex` takes `&self` — the lock is what makes "
+          "changing the value through a shared borrow safe — so the threads "
+          "of a `thread::scope` all use the one they are lent. `withLock` "
+          "takes a `fn` from the value to what it should become, "
           "and holds the lock for exactly as long as that runs. There is no "
           "way to keep a reference to what is inside past the moment the lock "
           "is released, because none is ever handed out."),
@@ -13044,18 +13068,22 @@ fn main() -> i64 {
         S('''import std::io
 import std::thread
 
-fn total(shared: thread::Arc<[4:i64]>) -> i64 {
+fn total(shared: &thread::Arc<[4:i64]>) -> i64 {
     var sum = 0
-    for v in shared.get() { sum += v }
+    for v in shared.look() { sum += v }
     sum
 }
 
 fn main() -> i64 {
     let table = thread::Arc<[4:i64]>([2, 3, 5, 7])
-    var here = thread::spawn(total, table)
-    var there = thread::spawn(total, table)
-    println!("{} and the original still has {} entries",
-             here.join() + there.join(), table.get().$length())
+    let both = thread::scope(table, ||(s: &thread::Scope<thread::Arc<[4:i64]>>) -> String {
+        var here = s.spawn(total, s.env())
+        var there = s.spawn(total, s.env())
+        let sum = here.join() + there.join()
+        sum.$str() + " and the original still has " +
+            s.env().look().$length().$str() + " entries"
+    })
+    println!("{}", both)
     0
 }''', mode="run", title="One value, two readers"),
         T(["Want", "Reach for"],
@@ -13073,7 +13101,7 @@ fn main() -> i64 {
 import std::thread
 
 /// Takes values until the channel is closed and empty.
-fn consume(line: thread::Channel<i64>) -> i64 {
+fn consume(line: &thread::Channel<i64>) -> i64 {
     var total = 0
     while true {
         match line.receive() {
@@ -13087,16 +13115,20 @@ fn consume(line: thread::Channel<i64>) -> i64 {
 fn main() -> i64 {
     // Three consumers on one queue. Each takes what it can, and the three
     // totals add up to the whole.
-    let jobs = thread::Channel<i64>()
-    var a = thread::spawn(consume, jobs)
-    var b = thread::spawn(consume, jobs)
-    var c = thread::spawn(consume, jobs)
+    let sum = thread::scope(thread::Channel<i64>(),
+        ||(s: &thread::Scope<thread::Channel<i64>>) -> i64 {
+            var a = s.spawn(consume, s.env())
+            var b = s.spawn(consume, s.env())
+            var c = s.spawn(consume, s.env())
 
-    var i = 1
-    while i <= 1000 { jobs.send(i); i += 1 }
-    jobs.close()               // no more coming; wake everyone waiting
+            let jobs = s.env()
+            var i = 1
+            while i <= 1000 { jobs.send(i); i += 1 }
+            jobs.close()       // no more coming; wake everyone waiting
 
-    println!("{}", a.join() + b.join() + c.join())
+            a.join() + b.join() + c.join()
+        })
+    println!("{}", sum)
     0
 }''', mode="run", title="One queue, three consumers"),
         T(["Method", "Does"],
@@ -13121,7 +13153,7 @@ fn main() -> i64 {
 import std::atomic
 import std::thread
 
-fn bump(counter: atomic::Counter) -> i64 {
+fn bump(counter: &atomic::Counter) -> i64 {
     var i = 0
     while i < 100000 { counter.increment(); i += 1 }
     0
@@ -13129,25 +13161,31 @@ fn bump(counter: atomic::Counter) -> i64 {
 
 /// `raise` sets the flag and says whether *this* call was the one that did,
 /// so exactly one caller out of any number gets `true`.
-fn tryClaim(flag: atomic::Flag) -> i64 {
+fn tryClaim(flag: &atomic::Flag) -> i64 {
     if flag.raise() { return 1 }
     0
 }
 
 fn main() -> i64 {
-    let served = atomic::Counter(0)
-    var a = thread::spawn(bump, served)
-    var b = thread::spawn(bump, served)
-    var c = thread::spawn(bump, served)
-    var d = thread::spawn(bump, served)
-    a.join(); b.join(); c.join(); d.join()
-    println!("{}", served.load())
+    let served = thread::scope(atomic::Counter(0),
+        ||(s: &thread::Scope<atomic::Counter>) -> i64 {
+            var a = s.spawn(bump, s.env())
+            var b = s.spawn(bump, s.env())
+            var c = s.spawn(bump, s.env())
+            var d = s.spawn(bump, s.env())
+            a.join(); b.join(); c.join(); d.join()
+            s.env().load()
+        })
+    println!("{}", served)
 
-    let once = atomic::Flag(false)
-    var w = thread::spawn(tryClaim, once)
-    var x = thread::spawn(tryClaim, once)
-    var y = thread::spawn(tryClaim, once)
-    println!("winners: {}", w.join() + x.join() + y.join())
+    let winners = thread::scope(atomic::Flag(false),
+        ||(s: &thread::Scope<atomic::Flag>) -> i64 {
+            var w = s.spawn(tryClaim, s.env())
+            var x = s.spawn(tryClaim, s.env())
+            var y = s.spawn(tryClaim, s.env())
+            w.join() + x.join() + y.join()
+        })
+    println!("winners: {}", winners)
     0
 }''', mode="run", title="Four threads, one counter, no lock"),
         T(["Method", "Does"],
@@ -13457,7 +13495,7 @@ async fn main() -> i64 {
     second.await
     io::println(c.hits)
     0
-}''', mode="run", title="One class, two tasks, no lock"),
+}''', mode="run", title="One class, two tasks, no lock", memory="arc"),
         P("Under `--memory zombie` a value has one owner, so the tasks share "
           "by borrowing — `touch(c: &Counter, ...)` — and change what they "
           "share through `mem::Checked<T>`, exactly as two borrows anywhere "
@@ -13501,8 +13539,9 @@ async fn main() -> i64 {
     let results = task::all(vec![fetch(1), fetch(2), fetch(3)]).await
     for r in results { io::println(r) }
 
-    let answer = task::pending<i64>()
-    let doubled = async { answer.await * 2 }
+    var answer = task::pending<i64>()
+    let waiting = answer.$clone()      // a second handle, for the block
+    let doubled = async { waiting.await * 2 }
     io::println(doubled.isDone())
     answer.complete(21)
     io::println(doubled.await)
@@ -13521,7 +13560,8 @@ async fn mirror(name: String, delay: i64) -> String {
 async fn main() -> i64 {
     let slow = mirror("slow", 30)
     let fast = mirror("fast", 5)
-    let (which, winner) = task::first(vec![slow, fast]).await
+    // A future is a handle: `$clone()` is a second one to the same task.
+    let (which, winner) = task::first(vec![slow.$clone(), fast]).await
     io::println(which)
     io::println(winner.await)
     // The loser keeps running; nothing cancels it. Here it is collected.
@@ -14299,10 +14339,14 @@ fn kernelMain(magic: u32, info: u32) -> Never {
 }""", mode="frag", title="The shape of a kernel"),
         P("The standard library is still there, and still only compiled "
           "where it is used, so `T?`, `Result`, `std::asm` and the rest of "
-          "what is plain Rune work as ever. What reaches the hosted runtime "
-          "— `String`, `std::io`, threads, tasks, reference counting — is "
-          "refused at compile time, against the function of yours that "
-          "reached it:"),
+          "what is plain Rune work as ever. So do the containers — "
+          "`Vector`, `Map` and `Set` — which allocate through `std::mem` "
+          "and so through the program's own `@allocator`. "
+          "`process::panic` takes the `CString` a literal already is and "
+          "hands it to the `@panicHandler`. What reaches the hosted runtime "
+          "— `String`, `std::io`, `std::fmt`, threads, tasks, reference "
+          "counting — is refused at compile time, against the function of "
+          "yours that reached it:"),
         SH("""● kernel.rune [4:3..8]
 4 ║ fn greet() { io::println("hi") }
        ^^^^^ ERROR: 'greet' needs the hosted runtime, and this program is built without one [E0542]
@@ -14335,7 +14379,8 @@ fn greet() {
             "every failed check, `unwrap` of an empty `Option`, "
             "`process::panic`", "stops where it is, for ever"],
            ["`@allocator`", "`fn(size: usize, align: usize) -> *var u8`",
-            "every object a class, a closure or a `Unique` makes",
+            "every object a class, a closure or a `Unique` makes, and every "
+            "block `std::mem` hands a container",
             "panics: *this program allocates, and declares no @allocator*"],
            ["`@deallocator`", "`fn(block: *var u8)`",
             "every object whose one owner is done with it",
@@ -14381,10 +14426,17 @@ fn release(block: *var u8) {}""", mode="frag",
             "`--safety full`'s check that a dropped object had one owner"],
            ["Memory", "`memcpy`, `memmove`, `memset`, `memcmp` — LLVM emits "
             "calls to them for large copies whatever the target"],
+           ["Raw memory", "`rune_raw_alloc`, `_realloc`, `_free` and "
+            "`_is_zero`, which `std::mem` is built on. Each block carries "
+            "its size in 16 bytes ahead of it, since `@deallocator` is never "
+            "told one and growing a block has to copy it"],
            ["32-bit targets", "`__divdi3`, `__udivdi3`, `__moddi3` and "
             "`__umoddi3`: 64-bit division, which a 32-bit processor does "
             "with a library call"],
            ["Classes", "`$clone()`, `is` and `Any` checks, hashing"]]),
+        P("A library that wants to work either way asks "
+          "`@Config(runtime == \"none\")` — `std::process` does, for its "
+          "`panic`."),
         N("A freestanding program is compiled with `no-builtins`, as C's "
           "`-ffreestanding` does, so LLVM never turns a loop that copies "
           "bytes into a call to `memcpy` — least of all inside `memcpy`. "
@@ -14560,7 +14612,10 @@ fn main() -> i64 {
            ["`target`", "the full triple being built for"],
            ["`safety`", "`none`, `minimal` or `full`"],
            ["`memory`", "`arc` or `zombie`"],
-           ["`opt_level`", "`\"0\"` through `\"3\"`"]]),
+           ["`runtime`", "`hosted`, or `none` for a program built "
+            "`@runtime(none)`"],
+           ["`opt_level`", "`\"0\"` through `\"3\"`"],
+           ["`overflow_checks`", "`on` or `off`"]]),
         P("Those are compared against a string. Everything else is a name that "
           "is either set or not, written on its own:"),
         T(["Name", "Set when"],

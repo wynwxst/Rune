@@ -25,7 +25,7 @@ bind Container to Bag {
 bind Container to Names {
     type Item = String
     fn count(&self) -> i64 { 2 }
-    fn first(&self) -> Self::Item { self.values[0] }
+    fn first(&self) -> Self::Item { self.values[0].$clone() }
 }
 
 fn howMany<T: Container>(c: T) -> i64 { c.count() }

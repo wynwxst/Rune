@@ -111,7 +111,7 @@ A failure is a value, so it can be answered where it happens or passed on with `
 import std::io
 
 /// Reads a file and counts its lines, or explains why it could not.
-fn countLines(path: String) -> Result<i64, io::FileError> {
+fn countLines(path: &String) -> Result<i64, io::FileError> {
     let text = io::readToString(path)?
     var lines = 0
     var i = 0

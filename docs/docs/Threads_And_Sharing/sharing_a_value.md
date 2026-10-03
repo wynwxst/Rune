@@ -8,18 +8,22 @@
 import std::io
 import std::thread
 
-fn total(shared: thread::Arc<[4:i64]>) -> i64 {
+fn total(shared: &thread::Arc<[4:i64]>) -> i64 {
     var sum = 0
-    for v in shared.get() { sum += v }
+    for v in shared.look() { sum += v }
     sum
 }
 
 fn main() -> i64 {
     let table = thread::Arc<[4:i64]>([2, 3, 5, 7])
-    var here = thread::spawn(total, table)
-    var there = thread::spawn(total, table)
-    println!("{} and the original still has {} entries",
-             here.join() + there.join(), table.get().$length())
+    let both = thread::scope(table, ||(s: &thread::Scope<thread::Arc<[4:i64]>>) -> String {
+        var here = s.spawn(total, s.env())
+        var there = s.spawn(total, s.env())
+        let sum = here.join() + there.join()
+        sum.$str() + " and the original still has " +
+            s.env().look().$length().$str() + " entries"
+    })
+    println!("{}", both)
     0
 }
 ```

@@ -11,7 +11,7 @@ enum ParseError { Empty, NotANumber { text: String } }
 enum AppError { Parse(ParseError), Disk(io::FileError) }
 
 bind ParseError into AppError {
-    fn convert(&self) -> AppError { AppError::Parse(*self) }
+    fn convert(&self) -> AppError { AppError::Parse(self.$clone()) }
 }
 bind io::FileError into AppError {
     fn convert(&self) -> AppError { AppError::Disk(*self) }

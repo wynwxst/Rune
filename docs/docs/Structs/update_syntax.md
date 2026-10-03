@@ -15,7 +15,9 @@ struct Options {
 
 fn main() -> i64 {
     let base = Options { width: 80, height: 24, label: "base" }
-    let wide = Options { width: 120, ..base }
+    // `..base` takes the rest from `base`, moving what it takes; a copy
+    // first leaves `base` whole for the next one.
+    let wide = Options { width: 120, ..base.$clone() }
     let renamed = Options { label: "renamed", ..base }
 
     io::println(wide.width.$str() + "x" + wide.height.$str() + " " + wide.label)

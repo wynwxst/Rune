@@ -10,7 +10,9 @@
 | `target` | the full triple being built for |
 | `safety` | `none`, `minimal` or `full` |
 | `memory` | `arc` or `zombie` |
+| `runtime` | `hosted`, or `none` for a program built `@runtime(none)` |
 | `opt_level` | `"0"` through `"3"` |
+| `overflow_checks` | `on` or `off` |
 
 Those are compared against a string. Everything else is a name that is either set or not, written on its own:
 
