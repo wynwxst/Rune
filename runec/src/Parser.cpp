@@ -359,7 +359,13 @@ void Parser::synchronize() {
     }
     if (depth == 0 && startsDecl(cur().Kind) && cur().AtLineStart)
       return;
+    // The last token is where `advance` stops. Normally that is the end of
+    // the file; if anything ever leaves something else there, recovery must
+    // still end rather than spin on it.
+    const size_t before = Pos;
     advance();
+    if (Pos == before)
+      return;
   }
 }
 

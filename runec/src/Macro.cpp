@@ -1186,6 +1186,22 @@ bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
 
       const std::string name = toks[i].Text;
       const SourceRange at = toks[i].Range;
+      // A call never closed — a string left open inside it swallows the
+      // rest of the file — is not expanded: its arguments would take the end
+      // of the file with them, and the parser would have no end to stop at.
+      {
+        size_t end = skipGroup(toks, i + 2);
+        if (end == 0 || !isClose(toks[end - 1].Kind)) {
+          diags.error(at, "`{}!(` is never closed", name)
+              .note("everything to the end of the file was read as its "
+                    "arguments; an unterminated string inside it does that")
+              .code(127);
+          ok = false;
+          for (; i < toks.size(); ++i)
+            out.push_back(toks[i]);
+          break;
+        }
+      }
       // `stringify!(...)` is the compiler's own: the argument tokens, as the
       // text they were written as. Nothing else can produce it, because the
       // spelling is gone by the time a macro body could look.
