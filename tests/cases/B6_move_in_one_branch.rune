@@ -1,0 +1,21 @@
+// EXPECT: kept 3
+// EXPECT: gave 4
+// A value moved in one branch of an `if` is still there in the other.
+import std::io
+import std::mem
+
+fn take(b: mem::Box<i64>) -> i64 { *b.look() }
+
+fn choose(b: mem::Box<i64>, give: bool) -> String {
+    if give {
+        "gave " + (take(b) + 1).$str()
+    } else {
+        "kept " + (*b.look()).$str()
+    }
+}
+
+fn main() -> i64 {
+    io::println(choose(mem::boxed(3), false))
+    io::println(choose(mem::boxed(3), true))
+    0
+}

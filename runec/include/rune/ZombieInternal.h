@@ -144,6 +144,12 @@ void analyseMoves(Body &body, DiagnosticEngine &diags, MoveResults &out);
 void applySummaries(Body &body, const SummaryTable &table,
                     DiagnosticEngine &diags);
 
+/// Splits what a struct or tuple local holds by field: subset edges from a
+/// field read take that field's origin, edges and loans into a field land in
+/// that field's, a whole value's in every field's, and a full write of one
+/// field forgets only its own. Runs after `applySummaries`.
+void refineFieldOrigins(Body &body);
+
 struct LoanResults {
   /// Which placeholder loans the result may hold, for inference.
   std::vector<FromEntry> ResultFrom;

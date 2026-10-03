@@ -3328,8 +3328,25 @@ Type *Sema::checkIf(IfExpr *i, Type *expected, bool discardBranches) {
   }
 
   ValueDiscarded = discardBranches;
+  // The branches move independently: what one gives away the other still
+  // has. Afterwards a name is gone if either branch that finishes gave it
+  // away — a branch that ends in `return` or `break` takes its moves with it.
+  const std::map<VarDecl *, Expr *> movedBefore = MovedFrom;
   Type *thenTy = checkBlock(i->Then.get(), expected);
   popScope();
+  std::map<VarDecl *, Expr *> movedByThen = MovedFrom;
+  const bool thenFinishes = !(thenTy && thenTy->isNever());
+  MovedFrom = movedBefore;
+  struct MergeMoves {
+    std::map<VarDecl *, Expr *> &Moved;
+    const std::map<VarDecl *, Expr *> &Then;
+    bool ThenFinishes;
+    ~MergeMoves() {
+      if (ThenFinishes)
+        for (const auto &[v, e] : Then)
+          Moved.emplace(v, e);
+    }
+  } mergeMoves{MovedFrom, movedByThen, thenFinishes};
 
   if (!i->Else) {
     // Without an `else` there is no value: when the condition is false there
@@ -3357,6 +3374,8 @@ Type *Sema::checkIf(IfExpr *i, Type *expected, bool discardBranches) {
   }
   ValueDiscarded = discardBranches;
   Type *elseTy = checkExpr(i->Else.get(), expected ? expected : thenTy);
+  if (elseTy && elseTy->isNever())
+    MovedFrom = movedBefore;
   // Nobody wants this value, so there is nothing for the branches to agree
   // on. Each was checked on its own terms; the `if` produces `()`.
   if (discardBranches)

@@ -953,3 +953,153 @@ FnSummary inferSummary(Body &body, const LoanResults &loans,
 
 } // namespace zombie
 } // namespace rune
+
+namespace rune {
+namespace zombie {
+
+//===----------------------------------------------------------------------===//
+// Per-field origins
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// The leading run of field steps of `p`: `s.a.b` is [a, b], `s.a.*.x` is [a].
+std::vector<uint32_t> fieldPath(const Body &b, PlaceId p) {
+  std::vector<uint32_t> path;
+  for (const Projection &pr : b.Places.get(p).Proj) {
+    if (pr.K != Projection::Field)
+      break;
+    path.push_back(pr.Arg);
+  }
+  return path;
+}
+
+bool isPrefix(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+  return a.size() <= b.size() && std::equal(a.begin(), a.end(), b.begin());
+}
+
+/// The field origin `p` is at or under, or `kNone` when `p` is above them.
+OriginId leafOf(const Body &b, PlaceId p) {
+  if (p == kNone)
+    return kNone;
+  const Local &l = b.Locals[b.Places.get(p).Root];
+  if (l.FieldOrigins.empty())
+    return kNone;
+  std::vector<uint32_t> path = fieldPath(b, p);
+  for (const Local::FieldOrigin &fo : l.FieldOrigins)
+    if (isPrefix(fo.Path, path))
+      return fo.O;
+  return kNone;
+}
+
+} // namespace
+
+void refineFieldOrigins(Body &body) {
+  for (Block &blk : body.Blocks)
+    for (Stmt &s : blk.Stmts) {
+      // Reading: an edge from a local's origin, where the statement read a
+      // field of it, comes from that field's origin. Only when one place of
+      // that local was read; two would say nothing about which.
+      std::map<OriginId, PlaceId> source;
+      std::set<OriginId> ambiguous;
+      auto offer = [&](PlaceId p) {
+        if (p == kNone)
+          return;
+        const Local &l = body.Locals[body.Places.get(p).Root];
+        if (l.FieldOrigins.empty() || l.Origin == kNone)
+          return;
+        auto it = source.find(l.Origin);
+        if (it != source.end() && it->second != p)
+          ambiguous.insert(l.Origin);
+        else
+          source[l.Origin] = p;
+      };
+      offer(s.Src);
+      for (PlaceId a : s.Args)
+        offer(a);
+      for (Subset &sub : s.Subsets) {
+        auto it = source.find(sub.From);
+        if (it == source.end() || ambiguous.count(sub.From))
+          continue;
+        OriginId leaf = leafOf(body, it->second);
+        if (leaf != kNone)
+          sub.From = leaf;
+      }
+
+      // Writing: what lands in a field lands in it (and in the whole, which
+      // stays the union); what lands in the whole lands in every field.
+      if (s.Dst == kNone)
+        continue;
+      const Local &dl = body.Locals[body.Places.get(s.Dst).Root];
+      if (dl.FieldOrigins.empty() || dl.Origin == kNone)
+        continue;
+      std::vector<OriginId> targets{dl.Origin};
+      std::vector<uint32_t> path = fieldPath(body, s.Dst);
+      OriginId leaf = leafOf(body, s.Dst);
+      if (leaf != kNone) {
+        targets.push_back(leaf);
+      } else {
+        for (const Local::FieldOrigin &fo : dl.FieldOrigins)
+          if (isPrefix(path, fo.Path))
+            targets.push_back(fo.O);
+      }
+      // A whole value copied from another tracked by field — `let p = tmp`
+      // after a literal — goes field to field: each of `dst`'s fields takes
+      // the same field of the source, where the source has it.
+      auto fieldFrom = [&](OriginId from, OriginId target) -> OriginId {
+        auto src = source.find(from);
+        if (src == source.end() || ambiguous.count(from) || target == dl.Origin)
+          return from;
+        const Local &sl = body.Locals[body.Places.get(src->second).Root];
+        std::vector<uint32_t> srcPath = fieldPath(body, src->second);
+        if (body.Places.get(src->second).Proj.size() != srcPath.size())
+          return from;            // not a plain field path: keep the union
+        for (const Local::FieldOrigin &dfo : dl.FieldOrigins) {
+          if (dfo.O != target || !isPrefix(path, dfo.Path))
+            continue;
+          std::vector<uint32_t> want = srcPath;
+          want.insert(want.end(), dfo.Path.begin() + path.size(), dfo.Path.end());
+          for (const Local::FieldOrigin &sfo : sl.FieldOrigins)
+            if (sfo.Path == want)
+              return sfo.O;
+        }
+        return from;
+      };
+      std::vector<Subset> subs;
+      for (const Subset &sub : s.Subsets) {
+        if (sub.Into != dl.Origin) {
+          subs.push_back(sub);
+          continue;
+        }
+        for (OriginId t : targets) {
+          OriginId from = leaf == kNone ? fieldFrom(sub.From, t) : sub.From;
+          if (t != from)
+            subs.push_back({from, t});
+        }
+      }
+      s.Subsets = std::move(subs);
+      s.Into = targets;
+
+      // A full write of one field forgets what that field held; of the
+      // whole, what every field held.
+      const bool replaces = (s.K == Stmt::Assign && !s.Aggregate) ||
+                            s.K == Stmt::Borrow || s.K == Stmt::Call;
+      const Place &dp = body.Places.get(s.Dst);
+      if (replaces && leaf != kNone && dp.Proj.size() == path.size()) {
+        for (const Local::FieldOrigin &fo : dl.FieldOrigins)
+          if (fo.O == leaf && fo.Path == path)
+            s.Clears.push_back(leaf);
+      }
+      if (dp.Proj.empty() &&
+          (s.K == Stmt::Borrow || s.K == Stmt::Call ||
+           std::find(s.Clears.begin(), s.Clears.end(), dl.Origin) !=
+               s.Clears.end()))
+        for (const Local::FieldOrigin &fo : dl.FieldOrigins)
+          s.Clears.push_back(fo.O);
+    }
+  for (auto &c : body.Closures)
+    (void)c; // closures are refined when their own unit is analysed
+}
+
+} // namespace zombie
+} // namespace rune

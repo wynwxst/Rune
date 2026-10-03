@@ -138,6 +138,15 @@ struct Local {
   bool Immortal = false;
   /// Parameter index, for `Param`; capture index, for `Capture`.
   unsigned Index = 0;
+  /// A struct or tuple local of this body with references in its fields
+  /// has an origin per such field, beside `Origin`, which stays the union of
+  /// them all: `p.a` and `p.b` borrow from different places, and reading one
+  /// should not hold the other's loans. `Path` is the run of field indices.
+  struct FieldOrigin {
+    std::vector<uint32_t> Path;
+    OriginId O = kNone;
+  };
+  std::vector<FieldOrigin> FieldOrigins;
 };
 
 /// Where a reference may have come from: a set of loans. One per local that
@@ -252,6 +261,10 @@ struct Stmt {
   /// Loans this statement issues into `Dst`'s origin besides `Loan`: the
   /// derived loans of a call's implicit borrows (see `applySummaries`).
   std::vector<LoanId> Issues;
+  /// Where `Loan` and `Issues` land when `Dst` is in a local with per-field
+  /// origins: that field's (and the whole's), or for a whole value every
+  /// field's. Empty means `Dst`'s local's own origin.
+  std::vector<OriginId> Into;
   /// Written inside `unsafe { }`.
   bool Unsafe = false;
   /// The final write of an aggregate literal: every part has already been

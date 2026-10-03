@@ -1,0 +1,10 @@
+// EXPECT-ERROR: cannot assign to 'x' while it is borrowed
+// A borrow held in a struct or a tuple is a borrow: changing what it points
+// at while it is still used is refused. The checker used to lose the loans a
+// literal's fields carried before the literal was finished.
+fn main() -> i64 {
+    var x = 1
+    let t = (&x, 2)
+    x = 5
+    *t.0
+}

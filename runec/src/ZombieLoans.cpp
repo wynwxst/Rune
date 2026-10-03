@@ -146,10 +146,20 @@ void LoanAnalysis::computeLiveness() {
       if (t != kNone)
         live.reset(t);
     }
+    // The closing write of an aggregate literal defines nothing: its parts
+    // were written one by one just before, and what they borrowed is what
+    // the whole holds. Treating it as a definition made the local dead in
+    // between, and the loans its fields carried were dropped there — so a
+    // struct or tuple holding a borrow was never checked against it.
     bool wholeWrite = false;
     for (const PlaceAccess &a : s.Accesses)
-      if (a.A == Access::Write && isWholeLocal(a.Place))
+      if (a.A == Access::Write && isWholeLocal(a.Place) && !s.Aggregate)
         wholeWrite = true;
+    if (s.Aggregate) {
+      uint32_t t = rootOf(s.Dst);
+      if (t != kNone)
+        live.set(t);
+    }
     if (wholeWrite) {
       uint32_t t = rootOf(s.Dst);
       if (t != kNone)
@@ -382,16 +392,22 @@ void LoanAnalysis::transfer(const Stmt &s, Location at, State &st) {
             c.set(pr.second);
           }
   }
-  // 4. New loans land in the destination's origin.
-  OriginId into = originOfPlace(s.Dst);
-  if (s.K == Stmt::Borrow && s.Loan != kNone) {
+  // 4. New loans land in the destination's origin — or, in a local tracked
+  //    by field, in the origins `refineFieldOrigins` chose.
+  std::vector<OriginId> intos = s.Into;
+  if (intos.empty()) {
+    OriginId into = originOfPlace(s.Dst);
     if (into != kNone)
+      intos.push_back(into);
+  }
+  if (s.K == Stmt::Borrow && s.Loan != kNone) {
+    for (OriginId into : intos)
       st.Contains[into].set(s.Loan);
     // Taken again — on a loop's next turn — a two-phase loan starts out
     // reserved again.
     st.Activated.reset(s.Loan);
   }
-  if (into != kNone)
+  for (OriginId into : intos)
     for (LoanId l : s.Issues)
       st.Contains[into].set(l);
   // 5. Subset edges: the destination may hold whatever the source may.
@@ -834,6 +850,10 @@ void LoanAnalysis::checkStatement(const Stmt &s, Location at, const State &st) {
 
   for (const PlaceAccess &a : s.Accesses) {
     if (a.Place == kNone)
+      continue;
+    // The closing write of an aggregate literal overwrites nothing: its
+    // parts are already in place, a field borrowing a sibling included.
+    if (s.Aggregate && a.A == Access::Write && a.Place == s.Dst)
       continue;
     for (OriginId o = 0; o < B.Origins.size(); ++o) {
       if (!originLive(o, at.Block, at.Index))

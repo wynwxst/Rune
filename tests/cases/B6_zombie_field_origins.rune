@@ -1,0 +1,23 @@
+// EXPECT: 1
+// EXPECT: 5
+// Borrows are tracked per field: `r = p.a` holds what `p.a` borrowed and not
+// `p.b`'s, so `y` can change while `r` is in use; and writing one field
+// forgets only that field's loans.
+import std::io
+
+struct Pair { a: &i64, b: &i64 }
+
+fn main() -> i64 {
+    var x = 1
+    var y = 2
+    let p = Pair { a: &x, b: &y }
+    let r = p.a
+    y = 5
+    io::println(*r)
+    var q = Pair { a: &x, b: &x }
+    q.b = &y
+    let s = q.b
+    x = 9
+    io::println(*s)
+    0
+}

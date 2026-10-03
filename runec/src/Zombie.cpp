@@ -228,6 +228,7 @@ FnSummary analyseUnit(Body &body, const SummaryTable &table,
   Stopwatch watch;
   Stats local;
   applySummaries(body, table, diags);
+  refineFieldOrigins(body);
   local.SummariesMs += watch.lap();
   MoveResults moves;
   analyseMoves(body, diags, moves);

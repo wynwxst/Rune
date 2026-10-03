@@ -320,11 +320,14 @@ pub class Vector<T> {
     ///     }
     @safe("the slot written is below the count, which tryReserve() has covered")
     pub fn tryPush(&var self, value: T) -> Result<(), T> {
-        if !self.tryReserve(self.count as i64 + 1) { return Err(value) }
-        let slot = unsafe { self.block as *var T }
-        unsafe { mem::store<T>(&var slot[self.count as i64] as *var T, value) }
-        self.count += 1
-        Ok(())
+        if self.tryReserve(self.count as i64 + 1) {
+            let slot = unsafe { self.block as *var T }
+            unsafe { mem::store<T>(&var slot[self.count as i64] as *var T, value) }
+            self.count += 1
+            Ok(())
+        } else {
+            Err(value)
+        }
     }
 }
 

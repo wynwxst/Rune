@@ -426,6 +426,45 @@ private:
 
   //=== Locals and places ================================================//
 
+  /// The reference-carrying fields of `t`, each with an origin of its own,
+  /// looking through nested structs and tuples a few levels down.
+  void addFieldOrigins(Local &l, Type *t, std::vector<uint32_t> &path,
+                       LocalId owner, int depth) {
+    if (!t || depth > 3)
+      return;
+    t = t->canonical();
+    std::vector<Type *> parts;
+    if (t->is(TypeKind::Tuple)) {
+      parts = t->tupleElements();
+    } else if (t->is(TypeKind::Struct) && t->nominal()) {
+      for (auto &f : t->nominal()->Fields)
+        parts.push_back(f->Ty);
+    } else {
+      return;
+    }
+    for (uint32_t i = 0; i < parts.size(); ++i) {
+      Type *ft = parts[i];
+      if (!ft || !carriesReference(ft))
+        continue;
+      path.push_back(i);
+      Type *fc = ft->canonical();
+      size_t before = l.FieldOrigins.size();
+      if ((fc->is(TypeKind::Tuple) || fc->is(TypeKind::Struct)) && depth < 3)
+        addFieldOrigins(l, fc, path, owner, depth + 1);
+      if (l.FieldOrigins.size() == before) {
+        Origin o;
+        o.K = Origin::Local;
+        o.Owner = owner;
+        Local::FieldOrigin fo;
+        fo.Path = path;
+        fo.O = static_cast<OriginId>(B.Origins.size());
+        B.Origins.push_back(o);
+        l.FieldOrigins.push_back(fo);
+      }
+      path.pop_back();
+    }
+  }
+
   LocalId addLocal(Local l) {
     if (l.Ty && carriesReference(l.Ty) && l.Origin == kNone) {
       Origin o;
@@ -434,6 +473,15 @@ private:
       o.Param = l.Index;
       l.Origin = static_cast<OriginId>(B.Origins.size());
       B.Origins.push_back(o);
+      // A struct or tuple of this body's own: an origin per field that
+      // holds a reference, so `p.a` and `p.b` are tracked apart.
+      if (o.K == Origin::Local && (l.K == Local::User || l.K == Local::Temp) &&
+          !l.RefLike) {
+        std::vector<uint32_t> path;
+        addFieldOrigins(l, l.Ty, path, o.Owner, 0);
+        if (l.FieldOrigins.size() < 2)
+          l.FieldOrigins.clear();   // one field is the whole: nothing to split
+      }
     }
     l.Owned = l.Ty && needsDrop(l.Ty) && !l.RefLike;
     B.Locals.push_back(l);
