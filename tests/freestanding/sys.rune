@@ -32,6 +32,12 @@ pub fn exit(code: i64) -> Never {
     loop {}
 }
 
+/// Where `io::println` and the rest go: standard output, by system call.
+@output
+fn writeOut(bytes: *u8, count: usize) {
+    let written: i64 = unsafe { asm::value<i64>("syscall", "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}", 1, 1, bytes, count as i64) }
+}
+
 @panicHandler
 fn panicked(message: CString, location: CString) -> Never {
     say("panic: ")

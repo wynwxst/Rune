@@ -5879,7 +5879,7 @@ bool Sema::isBuiltinDecorator(const std::string &name) {
       "lint",
       // Bare metal: the hooks a freestanding program gives the runtime it is
       // compiled with, and a definition another may replace.
-      "panicHandler", "allocator", "deallocator", "weak",
+      "panicHandler", "allocator", "deallocator", "output", "weak",
   };
   return kBuiltin.count(name) != 0;
 }
@@ -5940,6 +5940,11 @@ void Sema::checkRuntimeHook(FunctionDecl *fn, const Attribute &a) {
     want = {Types.usize(), Types.usize()};
     wantResult = bytes;
     spelled = "fn(size: usize, align: usize) -> *var u8";
+  } else if (a.Name == "output") {
+    want = {Types.pointerTo(Types.u8(), /*isMutable=*/false, /*isRaw=*/true),
+            Types.usize()};
+    wantResult = Types.voidType();
+    spelled = "fn(bytes: *u8, count: usize)";
   } else {
     want = {bytes};
     wantResult = Types.voidType();
@@ -5989,7 +5994,7 @@ void Sema::checkDecorators(FunctionDecl *fn) {
       continue;
     }
     if (a.Name == "panicHandler" || a.Name == "allocator" ||
-        a.Name == "deallocator")
+        a.Name == "deallocator" || a.Name == "output")
       checkRuntimeHook(fn, a);
     if (isBuiltinDecorator(a.Name))
       continue;

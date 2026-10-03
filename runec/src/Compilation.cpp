@@ -1385,15 +1385,19 @@ int compileWithOptions(const CompilerOptions &given) {
   // compiled without it: the program that links the library brings one.
   if (opts.Freestanding && opts.Output != OutputKind::Library &&
       opts.Output != OutputKind::Docs && opts.Output != OutputKind::None) {
-    const std::filesystem::path rt =
-        std::filesystem::path(opts.RunetimeDir) / "freestanding.rune";
-    std::optional<unsigned> id = sm.loadFile(rt.string());
-    if (!id) {
-      diags.fatal("cannot find the freestanding runtime at '{}'", rt.string())
-          .note("it ships in the toolchain's `runetime/` directory");
-      return 1;
+    // The core — panics, the heap, memory — and `String`, numbers as text,
+    // and printing to the program's `@output`.
+    for (const char *part : {"freestanding.rune", "freestanding_text.rune"}) {
+      const std::filesystem::path rt =
+          std::filesystem::path(opts.RunetimeDir) / part;
+      std::optional<unsigned> id = sm.loadFile(rt.string());
+      if (!id) {
+        diags.fatal("cannot find the freestanding runtime at '{}'", rt.string())
+            .note("it ships in the toolchain's `runetime/` directory");
+        return 1;
+      }
+      fileIDs.push_back(*id);
     }
-    fileIDs.push_back(*id);
   }
 
   if (opts.Verbose)

@@ -50,7 +50,7 @@ PROGRAMS = {
     "moved":    ("sys",  False, None, "'b' has been moved out of [E0273]"),
     "hosted":   (None,   False, None, "'greet' needs the hosted runtime, and this program is built without one [E0542]"),
     "literals": ("sys",  True,  0,   "no annotation needed\na literal is a CString here\nin an array\n"),
-    "wantsstring": (None, False, None, "needs the hosted runtime, and this program is built without one [E0542]"),
+    "printing": ("sys", True,  0,    "hello from freestanding: 42 0.30000000000000004\n0.6667 1e+301\n-1.25\n"),
 }
 
 

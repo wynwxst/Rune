@@ -84,6 +84,22 @@ driver — nothing to a linker run directly, and nothing at all under
 `--no-default-link-args` — and leaves out the runtime archive, `-lm` and
 `-rdynamic`. A linker script and anything else arrive through `--link-arg`.
 
+**Text.** `runetime/freestanding_text.rune` is compiled in beside it: every
+`rune_string_*` function the code generator and the standard library call,
+over `rune_alloc` and the raw blocks, with the C runtime's `RuneString`
+layout and FNV-1a hash; `rune_print` and friends over `@output`
+(`rune_output`, reached through the strong `rune_write_output`); and numbers
+as text. A double's exact decimal expansion is computed with big integers
+(m·5^k for a negative exponent), the shortest digits whose value lies inside
+the round-trip interval are chosen from it, and the hosted runtime's `%g` /
+`%.Nf` presentation rules are reproduced — checked against the C runtime on
+400,000 random doubles. Parsing divides out the exact fraction for a
+correctly rounded result. The scratch space is global, so it is not
+reentrant. Freestanding, a `String` literal is emitted as an immortal object
+in the image (`.rune.strconst`) instead of a `rune_string_literal` call, and
+in `+` a string literal checks after the other side so it can become a
+`String`.
+
 ## In `runetime/freestanding.rune`
 
 Everything the code generator calls, as `@export`ed Rune: the panic entry

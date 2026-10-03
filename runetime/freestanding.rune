@@ -3,15 +3,17 @@
 //
 // It is Rune, compiled into the program for the program's own target, and it
 // depends on nothing: no C library, no operating system. What only the
-// program can know it asks the program for, through three hooks:
+// program can know it asks the program for, through four hooks:
 //
 //     @panicHandler  fn(message: CString, location: CString) -> Never
 //     @allocator     fn(size: usize, align: usize) -> *var u8
 //     @deallocator   fn(block: *var u8)
+//     @output        fn(bytes: *u8, count: usize)
 //
 // Each has a `@weak` default here that a program's own replaces. The default
-// panic handler stops the processor where it is; the default allocator
-// panics, so a program that never allocates never needs one.
+// panic handler says what happened through `@output` and stops the processor
+// where it is; the default allocator panics, so a program that never
+// allocates never needs one; the default output discards.
 //
 // Every safety check the compiler inserts — bounds, overflow, division by
 // zero, nil, an unmatched `match`, a checked drop — still happens; this file
@@ -21,14 +23,38 @@
 // The hooks, and their defaults
 //===--------------------------------------------------------------------===//
 
-/// Stops here, for ever. With no handler of the program's own there is
-/// nowhere to say anything, and carrying on after a failed check is the one
-/// thing a panic exists to prevent.
+/// Says what happened through `@output`, if the program has one, then stops
+/// here for ever: carrying on after a failed check is the one thing a panic
+/// exists to prevent.
 @lint(allow(empty-block))
 @export("rune_panic_handler")
 @weak
 fn defaultPanicHandler(message: CString, location: CString) -> Never {
+    say("panic: ")
+    say(message)
+    say(" at ")
+    say(location)
+    say("\n")
     loop {}
+}
+
+/// Where printing goes — `io::println`, the default panic handler — when the
+/// program names nowhere with `@output`: nowhere.
+@export("rune_output")
+@weak
+fn defaultOutput(bytes: *u8, count: usize) {}
+
+/// `@output`, for the text runtime: a strong name of its own, so calling the
+/// hook from another file never has to name the weak one.
+@export("rune_write_output")
+pub fn writeOutput(bytes: *u8, count: usize) { defaultOutput(bytes, count) }
+
+@safe("reads up to the NUL a CString ends with")
+fn say(text: CString) {
+    let bytes = unsafe { text as *u8 }
+    var n: i64 = 0
+    while unsafe { bytes[n] } != 0 { n += 1 }
+    if n > 0 { defaultOutput(bytes, n as usize) }
 }
 
 @export("rune_heap_allocate")

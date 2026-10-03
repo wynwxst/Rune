@@ -986,9 +986,14 @@ Type *Sema::checkBinary(BinaryExpr *b, Type *expected) {
   }
 
   // Check the side that cannot adapt first, so literals take the other's type.
+  // Where a string literal is a `CString` unless asked otherwise — a
+  // freestanding program — `"total: " + n.$str()` makes it a `String` too.
   Type *lt, *rt;
-  if ((isUntypedIntLiteral(b->LHS.get()) || isUntypedFloatLiteral(b->LHS.get())) &&
-      !isUntypedIntLiteral(b->RHS.get())) {
+  const bool adaptableText = CStringLiterals && isa<StringLitExpr>(b->LHS.get()) &&
+                             !isa<StringLitExpr>(b->RHS.get());
+  if (((isUntypedIntLiteral(b->LHS.get()) || isUntypedFloatLiteral(b->LHS.get())) &&
+       !isUntypedIntLiteral(b->RHS.get())) ||
+      adaptableText) {
     rt = checkExpr(b->RHS.get(), expected);
     lt = checkExpr(b->LHS.get(), rt);
   } else {

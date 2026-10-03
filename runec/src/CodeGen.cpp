@@ -4203,9 +4203,13 @@ void CodeGen::emitEntryPoint() {
 /// What a hosted-runtime entry point is part of, said the way a program's
 /// author would look for it.
 static const char *hostedFeatureOf(llvm::StringRef name) {
-  if (name.starts_with("rune_string_") || name.starts_with("rune_cstring_"))
-    return "`String`, which lives in the hosted runtime; a freestanding "
-           "program works in `CString` and byte arrays";
+  if (name.starts_with("rune_read_") || name.starts_with("rune_stdin_"))
+    return "standard input, which needs an operating system to read from";
+  if (name.starts_with("rune_ucd_"))
+    return "the Unicode tables `std::text` folds, composes and collates with";
+  if (name.starts_with("rune_dir_") || name.starts_with("rune_path_") ||
+      name == "rune_last_file_error")
+    return "files, which need an operating system";
   if (name.starts_with("rune_task_") || name.starts_with("rune_pool_"))
     return "`std::task`, which needs threads and an event loop";
   if (name.starts_with("rune_thread_") || name.starts_with("rune_mutex_") ||
@@ -4557,16 +4561,18 @@ void CodeGen::exportCAdapters() {
 }
 
 void CodeGen::releaseUnusedRuntime() {
-  const std::string runtime =
-      (std::filesystem::path(Opts.RunetimeDir) / "freestanding.rune")
-          .lexically_normal()
-          .string();
+  const std::filesystem::path dir =
+      std::filesystem::path(Opts.RunetimeDir).lexically_normal();
   for (auto &[decl, f] : Functions) {
     if (!f || f->isDeclaration() || !f->hasExternalLinkage())
       continue;
     const SourceFile *file = SM.fileFor(decl->Range.begin());
-    if (!file || std::filesystem::path(file->Path).lexically_normal().string() !=
-                     runtime)
+    if (!file)
+      continue;
+    const std::filesystem::path path =
+        std::filesystem::path(file->Path).lexically_normal();
+    if (path.parent_path() != dir ||
+        path.filename().string().rfind("freestanding", 0) != 0)
       continue;
     llvm::StringRef name = f->getName();
     if (name.starts_with("mem") || name.starts_with("__"))

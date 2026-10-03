@@ -1442,7 +1442,8 @@ template <> inline bool isa<ValueDecl>(const Node *n) {
 }
 /// The symbol a function answers to when it provides something the generated
 /// code relies on — the freestanding runtime's hooks, which a bare-metal
-/// program supplies itself: `@panicHandler`, `@allocator`, `@deallocator`.
+/// program supplies itself: `@panicHandler`, `@allocator`, `@deallocator`,
+/// `@output`.
 /// Null for any other function.
 inline const char *langItemSymbol(const FunctionDecl *fn) {
   if (!fn)
@@ -1453,6 +1454,8 @@ inline const char *langItemSymbol(const FunctionDecl *fn) {
     return "rune_heap_allocate";
   if (fn->hasAttr("deallocator"))
     return "rune_heap_free";
+  if (fn->hasAttr("output"))
+    return "rune_output";
   return nullptr;
 }
 

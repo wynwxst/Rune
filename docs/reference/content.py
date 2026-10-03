@@ -14376,29 +14376,38 @@ fn kernelMain(magic: u32, info: u32) -> Never {
           "where it is used, so `T?`, `Result`, `std::asm` and the rest of "
           "what is plain Rune work as ever. So do the containers — "
           "`Vector`, `Map` and `Set` — which allocate through `std::mem` "
-          "and so through the program's own `@allocator`. "
-          "`process::panic` takes the `CString` a literal already is and "
-          "hands it to the `@panicHandler`. What reaches the hosted runtime "
-          "— `String`, `std::io`, `std::fmt`, threads, tasks, reference "
-          "counting — is refused at compile time, against the function of "
-          "yours that reached it:"),
+          "and so through the program's own `@allocator`; `String`, "
+          "`std::fmt`, `format!` and printing, which writes through "
+          "`@output`; and `process::panic`, whose message goes to the "
+          "`@panicHandler`. What needs an operating system — standard "
+          "input, files, threads, tasks, the network, `std::text`'s Unicode "
+          "tables, reference counting — is refused at compile time, against "
+          "the function of yours that reached it:"),
         SH("""● kernel.rune [4:3..8]
-4 ║ fn greet() { io::println("hi") }
+4 ║ fn greet() { let name = io::readLine() }
        ^^^^^ ERROR: 'greet' needs the hosted runtime, and this program is built without one [E0542]
-    ─  note: it uses `String`, which lives in the hosted runtime; a freestanding program works in `CString` and byte arrays"""),
+    ─  note: it uses standard input, which needs an operating system to read from"""),
         H("Strings"),
-        P("With no hosted runtime there is no `String` to make, so a string "
-          "literal nothing asks to be a `String` is a `CString`: it can be "
-          "named, stored in a table and handed to a function without an "
-          "annotation. Asking for `String` by name still means the hosted "
-          "runtime's, and is refused like any other use of it. The same holds "
+        P("A string literal nothing asks to be a `String` is a `CString`: it "
+          "can be named, stored in a table and handed to a function without "
+          "an annotation, and it costs nothing at run time. A `String` is "
+          "there too — the freestanding runtime makes one over the program's "
+          "`@allocator` — so asking for one, adding a literal to one, "
+          "`format!`, `$str()`, `std::fmt` and `Display` all work. A literal "
+          "that becomes a `String` is built into the image rather than the "
+          "heap, so it never takes memory from the allocator. The same holds "
           "under `--no-stdlib`."),
         S("""let banner = "TETRIS-OS\\n"        // a CString
 
-fn greet() {
+fn greet(name: String) {
     serial::write(banner)
-    serial::write("ready\\n")
+    let line = "ready, " + name       // a String: the literal follows `name`
+    println!("{line} at {} Hz", 1193182 / 65536)
 }""", mode="frag", title="No annotations"),
+        P("Numbers become text exactly as they do on a hosted build, byte for "
+          "byte — the shortest digits that read back as the same double, "
+          "found with exact big-integer arithmetic rather than a C library — "
+          "and `$toFloat()` rounds correctly the same way."),
         N("A freestanding program is built with `--memory zombie`. Every "
           "object has one owner and nothing is counted, so the heap needs "
           "nothing but an allocator; reference counting would need the "
@@ -14406,20 +14415,24 @@ fn greet() {
           "other use of it.", label="Single ownership"),
 
         H("The hooks"),
-        P("Three functions the generated code relies on, supplied by the "
+        P("Four functions the generated code relies on, supplied by the "
           "program. Each has a default in the freestanding runtime, marked "
           "`@weak`, that the program's own replaces."),
         T(["Attribute", "Signature", "Called for", "Default"],
           [["`@panicHandler`", "`fn(message: CString, location: CString) -> Never`",
             "every failed check, `unwrap` of an empty `Option`, "
-            "`process::panic`", "stops where it is, for ever"],
+            "`process::panic`", "writes the message to `@output`, then stops where it is"],
            ["`@allocator`", "`fn(size: usize, align: usize) -> *var u8`",
             "every object a class, a closure or a `Unique` makes, and every "
             "block `std::mem` hands a container",
             "panics: *this program allocates, and declares no @allocator*"],
            ["`@deallocator`", "`fn(block: *var u8)`",
             "every object whose one owner is done with it",
-            "nothing — without an allocator nothing was allocated"]],
+            "nothing — without an allocator nothing was allocated"],
+           ["`@output`", "`fn(bytes: *u8, count: usize)`",
+            "`print`, `println!` and the rest of `std::io`'s output, and the "
+            "default panic handler's message",
+            "discards it"]],
           caption="A hook with the wrong signature is E0248; two of one kind "
                   "is E0249."),
         S("""global var region: [65536:u8] = [0; 65536]
@@ -14468,7 +14481,10 @@ fn release(block: *var u8) {}""", mode="frag",
            ["32-bit targets", "`__divdi3`, `__udivdi3`, `__moddi3` and "
             "`__umoddi3`: 64-bit division, which a 32-bit processor does "
             "with a library call"],
-           ["Classes", "`$clone()`, `is` and `Any` checks, hashing"]]),
+           ["Classes", "`$clone()`, `is` and `Any` checks, hashing"],
+           ["Text", "`String` and every `rune_string_*` operation, numbers "
+            "to text and back, and `rune_print` and the rest over `@output` "
+            "— in `runetime/freestanding_text.rune`"]]),
         P("A library that wants to work either way asks "
           "`@Config(runtime == \"none\")` — `std::process` does, for its "
           "`panic`."),

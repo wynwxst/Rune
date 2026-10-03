@@ -1179,8 +1179,9 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
     if (!m.LinkerScript.empty())
       deps.push_back(m.LinkerScript);
     if (opts.Freestanding)
-      deps.push_back((fs::path(RUNE_TOOLCHAIN_ROOT) / "runetime" /
-                      "freestanding.rune").string());
+      for (const char *part : {"freestanding.rune", "freestanding_text.rune"})
+        deps.push_back(
+            (fs::path(RUNE_TOOLCHAIN_ROOT) / "runetime" / part).string());
     pm::Fingerprint fp = stepFingerprint(cmd, deps);
     const bool linked = step.Kind == OutputKind::Executable && !emitting;
     // After the link, the build script's finish phase — every build, since

@@ -18,6 +18,8 @@ import toyos::multiboot
 import toyos::process
 import std::collections::vector
 import std::dictionary
+import std::io
+import std::fmt
 
 extern "C" {
     /// The initialisers of the kernel's globals that are not simply zero —
@@ -46,6 +48,7 @@ fn kernelMain(magic: u32, infoAddress: u32) -> Never {
     safetyChecksAreOn()
     theHeap()
     theStandardLibrary()
+    text()
     scheduling()
 
     console::line("")
@@ -146,6 +149,35 @@ fn theStandardLibrary() {
                        "a Set, iterated")
     }
     console::check(heap::bytesInUse == 0, "every container handed its memory back")
+}
+
+/// `String`, `+`, interpolation and `std::fmt`, on bare metal: the
+/// freestanding runtime makes them over the kernel heap, and `io::println`
+/// writes through `@output` — the console, below.
+fn text() {
+    let name: String = "toyos"
+    let pi = 3.14159
+    let greeting = format!("hello from {name}, {pi} and {}", 7 * 6)
+    console::check(greeting == "hello from toyos, 3.14159 and 42", "a String, interpolated")
+    console::check(fmt::fixed(2.0 / 3.0, 3) == "0.667" && (1.5e300).$str() == "1.5e+300" &&
+                   (0.1 + 0.2).$str() == "0.30000000000000004",
+                   "numbers written as the hosted runtime writes them")
+    let half: String = "2.5"
+    let negative: String = "-17"
+    console::check((half.$toFloat() ?? 0.0) == 2.5 && (negative.$toInt() ?? 0) == -17,
+                   "and read back")
+    println!("       println!, through @output: {greeting}")
+}
+
+/// Where `io::println` goes: the console, as the kernel's own printing does.
+@output
+@safe("writes the bytes the caller says it has")
+fn consoleOutput(bytes: *u8, count: usize) {
+    var i: usize = 0
+    while i < count {
+        console::putByte(unsafe { bytes[i as i64] })
+        i += 1
+    }
 }
 
 /// Processes on a round-robin scheduler, each owned by the one before it.

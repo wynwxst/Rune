@@ -31,6 +31,29 @@ Value *CodeGen::emitStringLiteral(const std::string &text, bool asCString) {
   }
   if (asCString)
     return gv;
+  // Freestanding, the object itself is in the image: a header marked
+  // immortal (so nothing ever counts, drops or frees it), no descriptor, and
+  // the text where the literal's bytes already are. Making it at run time
+  // would take it from the program's heap and never give it back.
+  if (Opts.Freestanding) {
+    auto cached = StringLiterals.find("object:" + text);
+    if (cached != StringLiterals.end())
+      return cached->second;
+    auto *objTy = StructType::get(
+        *Ctx, {B->getInt64Ty(), PtrTy, B->getInt64Ty(), B->getInt64Ty(), PtrTy});
+    const int64_t immortal = int64_t(1) << 62;
+    auto *obj = new GlobalVariable(
+        *M, objTy, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantStruct::get(
+            objTy, {ConstantInt::get(B->getInt64Ty(), immortal | 1),
+                    ConstantPointerNull::get(PtrTy),
+                    ConstantInt::get(B->getInt64Ty(), text.size()),
+                    ConstantInt::get(B->getInt64Ty(), text.size()), gv}),
+        ".rune.strconst");
+    obj->setAlignment(llvm::Align(8));
+    StringLiterals["object:" + text] = obj;
+    return obj;
+  }
   // One String object per literal, built on first use and shared from then
   // on. A String is immutable — every operation returns a new one — so there
   // is nothing to observe in the sharing, and the object is marked immortal:

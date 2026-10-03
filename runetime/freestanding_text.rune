@@ -1,0 +1,1246 @@
+// The freestanding runtime's `String`, numbers as text, and output — compiled
+// into a program built `@runtime(none)` beside freestanding.rune.
+//
+// The hosted runtime keeps these in C, over the C library; here there is no C
+// library, so they are Rune over the program's `@allocator`. A `String` is the
+// same object the code generator expects everywhere — a header, a length, a
+// capacity and a NUL-terminated block of UTF-8 — so `+`, interpolation,
+// `$str()`, `Display`, `std::fmt` and `io::println` work unchanged.
+//
+// Printing goes to the program's `@output` hook, `fn(bytes: *u8, count:
+// usize)`: a serial port, the screen, a semihosting call. Without one,
+// output is discarded.
+//
+// Numbers become text exactly as they do hosted, byte for byte: a double is
+// a finite binary fraction, so its exact decimal expansion is computed with
+// big integers and the shortest digits that read back as the same double are
+// chosen from it. Parsing rounds correctly the same way. Not reentrant: the
+// scratch space is global, as a kernel's stack is small.
+
+extern "C" {
+    fn rune_alloc(size: u64, info: *var u8) -> *var u8
+    fn rune_raw_alloc(size: u64) -> *var u8
+    fn rune_raw_free(block: *var u8)
+    fn rune_raw_copy(dst: *var u8, src: *u8, size: u64)
+    fn rune_make_immortal(obj: *var u8)
+    fn rune_panic_bounds(index: i64, length: i64, location: CString)
+    fn rune_write_output(bytes: *u8, count: usize)
+}
+
+//===--------------------------------------------------------------------===//
+// Output
+//===--------------------------------------------------------------------===//
+
+fn emit(bytes: *u8, count: i64) {
+    if count > 0 { unsafe { rune_write_output(bytes, count as usize) } }
+}
+
+fn emitNewline() {
+    var nl: [1:u8] = [10]
+    emit(unsafe { &nl[0] as *u8 }, 1)
+}
+
+@export("rune_print")
+pub fn print(s: *var u8) { emit(stringData(s), stringLength(s)) }
+
+@export("rune_println")
+pub fn println(s: *var u8) {
+    print(s)
+    emitNewline()
+}
+
+@export("rune_eprint")
+pub fn eprint(s: *var u8) { print(s) }
+
+@export("rune_eprintln")
+pub fn eprintln(s: *var u8) { println(s) }
+
+@export("rune_print_cstr")
+pub fn printCString(text: *u8) { emit(text, cLength(text)) }
+
+/// Nothing is buffered: each print went out as it was made.
+@export("rune_flush_stdout")
+pub fn flushStdout() {}
+
+//===--------------------------------------------------------------------===//
+// The object
+//===--------------------------------------------------------------------===//
+
+/// The code generator's layout of a `String`: the object header, then the
+/// text. `capacity` excludes the NUL that always follows the text.
+struct StringObject {
+    refcount: i64
+    typeinfo: *var u8
+    length: i64
+    capacity: i64
+    data: *var u8
+}
+
+/// A `TypeInfo`, as freestanding.rune and the code generator lay one out,
+/// with its function slots typed.
+struct StringInfo {
+    name: CString
+    size: u64
+    deinit: @cfunction(*var u8) -> ()
+    base: *var u8
+    vtable: *var u8
+    vtableCount: u32
+    clone: @cfunction(*var u8) -> *var u8
+}
+
+global stringInfo: StringInfo = StringInfo {
+    name: "std::String", size: 40, deinit: stringDeinit, base: unsafe { 0 as *var u8 },
+    vtable: unsafe { 0 as *var u8 }, vtableCount: 0, clone: stringClone
+}
+
+@safe("a String's block is its own, and goes with it")
+fn stringDeinit(obj: *var u8) {
+    let s = unsafe { obj as *var StringObject }
+    let block = unsafe { s[0].data }
+    if unsafe { block as usize } != 0 {
+        unsafe { rune_raw_free(block) }
+    }
+    unsafe { s[0].data = 0 as *var u8 }
+}
+
+fn stringClone(obj: *var u8) -> *var u8 { copy(obj) }
+
+@safe("reads the header of a String the code generator handed over")
+fn stringLength(s: *var u8) -> i64 {
+    if unsafe { s as usize } == 0 { return 0 }
+    unsafe { (s as *var StringObject)[0].length }
+}
+
+@safe("reads the header of a String the code generator handed over")
+fn stringData(s: *var u8) -> *u8 {
+    if unsafe { s as usize } == 0 { return unsafe { emptyText() } }
+    unsafe { (s as *var StringObject)[0].data as *u8 }
+}
+
+global emptyByte: [1:u8] = [0]
+
+@unsafe
+fn emptyText() -> *u8 { &emptyByte[0] as *u8 }
+
+@safe("the block is sized for the capacity and its NUL")
+fn allocString(capacity: i64) -> *var u8 {
+    let cap = if capacity < 0 { 0 } else { capacity }
+    let obj = unsafe { rune_alloc(40, &stringInfo as *var u8) }
+    let s = unsafe { obj as *var StringObject }
+    let block = unsafe { rune_raw_alloc((cap + 1) as u64) }
+    unsafe {
+        s[0].length = 0
+        s[0].capacity = cap
+        s[0].data = block
+        block[0] = 0
+    }
+    obj
+}
+
+@safe("copies `n` bytes the caller has, then terminates them")
+fn fromBytes(p: *u8, n: i64) -> *var u8 {
+    let count = if n < 0 { 0 } else { n }
+    let obj = allocString(count)
+    let s = unsafe { obj as *var StringObject }
+    if count > 0 && unsafe { p as usize } != 0 {
+        unsafe { rune_raw_copy(s[0].data, p, count as u64) }
+    }
+    unsafe {
+        s[0].length = count
+        s[0].data[count] = 0
+    }
+    obj
+}
+
+@safe("counts up to the NUL a CString ends with")
+fn cLength(p: *u8) -> i64 {
+    if unsafe { p as usize } == 0 { return 0 }
+    var n: i64 = 0
+    while unsafe { p[n] } != 0 { n += 1 }
+    n
+}
+
+//===--------------------------------------------------------------------===//
+// Making strings
+//===--------------------------------------------------------------------===//
+
+@export("rune_string_new")
+pub fn newString() -> *var u8 { allocString(0) }
+
+@export("rune_string_from_bytes")
+pub fn stringFromBytes(p: *u8, n: i64) -> *var u8 { fromBytes(p, n) }
+
+/// One object per literal, made on first use and never freed.
+@export("rune_string_literal")
+@safe("the slot is the per-literal cache the compiler allocated")
+pub fn literal(p: *u8, n: i64, slot: *var *var u8) -> *var u8 {
+    if unsafe { slot as usize } != 0 && unsafe { slot[0] as usize } != 0 {
+        return unsafe { slot[0] }
+    }
+    let s = fromBytes(p, n)
+    unsafe { rune_make_immortal(s) }
+    if unsafe { slot as usize } != 0 { unsafe { slot[0] = s } }
+    s
+}
+
+@export("rune_string_from_cstr")
+pub fn fromCString(p: *u8) -> *var u8 { fromBytes(p, cLength(p)) }
+
+@export("rune_string_copy")
+pub fn copy(s: *var u8) -> *var u8 { fromBytes(stringData(s), stringLength(s)) }
+
+@export("rune_string_concat")
+@safe("both lengths are read from the strings themselves")
+pub fn concat(a: *var u8, b: *var u8) -> *var u8 {
+    let la = stringLength(a)
+    let lb = stringLength(b)
+    let obj = allocString(la + lb)
+    let s = unsafe { obj as *var StringObject }
+    if la > 0 { unsafe { rune_raw_copy(s[0].data, stringData(a), la as u64) } }
+    if lb > 0 {
+        unsafe { rune_raw_copy((s[0].data as usize + la as usize) as *var u8,
+                               stringData(b), lb as u64) }
+    }
+    unsafe {
+        s[0].length = la + lb
+        s[0].data[la + lb] = 0
+    }
+    obj
+}
+
+@export("rune_string_substring")
+@safe("the range is checked against the length before the copy")
+pub fn substring(s: *var u8, start: i64, end: i64, location: CString) -> *var u8 {
+    let len = stringLength(s)
+    if start < 0 || end > len || start > end {
+        unsafe { rune_panic_bounds(if start < 0 { start } else { end }, len, location) }
+    }
+    fromBytes(unsafe { (stringData(s) as usize + start as usize) as *u8 }, end - start)
+}
+
+@export("rune_string_repeat")
+@safe("each copy lands inside the block sized for all of them")
+pub fn repeat(s: *var u8, timesIn: i64) -> *var u8 {
+    let times = if timesIn < 0 { 0 } else { timesIn }
+    let l = stringLength(s)
+    let obj = allocString(l * times)
+    let out = unsafe { obj as *var StringObject }
+    var i: i64 = 0
+    while i < times {
+        if l > 0 {
+            unsafe { rune_raw_copy((out[0].data as usize + (i * l) as usize) as *var u8,
+                                   stringData(s), l as u64) }
+        }
+        i += 1
+    }
+    unsafe {
+        out[0].length = l * times
+        out[0].data[l * times] = 0
+    }
+    obj
+}
+
+//===--------------------------------------------------------------------===//
+// Asking about strings
+//===--------------------------------------------------------------------===//
+
+@export("rune_string_length")
+pub fn length(s: *var u8) -> i64 { stringLength(s) }
+
+@export("rune_string_char_count")
+@safe("reads the bytes below the length")
+pub fn charCount(s: *var u8) -> i64 {
+    let p = stringData(s)
+    let len = stringLength(s)
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        if (unsafe { p[i] } & 192) != 128 { n += 1 }
+        i += 1
+    }
+    n
+}
+
+@export("rune_string_cstr")
+pub fn cstr(s: *var u8) -> *u8 { stringData(s) }
+
+@safe("reads the bytes below each length")
+fn sameBytes(a: *u8, b: *u8, n: i64) -> i32 {
+    var i: i64 = 0
+    while i < n {
+        let x = unsafe { a[i] }
+        let y = unsafe { b[i] }
+        if x != y { return if x < y { -1 } else { 1 } }
+        i += 1
+    }
+    0
+}
+
+@export("rune_string_equal")
+pub fn equal(a: *var u8, b: *var u8) -> i32 {
+    if unsafe { a as usize } == unsafe { b as usize } { return 1 }
+    let la = stringLength(a)
+    if la != stringLength(b) { return 0 }
+    if sameBytes(stringData(a), stringData(b), la) == 0 { 1 } else { 0 }
+}
+
+@export("rune_string_compare")
+pub fn compare(a: *var u8, b: *var u8) -> i32 {
+    let la = stringLength(a)
+    let lb = stringLength(b)
+    let n = if la < lb { la } else { lb }
+    let c = sameBytes(stringData(a), stringData(b), n)
+    if c != 0 { return c }
+    if la == lb { 0 } else if la < lb { -1 } else { 1 }
+}
+
+/// FNV-1a, as the hosted runtime hashes, so a hash is the same number on
+/// either.
+@safe("reads the bytes below the length")
+fn fnv(p: *u8, n: i64) -> u64 {
+    var h: u64 = 1469598103934665603
+    var i: i64 = 0
+    while i < n {
+        h = (h ^ unsafe { p[i] } as u64).$wrappingMul(1099511628211)
+        i += 1
+    }
+    h
+}
+
+@export("rune_cstring_hash")
+pub fn cstringHash(p: *u8) -> u64 { fnv(p, cLength(p)) }
+
+@export("rune_string_hash")
+pub fn stringHash(s: *var u8) -> u64 { fnv(stringData(s), stringLength(s)) }
+
+@export("rune_string_byte_at")
+@safe("the index is checked against the length")
+pub fn byteAt(s: *var u8, i: i64, location: CString) -> u8 {
+    let len = stringLength(s)
+    if i < 0 || i >= len { unsafe { rune_panic_bounds(i, len, location) } }
+    unsafe { stringData(s)[i] }
+}
+
+/// The character starting at byte `at`, and in `next` where the one after
+/// it starts.
+@safe("reads no further than the length")
+fn decodeAt(p: *u8, len: i64, at: i64, next: *var i64) -> u32 {
+    let lead = unsafe { p[at] } as u32
+    var extra: i64 = if lead < 128 { 0 } else if lead < 224 { 1 } else if lead < 240 { 2 } else { 3 }
+    if at + extra >= len { extra = 0 }
+    var cp: u32 = 0
+    if extra == 0 {
+        cp = lead
+    } else if extra == 1 {
+        cp = ((lead & 31) << 6) | (unsafe { p[at + 1] } as u32 & 63)
+    } else if extra == 2 {
+        cp = ((lead & 15) << 12) | ((unsafe { p[at + 1] } as u32 & 63) << 6) |
+             (unsafe { p[at + 2] } as u32 & 63)
+    } else {
+        cp = ((lead & 7) << 18) | ((unsafe { p[at + 1] } as u32 & 63) << 12) |
+             ((unsafe { p[at + 2] } as u32 & 63) << 6) | (unsafe { p[at + 3] } as u32 & 63)
+    }
+    if unsafe { next as usize } != 0 { unsafe { next[0] = at + extra + 1 } }
+    cp
+}
+
+/// `i` counts characters, not bytes.
+@export("rune_string_char_at")
+@safe("every byte read is below the length")
+pub fn charAt(s: *var u8, i: i64, next: *var i64, location: CString) -> u32 {
+    let p = stringData(s)
+    let bytes = stringLength(s)
+    if i < 0 { unsafe { rune_panic_bounds(i, charCount(s), location) } }
+    var at: i64 = 0
+    var seen: i64 = 0
+    while seen < i {
+        if at >= bytes { unsafe { rune_panic_bounds(i, charCount(s), location) } }
+        let c = unsafe { p[at] }
+        at += if c < 128 { 1 } else if c < 224 { 2 } else if c < 240 { 3 } else { 4 }
+        seen += 1
+    }
+    if at >= bytes { unsafe { rune_panic_bounds(i, charCount(s), location) } }
+    decodeAt(p, bytes, at, next)
+}
+
+@export("rune_string_char_after")
+@safe("past the end it reads nothing")
+pub fn charAfter(s: *var u8, at: i64, next: *var i64) -> u32 {
+    let len = stringLength(s)
+    if at < 0 || at >= len {
+        if unsafe { next as usize } != 0 { unsafe { next[0] = at } }
+        return 0
+    }
+    decodeAt(stringData(s), len, at, next)
+}
+
+@export("rune_string_find")
+@safe("every comparison stays inside both strings")
+pub fn find(hay: *var u8, needle: *var u8) -> i64 {
+    let n = stringLength(needle)
+    let h = stringLength(hay)
+    if n == 0 { return 0 }
+    if n > h { return -1 }
+    var i: i64 = 0
+    while i + n <= h {
+        if sameBytes(unsafe { (stringData(hay) as usize + i as usize) as *u8 },
+                     stringData(needle), n) == 0 {
+            return i
+        }
+        i += 1
+    }
+    -1
+}
+
+//===--------------------------------------------------------------------===//
+// Scratch text
+//
+// Numbers are written into this, then copied into a String of their own.
+//===--------------------------------------------------------------------===//
+
+global var scratch: [512:u8] = [0; 512]
+global var textLength: i64 = 0
+
+fn textReset() { textLength = 0 }
+
+fn put(b: u8) {
+    if textLength < 512 {
+        scratch[textLength] = b
+        textLength += 1
+    }
+}
+
+@safe("reads up to the NUL")
+fn putC(p: CString) {
+    let bytes = unsafe { p as *u8 }
+    var i: i64 = 0
+    while unsafe { bytes[i] } != 0 {
+        put(unsafe { bytes[i] })
+        i += 1
+    }
+}
+
+fn putUnsigned(vIn: u64) {
+    var digits: [20:u8] = [0; 20]
+    var n: i64 = 0
+    var v = vIn
+    while true {
+        digits[n] = (48 + v % 10) as u8
+        v = v / 10
+        n += 1
+        if v == 0 { break }
+    }
+    while n > 0 {
+        n -= 1
+        put(digits[n])
+    }
+}
+
+@safe("the scratch text is copied out whole")
+fn textString() -> *var u8 { fromBytes(unsafe { &scratch[0] as *u8 }, textLength) }
+
+//===--------------------------------------------------------------------===//
+// Integers, booleans, characters, pointers
+//===--------------------------------------------------------------------===//
+
+@export("rune_string_from_i64")
+pub fn fromI64(v: i64) -> *var u8 {
+    textReset()
+    if v < 0 {
+        put(45)
+        // The most negative i64 has no positive; its magnitude is one more.
+        putUnsigned(((0 - (v + 1)) as u64) + 1)
+    } else {
+        putUnsigned(v as u64)
+    }
+    textString()
+}
+
+@export("rune_string_from_u64")
+pub fn fromU64(v: u64) -> *var u8 {
+    textReset()
+    putUnsigned(v)
+    textString()
+}
+
+@export("rune_string_from_bool")
+pub fn fromBool(v: i8) -> *var u8 {
+    textReset()
+    putC(if v != 0 { "true" } else { "false" })
+    textString()
+}
+
+@export("rune_string_from_char")
+pub fn fromChar(cp: u32) -> *var u8 {
+    textReset()
+    if cp < 128 {
+        put(cp as u8)
+    } else if cp < 2048 {
+        put((192 | (cp >> 6)) as u8)
+        put((128 | (cp & 63)) as u8)
+    } else if cp < 65536 {
+        put((224 | (cp >> 12)) as u8)
+        put((128 | ((cp >> 6) & 63)) as u8)
+        put((128 | (cp & 63)) as u8)
+    } else {
+        put((240 | (cp >> 18)) as u8)
+        put((128 | ((cp >> 12) & 63)) as u8)
+        put((128 | ((cp >> 6) & 63)) as u8)
+        put((128 | (cp & 63)) as u8)
+    }
+    textString()
+}
+
+@export("rune_string_from_ptr")
+pub fn fromPointer(p: *u8) -> *var u8 {
+    textReset()
+    putC("0x")
+    let v = unsafe { p as usize } as u64
+    var digits: [16:u8] = [0; 16]
+    var n: i64 = 0
+    var rest = v
+    while true {
+        let d = (rest & 15) as u8
+        digits[n] = if d < 10 { 48 + d } else { 87 + d }
+        rest = rest >> 4
+        n += 1
+        if rest == 0 { break }
+    }
+    while n > 0 {
+        n -= 1
+        put(digits[n])
+    }
+    textString()
+}
+
+//===--------------------------------------------------------------------===//
+// Big integers
+//
+// Enough for the exact value of any double scaled to an integer — the
+// smallest subnormal is 2^-1074, which is 5^1074 / 10^1074 — and for the
+// powers of ten parsing divides by. Little-endian 32-bit limbs.
+//===--------------------------------------------------------------------===//
+
+struct Big {
+    limbs: [240:u32]
+    count: i64
+}
+
+fn bigSet(b: &var Big, v: u64) {
+    b.count = 0
+    var rest = v
+    while rest != 0 {
+        b.limbs[b.count] = (rest & 4294967295) as u32
+        rest = rest >> 32
+        b.count += 1
+    }
+}
+
+fn bigIsZero(b: &Big) -> bool { b.count == 0 }
+
+fn bigTrim(b: &var Big) {
+    while b.count > 0 && b.limbs[b.count - 1] == 0 { b.count -= 1 }
+}
+
+/// `b = b * m + add`.
+fn bigMulAdd(b: &var Big, m: u32, add: u32) {
+    var carry: u64 = add as u64
+    var i: i64 = 0
+    while i < b.count {
+        let p = (b.limbs[i] as u64) * (m as u64) + carry
+        b.limbs[i] = (p & 4294967295) as u32
+        carry = p >> 32
+        i += 1
+    }
+    if carry != 0 && b.count < 240 {
+        b.limbs[b.count] = carry as u32
+        b.count += 1
+    }
+    bigTrim(b)
+}
+
+fn bigMulPow5(b: &var Big, kIn: i64) {
+    var k = kIn
+    while k >= 13 {
+        bigMulAdd(b, 1220703125, 0)        // 5^13, the largest that fits
+        k -= 13
+    }
+    var m: u32 = 1
+    while k > 0 {
+        m = m * 5
+        k -= 1
+    }
+    if m != 1 { bigMulAdd(b, m, 0) }
+}
+
+fn bigShiftLeft(b: &var Big, bits: i64) {
+    if b.count == 0 || bits <= 0 { return }
+    let whole = bits / 32
+    let part = (bits % 32) as u64
+    // From the top down, so nothing is overwritten before it is read: limb
+    // `i` lands at `i + whole`, its high bits spilling into the one above.
+    b.limbs[b.count + whole] = 0
+    var i = b.count - 1
+    while i >= 0 {
+        let v = b.limbs[i] as u64
+        if part != 0 {
+            b.limbs[i + whole + 1] = b.limbs[i + whole + 1] | ((v >> (32 - part)) as u32)
+        }
+        b.limbs[i + whole] = ((v << part) & 4294967295) as u32
+        i -= 1
+    }
+    var z: i64 = 0
+    while z < whole {
+        b.limbs[z] = 0
+        z += 1
+    }
+    b.count = b.count + whole + 1
+    bigTrim(b)
+}
+
+fn bigCompare(a: &Big, b: &Big) -> i32 {
+    if a.count != b.count { return if a.count < b.count { -1 } else { 1 } }
+    var i = a.count - 1
+    while i >= 0 {
+        if a.limbs[i] != b.limbs[i] { return if a.limbs[i] < b.limbs[i] { -1 } else { 1 } }
+        i -= 1
+    }
+    0
+}
+
+/// `a -= b`, where `a >= b`.
+fn bigSub(a: &var Big, b: &Big) {
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < a.count {
+        var d = (a.limbs[i] as i64) - borrow
+        if i < b.count { d = d - (b.limbs[i] as i64) }
+        if d < 0 {
+            d = d + 4294967296
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        a.limbs[i] = d as u32
+        i += 1
+    }
+    bigTrim(a)
+}
+
+/// `b /= d`, handing back the remainder.
+fn bigDivSmall(b: &var Big, d: u32) -> u32 {
+    var rem: u64 = 0
+    var i = b.count - 1
+    while i >= 0 {
+        let cur = (rem << 32) | (b.limbs[i] as u64)
+        b.limbs[i] = (cur / (d as u64)) as u32
+        rem = cur % (d as u64)
+        i -= 1
+    }
+    bigTrim(b)
+    rem as u32
+}
+
+fn bigBitLength(b: &Big) -> i64 {
+    if b.count == 0 { return 0 }
+    var top = b.limbs[b.count - 1]
+    var bits: i64 = 0
+    while top != 0 {
+        bits += 1
+        top = top >> 1
+    }
+    (b.count - 1) * 32 + bits
+}
+
+fn bigBit(b: &Big, i: i64) -> u64 {
+    if i < 0 || i / 32 >= b.count { return 0 }
+    ((b.limbs[i / 32] as u64) >> ((i % 32) as u64)) & 1
+}
+
+//===--------------------------------------------------------------------===//
+// Exact decimals
+//
+// A decimal number as its digits (most significant first, no leading
+// zeros) and where the point goes: `point` digits come before it, which may
+// be more than there are digits (append zeros) or zero or less (prepend
+// them).
+//===--------------------------------------------------------------------===//
+
+struct Decimal {
+    digits: [800:u8]
+    count: i64
+    point: i64
+}
+
+global var scratchBig: Big = Big { limbs: [0; 240], count: 0 }
+global var exactV: Decimal = Decimal { digits: [0; 800], count: 0, point: 0 }
+global var exactLow: Decimal = Decimal { digits: [0; 800], count: 0, point: 0 }
+global var exactHigh: Decimal = Decimal { digits: [0; 800], count: 0, point: 0 }
+global var rounded: Decimal = Decimal { digits: [0; 800], count: 0, point: 0 }
+
+/// The digits of `b`, consumed.
+fn bigDigits(b: &var Big, out: &var Decimal) {
+    var chunks: [100:u32] = [0; 100]
+    var n: i64 = 0
+    while !bigIsZero(b) {
+        chunks[n] = bigDivSmall(b, 1000000000)
+        n += 1
+    }
+    out.count = 0
+    var first = true
+    while n > 0 {
+        n -= 1
+        var chunk = chunks[n]
+        var nine: [9:u8] = [0; 9]
+        var k: i64 = 8
+        while k >= 0 {
+            nine[k] = (48 + chunk % 10) as u8
+            chunk = chunk / 10
+            k -= 1
+        }
+        var j: i64 = 0
+        while j < 9 {
+            if !(first && nine[j] == 48) {
+                first = false
+                out.digits[out.count] = nine[j]
+                out.count += 1
+            }
+            j += 1
+        }
+    }
+}
+
+/// `mant * 2^exp2`, exactly.
+fn exactDecimal(mant: u64, exp2: i64, out: &var Decimal) {
+    unsafe { bigSet(&var scratchBig, mant) }
+    if exp2 >= 0 {
+        unsafe { bigShiftLeft(&var scratchBig, exp2) }
+        unsafe { bigDigits(&var scratchBig, out) }
+        out.point = out.count
+    } else {
+        // m / 2^k is m * 5^k / 10^k.
+        unsafe { bigMulPow5(&var scratchBig, 0 - exp2) }
+        unsafe { bigDigits(&var scratchBig, out) }
+        out.point = out.count + exp2
+    }
+    while out.count > 0 && out.digits[out.count - 1] == 48 { out.count -= 1 }
+}
+
+fn digitAt(d: &Decimal, i: i64) -> u8 {
+    if i < 0 || i >= d.count { 48 } else { d.digits[i] }
+}
+
+/// -1, 0 or 1 as `a` is below, equal to or above `b`; both positive.
+fn decimalCompare(a: &Decimal, b: &Decimal) -> i32 {
+    if a.count == 0 || b.count == 0 {
+        if a.count == b.count { return 0 }
+        return if a.count == 0 { -1 } else { 1 }
+    }
+    if a.point != b.point { return if a.point < b.point { -1 } else { 1 } }
+    let n = if a.count > b.count { a.count } else { b.count }
+    var i: i64 = 0
+    while i < n {
+        let x = digitAt(a, i)
+        let y = digitAt(b, i)
+        if x != y { return if x < y { -1 } else { 1 } }
+        i += 1
+    }
+    0
+}
+
+/// `src` rounded to `keep` significant digits, halves to even. A `keep` below
+/// zero rounds at a place above the first digit, which leaves nothing.
+fn roundTo(src: &Decimal, keep: i64, out: &var Decimal) {
+    out.point = src.point
+    if keep < 0 {
+        out.count = 0
+        return
+    }
+    out.count = if keep < src.count { keep } else { src.count }
+    var i: i64 = 0
+    while i < out.count {
+        out.digits[i] = src.digits[i]
+        i += 1
+    }
+    if keep >= src.count { return }
+    let next = src.digits[keep]
+    var up = next > 53
+    if next == 53 {
+        var rest = false
+        var j = keep + 1
+        while j < src.count {
+            if src.digits[j] != 48 { rest = true }
+            j += 1
+        }
+        up = rest || (keep > 0 && (src.digits[keep - 1] - 48) % 2 == 1)
+    }
+    if keep == 0 {
+        // Nothing kept: the result is 0 or one unit at the first place.
+        out.count = 0
+        if up {
+            out.digits[0] = 49
+            out.count = 1
+            out.point = src.point + 1
+        }
+        return
+    }
+    if up {
+        var k = out.count - 1
+        while k >= 0 && out.digits[k] == 57 {
+            out.digits[k] = 48
+            k -= 1
+        }
+        if k < 0 {
+            // 999 -> 1000: one more digit before the point.
+            out.digits[0] = 49
+            var z: i64 = 1
+            while z < out.count {
+                out.digits[z] = 48
+                z += 1
+            }
+            out.point += 1
+        } else {
+            out.digits[k] += 1
+        }
+    }
+    while out.count > 0 && out.digits[out.count - 1] == 48 { out.count -= 1 }
+}
+
+//===--------------------------------------------------------------------===//
+// Doubles as text
+//===--------------------------------------------------------------------===//
+
+@safe("reads the bits of a double through its own address")
+fn bitsOf(v: f64) -> u64 {
+    var copy = v
+    unsafe { (&var copy as *var f64 as *var u64)[0] }
+}
+
+@safe("reads a double through the address of its bits")
+fn fromBits(bits: u64) -> f64 {
+    var copy = bits
+    unsafe { (&var copy as *var u64 as *var f64)[0] }
+}
+
+/// The shortest digits that read back as `v` (positive, finite, not zero)
+/// into `rounded`.
+fn shortest(bits: u64) {
+    let biased = ((bits >> 52) & 2047) as i64
+    let fraction = bits & 4503599627370495
+    var mant = fraction
+    var e: i64 = 0
+    if biased == 0 {
+        e = -1074
+    } else {
+        mant = fraction | 4503599627370496
+        e = biased - 1075
+    }
+    unsafe { exactDecimal(mant, e, &var exactV) }
+    // The interval that reads back as `v`: halfway to each neighbour. Below
+    // a power of two the neighbour underneath is half as far.
+    unsafe { exactDecimal(2 * mant + 1, e - 1, &var exactHigh) }
+    if fraction == 0 && biased > 1 {
+        unsafe { exactDecimal(4 * mant - 1, e - 2, &var exactLow) }
+    } else {
+        unsafe { exactDecimal(2 * mant - 1, e - 1, &var exactLow) }
+    }
+    let inclusive = mant % 2 == 0
+    var keep: i64 = 1
+    while keep <= 17 {
+        unsafe { roundTo(&exactV, keep, &var rounded) }
+        let lo = decimalCompare(&rounded, &exactLow)
+        let hi = decimalCompare(&rounded, &exactHigh)
+        let aboveLow = lo > 0 || (inclusive && lo == 0)
+        let belowHigh = hi < 0 || (inclusive && hi == 0)
+        if aboveLow && belowHigh { return }
+        keep += 1
+    }
+    unsafe { roundTo(&exactV, 17, &var rounded) }
+}
+
+fn putDigits(d: &Decimal, first: i64, end: i64) {
+    var i = first
+    while i < end {
+        put(digitAt(d, i))
+        i += 1
+    }
+}
+
+/// `v`'s text, as the hosted runtime writes it: the shortest digits that
+/// read back as `v`, in fixed notation from 1e-6 up to 1e17 and in C's
+/// `%g` exponent notation outside it, with `.0` on a whole number.
+fn formatDouble(v: f64) {
+    textReset()
+    let bits = bitsOf(v)
+    let negative = (bits >> 63) != 0
+    let biased = (bits >> 52) & 2047
+    let fraction = bits & 4503599627370495
+    if biased == 2047 {
+        if fraction != 0 {
+            putC("nan")
+            return
+        }
+        if negative { put(45) }
+        putC("inf")
+        return
+    }
+    if negative { put(45) }
+    if biased == 0 && fraction == 0 {
+        putC("0.0")
+        return
+    }
+    shortest(bits & 9223372036854775807)
+    let n = rounded.count
+    let x = rounded.point - 1          // the decimal exponent of the first digit
+    // C's `%.{n}g` writes fixed notation for an exponent from -4 below n.
+    if x >= -4 && x < n {
+        if x >= 0 {
+            putDigits(&rounded, 0, x + 1)
+            put(46)
+            if n > x + 1 { putDigits(&rounded, x + 1, n) } else { put(48) }
+        } else {
+            put(48)
+            put(46)
+            var z: i64 = 0
+            while z < 0 - x - 1 {
+                put(48)
+                z += 1
+            }
+            putDigits(&rounded, 0, n)
+        }
+        return
+    }
+    // Otherwise, from 1e-6 up to 1e17, the hosted runtime writes `%.{k}f`
+    // with the fewest places, up to 17, that read back as `v`: the exact
+    // value rounded there, trailing zeros trimmed to one.
+    let places = if n - 1 - x > 1 { n - 1 - x } else { 1 }
+    if x >= -6 && x <= 16 && places <= 17 {
+        let start = textLength
+        unsafe { roundTo(&exactV, exactV.point + places, &var rounded) }
+        if rounded.point <= 0 {
+            put(48)
+        } else {
+            putDigits(&rounded, 0, rounded.point)
+        }
+        put(46)
+        var i: i64 = 0
+        while i < places {
+            put(digitAt(&rounded, rounded.point + i))
+            i += 1
+        }
+        while textLength > start + 2 && scratch[textLength - 1] == 48 &&
+              scratch[textLength - 2] != 46 {
+            textLength -= 1
+        }
+        return
+    }
+    // C's exponent notation: at least two digits of exponent.
+    put(rounded.digits[0])
+    if n > 1 {
+        put(46)
+        putDigits(&rounded, 1, n)
+    }
+    put(101)
+    put(if x < 0 { 45 } else { 43 })
+    let mag = if x < 0 { 0 - x } else { x }
+    if mag < 10 { put(48) }
+    putUnsigned(mag as u64)
+}
+
+/// `v` with exactly `places` digits after the point, rounded halves to even
+/// as C's `%.*f` does.
+fn formatFixed(v: f64, placesIn: i64) {
+    textReset()
+    let places = if placesIn < 0 { 0 } else if placesIn > 30 { 30 } else { placesIn }
+    let bits = bitsOf(v)
+    let negative = (bits >> 63) != 0
+    let biased = ((bits >> 52) & 2047) as i64
+    let fraction = bits & 4503599627370495
+    if biased == 2047 {
+        if fraction != 0 {
+            putC("nan")
+            return
+        }
+        if negative { put(45) }
+        putC("inf")
+        return
+    }
+    if negative { put(45) }
+    if biased == 0 && fraction == 0 {
+        exactV.count = 0
+        exactV.point = 0
+    } else if biased == 0 {
+        unsafe { exactDecimal(fraction, -1074, &var exactV) }
+    } else {
+        unsafe { exactDecimal(fraction | 4503599627370496, biased - 1075, &var exactV) }
+    }
+    // Rounding at `places` after the point is rounding to this many
+    // significant digits.
+    unsafe { roundTo(&exactV, exactV.point + places, &var rounded) }
+    let point = rounded.point
+    if point <= 0 {
+        put(48)
+    } else {
+        putDigits(&rounded, 0, point)
+    }
+    if places > 0 {
+        put(46)
+        var i: i64 = 0
+        while i < places {
+            put(digitAt(&rounded, point + i))
+            i += 1
+        }
+    }
+}
+
+@export("rune_string_from_f64")
+pub fn fromF64(v: f64) -> *var u8 {
+    formatDouble(v)
+    textString()
+}
+
+@export("rune_string_from_f64_fixed")
+pub fn fromF64Fixed(v: f64, places: i64) -> *var u8 {
+    formatFixed(v, places)
+    textString()
+}
+
+//===--------------------------------------------------------------------===//
+// Text as numbers
+//===--------------------------------------------------------------------===//
+
+fn isSpace(c: u8) -> bool { c == 32 || (c >= 9 && c <= 13) }
+
+@safe("reads below the length, and writes the flag the caller gave")
+fn setOk(ok: *var i8, v: bool) {
+    if unsafe { ok as usize } != 0 { unsafe { ok[0] = if v { 1 } else { 0 } } }
+}
+
+/// As C's `strtoll` with base 10, and true only when the whole string was
+/// the number.
+@export("rune_string_to_i64")
+@safe("reads below the length")
+pub fn toI64(s: *var u8, ok: *var i8) -> i64 {
+    let p = stringData(s)
+    let len = stringLength(s)
+    var i: i64 = 0
+    while i < len && isSpace(unsafe { p[i] }) { i += 1 }
+    var negative = false
+    if i < len && (unsafe { p[i] } == 43 || unsafe { p[i] } == 45) {
+        negative = unsafe { p[i] } == 45
+        i += 1
+    }
+    let start = i
+    var magnitude: u64 = 0
+    var overflow = false
+    while i < len && unsafe { p[i] } >= 48 && unsafe { p[i] } <= 57 {
+        let d = (unsafe { p[i] } - 48) as u64
+        if magnitude > (18446744073709551615 - d) / 10 { overflow = true } else { magnitude = magnitude * 10 + d }
+        i += 1
+    }
+    setOk(ok, len > 0 && i > start && i == len)
+    let limit: u64 = if negative { 9223372036854775808 } else { 9223372036854775807 }
+    if overflow || magnitude > limit {
+        return if negative { -9223372036854775807 - 1 } else { 9223372036854775807 }
+    }
+    if negative {
+        if magnitude == 9223372036854775808 { return -9223372036854775807 - 1 }
+        return 0 - (magnitude as i64)
+    }
+    magnitude as i64
+}
+
+global var parseNum: Big = Big { limbs: [0; 240], count: 0 }
+global var parseDen: Big = Big { limbs: [0; 240], count: 0 }
+global var parseShifted: Big = Big { limbs: [0; 240], count: 0 }
+
+/// The double nearest `mant * 2^exp2` (`mant` nonzero, up to 63 bits), with
+/// `sticky` saying something nonzero was dropped below it: rounded once,
+/// halves to even, into a normal, a subnormal, or infinity.
+fn compose(mantIn: u64, exp2In: i64, stickyIn: bool, negative: bool) -> f64 {
+    var mant = mantIn
+    var exp2 = exp2In
+    var sticky = stickyIn
+    // Normalise to 53 bits, collecting what falls off.
+    var width: i64 = 0
+    var probe = mant
+    while probe != 0 {
+        width += 1
+        probe = probe >> 1
+    }
+    // Where the lowest kept bit has to sit: 53 bits, unless that would put
+    // it below the subnormal floor of 2^-1074.
+    var drop = width - 53
+    if exp2 + drop < -1074 { drop = -1074 - exp2 }
+    var half = false
+    if drop > 64 {
+        if mant != 0 { sticky = true }
+        mant = 0
+        exp2 += drop
+    } else if drop == 64 {
+        half = (mant >> 63) == 1
+        if (mant & 9223372036854775807) != 0 { sticky = true }
+        mant = 0
+        exp2 += drop
+    } else if drop > 0 {
+        let halfBit = (1 as u64) << ((drop - 1) as u64)
+        half = (mant & halfBit) != 0
+        if (mant & (halfBit - 1)) != 0 { sticky = true }
+        mant = mant >> (drop as u64)
+        exp2 += drop
+    } else if drop < 0 {
+        mant = mant << ((0 - drop) as u64)
+        exp2 += drop
+    }
+    if half && (sticky || (mant & 1) == 1) {
+        mant += 1
+        if mant == 9007199254740992 {       // 2^53: carried into a new bit
+            mant = mant >> 1
+            exp2 += 1
+        }
+    }
+    let sign: u64 = if negative { 9223372036854775808 } else { 0 }
+    if mant == 0 { return fromBits(sign) }
+    // `mant * 2^exp2`, `mant` < 2^53: as a normal, or below 2^52 a subnormal.
+    if mant < 4503599627370496 {
+        return fromBits(sign | mant)          // exp2 is -1074 here
+    }
+    let biased = exp2 + 1075
+    if biased >= 2047 { return fromBits(sign | 9218868437227405312) }
+    fromBits(sign | ((biased as u64) << 52) | (mant & 4503599627370495))
+}
+
+@safe("reads below the length")
+fn matchWord(p: *u8, at: i64, len: i64, word: CString) -> bool {
+    let w = unsafe { word as *u8 }
+    var i: i64 = 0
+    while unsafe { w[i] } != 0 {
+        if at + i >= len { return false }
+        var c = unsafe { p[at + i] }
+        if c >= 65 && c <= 90 { c += 32 }
+        if c != unsafe { w[i] } { return false }
+        i += 1
+    }
+    true
+}
+
+/// As C's `strtod` for decimal text — `inf`, `infinity` and `nan` too — and
+/// true only when the whole string was the number. Correctly rounded: the
+/// digits are an exact fraction, divided out in big integers.
+@export("rune_string_to_f64")
+@safe("reads below the length")
+pub fn toF64(s: *var u8, ok: *var i8) -> f64 {
+    let p = stringData(s)
+    let len = stringLength(s)
+    var i: i64 = 0
+    while i < len && isSpace(unsafe { p[i] }) { i += 1 }
+    var negative = false
+    if i < len && (unsafe { p[i] } == 43 || unsafe { p[i] } == 45) {
+        negative = unsafe { p[i] } == 45
+        i += 1
+    }
+    if matchWord(p, i, len, "infinity") || matchWord(p, i, len, "inf") {
+        let used = if matchWord(p, i, len, "infinity") { 8 } else { 3 }
+        setOk(ok, i + used == len)
+        return fromBits(if negative { 18442240474082181120 } else { 9218868437227405312 })
+    }
+    if matchWord(p, i, len, "nan") {
+        setOk(ok, i + 3 == len)
+        return fromBits(9221120237041090560)
+    }
+    unsafe { bigSet(&var parseNum, 0) }
+    var digits: i64 = 0          // significant digits kept
+    var scale: i64 = 0           // power of ten the kept digits are short by
+    var dropped = false          // a nonzero digit beyond what is kept
+    var seen = false
+    var afterPoint = false
+    while i < len {
+        let c = unsafe { p[i] }
+        if c == 46 && !afterPoint {
+            afterPoint = true
+            i += 1
+            continue
+        }
+        if c < 48 || c > 57 { break }
+        seen = true
+        if digits < 780 {
+            if digits > 0 || c != 48 {
+                unsafe { bigMulAdd(&var parseNum, 10, (c - 48) as u32) }
+                digits += 1
+            }
+            if afterPoint { scale -= 1 }
+        } else {
+            if c != 48 { dropped = true }
+            if !afterPoint { scale += 1 }
+        }
+        i += 1
+    }
+    if !seen {
+        setOk(ok, false)
+        return 0.0
+    }
+    if i < len && (unsafe { p[i] } == 101 || unsafe { p[i] } == 69) {
+        var j = i + 1
+        var expNegative = false
+        if j < len && (unsafe { p[j] } == 43 || unsafe { p[j] } == 45) {
+            expNegative = unsafe { p[j] } == 45
+            j += 1
+        }
+        if j < len && unsafe { p[j] } >= 48 && unsafe { p[j] } <= 57 {
+            var e: i64 = 0
+            while j < len && unsafe { p[j] } >= 48 && unsafe { p[j] } <= 57 {
+                if e < 100000 { e = e * 10 + (unsafe { p[j] } - 48) as i64 }
+                j += 1
+            }
+            scale += if expNegative { 0 - e } else { e }
+            i = j
+        }
+    }
+    setOk(ok, i == len)
+    let sign: u64 = if negative { 9223372036854775808 } else { 0 }
+    if bigIsZero(&parseNum) { return fromBits(sign) }
+    // Far outside what a double holds: no arithmetic needed.
+    if scale + digits > 330 { return fromBits(sign | 9218868437227405312) }
+    if scale + digits < -345 { return fromBits(sign) }
+    if scale >= 0 {
+        // A whole number: its top bits, and whether anything below them is set.
+        unsafe { bigMulPow5(&var parseNum, scale) }
+        let bits = bigBitLength(&parseNum)
+        let take = if bits > 63 { 63 } else { bits }
+        var top: u64 = 0
+        var k = bits - 1
+        while k >= bits - take {
+            top = (top << 1) | bigBit(&parseNum, k)
+            k -= 1
+        }
+        var sticky = dropped
+        while k >= 0 && !sticky {
+            if bigBit(&parseNum, k) != 0 { sticky = true }
+            k -= 1
+        }
+        return compose(top, bits - take + scale, sticky, negative)
+    }
+    // A fraction: num / 10^-scale, divided out to 62 bits of quotient, the
+    // remainder saying whether anything is left over.
+    unsafe { bigSet(&var parseDen, 1) }
+    unsafe { bigMulPow5(&var parseDen, 0 - scale) }
+    let twos = 0 - scale                      // 10^k = 5^k * 2^k
+    // floor(num * 2^shift / den) has 62 or 63 bits; a negative shift
+    // scales the divisor instead.
+    let shift = bigBitLength(&parseDen) - bigBitLength(&parseNum) + 62
+    if shift > 0 { unsafe { bigShiftLeft(&var parseNum, shift) } }
+    if shift < 0 { unsafe { bigShiftLeft(&var parseDen, 0 - shift) } }
+    var quotient: u64 = 0
+    var bit: i64 = 63
+    while bit >= 0 {
+        parseShifted = parseDen
+        unsafe { bigShiftLeft(&var parseShifted, bit) }
+        if bigCompare(&parseNum, &parseShifted) >= 0 {
+            unsafe { bigSub(&var parseNum, &parseShifted) }
+            quotient = quotient | ((1 as u64) << (bit as u64))
+        }
+        bit -= 1
+    }
+    let sticky = dropped || !bigIsZero(&parseNum)
+    compose(quotient, 0 - shift - twos, sticky, negative)
+}
