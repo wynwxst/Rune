@@ -3246,6 +3246,13 @@ fn main() -> i64 {
     io::println(Family::Ecma as i64)
     0
 }""", mode="run", title="Flags, and an alias"),
+        P("An alias is written as the other variant's name, as `Osi = Iso` "
+          "is. Two variants that land on one value any other way — two equal "
+          "numbers, or a value counted on from the variant before into one "
+          "already taken — are usually a slip, and warn (W0402)."),
+        S("""enum Step { First = 1, Reset = 0, Second }   // Second is 1 too
+
+fn main() -> i64 { 0 }""", mode="warn", title="A value taken twice"),
 
         H("Methods on an enum"),
         S("""import std::io

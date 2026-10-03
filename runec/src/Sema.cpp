@@ -3481,6 +3481,7 @@ void Sema::assignVariantValues(EnumDecl *e) {
       }
       v->FloatValue = values[i].Float;
     }
+    warnDuplicateVariantValues(e);
     return;
   }
 
@@ -3490,6 +3491,55 @@ void Sema::assignVariantValues(EnumDecl *e) {
     if (values[i].Ok)
       next = values[i].Int;
     v->Value = next++;
+  }
+  warnDuplicateVariantValues(e);
+}
+
+void Sema::warnDuplicateVariantValues(EnumDecl *e) {
+  // An integer enum's tag is its value, so two variants with one value are
+  // one variant under two names: a `match` cannot tell them apart, and the
+  // second arm for them is never taken. Written as the other's name —
+  // `Default = Low` — that is the point, and nothing is said.
+  auto namesAnother = [&](const EnumVariantDecl *v) {
+    const auto *r = v->Discriminant
+                        ? dyn_cast<DeclRefExpr>(v->Discriminant.get())
+                        : nullptr;
+    if (!r || r->Path.empty())
+      return false;
+    for (const auto &other : e->Variants)
+      if (other.get() != v && other->Name == r->Path.back())
+        return true;
+    return false;
+  };
+  for (size_t i = 0; i < e->Variants.size(); ++i) {
+    EnumVariantDecl *v = e->Variants[i].get();
+    if (namesAnother(v))
+      continue;
+    for (size_t j = 0; j < i; ++j) {
+      EnumVariantDecl *w = e->Variants[j].get();
+      bool same = e->RawFloat ? v->FloatValue == w->FloatValue
+                              : v->Value == w->Value;
+      if (!same)
+        continue;
+      std::string value = e->RawFloat ? fmt("{}", v->FloatValue)
+                                      : std::to_string(v->Value);
+      auto d = Diags.warn(v->Discriminant ? v->Discriminant->Range : v->Range,
+                          "'{}' and '{}' have the same value, {}", w->Name,
+                          v->Name, value);
+      if (!v->Discriminant)
+        d.note(fmt("'{}' has no value of its own: it is one more than the "
+                   "variant before it", v->Name)
+                   .c_str());
+      if (!e->RawFloat)
+        d.note("a variant's value is its tag, so a `match` cannot tell these "
+               "two apart");
+      d.related(w->Range, fmt("'{}' is {} here", w->Name, value),
+                fmt("give one a value of its own, or write `{} = {}` to say "
+                    "they are the same on purpose",
+                    v->Name, w->Name));
+      d.code(402);
+      break;
+    }
   }
 }
 

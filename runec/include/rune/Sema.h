@@ -785,6 +785,8 @@ private:
   /// written: a `&var` borrow, a `var` binding, `&var self`, or a temporary
   /// the match owns. Its borrowing bindings may then be lent out mutably.
   bool scrutineeWritable(const Expr *e);
+  /// Warns about two variants of `e` with one value (W0402).
+  void warnDuplicateVariantValues(EnumDecl *e);
   /// Set around checking the pattern of a `match`, `if ... is` or
   /// `while ... is`, whose bindings borrow unless they say `take`.
   bool PatternBorrows = false;
