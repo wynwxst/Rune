@@ -99,6 +99,15 @@ if(RUNE_PYTHON3)
             ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# Workspaces (`rune ws`): several packages under one Rune.toml, built in
+# dependency order; and a package's local units, folders under src/ compiled
+# on their own.
+if(RUNE_PYTHON3)
+  add_test(NAME rune_workspace
+    COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/workspace_test.py
+            ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # Bare metal: freestanding programs with no C library, every safety check
 # reaching their own panic handler, and examples/toyos booted under QEMU.
 # Each half is skipped where this machine cannot run it.

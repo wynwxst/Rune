@@ -12846,6 +12846,46 @@ dashboard v0.1.0
           "it. `rune doc lab::logger` reads the copy from one registry; "
           "`--no-open` only says where the page was written."),
 
+        H("Workspaces"),
+        P("Packages that are worked on together — a program and the "
+          "libraries it is split into — can share one directory as a "
+          "workspace. Its `Rune.toml` has a `[workspace]` table naming the "
+          "packages under it, its members; each member is an ordinary "
+          "package with a manifest of its own, and members use one another "
+          "by `path`. `rune ws` makes and edits the workspace and runs a "
+          "command over every member, a member always after the members it "
+          "uses."),
+        SH("""$ rune ws new studio && cd studio
+$ rune ws add geometry --lib     # makes the package when there is none
+$ rune ws add app
+$ cat Rune.toml
+[workspace]
+members = [
+    "app",
+    "geometry",
+]
+$ rune ws list
+  geometry  geometry  [lib]
+  app  app  [bin]  uses geometry
+$ rune build                     # at the root: every member, geometry first
+$ rune ws run app"""),
+        T(["Command", "Does"],
+          [["`rune ws new <dir>` / `rune ws init`", "make a workspace; `init` "
+            "takes in the packages already below"],
+           ["`rune ws add <dir> [--lib]`", "add a member, making the package "
+            "first if there is none"],
+           ["`rune ws remove <dir>`", "stop treating it as a member; its "
+            "files stay"],
+           ["`rune ws list`", "the members, in the order they build"],
+           ["`rune ws build` / `check` / `test` / `clean` / `doc`",
+            "the command in every member; the same as the bare command at "
+            "the root of a workspace that is not a package itself"],
+           ["`rune ws run <member> [args]`", "run one member's program"]]),
+        N("Inside a member, `rune build` builds that member and what it "
+          "uses. `rune ws` works from anywhere inside the workspace: it looks "
+          "upward for the `[workspace]` table, as `rune` looks for the "
+          "package around it.", label="From a member"),
+
         H("Which registry"),
         P("Every registry has a name: the one its `index.toml` declares, "
           "which `rune pkg init` takes from the directory or `--name`. A "

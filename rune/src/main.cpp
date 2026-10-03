@@ -10,6 +10,7 @@
 //   rune doc                  read docs/ and the source, write target/<p>/docs
 //   rune check                type-check without producing output
 //   rune clean                remove target/
+//   rune ws <command>         work on a workspace of several packages
 //
 // Dependencies are built first, each into its own `target/<profile>/`, and
 // their `.rul` files are collected into this package's deps directory.
@@ -30,6 +31,7 @@
 #include "Manifest.h"
 #include "Registry.h"
 #include "Targets.h"
+#include "Workspace.h"
 
 #include <algorithm>
 #include <cctype>
@@ -2484,6 +2486,18 @@ COMMANDS
                          targets (wasm, windows, linux-arm64, ...) and the
                          package's own [target.<name>] tables
 
+WORKSPACES
+    ws new <dir> | ws init
+                         Make a workspace: a Rune.toml whose [workspace]
+                         table lists the packages (members) under it
+    ws add <dir> [--lib] Add a member, making the package first if needed
+    ws remove <dir>      Stop treating a directory as a member
+    ws list              The members, in the order they build
+    ws build | check | test | clean | doc
+                         Run the command in every member, dependencies first;
+                         at a workspace's root the bare command does the same
+    ws run <member>      Run one member's program
+
 PACKAGES
     search <regex>       Find packages in the configured registries
     desc <name>          Describe a package: versions, authors, dependencies
@@ -2566,6 +2580,21 @@ int main(int argc, char **argv) {
       rest.push_back(a);
     }
     return commandEditorTool(command, rest, opts);
+  }
+
+  // `rune ws` works on the workspace — several packages under one
+  // Rune.toml — and runs `rune` itself in each member.
+  if (command == "ws" || command == "workspace") {
+    std::vector<std::string> rest;
+    for (int i = 2; i < argc; ++i) {
+      std::string a = argv[i];
+      if ((a == "-C" || a == "--directory") && i + 1 < argc) { opts.PackageDir = argv[++i]; continue; }
+      if (a == "-v" || a == "--verbose") { opts.Verbose = true; continue; }
+      rest.push_back(a);
+    }
+    return pm::commandWorkspace(rest, opts.PackageDir,
+                                (fs::path(gExecutableDir) / "rune").string(),
+                                opts.Verbose);
   }
 
   // The package commands take their own flags — `--serve`, `--port`,
@@ -2732,6 +2761,21 @@ int main(int argc, char **argv) {
       if (dir == dir.root_path())
         break;
     }
+  }
+  // At the root of a workspace that is not itself a package, the package
+  // commands mean every member.
+  if ((command == "build" || command == "check" || command == "test" ||
+       command == "clean" || command == "doc") &&
+      opts.DocModule.empty() && pm::isWorkspaceOnly(opts.PackageDir)) {
+    std::vector<std::string> rest;
+    for (int i = 2; i < argc; ++i) {
+      std::string a = argv[i];
+      if ((a == "-C" || a == "--directory") && i + 1 < argc) { ++i; continue; }
+      rest.push_back(a);
+    }
+    return pm::runInMembers(opts.PackageDir,
+                            (fs::path(gExecutableDir) / "rune").string(),
+                            command, rest, opts.Verbose);
   }
   // Resolve the target once, from the root package's manifest. A dependency
   // does not get to pick the toolchain: everything in one build is built for
