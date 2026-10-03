@@ -65,6 +65,15 @@ not expected to be a `String` is typed `CString`, so `let s = "..."` needs no
 annotation where `String` cannot exist. The standard library's modules are
 unaffected, and an expected `String` still gets one — and E0542.
 
+**The standard library, freestanding.** `ConfigSet::forOptions` sets the
+`@Config` key `runtime` to `none` or `hosted`, after the `@runtime(none)`
+directive has been read, so the library can keep a second definition for a
+freestanding build. `process::panic` and `process::assert` do: the hosted ones
+take any `Display` and build a `String`, the freestanding ones take a
+`CString` and pass it straight to `rune_panic`. That is what lets `Vector`,
+`Map` and `Set` — whose only hosted dependency was a literal panic message —
+build on bare metal; examples/toyos runs them on its own heap.
+
 **Sema.** `@panicHandler`, `@allocator` and `@deallocator` give a function a
 fixed symbol (`langItemSymbol` in `AST.h`) and a fixed C signature, checked by
 `checkRuntimeHook` (E0248, and E0249 for a second one). `@weak` is linkage
@@ -80,7 +89,10 @@ driver — nothing to a linker run directly, and nothing at all under
 Everything the code generator calls, as `@export`ed Rune: the panic entry
 points (formatting into a static buffer, since a panic may be the heap
 running out), `rune_alloc` / `rune_drop` over the hooks, `$clone`, `is`,
-`Any`, hashing, `memcpy` and friends, and `__divdi3` and its three siblings
+`Any`, hashing, `memcpy` and friends, the raw blocks `std::mem` is built on
+(`rune_raw_alloc`, `_realloc`, `_free`, `_is_zero` — each block keeps its size
+in a 16-byte header, because `@deallocator` is never told one and a realloc
+has to know how much to copy), and `__divdi3` and its three siblings
 under `@Config(pointer_width == "32")` — written with shifts and subtraction,
 since a `/` there would call itself. Everything a program might want to
 replace is `@weak`.

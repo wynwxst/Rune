@@ -128,9 +128,19 @@ pub fn fail() -> Never {
 /// This is the deliberate way to stop. A failed bounds check inside the
 /// library stops the same way, and prints the same shape of report: the
 /// message, then a traceback when the program was built with `-g`.
+@Config(runtime == "hosted")
 @safe("the runtime prints the message and aborts")
 pub fn panic<M: io::Display>(message: M) -> Never {
     rune_panic(message.display().$cstr(), "explicit call to std::process::panic")
+}
+
+/// The same, built `@runtime(none)`: there is no `String` to display a
+/// message into, so the message is the `CString` a literal already is, and
+/// it goes as it is to the program's `@panicHandler`.
+@Config(runtime == "none")
+@safe("the program's own panic handler takes the message")
+pub fn panic(message: CString) -> Never {
+    rune_panic(message, "explicit call to std::process::panic")
 }
 
 /// Aborts with `message` unless `condition` holds.
@@ -140,7 +150,15 @@ pub fn panic<M: io::Display>(message: M) -> Never {
 /// expression it was given.
 ///
 ///     process::assert(index < count, "index out of range")
+@Config(runtime == "hosted")
 pub fn assert<M: io::Display>(condition: bool, message: M) {
+    if !condition {
+        panic(message)
+    }
+}
+
+@Config(runtime == "none")
+pub fn assert(condition: bool, message: CString) {
     if !condition {
         panic(message)
     }

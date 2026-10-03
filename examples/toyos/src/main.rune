@@ -16,6 +16,8 @@ import toyos::cpu
 import toyos::heap
 import toyos::multiboot
 import toyos::process
+import std::collections::vector
+import std::dictionary
 
 extern "C" {
     /// The initialisers of the kernel's globals that are not simply zero —
@@ -43,6 +45,7 @@ fn kernelMain(magic: u32, infoAddress: u32) -> Never {
     arithmetic()
     safetyChecksAreOn()
     theHeap()
+    theStandardLibrary()
     scheduling()
 
     console::line("")
@@ -113,6 +116,36 @@ fn theHeap() {
         console::check(c.label == 3 && heap::carvedBytes() == carved,
                        "freed space is reused")
     }
+}
+
+/// The standard library's containers, on the kernel heap. They allocate
+/// through `std::mem`, which the freestanding runtime answers from the
+/// kernel's own `@allocator` — growing a vector copies it into a bigger
+/// block, by the size the runtime keeps in front of each one.
+fn theStandardLibrary() {
+    {
+        var squares = vector::Vector<i64>()
+        for i in 0..100 { squares.push(i * i) }
+        var sum: i64 = 0
+        for s in &squares { sum += *s }
+        console::check(squares.length() == 100 && sum == 328350 &&
+                       *squares.look(99) == 9801,
+                       "a Vector grown to 100 elements")
+
+        var ages = dictionary::Map<i64, i64>()
+        for i in 0..40 { ages[i] = i * 2 }
+        ages[7] = 70
+        console::check(ages.length() == 40 && ages[7] == 70 && ages[39] == 78,
+                       "a Map of 40 entries, one replaced")
+
+        var seen = dictionary::Set<i64>()
+        for i in 0..10 { seen.add(i % 4) }
+        var members: i64 = 0
+        for m in seen { members += *m }
+        console::check(seen.length() == 4 && members == 6,
+                       "a Set, iterated")
+    }
+    console::check(heap::bytesInUse == 0, "every container handed its memory back")
 }
 
 /// Processes on a round-robin scheduler, each owned by the one before it.

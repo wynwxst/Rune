@@ -1,0 +1,10 @@
+import fs::sys
+import std::process
+
+// `process::panic` built `@runtime(none)`: no `String` to display a message
+// into, so a literal goes as the `CString` it already is, to the program's
+// own panic handler.
+@export("_start")
+fn start() -> Never {
+    process::panic("out of fuel")
+}

@@ -24,6 +24,7 @@
 /// Stops here, for ever. With no handler of the program's own there is
 /// nowhere to say anything, and carrying on after a failed check is the one
 /// thing a panic exists to prevent.
+@lint(allow(empty-block))
 @export("rune_panic_handler")
 @weak
 fn defaultPanicHandler(message: CString, location: CString) -> Never {
@@ -354,13 +355,63 @@ pub fn isKindOf(obj: *var u8, info: *var u8) -> i32 {
 @export("rune_any_is")
 pub fn anyIs(obj: *var u8, info: *var u8) -> i32 { isKindOf(obj, info) }
 
-/// Raw memory, for code that manages its own: `mem::allocator` and the like.
+/// Raw memory, for code that manages its own: `mem::allocator`, and so
+/// `Vector`, `Map` and the rest of `std::collections`.
+///
+/// Growing a block means copying what it held, and `@deallocator` is told
+/// only where a block is, never how big — so each raw block carries its size
+/// in a header of its own, ahead of what the caller sees. Sixteen bytes of
+/// it, which keeps the caller's part aligned as the allocator's was.
+fn rawHeader() -> usize { 16 as usize }
+
 @export("rune_raw_alloc")
-pub fn rawAlloc(size: u64) -> *var u8 { defaultAllocate(size as usize, 16 as usize) }
+@safe("the header is inside the block the allocator handed back")
+pub fn rawAlloc(size: u64) -> *var u8 {
+    let block = defaultAllocate(size as usize + rawHeader(), 16 as usize)
+    if isNull(block) { return block }
+    unsafe { (block as *var u64)[0] = size }
+    unsafe { (block as usize + rawHeader()) as *var u8 }
+}
+
+/// The block the allocator handed out, from the address its caller holds.
+@safe("only raw blocks reach here, and each has its header before it")
+fn rawBase(block: *var u8) -> *var u8 {
+    unsafe { (block as usize - rawHeader()) as *var u8 }
+}
 
 @export("rune_raw_free")
 pub fn rawFree(block: *var u8) {
-    if !isNull(block) { defaultFree(block) }
+    if !isNull(block) { defaultFree(rawBase(block)) }
+}
+
+/// A block of `size` holding what `block` did, up to the smaller of the two;
+/// `block` is gone afterwards. A null `block` is a fresh allocation, as C's
+/// `realloc` has it.
+@export("rune_raw_realloc")
+@safe("copies no more than either block holds, by the size in its header")
+pub fn rawRealloc(block: *var u8, size: u64) -> *var u8 {
+    if isNull(block) { return rawAlloc(size) }
+    let old = unsafe { (rawBase(block) as *var u64)[0] }
+    let fresh = rawAlloc(size)
+    if isNull(fresh) { return fresh }
+    let keep = if old < size { old } else { size }
+    if keep != 0 { memcpy(fresh, unsafe { block as *u8 }, keep as usize) }
+    rawFree(block)
+    fresh
+}
+
+/// True when `size` bytes from `block` are all zero: `std::mem`'s test for
+/// a slot that was never written.
+@export("rune_raw_is_zero")
+@safe("reads exactly the bytes the caller sized, and only to compare them")
+pub fn rawIsZero(block: *u8, size: u64) -> bool {
+    if size == 0 || isNull(unsafe { block as *var u8 }) { return true }
+    var i: u64 = 0
+    while i < size {
+        if unsafe { block[i as i64] } != 0 { return false }
+        i += 1
+    }
+    true
 }
 
 @export("rune_raw_copy")

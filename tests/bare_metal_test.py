@@ -43,6 +43,7 @@ PROGRAMS = {
     "overflow": ("sys",  True,  101, "panic: integer overflow in `+`"),
     "divzero":  ("sys",  True,  101, "panic: division by zero"),
     "unwrap":   ("sys",  True,  101, "panic: unwrapped an empty Option"),
+    "stdpanic": ("sys",  True,  101, "panic: out of fuel"),
     "heap":     ("sys",  True,  0,   "freed the pair\nfreed a leaf\nfreed a leaf\nlive after scope 0"),
     "optional": ("sys",  True,  23,  ""),
     "noalloc":  ("mini", True,  101, "panic: this program allocates, and declares no @allocator"),

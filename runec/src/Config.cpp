@@ -193,7 +193,8 @@ bool evalComparison(const Expr *lhs, const Expr *rhs, bool wantEqual,
     auto d = diags.error(key->Range, "`{}` is not something `@Config` can "
                                      "compare", name);
     d.note("comparable keys are os, arch, family, pointer_width, endian, "
-           "target, safety, memory, opt_level and overflow_checks, plus "
+           "target, safety, memory, runtime, opt_level and overflow_checks, "
+           "plus "
            "whatever `[config]` in the manifest names");
     d.note("a name set with `--cfg` is written on its own, not compared");
     suggest(d, name, cfg);
@@ -297,6 +298,9 @@ ConfigSet ConfigSet::forOptions(const CompilerOptions &opts) {
   cfg.Values["endian"] = triple.isLittleEndian() ? "little" : "big";
   cfg.Values["safety"] = safetyName(opts.Safety);
   cfg.Values["memory"] = memoryModeName(opts.Memory);
+  // `none` for `@runtime(none)`: no C library and no hosted runtime, so the
+  // standard library keeps to what the freestanding one provides.
+  cfg.Values["runtime"] = opts.Freestanding ? "none" : "hosted";
   cfg.Values["opt_level"] = std::to_string(opts.OptLevel);
   cfg.Values["overflow_checks"] = opts.overflowChecksEnabled() ? "on" : "off";
   for (const auto &kv : cfg.Values)
