@@ -153,15 +153,22 @@ CodeGen::CxxArg CodeGen::classifyCxxArgument(Type *t, unsigned &intRegs,
     return scalar(PtrTy, false);
   case TypeKind::Enum: {
     NominalDecl *nd = t->nominal();
-    if (!nd || !nd->Cxx)
-      return reject("a Rune enum is laid out Rune's way",
-                    "declare the enum inside the `extern \"C++\"` block, "
-                    "where it is C++'s `int`");
-    // C++ sees an `int`; Rune's layout of a payload-less enum is one `i32`
-    // in a struct, so the bytes agree and only the IR type changes.
-    scalar(B->getInt32Ty(), false);
-    out.K = CxxArg::Coerce;
-    return out;
+    auto *e = nd ? dyn_cast<EnumDecl>(static_cast<Decl *>(nd)) : nullptr;
+    bool payloadFree = e && enumPayloadSize(e) == 0;
+    if (nd && (nd->Cxx || payloadFree)) {
+      // C sees an `int`; Rune's layout of a payload-less enum is one `i32`
+      // in a struct, so the bytes agree and only the IR type changes.
+      scalar(B->getInt32Ty(), false);
+      out.K = CxxArg::Coerce;
+      return out;
+    }
+    // An enum with payloads is a tag and a union to C — what
+    // `@Convention("C")` promises, and how C classifies it.
+    if (ClassifyingForC)
+      break;
+    return reject("a Rune enum with payloads is laid out Rune's way",
+                  "declare the enum inside the `extern \"C++\"` block, "
+                  "where it is C++'s `int`");
   }
   case TypeKind::Struct:
   case TypeKind::Tuple:
@@ -638,7 +645,7 @@ bool crossesAsAggregate(Type *t) {
     return false;
   t = t->canonical();
   return t->is(TypeKind::Struct) || t->is(TypeKind::Tuple) ||
-         t->is(TypeKind::Array);
+         t->is(TypeKind::Array) || t->is(TypeKind::Enum);
 }
 } // namespace
 

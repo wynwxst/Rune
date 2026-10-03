@@ -8667,11 +8667,46 @@ fn main() -> i64 {
           "Rune function handed to C as one takes its arguments that way "
           "too. A pointer is still the cheaper way to hand over anything "
           "large.", label="Structs by value"),
-        N("A Rune function `@export`ed to C still takes its arguments as "
-          "Rune passes them. On Windows x64 that differs from C for a struct "
-          "that is not 1, 2, 4 or 8 bytes wide, and such a signature is "
-          "refused with an error saying so; pass a pointer instead.",
-          label="An export on Windows x64", tone="warn"),
+        N("A Rune function `@export`ed to C takes its arguments the C way "
+          "too: where C passes a signature differently from Rune — a struct "
+          "by value — the exported symbol is an adapter that receives them "
+          "as C sends them and makes the Rune call.",
+          label="Being called with a struct"),
+
+        H("@Convention(\"C\")"),
+        P("`@Convention(\"C\")` on a struct or an enum promises C's layout, "
+          "and the compiler holds it to that: fields in the order written, "
+          "with C's padding and alignment; a payload-free enum is a C `int` "
+          "holding its values; an enum with payloads is a tag (`int32_t`, "
+          "the variant's index or value) followed by a union aligned for its "
+          "widest member. Passed by value — to C, from C, through a "
+          "`@cfunction` or an `@export` — it travels as the platform's C "
+          "compiler would pass the same declaration."),
+        S('''import std::io
+import std::mem
+
+@Convention("C")
+struct Packet { kind: u8, length: u32, checksum: u16, stamp: i64 }
+
+@Convention("C")
+enum Level { Debug = 10, Info = 20, Warn = 30 }
+
+@Convention("C")
+enum Reading { Celsius(f64), Raw(i64), Missing }
+
+fn main() -> i64 {
+    // 1 padded to 4, 4, 2 padded to 8, 8: what C's sizeof says
+    io::println(mem::size_of<Packet>())
+    io::println(mem::size_of<Level>())
+    io::println(mem::size_of<Reading>())   // a 4-byte tag, then 8 aligned
+    0
+}''', mode="run", title="Layouts C shares"),
+        P("Every part has to be something C has: numbers, `bool`, "
+          "`Character` (a `uint32_t`), raw pointers, `CString`, "
+          "`@cfunction`s, arrays of those, and other `@Convention(\"C\")` "
+          "types. A `String`, a class, an `Option`, a borrow or a `dyn` is "
+          "Rune's and is refused (E0544), as is a class, a generic type or "
+          "a convention other than `\"C\"` (E0543)."),
 
         H("Pointers and out-parameters"),
         P("A C function has one result, so a second comes back through a "

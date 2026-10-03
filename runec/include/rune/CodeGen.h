@@ -209,6 +209,8 @@ private:
   llvm::FunctionType *functionTypeFor(FunctionDecl *fn);
   /// Byte size of an enum's largest payload.
   uint64_t enumPayloadSize(EnumDecl *e);
+  uint64_t enumPayloadAlign(EnumDecl *e);
+  llvm::Type *enumPayloadFloat(EnumDecl *e, uint64_t align);
   llvm::Type *variantPayloadType(EnumDecl *e, unsigned variantIndex);
   /// Every field of a class, base classes first, matching Sema's indices.
   std::vector<FieldDecl *> allFieldsOf(NominalDecl *nd);
@@ -392,7 +394,8 @@ private:
   /// Drops every definition nothing in the module reaches. What "reaches"
   /// means is decided by linkage: see `setDiscardableLinkage`.
   void pruneUnreachable();
-  bool abiRejectsByValue(Type *t);
+  void releaseUnusedRuntime();
+  void exportCAdapters();
   /// True when a place expression is rooted in something with storage of its
   /// own — a local, `self`, a global — rather than in a value a call just
   /// produced. Only the former can be re-evaluated for its address.
@@ -464,7 +467,6 @@ private:
   bool isSharedRefType(Type *t);
   const char *retainFnFor(Type *t);
   const char *releaseFnFor(Type *t);
-  void checkForeignABI(FunctionDecl *fn);
   void emitFunctionBody(FunctionDecl *fn);
   void emitClosureBody(FunctionDecl *lifted);
   llvm::GlobalVariable *emitTypeInfo(NominalDecl *nd);

@@ -1805,6 +1805,7 @@ int compileWithOptions(const CompilerOptions &given) {
   if (opts.Verbose)
     diags.status("generating code");
 
+  opts.LinksRuneLibraries = !libraryObjects.empty();
   CodeGen cg(sm, diags, typeCtx, sema.result(), opts);
   bool generated = false;
   timer.phase("codegen", [&] { generated = cg.run(); });

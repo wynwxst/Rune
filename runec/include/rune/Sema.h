@@ -833,6 +833,7 @@ private:
   /// `Option`s to the payload. `eq` receives the binding the innermost
   /// payload compares with, or stays null when the comparison is builtin.
   bool equalityDefined(Type *t, FunctionDecl *&eq);
+  void checkConventions();
   bool typeConformsTo(Type *t, MarkDecl *mark);
   //=== Automatic marks ===================================================//
   /// Validates `@auto` on a mark and records it.

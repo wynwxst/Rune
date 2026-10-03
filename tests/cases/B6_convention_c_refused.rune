@@ -1,0 +1,7 @@
+// EXPECT-ERROR: field 'name' cannot be laid out the way C would
+// A `@Convention("C")` type promises C's layout, so every part has to be
+// something C has: a `String` is Rune's.
+@Convention("C")
+struct Person { age: i32, name: String }
+
+fn main() -> i64 { 0 }

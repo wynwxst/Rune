@@ -5,6 +5,7 @@
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include <filesystem>
+#include <functional>
 
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
@@ -313,6 +314,48 @@ llvm::Type *CodeGen::variantPayloadType(EnumDecl *e, unsigned variantIndex) {
   return StructType::get(*Ctx, fields);
 }
 
+/// `double` when every scalar in every variant's payload is a `double` and it
+/// fills its alignment exactly; `float` likewise; otherwise null.
+llvm::Type *CodeGen::enumPayloadFloat(EnumDecl *e, uint64_t align) {
+  llvm::Type *only = nullptr;
+  std::function<bool(llvm::Type *)> walk = [&](llvm::Type *t) {
+    if (auto *st = dyn_cast<StructType>(t)) {
+      for (llvm::Type *el : st->elements())
+        if (!walk(el))
+          return false;
+      return true;
+    }
+    if (auto *at = dyn_cast<ArrayType>(t))
+      return walk(at->getElementType());
+    if (!t->isFloatTy() && !t->isDoubleTy())
+      return false;
+    if (only && only != t)
+      return false;
+    only = t;
+    return true;
+  };
+  for (unsigned i = 0; i < e->Variants.size(); ++i) {
+    llvm::Type *pt = variantPayloadType(e, i);
+    if (!pt->isSized() || !walk(pt))
+      return nullptr;
+  }
+  if (!only || M->getDataLayout().getABITypeAlign(only).value() != align)
+    return nullptr;
+  return only;
+}
+
+/// The strictest alignment any variant's payload asks for: 1, 2, 4, 8 or 16.
+uint64_t CodeGen::enumPayloadAlign(EnumDecl *e) {
+  const DataLayout &DL = M->getDataLayout();
+  uint64_t align = 1;
+  for (unsigned i = 0; i < e->Variants.size(); ++i) {
+    llvm::Type *pt = variantPayloadType(e, i);
+    if (pt->isSized())
+      align = std::max<uint64_t>(align, DL.getABITypeAlign(pt).value());
+  }
+  return std::min<uint64_t>(align, 16);
+}
+
 uint64_t CodeGen::enumPayloadSize(EnumDecl *e) {
   const DataLayout &DL = M->getDataLayout();
   uint64_t maxSize = 0;
@@ -372,9 +415,21 @@ llvm::StructType *CodeGen::layoutOf(NominalDecl *nd, Type *t) {
   std::vector<llvm::Type *> body;
   if (auto *e = dyn_cast<EnumDecl>(static_cast<Decl *>(nd))) {
     body.push_back(B->getInt32Ty()); // discriminant
+    // The payload is a run of the widest-aligned integer any variant needs,
+    // so it starts where C's tagged union would put it: an `i64` after the
+    // tag at 8, not 4. Bytes would leave it at 4, which is a misaligned load
+    // on a processor that minds — and a layout C does not share.
     uint64_t payload = enumPayloadSize(e);
-    if (payload)
-      body.push_back(ArrayType::get(B->getInt8Ty(), payload));
+    if (payload) {
+      uint64_t align = enumPayloadAlign(e);
+      // All `double`s (or all `float`s) in every variant: a run of that, so
+      // C's classification — floating-point registers — is what the IR says.
+      llvm::Type *unit = enumPayloadFloat(e, align);
+      if (!unit)
+        unit = IntegerType::get(*Ctx, static_cast<unsigned>(align * 8));
+      uint64_t unitSize = M->getDataLayout().getTypeAllocSize(unit);
+      body.push_back(ArrayType::get(unit, (payload + unitSize - 1) / unitSize));
+    }
   } else {
     if (isa<ClassDecl>(static_cast<Decl *>(nd)))
       body.push_back(ObjectHeaderTy);
@@ -3185,53 +3240,6 @@ bool CodeGen::isAncillary(const Decl *d) const {
   return d && Sema.isAncillary(d->ModulePath);
 }
 
-/// True when `t` is a struct that this target's C ABI does not pass the way
-/// the code generator emits it.
-///
-/// Win64 passes an aggregate in a register only when it is exactly 1, 2, 4 or
-/// 8 bytes wide; anything else goes as a pointer to a copy the caller makes,
-/// and a result comes back through a hidden pointer. We emit the value
-/// directly. A call into C is lowered the way C passes it (`cSignatureFor`),
-/// but a Rune function exported to C takes its arguments as LLVM lowers
-/// them. Rather than accept something C will misread, say so.
-bool CodeGen::abiRejectsByValue(Type *t) {
-  if (!t)
-    return false;
-  const llvm::Triple triple(M->getTargetTriple());
-  if (!triple.isOSBinFormatCOFF() || triple.getArch() != llvm::Triple::x86_64)
-    return false;
-  if (!t->is(TypeKind::Struct) && !t->is(TypeKind::Tuple))
-    return false;
-  llvm::Type *lowered = lower(t);
-  if (!lowered->isSized())
-    return false;
-  uint64_t size = M->getDataLayout().getTypeAllocSize(lowered);
-  return size != 1 && size != 2 && size != 4 && size != 8;
-}
-
-/// Checks a signature that C is on the other side of.
-void CodeGen::checkForeignABI(FunctionDecl *fn) {
-  auto complain = [&](SourceRange where, Type *t, const char *role) {
-    if (!abiRejectsByValue(t))
-      return;
-    auto d = Diags.error(where,
-                         "'{}' cannot cross the C boundary by value on this "
-                         "target", t->toString());
-    d.note("Windows x64 passes a struct in a register only at 1, 2, 4 or 8 "
-           "bytes wide, and this one is {} bytes",
-           M->getDataLayout().getTypeAllocSize(lower(t)));
-    d.note("pass it as a pointer instead — `*{}` for the {}, which every "
-           "target handles the same way", t->toString(), role);
-    d.code(504);
-  };
-  for (const Param &p : fn->Params)
-    complain(p.TypeAnnotation ? p.TypeAnnotation->Range : fn->Range, p.Ty,
-             "parameter");
-  if (fn->Ty)
-    complain(fn->ReturnType ? fn->ReturnType->Range : fn->Range,
-             fn->Ty->result(), "result");
-}
-
 Function *CodeGen::declareFunction(FunctionDecl *fn) {
   auto it = Functions.find(fn);
   if (it != Functions.end())
@@ -3255,12 +3263,6 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     fn->CodeGenFn = existing;
     return existing;
   }
-
-  // A foreign `extern "C"` function is called the way C passes a struct
-  // (`cSignatureFor`); a Rune function exported to C still takes its
-  // arguments Rune's way, which C would misread on Windows x64.
-  if (isExportedFunction(fn) && !fn->IsExtern)
-    checkForeignABI(fn);
 
   auto *f = Function::Create(ft, GlobalValue::ExternalLinkage, name, *M);
   if (isCxxExtern(fn)) {
@@ -4477,6 +4479,11 @@ bool CodeGen::run() {
   if (Diags.hadError())
     return false;
 
+  exportCAdapters();
+  if (Opts.Freestanding && Opts.Output == OutputKind::Executable &&
+      !Opts.LinksRuneLibraries)
+    releaseUnusedRuntime();
+
   // Pruning first, and verifying what is left: the module that goes to the
   // back end is the one worth checking, and there is a great deal more of it
   // before the prune than after.
@@ -4514,6 +4521,60 @@ bool CodeGen::run() {
 /// Nothing is lost. A dropped definition is one no call, no vtable, no
 /// initialiser and no metadata in this module mentions, and another artefact
 /// that wants it carries — or merges in — its own copy.
+/// A freestanding executable carries the freestanding runtime, and every
+/// entry point in it is exported: a library compiled on its own calls them by
+/// name. When no such library is linked, this module is every caller there
+/// is, so an entry point it never calls — `rune_any_is` in a kernel with no
+/// `Any` — is made discardable and goes with the rest of the unreached code.
+///
+/// Not the C library's names, nor the 64-bit division helpers: the back end
+/// calls those itself, after the IR is final, for a large copy or a `/` the
+/// processor cannot do.
+/// An `@export`ed function is called from C, by C's rules. Where those
+/// differ from how Rune passes the same signature — a struct by value — the
+/// exported symbol is an adapter that takes its arguments the C way and makes
+/// the Rune call; the Rune body keeps an internal name, and Rune's own calls
+/// go straight to it. `@cfunction` pointers handed to C get the same adapter.
+void CodeGen::exportCAdapters() {
+  std::vector<std::pair<FunctionDecl *, llvm::Function *>> exported;
+  for (auto &[decl, f] : Functions)
+    if (f && !f->isDeclaration() && !decl->IsExtern && decl->hasAttr("export"))
+      exported.push_back({decl, f});
+  for (auto &[decl, f] : exported) {
+    if (!decl->Ty ||
+        !cSignatureFor(decl->Ty->params(), decl->Ty->result(), false))
+      continue;
+    const std::string name = f->getName().str();
+    const GlobalValue::LinkageTypes linkage = f->getLinkage();
+    f->setName(name + ".rune");
+    f->setLinkage(GlobalValue::InternalLinkage);
+    Function *adapter = cAdapterFor(decl, f);
+    if (adapter == f)
+      continue;
+    adapter->setName(name);
+    adapter->setLinkage(linkage);
+  }
+}
+
+void CodeGen::releaseUnusedRuntime() {
+  const std::string runtime =
+      (std::filesystem::path(Opts.RunetimeDir) / "freestanding.rune")
+          .lexically_normal()
+          .string();
+  for (auto &[decl, f] : Functions) {
+    if (!f || f->isDeclaration() || !f->hasExternalLinkage())
+      continue;
+    const SourceFile *file = SM.fileFor(decl->Range.begin());
+    if (!file || std::filesystem::path(file->Path).lexically_normal().string() !=
+                     runtime)
+      continue;
+    llvm::StringRef name = f->getName();
+    if (name.starts_with("mem") || name.starts_with("__"))
+      continue;
+    setDiscardableLinkage(f, name.str());
+  }
+}
+
 void CodeGen::pruneUnreachable() {
   ModuleAnalysisManager mam;
   PassBuilder pb;

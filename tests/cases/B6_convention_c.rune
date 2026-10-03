@@ -1,0 +1,55 @@
+// CXX: cxx/convention.cpp
+// EXPECT: layout 4081624
+// EXPECT: by value 4006 in memory 4006
+// EXPECT: colour 40
+// EXPECT: values 7 25 -1 made 99
+// EXPECT: from C: grown -1 -1 5 7, area 15
+// `@Convention("C")` types are laid out and passed exactly as C would: a
+// struct with C's padding, a payload-free enum as an `int`, an enum with
+// payloads as a tag and an aligned union. An `@export`ed function taking or
+// returning a struct by value is called by C's rules, through an adapter.
+import std::io
+
+@Convention("C")
+struct Wide { x: f64, y: f64, w: f64, h: f64 }
+
+@Convention("C")
+struct Packed { a: u8, b: i32, c: u16, d: i64 }
+
+@Convention("C")
+enum Colour { Red = 1, Green = 2, Blue = 4 }
+
+@Convention("C")
+enum Value { Int(i64), Real(f64), Empty }
+
+extern "C" {
+    fn rune_conv_layout() -> i64
+    fn rune_conv_packed(p: Packed) -> i64
+    fn rune_conv_packed_at(p: *Packed) -> i64
+    fn rune_conv_colour(c: Colour) -> i32
+    fn rune_conv_value(v: Value) -> i64
+    fn rune_conv_make(n: i64) -> Value
+    fn rune_conv_call_back()
+}
+
+@export("rune_conv_area")
+fn area(r: Wide) -> f64 { r.w * r.h }
+
+@export("rune_conv_grow")
+fn grow(r: Wide, by: f64) -> Wide {
+    Wide { x: r.x - by, y: r.y - by, w: r.w + 2.0 * by, h: r.h + 2.0 * by }
+}
+
+@unsafe fn main() -> i64 {
+    io::println("layout " + rune_conv_layout().$str())
+    var p = Packed { a: 1, b: 5, c: 1000, d: 3000 }
+    io::println("by value " + rune_conv_packed(p).$str() + " in memory " +
+                rune_conv_packed_at(&p as *Packed).$str())
+    io::println("colour " + rune_conv_colour(Colour::Blue).$str())
+    let made = match rune_conv_make(99) { Value::Int(n) => n, _ => 0 }
+    io::println("values " + rune_conv_value(Value::Int(7)).$str() + " " +
+                rune_conv_value(Value::Real(2.5)).$str() + " " +
+                rune_conv_value(Value::Empty).$str() + " made " + made.$str())
+    rune_conv_call_back()
+    0
+}

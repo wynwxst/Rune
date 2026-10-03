@@ -148,6 +148,10 @@ struct CompilerOptions {
   bool WarningsAsErrors = false;
   bool NoWarnings = false;
   bool NoStdlib = false;
+  /// Objects compiled from imported `.rul` libraries are linked into this
+  /// artefact. They may call the freestanding runtime by name, so its entry
+  /// points have to survive even where this module does not call them.
+  bool LinksRuneLibraries = false;
   /// `--runtime none` (or `@runtime(none)` at the top of a file): build a
   /// freestanding program. Nothing hosted is linked — no C library, no
   /// `libruneruntime.a` — and what the generated code needs of a runtime

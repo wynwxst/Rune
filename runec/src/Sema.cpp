@@ -575,6 +575,7 @@ bool Sema::check() {
   // known now, so the question can finally be answered.
   reportSlotClashes();
   checkStrongCycles();
+  checkConventions();
   // Everything is declared, so bodies can be checked: first the generic
   // instantiations that earlier passes asked for, then the modules.
   // Every method table is settled, so each type's `deinit` — whether it came
@@ -5742,6 +5743,107 @@ void Sema::checkAvailableUnderZombie(Decl *d, SourceRange at) {
   e.code(292);
 }
 
+/// True when a field of type `t` means the same thing to C: a number, a
+/// `bool`, a `Character` (a `uint32_t`), a raw pointer, a `CString`, a C
+/// function pointer, an array of those, or a type that is `@Convention("C")`
+/// itself. `why` names what is not.
+static bool representableInC(Type *t, std::string &why) {
+  if (!t)
+    return true;
+  t = t->canonical();
+  switch (t->kind()) {
+  case TypeKind::Bool:
+  case TypeKind::Int:
+  case TypeKind::Float:
+  case TypeKind::Char:
+  case TypeKind::CString:
+  case TypeKind::CFunction:
+  case TypeKind::Error:
+    return true;
+  case TypeKind::Pointer:
+    if (t->isRawPointer())
+      return true;
+    why = "a borrow is checked by Rune and means nothing to C; use `*T`";
+    return false;
+  case TypeKind::Array:
+    return representableInC(t->element(), why);
+  case TypeKind::Struct:
+  case TypeKind::Enum:
+    if (NominalDecl *nd = t->nominal())
+      if (static_cast<Decl *>(nd)->findAttr("Convention"))
+        return true;
+    why = "'" + t->toString() + "' is laid out the way Rune likes; give it "
+          "`@Convention(\"C\")` too";
+    return false;
+  default:
+    why = "a '" + t->toString() + "' is a Rune value C cannot read";
+    return false;
+  }
+}
+
+/// `@Convention("C")` on a struct or an enum: laid out, and passed by value,
+/// exactly as C would — fields in the order written with C's padding and
+/// alignment, a payload-free enum as a C `int`, an enum with payloads as a
+/// tag followed by a union aligned for its widest member. What is promised
+/// has to be possible, so every part must be something C has (E0544).
+void Sema::checkConventions() {
+  for (Module *m : Modules)
+    for (auto &d : m->Decls) {
+      auto *nd = dyn_cast<NominalDecl>(d.get());
+      if (!nd)
+        continue;
+      Decl *decl = static_cast<Decl *>(nd);
+      const Attribute *a = decl->findAttr("Convention");
+      if (!a)
+        continue;
+      auto *lit = a->Args.size() == 1 ? dyn_cast<StringLitExpr>(a->Args[0].get())
+                                      : nullptr;
+      if (!lit || lit->Value != "C") {
+        Diags.error(a->Range, "`@Convention` takes one convention, and the one "
+                              "there is is \"C\"")
+            .note("write `@Convention(\"C\")`")
+            .code(543);
+        continue;
+      }
+      if (isa<ClassDecl>(decl) || isa<MarkDecl>(decl)) {
+        Diags.error(a->Range, "`@Convention(\"C\")` is for a struct or an enum")
+            .note("a class is an object Rune allocates and frees; C reaches it "
+                  "only through a pointer")
+            .code(543);
+        continue;
+      }
+      if (!nd->Generics.empty()) {
+        Diags.error(a->Range, "a `@Convention(\"C\")` type cannot be generic")
+            .note("C sees one layout per type, so its fields need one type each")
+            .code(543);
+        continue;
+      }
+      auto check = [&](Type *t, SourceRange where, const std::string &what) {
+        std::string why;
+        if (representableInC(t, why))
+          return;
+        Diags.error(where, "{} cannot be laid out the way C would", what)
+            .note("{}", why)
+            .note("'{}' is `@Convention(\"C\")`", decl->Name)
+            .code(544);
+      };
+      for (auto &f : nd->Fields)
+        check(f->Ty, f->Range, "field '" + f->Name + "'");
+      if (auto *e = dyn_cast<EnumDecl>(decl)) {
+        if (e->RawFloat)
+          Diags.error(a->Range, "a C enum's values are integers")
+              .note("'{}' has float values", e->Name)
+              .code(544);
+        for (auto &v : e->Variants) {
+          for (auto &tt : v->TupleTypes)
+            check(tt->Resolved, v->Range, "variant '" + v->Name + "'");
+          for (auto &fd : v->Fields)
+            check(fd->Ty, fd->Range, "variant '" + v->Name + "'");
+        }
+      }
+    }
+}
+
 bool Sema::isBuiltinDecorator(const std::string &name) {
   static const std::set<std::string> kBuiltin = {
       "unsafe", "safe",  "inline", "noinline", "export",
@@ -5769,6 +5871,8 @@ bool Sema::isBuiltinDecorator(const std::string &name) {
       // carrying one here is one this build kept, so there is nothing left to
       // do but recognise the name.
       "Config", "config",
+      // `@Convention("C")` on a struct or enum: checked by `checkConventions`.
+      "Convention",
       // The linter's: `@lint(allow(unused-variable))`. The compiler reads
       // nothing in it — the arguments are rule names, not expressions to
       // check — and only has to know the name.
