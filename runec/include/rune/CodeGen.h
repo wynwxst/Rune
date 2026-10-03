@@ -519,6 +519,10 @@ private:
   /// The call itself; `emitCall` wraps a suspension point around it.
   llvm::Value *emitCallPlain(CallExpr *c);
   llvm::Value *emitBinary(BinaryExpr *b);
+  /// `l == r` for two values of type `t`, read through `Option`s; `eq` is
+  /// the binding the innermost payload compares with, if it has one.
+  llvm::Value *emitEquality(llvm::Value *l, llvm::Value *r, Type *t,
+                            FunctionDecl *eq);
   llvm::Value *emitUnary(UnaryExpr *u);
   llvm::Value *emitAssign(AssignExpr *a);
   llvm::Value *emitAssignInto(AssignExpr *a, llvm::Value *slot, Type *lt);

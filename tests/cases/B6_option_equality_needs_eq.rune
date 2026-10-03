@@ -1,0 +1,12 @@
+// EXPECT-ERROR: its payload 'Point' has no `==`
+// An Option compares its payloads, so a payload type with no `==` leaves
+// the Option without one too — refused, rather than comparing variants only.
+import std::io
+
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 {
+    let a: Point? = Point { x: 1, y: 2 }
+    io::println(a == a)
+    0
+}

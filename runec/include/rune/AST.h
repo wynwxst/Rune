@@ -556,6 +556,9 @@ struct BinaryExpr : Expr {
   BinaryOp Op;
   ExprPtr LHS, RHS;
   SourceRange OpRange;
+  /// `==` on two `Option`s compares the payloads when both are `Some`; this
+  /// is the `eq` the innermost payload type is bound to, when it has one.
+  FunctionDecl *PayloadEq = nullptr;
   BinaryExpr() : Expr(NodeKind::Binary), Op(BinaryOp::Add) {}
 };
 

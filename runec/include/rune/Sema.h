@@ -829,6 +829,10 @@ private:
   /// True when the language already gives `op` a meaning for this pair, which
   /// is what an overload may never replace.
   bool builtinOperatorApplies(const std::string &op, Type *lhs, Type *rhs);
+  /// True when `==` means something for two `t`s, reading through
+  /// `Option`s to the payload. `eq` receives the binding the innermost
+  /// payload compares with, or stays null when the comparison is builtin.
+  bool equalityDefined(Type *t, FunctionDecl *&eq);
   bool typeConformsTo(Type *t, MarkDecl *mark);
   //=== Automatic marks ===================================================//
   /// Validates `@auto` on a mark and records it.
