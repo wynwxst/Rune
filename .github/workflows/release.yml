@@ -69,7 +69,7 @@ jobs:
 
       - name: Cached LLVM
         id: llvm-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: llvm-install
           key: llvm-${{ env.LLVM_VERSION }}-${{ matrix.platform }}-${{ hashFiles('scripts/build-llvm.sh') }}
@@ -78,6 +78,15 @@ jobs:
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         shell: bash
         run: scripts/build-llvm.sh "$LLVM_VERSION" "$PWD/llvm-install"
+
+      # Saved here, not in the cache action's post step, which only runs when
+      # the whole job succeeds: a later failure must not throw LLVM away.
+      - name: Save LLVM cache
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: llvm-install
+          key: llvm-${{ env.LLVM_VERSION }}-${{ matrix.platform }}-${{ hashFiles('scripts/build-llvm.sh') }}
 
       - name: Build, test and pack
         shell: bash
@@ -122,7 +131,7 @@ jobs:
 
       - name: Cached LLVM
         id: llvm-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: llvm-install
           key: llvm-${{ env.LLVM_VERSION }}-windows-x86_64-${{ hashFiles('scripts/build-llvm.sh') }}
@@ -130,6 +139,15 @@ jobs:
       - name: Build LLVM
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: scripts/build-llvm.sh "$LLVM_VERSION" "$PWD/llvm-install"
+
+      # Saved here, not in the cache action's post step, which only runs when
+      # the whole job succeeds: a later failure must not throw LLVM away.
+      - name: Save LLVM cache
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: llvm-install
+          key: llvm-${{ env.LLVM_VERSION }}-windows-x86_64-${{ hashFiles('scripts/build-llvm.sh') }}
 
       # The test harness is written for a POSIX shell's view of processes;
       # its results on Windows are reported but do not stop the release.
