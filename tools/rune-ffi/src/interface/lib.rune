@@ -1,0 +1,225 @@
+// interface: C headers in, Rune bindings out.
+//
+// What Rust's bindgen does, written in Rune: libclang reads the headers
+// exactly as the target's C compiler would — preprocessing, parsing and
+// laying out every struct — and this unit walks what clang found and writes
+// it as Rune: `#Convention("C")` structs, constants, and a `pub extern "C"`
+// block. libclang is reached through Rune's own `extern "C"` declarations
+// (`interface::clang`); there is no C source anywhere.
+//
+//     var b = interface::Builder()
+//     b.header("/usr/include/zlib.h")
+//     b.link("z")
+//     match b.generate() {
+//         Ok(bindings) => bindings.writeTo(&"src/zlib.rune"),
+//         Err(why) => io::eprintln(why),
+//     }
+//
+// The bindings for the headers asked for hold what those headers declare,
+// and every type that reaches — not the rest of whatever system headers
+// they include. `allowFunction`, `allowType`, `allowVar` and `allowFile`
+// choose differently; `block` and `opaque` leave things out.
+
+import std::io
+import std::mem
+import std::collections::vector
+import interface::clang::*
+import interface::model
+import interface::ingest
+import interface::target
+import interface::emit
+
+/// The bindings one run produced.
+pub struct Bindings {
+    /// The Rune source.
+    pub source: String
+    /// What was skipped, and why: declarations the parser could not read,
+    /// headers it could not find, functions that pass what Rune cannot hold.
+    pub warnings: vector::Vector<String>
+}
+
+extend Bindings {
+    /// Writes the source to `path`.
+    pub fn writeTo(&self, path: &String) -> io::FileError? {
+        match io::writeString(path, self.source.$clone()) {
+            Ok(n) => nil,
+            Err(e) => Some(e),
+        }
+    }
+}
+
+/// How to read the headers, and what to write.
+pub class Builder {
+    headers: vector::Vector<String>
+    texts: vector::Vector<String>
+    textNames: vector::Vector<String>
+    args: vector::Vector<String>
+    triple: String
+    sysroot: String
+    pub options: emit::Options
+
+    fn init(self) {
+        self.headers = vector::Vector<String>()
+        self.texts = vector::Vector<String>()
+        self.textNames = vector::Vector<String>()
+        self.args = vector::Vector<String>()
+        self.triple = target::hostTriple()
+        self.sysroot = ""
+        self.options = emit::Options {}
+    }
+
+    /// A header to bind, by path.
+    pub fn header(&var self, path: String) { self.headers.push(path) }
+
+    /// A header to bind, given as text — as though it were a file called
+    /// `name`.
+    pub fn headerText(&var self, name: String, text: String) {
+        self.textNames.push(name)
+        self.texts.push(text)
+    }
+
+    /// Another directory to search for `#include`s.
+    pub fn includeDir(&var self, dir: String) { self.args.push("-I" + dir) }
+
+    /// `-D name=value`. An empty value is `1`.
+    pub fn define(&var self, name: String, value: String) {
+        if value.$isEmpty() { self.args.push("-D" + name) } else { self.args.push("-D" + name + "=" + value) }
+    }
+
+    pub fn undefine(&var self, name: String) { self.args.push("-U" + name) }
+
+    /// Any other argument for clang, as its command line would take it.
+    pub fn clangArg(&var self, arg: String) { self.args.push(arg) }
+
+    /// The machine the bindings are for, as a triple. The host by default.
+    pub fn target(&var self, triple: String) { self.triple = triple }
+
+    /// Where the target's headers are, instead of the system's own.
+    pub fn sysroot(&var self, dir: String) { self.sysroot = dir }
+
+    pub fn allowFunction(&var self, pattern: String) { self.options.allowFunctions.push(pattern) }
+    pub fn allowType(&var self, pattern: String) { self.options.allowTypes.push(pattern) }
+    pub fn allowVar(&var self, pattern: String) { self.options.allowVars.push(pattern) }
+    pub fn allowFile(&var self, pattern: String) { self.options.allowFiles.push(pattern) }
+    pub fn block(&var self, pattern: String) { self.options.block.push(pattern) }
+    pub fn opaque(&var self, pattern: String) { self.options.opaque.push(pattern) }
+
+    /// A library the bindings link with: `#link("name")` at their top.
+    pub fn link(&var self, library: String) { self.options.links.push(library) }
+
+    /// Reads the headers with libclang and writes the bindings.
+    #safe("libclang is given strings and arrays that outlive the call, and its results are disposed")
+    pub fn generate(&self) -> Result<Bindings, String> {
+        if self.headers.length() == 0 && self.texts.length() == 0 {
+            return Err("no header to read: call `header` or `headerText` first")
+        }
+        var args = target::clangArgs(&self.triple, &self.sysroot)
+        for a in self.args { args.push(a.$clone()) }
+
+        // One header is parsed as itself. Several — or any given as text —
+        // are included from a header written for the purpose, so they are
+        // one translation unit, as they would be in a C file.
+        var unsavedNames = vector::Vector<String>()
+        var unsavedTexts = vector::Vector<String>()
+        var file = ""
+        var names = ""
+        for h in self.headers { names = names + (if names.$isEmpty() { "" } else { ", " }) + "`" + baseName(h) + "`" }
+        for n in self.textNames { names = names + (if names.$isEmpty() { "" } else { ", " }) + "`" + n + "`" }
+        if self.headers.length() == 1 && self.texts.length() == 0 {
+            file = self.headers.look(0).$clone()
+        } else {
+            var umbrella = ""
+            for h in self.headers { umbrella = umbrella + "#include \"" + h + "\"\n" }
+            var k = 0
+            // libclang finds a header given as text by its exact path, so
+            // each is given one, absolute, in a directory nothing else uses.
+            while k < self.texts.length() {
+                let path = "/interface-text/" + self.textNames.look(k)
+                unsavedNames.push(path.$clone())
+                unsavedTexts.push(self.texts.look(k).$clone())
+                umbrella = umbrella + "#include \"" + path + "\"\n"
+                k += 1
+            }
+            file = "/interface-text/umbrella.h"
+            unsavedNames.push(file.$clone())
+            unsavedTexts.push(umbrella)
+        }
+
+        var cargs = vector::Vector<CString>()
+        for a in args { cargs.push(a.$cstr()) }
+        var unsaved = vector::Vector<CXUnsavedFile>()
+        var k = 0
+        while k < unsavedNames.length() {
+            unsaved.push(CXUnsavedFile { filename: unsavedNames.look(k).$cstr(),
+                                         contents: unsavedTexts.look(k).$cstr(),
+                                         length: unsavedTexts.look(k).$length() as u64 })
+            k += 1
+        }
+
+        let index = clang_createIndex(0, 0)
+        let argPtr = mem::slice_data(cargs.asSlice()) as *CString
+        let unsavedPtr = if unsaved.length() == 0 { 0 as *var CXUnsavedFile }
+                         else { mem::slice_data(unsaved.asSlice()) }
+        let unit = clang_parseTranslationUnit(index, file.$cstr(), argPtr, cargs.length() as i32,
+                                              unsavedPtr, unsaved.length() as u32,
+                                              CXTranslationUnit_DetailedPreprocessingRecord |
+                                              CXTranslationUnit_SkipFunctionBodies)
+        if (unit as usize) == 0 {
+            clang_disposeIndex(index)
+            return Err("libclang could not read " + file)
+        }
+
+        var warnings = vector::Vector<String>()
+        var fatal = false
+        let nd = clang_getNumDiagnostics(unit)
+        var d: u32 = 0
+        while d < nd {
+            let diag = clang_getDiagnostic(unit, d)
+            let severity = clang_getDiagnosticSeverity(diag)
+            if severity >= 3 {
+                warnings.push(take(clang_formatDiagnostic(diag, 1)))
+                if severity >= 4 { fatal = true }
+            }
+            clang_disposeDiagnostic(diag)
+            d += 1
+        }
+        if fatal {
+            clang_disposeTranslationUnit(unit)
+            clang_disposeIndex(index)
+            var why = "clang could not read the headers:"
+            for w in warnings { why = why + "\n  " + w }
+            return Err(why)
+        }
+
+        var walk = ingest::Ingest(model::Model(target::dataModel(&self.triple)), unit)
+        walk.run()
+        let m = walk.finish()
+
+        // The headers asked for are the ones whose declarations are wanted.
+        var mains = vector::Vector<i64>()
+        var fi = 0
+        while fi < m.files.length() {
+            let path = m.files.look(fi).$clone()
+            for h in self.headers { if path == h || endsWith(&path, h) || endsWith(h, &path) { mains.push(fi) } }
+            for n in self.textNames { if path == n || endsWith(&path, n) { mains.push(fi) } }
+            fi += 1
+        }
+        var e = emit::Emitter(m, self.options.$clone())
+        for f in mains { e.markMainFile(*f) }
+        let source = e.generate(&names)
+        for w in e.warningsOf() { warnings.push(w.$clone()) }
+        clang_disposeTranslationUnit(unit)
+        clang_disposeIndex(index)
+        Ok(Bindings { source: source, warnings: warnings })
+    }
+}
+
+fn endsWith(s: &String, tail: &String) -> bool {
+    s.$length() >= tail.$length() && s.$substring(s.$length() - tail.$length(), s.$length()) == tail
+}
+
+fn baseName(path: &String) -> String {
+    var i = path.$length() - 1
+    while i >= 0 && path.$byteAt(i) != 47 { i -= 1 }
+    path.$substring(i + 1, path.$length())
+}

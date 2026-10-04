@@ -43,9 +43,9 @@ fn main() -> i64 {
 }
 ```
 
-`triple()` is the one answer that is not a fixed list, so it is the compiler's own rather than a `@Config` branch. It still costs nothing: the string is in the object file.
+`triple()` is the one answer that is not a fixed list, so it is the compiler's own rather than a `#Config` branch. It still costs nothing: the string is in the object file.
 
 > [!NOTE]
-> **`@Config` or `std::arch`?**
+> **`#Config` or `std::arch`?**
 >
-> These are the same answers `@Config` gives, in a form you can compute with. Reach for `@Config` when a declaration should not **exist** on a target — a function that calls something only Windows has — and for `std::arch` when a value or a type depends on it.
+> These are the same answers `#Config` gives, in a form you can compute with. Reach for `#Config` when a declaration should not **exist** on a target — a function that calls something only Windows has — and for `std::arch` when a value or a type depends on it.

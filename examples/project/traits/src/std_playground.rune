@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 import std
 
 fn main() -> i64 {

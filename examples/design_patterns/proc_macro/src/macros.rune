@@ -1,4 +1,4 @@
-@type(Macros)
+#type(Macros)
 // A list comprehension, as a procedural macro:
 //
 //     comprehend!(x * 2 for x in xs if x > 0)      // a Vector of the doubles
@@ -13,7 +13,7 @@ import std::Macro
 ///
 /// The condition is tested before the value is computed, as it reads: only
 /// the items it lets through are mapped.
-@macro
+#macro
 pub fn comprehend(input: Macro::Tokens) -> Macro::Tokens {
     let c = input.capture("$value for $item in $source [if $condition]")
     if !c.matched() {

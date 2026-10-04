@@ -1,0 +1,96 @@
+// What clang has to be told about the machine the bindings are for.
+//
+// clang knows every target's predefined macros, type sizes and its own
+// headers. What it may not know is where the system's headers are: a clang
+// from Homebrew or a Linux distribution does not go looking for Apple's SDK,
+// so on macOS it is handed `-isysroot`.
+
+import std::io
+import std::env
+import std::arch
+import std::collections::vector
+import interface::model::*
+
+/// The machine this program runs on, as a triple.
+pub fn hostTriple() -> String { arch::triple() }
+
+fn isApple(triple: &String) -> bool {
+    triple.$find("apple") >= 0 || triple.$find("darwin") >= 0 || triple.$find("macos") >= 0
+}
+
+/// What clang is given besides the header: the target, and where its
+/// headers are when clang would not find them itself.
+pub fn clangArgs(triple: &String, sysroot: &String) -> vector::Vector<String> {
+    var args = vector::Vector<String>()
+    args.push("-x")
+    args.push("c")
+    args.push("-std=gnu17")
+    args.push("-target")
+    args.push(triple.$clone())
+    // libclang finds its own headers — `stdarg.h`, `stddef.h` — beside the
+    // library, when it can tell where it was loaded from. It cannot always,
+    // so it is told.
+    let resources = resourceDir()
+    if !resources.$isEmpty() {
+        args.push("-resource-dir")
+        args.push(resources)
+    }
+    var root = sysroot.$clone()
+    if root.$isEmpty() && isApple(triple) { root = macSDK() }
+    if !root.$isEmpty() {
+        args.push("-isysroot")
+        args.push(root)
+    }
+    args
+}
+
+/// A starting point for what the emitter asks about the target, before
+/// clang's own answers replace it.
+pub fn dataModel(triple: &String) -> DataModel {
+    var dm = DataModel {}
+    dm.underscore = isApple(triple)
+    let windows = triple.$find("windows") >= 0 || triple.$find("mingw") >= 0
+    let wide = triple.$find("64") >= 0
+    dm.long = if wide && !windows { 8 } else { 4 }
+    dm
+}
+
+/// The macOS SDK: `SDKROOT` when it is set, else the Command Line Tools',
+/// else Xcode's.
+pub fn macSDK() -> String {
+    let fromEnv = env::get(&"SDKROOT") ?? ""
+    if !fromEnv.$isEmpty() && io::isDirectory(&fromEnv) { return fromEnv }
+    for d in ["/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+              "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"] {
+        if io::isDirectory(d) { return d.$clone() }
+    }
+    ""
+}
+
+/// clang's resource directory: `RUNE_CLANG_RESOURCE_DIR` when set, else the
+/// newest beside a libclang installed where this unit links from.
+pub fn resourceDir() -> String {
+    let fromEnv = env::get(&"RUNE_CLANG_RESOURCE_DIR") ?? ""
+    if !fromEnv.$isEmpty() { return fromEnv }
+    for base in ["/opt/homebrew/opt/llvm/lib/clang", "/usr/local/opt/llvm/lib/clang",
+                 "/usr/lib/llvm-19/lib/clang", "/usr/lib/llvm-18/lib/clang",
+                 "/Library/Developer/CommandLineTools/usr/lib/clang"] {
+        if !io::isDirectory(base) { continue }
+        var best = ""
+        var bestVersion = -1
+        match io::readDirectory(base) {
+            Ok(entries) => {
+                for e in entries {
+                    let name = e.name.$clone()
+                    let v = name.$toInt() ?? -1
+                    let full = io::joinPath(base, &name)
+                    let marker = io::joinPath(&full, &"include/stdarg.h")
+                    if v > bestVersion && io::exists(&marker) { best = full; bestVersion = v }
+                }
+            },
+            Err(e) => {},
+        }
+        if !best.$isEmpty() { return best }
+    }
+    ""
+}

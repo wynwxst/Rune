@@ -1,0 +1,231 @@
+// What a header declares, as libclang described it.
+//
+// Everything is kept in flat tables and refers to everything else by index:
+// a pointer type names its pointee as a number into `types`, a struct type
+// names its record as a number into `records`. C's types form a graph —
+// `struct node { struct node *next; }` — and indices let that graph exist
+// without anything owning anything else.
+//
+// Sizes, alignments and member offsets are clang's own answers, so the
+// bindings lay things out exactly as the C compiler does.
+
+import std::collections::vector
+import std::dictionary
+
+/// The kinds of C type.
+pub enum TK {
+    Void, Bool, Char, SChar, UChar, Short, UShort, Int, UInt, Long, ULong,
+    LongLong, ULongLong, Int128, UInt128, Float, Double, LongDouble, Float128,
+    /// `inner` is the pointee.
+    Pointer,
+    /// `inner` is the element; `count` the length, -1 when not written.
+    Array,
+    /// `inner` is the result; `params` the parameters.
+    Function,
+    /// `inner` indexes `records`.
+    Record,
+    /// `inner` indexes `enums`.
+    Enum,
+    /// `name` is the typedef; `inner` what it stands for.
+    Typedef,
+    /// A block pointer (`^`), which Rune cannot call: an opaque pointer.
+    Block,
+    /// A type Rune has no word for — `_Complex`, a vector type; `name` is
+    /// how C spells it.
+    Unknown,
+}
+
+pub struct CType {
+    pub kind: TK
+    pub inner: i64 = -1
+    pub count: i64 = -1
+    pub isConst: bool = false
+    pub params: vector::Vector<i64> = vector::Vector<i64>()
+    pub paramNames: vector::Vector<String> = vector::Vector<String>()
+    pub variadic: bool = false
+    pub name: String = ""
+    /// clang's size and alignment in bytes; negative when it has none.
+    pub size: i64 = -1
+    pub align: i64 = -1
+}
+
+pub struct CField {
+    pub name: String
+    pub ty: i64
+    /// The width of a bit-field; -1 for an ordinary member.
+    pub bits: i64 = -1
+    /// Where it starts, in bits from the start of the record.
+    pub offsetBits: i64 = 0
+}
+
+pub struct CRecord {
+    /// The tag after `struct`; empty for an anonymous one.
+    pub tag: String
+    pub isUnion: bool
+    pub complete: bool = false
+    pub fields: vector::Vector<CField> = vector::Vector<CField>()
+    /// `__attribute__((packed))`.
+    pub packed: bool = false
+    pub size: i64 = 0
+    pub align: i64 = 1
+    pub file: i64 = -1
+    /// The name a `typedef` gave an anonymous record.
+    pub alias: String = ""
+    /// For an anonymous record nested in another: that record, and which
+    /// of its anonymous members this is.
+    pub parent: i64 = -1
+    pub anonIndex: i64 = 0
+}
+
+pub struct CEnumItem {
+    pub name: String
+    pub value: i64
+}
+
+pub struct CEnum {
+    pub tag: String
+    pub items: vector::Vector<CEnumItem> = vector::Vector<CEnumItem>()
+    pub complete: bool = false
+    pub file: i64 = -1
+    pub alias: String = ""
+    /// The integer type it is stored in.
+    pub underlying: i64 = -1
+}
+
+pub struct CTypedef {
+    pub name: String
+    /// The `Typedef` type itself; its `inner` is what it stands for.
+    pub ty: i64
+    pub file: i64
+}
+
+pub struct CFunc {
+    pub name: String
+    pub ty: i64
+    pub file: i64
+    /// The symbol, when an `__asm__` label names one other than `name`.
+    pub symbol: String = ""
+}
+
+pub struct CVar {
+    pub name: String
+    pub ty: i64
+    pub file: i64
+    pub symbol: String = ""
+}
+
+/// A `#define` that stands for a constant.
+pub struct CConst {
+    pub name: String
+    /// 1 integer, 2 float, 3 string.
+    pub kind: i64
+    pub int: i64 = 0
+    pub float: f64 = 0.0
+    pub text: String = ""
+    /// An integer written with a `u` suffix.
+    pub unsigned: bool = false
+    /// A float without an `f` suffix: a `double`.
+    pub wide: bool = true
+    pub file: i64
+}
+
+/// The few facts about the target the emitter asks for.
+pub struct DataModel {
+    pub long: i64 = 8
+    pub longDouble: i64 = 8
+    /// Whether plain `char` is signed.
+    pub charSigned: bool = true
+    /// Whether symbols carry a leading underscore — Apple's platforms.
+    pub underscore: bool = true
+}
+
+/// The whole of what was declared, in tables.
+pub class Model {
+    pub types: vector::Vector<CType>
+    pub records: vector::Vector<CRecord>
+    pub enums: vector::Vector<CEnum>
+    pub typedefs: vector::Vector<CTypedef>
+    pub typedefIndex: dictionary::Map<String, i64>
+    /// Every enumerator's value, by name.
+    pub enumConsts: dictionary::Map<String, i64>
+    pub funcs: vector::Vector<CFunc>
+    pub funcIndex: dictionary::Map<String, i64>
+    pub vars: vector::Vector<CVar>
+    pub varIndex: dictionary::Map<String, i64>
+    pub consts: vector::Vector<CConst>
+    pub files: vector::Vector<String>
+    pub warnings: vector::Vector<String>
+    pub dm: DataModel
+
+    fn init(self, dm: DataModel) {
+        self.types = vector::Vector<CType>()
+        self.records = vector::Vector<CRecord>()
+        self.enums = vector::Vector<CEnum>()
+        self.typedefs = vector::Vector<CTypedef>()
+        self.typedefIndex = dictionary::Map<String, i64>()
+        self.enumConsts = dictionary::Map<String, i64>()
+        self.funcs = vector::Vector<CFunc>()
+        self.funcIndex = dictionary::Map<String, i64>()
+        self.vars = vector::Vector<CVar>()
+        self.varIndex = dictionary::Map<String, i64>()
+        self.consts = vector::Vector<CConst>()
+        self.files = vector::Vector<String>()
+        self.warnings = vector::Vector<String>()
+        self.dm = dm
+    }
+
+    /// A new type, and its index.
+    pub fn add(&var self, t: CType) -> i64 {
+        self.types.push(t)
+        self.types.length() - 1
+    }
+
+    pub fn kindOf(&self, t: i64) -> TK {
+        if t < 0 || t >= self.types.length() { return TK::Unknown }
+        self.types.look(t).kind
+    }
+
+    /// `t` with every typedef seen through.
+    pub fn resolve(&self, t: i64) -> i64 {
+        var r = t
+        var guard = 0
+        while r >= 0 && r < self.types.length() && self.types.look(r).kind == TK::Typedef && guard < 64 {
+            r = self.types.look(r).inner
+            guard += 1
+        }
+        r
+    }
+
+    /// Whether `t` is `const` — on itself, or on the typedef it names.
+    pub fn isConst(&self, t: i64) -> bool {
+        var r = t
+        var guard = 0
+        while r >= 0 && r < self.types.length() && guard < 64 {
+            if self.types.look(r).isConst { return true }
+            if self.types.look(r).kind != TK::Typedef { return false }
+            r = self.types.look(r).inner
+            guard += 1
+        }
+        false
+    }
+
+    /// The size of `t` in bytes, as clang has it; 0 when it has none.
+    pub fn sizeOf(&self, t: i64) -> i64 {
+        if t < 0 || t >= self.types.length() { return 0 }
+        let s = self.types.look(t).size
+        if s < 0 { 0 } else { s }
+    }
+
+    pub fn alignOf(&self, t: i64) -> i64 {
+        if t < 0 || t >= self.types.length() { return 1 }
+        let a = self.types.look(t).align
+        if a < 1 { 1 } else { a }
+    }
+
+    pub fn isUnsignedInt(&self, t: i64) -> bool {
+        let k = self.kindOf(self.resolve(t))
+        k == TK::UChar || k == TK::UShort || k == TK::UInt || k == TK::ULong ||
+            k == TK::ULongLong || k == TK::UInt128 || k == TK::Bool ||
+            (k == TK::Char && !self.dm.charSigned)
+    }
+}

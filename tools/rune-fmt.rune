@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 // The Rune formatter.
 //
 //     rune-fmt [options] [path...]

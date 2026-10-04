@@ -14,7 +14,7 @@ pub fn checked_division(dividend: i32, divisor: i32) -> Option<i32> {
 }
 
 
-@safe("Type Checked")
+#safe("Type Checked")
 pub fn try_division(dividend: i32, divisor: i32) {
     // `Option` values can be pattern matched, just like other enums
     match checked_division(dividend, divisor) {

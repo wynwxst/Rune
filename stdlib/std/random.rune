@@ -79,7 +79,7 @@ fn rotl(x: u64, k: u64) -> u64 { (x << k) | (x >> (64 - k)) }
 /// Eight bytes of OS entropy as one number, or — should the OS have none —
 /// the address of a fresh allocation, which is at least different from run
 /// to run on a system that randomises its layout.
-@safe("the buffer is given eight bytes of room and the call is told so")
+#safe("the buffer is given eight bytes of room and the call is told so")
 fn entropy64() -> u64 {
     var buf = io::Bytes()
     let at = buf.writePoint(8)
@@ -184,7 +184,7 @@ extend Random {
 /// `count` bytes straight from the operating system's entropy source — the
 /// right thing for a key, a token, or a nonce. Empty if the OS has none to
 /// give, which is worth checking for anything that matters.
-@safe("the buffer is given `count` bytes of room and the call is told exactly that")
+#safe("the buffer is given `count` bytes of room and the call is told exactly that")
 pub fn bytes(count: i64) -> vector::Vector<u8> {
     var out = vector::Vector<u8>()
     if count <= 0 { return out }

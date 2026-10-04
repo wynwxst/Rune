@@ -1,0 +1,43 @@
+// FLAGS: --memory zombie
+// EXPECT: [alpha!] [beta!]
+// EXPECT: literal gamma delta
+// EXPECT: break at b
+// EXPECT: first long word: three
+// EXPECT: skip 2
+//
+// A `for` over an array made for it — `for x in [a, b]` — reads that array
+// on every turn, so the array has to outlive the loop's first step. It was
+// released as soon as the loop began: the loop saw empty strings under
+// single ownership, and freed memory under reference counting.
+import std::io
+
+fn mk(s: String) -> String { s + "!" }
+
+fn firstLong() -> String {
+    for w in [mk("one"), "two".$clone(), "three".$clone(), "four".$clone()] {
+        if w.$length() > 4 { return w.$clone() }
+    }
+    ""
+}
+
+fn main() -> i64 {
+    var line = ""
+    for d in [mk("alpha"), mk("beta")] { line = line + "[" + d + "] " }
+    io::println(line.$substring(0, line.$length() - 1))
+
+    var lit = "literal"
+    for d in ["gamma", "delta"] { lit = lit + " " + d }
+    io::println(lit)
+
+    for d in [mk("a"), mk("b"), mk("c")] {
+        if d == "b!" { io::println("break at b"); break }
+    }
+    io::println("first long word: " + firstLong())
+
+    var skipped = 0
+    for d in [mk("x"), mk("y"), mk("z")] {
+        if d == "y!" { skipped += 2; continue }
+    }
+    io::println("skip " + skipped.$str())
+    0
+}

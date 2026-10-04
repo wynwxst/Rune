@@ -31,7 +31,7 @@ targets and how their toolchains are found.
 | Change how something is emitted | `CodeGenExpr.cpp` for expressions, `CodeGen.cpp` for shapes |
 | Add a compiler flag | `Driver.h`, `Driver.cpp` |
 | Add a standard-library function | `stdlib/std/*.rune` — nothing in C++ |
-| Add something the compiler must answer itself | An `@intrinsic` in `stdlib/`, handled in `CodeGenExpr.cpp` |
+| Add something the compiler must answer itself | An `#intrinsic` in `stdlib/`, handled in `CodeGenExpr.cpp` |
 | Change what a build does | `rune/src/main.cpp` |
 | Add a cross target, or change how one is found | `rune/src/Targets.cpp` |
 | Change what a freestanding program is given | `runetime/freestanding.rune` |

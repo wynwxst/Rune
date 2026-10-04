@@ -4,7 +4,7 @@ extern "C" {
     fn sqrt(value: f64) -> f64
 }
 
-@safe("sqrt of a sum of squares is always in libm's domain")
+#safe("sqrt of a sum of squares is always in libm's domain")
 fn squareRoot(value: f64) -> f64 {
     sqrt(value)
 }

@@ -211,7 +211,7 @@ fn setSampleRate(hz: u16) {
 /// Points DMA channel 5 at the buffer, in auto-init mode. A 16-bit channel
 /// counts in words and cannot cross a 128 KB boundary, which the original
 /// left to chance; here it is checked.
-@safe("hands the DMA controller the address of a buffer that lives for ever")
+#safe("hands the DMA controller the address of a buffer that lives for ever")
 fn transfer() {
     let address = unsafe { &var buffer[0] as *var u8 as usize }
     let end = address + (bufferSize as usize) * 2 - 1

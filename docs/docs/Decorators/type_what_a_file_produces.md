@@ -1,23 +1,23 @@
-# `@type`: what a file produces
+# `#type`: what a file produces
 
-A file can say what it is meant to become. `@type` comes before every other directive, because what a file produces is what decides how the rest of them are used. A file with a `main` and no `@type` is an executable, which is what the compiler already assumed.
+A file can say what it is meant to become. `#type` comes before every other directive, because what a file produces is what decides how the rest of them are used. A file with a `main` and no `#type` is an executable, which is what the compiler already assumed.
 
 | Written | Produces |
 | --- | --- |
-| `@type(Executable)` | a linked program |
-| `@type(Library)` | a `.rul` — object code plus the interface |
-| `@type(Shared)` | a native shared library — `.dylib`, `.so` or `.dll`, for anything that can load one |
-| `@type(Object)` | a `.o` and nothing else |
-| `@type(Assembly)` | target assembly |
-| `@type(LLVM)` | textual LLVM IR |
-| `@type(Macros)` | nothing on its own — the file holds procedural macros, built and run while the *program* compiles |
+| `#type(Executable)` | a linked program |
+| `#type(Library)` | a `.rul` — object code plus the interface |
+| `#type(Shared)` | a native shared library — `.dylib`, `.so` or `.dll`, for anything that can load one |
+| `#type(Object)` | a `.o` and nothing else |
+| `#type(Assembly)` | target assembly |
+| `#type(LLVM)` | textual LLVM IR |
+| `#type(Macros)` | nothing on its own — the file holds procedural macros, built and run while the *program* compiles |
 
 *A flag on the command line still wins: a build script has the last word over a file's preference.*
 
 **A file that compiles to an object**
 
 ```text
-@type(Object)
+#type(Object)
 
 // No entry point is emitted for an object, so nothing runs global
 // initialisers for it — anything constant has to be a function.
@@ -28,11 +28,11 @@ pub fn checksum(bytes: [u8]) -> u64 {
 }
 ```
 
-**`@type` comes first**
+**`#type` comes first**
 
 ```rune
-@link("m")
-@type(Object)
+#link("m")
+#type(Object)
 
 fn f() -> i64 { 0 }
 ```

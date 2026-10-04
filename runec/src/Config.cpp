@@ -120,7 +120,7 @@ void suggest(DiagBuilder &d, const std::string &name, const ConfigSet &cfg) {
 /// The left side names something about the build and the right side is what it
 /// might be. Written the other way round it reads backwards, so both orders
 /// are accepted and mean the same thing.
-/// The text a `@Config` comparison's right-hand side stands for, or "" when
+/// The text a `#Config` comparison's right-hand side stands for, or "" when
 /// the expression is not one a condition may compare against.
 ///
 /// A manifest's `[config]` values are strings, numbers and booleans, so all
@@ -179,7 +179,7 @@ bool evalComparison(const Expr *lhs, const Expr *rhs, bool wantEqual,
   std::string text;
   if (!key || !valueExpr || !configValueText(valueExpr, text)) {
     auto d = diags.error(range,
-                         "a `@Config` comparison needs a name on one side and "
+                         "a `#Config` comparison needs a name on one side and "
                          "a value on the other");
     d.note("for example `os == \"windows\"`, `backend == vulkan` or "
            "`api_level == 3`")
@@ -190,7 +190,7 @@ bool evalComparison(const Expr *lhs, const Expr *rhs, bool wantEqual,
 
   const std::string name = key->joined();
   if (!cfg.isKey(name)) {
-    auto d = diags.error(key->Range, "`{}` is not something `@Config` can "
+    auto d = diags.error(key->Range, "`{}` is not something `#Config` can "
                                      "compare", name);
     d.note("comparable keys are os, arch, family, pointer_width, endian, "
            "target, safety, memory, runtime, opt_level and overflow_checks, "
@@ -235,7 +235,7 @@ bool eval(const Expr *e, const ConfigSet &cfg, DiagnosticEngine &diags,
   if (const auto *un = dyn_cast<UnaryExpr>(e)) {
     if (un->Op == UnaryOp::Not)
       return !eval(un->Operand.get(), cfg, diags, ok);
-    auto d = diags.error(e->Range, "`@Config` understands `!`, `&&` and `||`, "
+    auto d = diags.error(e->Range, "`#Config` understands `!`, `&&` and `||`, "
                                    "and nothing else");
     d.code(112);
     ok = false;
@@ -273,7 +273,7 @@ bool eval(const Expr *e, const ConfigSet &cfg, DiagnosticEngine &diags,
       return evalComparison(as->LHS.get(), as->RHS.get(), /*wantEqual=*/true,
                             as->Range, cfg, diags, ok);
 
-  auto d = diags.error(e->Range, "this is not something `@Config` can answer");
+  auto d = diags.error(e->Range, "this is not something `#Config` can answer");
   d.note("a condition is a key compared with a string, a name set with "
          "`--cfg`, or those joined by `&&`, `||` and `!`");
   d.code(112);
@@ -298,14 +298,14 @@ ConfigSet ConfigSet::forOptions(const CompilerOptions &opts) {
   cfg.Values["endian"] = triple.isLittleEndian() ? "little" : "big";
   cfg.Values["safety"] = safetyName(opts.Safety);
   cfg.Values["memory"] = memoryModeName(opts.Memory);
-  // `none` for `@runtime(none)`: no C library and no hosted runtime, so the
+  // `none` for `#runtime(none)`: no C library and no hosted runtime, so the
   // standard library keeps to what the freestanding one provides.
   cfg.Values["runtime"] = opts.Freestanding ? "none" : "hosted";
   cfg.Values["opt_level"] = std::to_string(opts.OptLevel);
   cfg.Values["overflow_checks"] = opts.overflowChecksEnabled() ? "on" : "off";
   for (const auto &kv : cfg.Values)
     cfg.Builtin.insert(kv.first);
-  // How much of the freestanding runtime a `@runtime(none)` program brings:
+  // How much of the freestanding runtime a `#runtime(none)` program brings:
   // `full`, or `minimal` — what the generated code cannot run without. A
   // package chooses, with `[config] freestanding_type = "minimal"` or
   // `--cfg freestanding_type=minimal`, so it is not one of the builtins.
@@ -338,8 +338,8 @@ std::vector<std::string> ConfigSet::known() const {
 bool evaluateConfig(const Attribute &attr, const ConfigSet &cfg,
                     DiagnosticEngine &diags) {
   if (attr.Args.size() != 1) {
-    auto d = diags.error(attr.Range, "`@Config` takes one condition");
-    d.note("for example `@Config(os == \"windows\")`").code(112);
+    auto d = diags.error(attr.Range, "`#Config` takes one condition");
+    d.note("for example `#Config(os == \"windows\")`").code(112);
     return true;
   }
   bool ok = true;
@@ -353,7 +353,7 @@ bool evaluateConfig(const Attribute &attr, const ConfigSet &cfg,
 
 namespace {
 
-/// True when `d` carries a `@Config` that this build says no to.
+/// True when `d` carries a `#Config` that this build says no to.
 bool excluded(const Decl *d, const ConfigSet &cfg, DiagnosticEngine &diags) {
   for (const Attribute &a : d->Attrs)
     if (a.Name == "Config" || a.Name == "config")
@@ -411,6 +411,17 @@ void applyConfig(Module &m, const ConfigSet &cfg, DiagnosticEngine &diags) {
   for (const DeclPtr &d : m.Decls)
     if (d)
       applyToMembers(d.get(), cfg, diags);
+  // `#Config(...)` `#link(...)`: linked when the condition holds.
+  for (const Module::ConditionalLink &cl : m.ConditionalLinks) {
+    bool holds = true;
+    for (const Attribute &a : cl.Conditions)
+      holds = holds && evaluateConfig(a, cfg, diags);
+    if (!holds)
+      continue;
+    m.LinkLibraries.insert(m.LinkLibraries.end(), cl.Libraries.begin(), cl.Libraries.end());
+    m.LinkPaths.insert(m.LinkPaths.end(), cl.Paths.begin(), cl.Paths.end());
+  }
+  m.ConditionalLinks.clear();
 }
 
 } // namespace rune

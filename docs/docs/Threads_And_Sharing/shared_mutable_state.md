@@ -1,6 +1,6 @@
 # Shared mutable state
 
-`Mutex<T>` is the one type that is `Sync` while holding something that is not — because it is the one type that synchronises access to what it holds. It says so with `@sync("reason")`, which is the single place the compiler takes such a claim on trust.
+`Mutex<T>` is the one type that is `Sync` while holding something that is not — because it is the one type that synchronises access to what it holds. It says so with `#sync("reason")`, which is the single place the compiler takes such a claim on trust.
 
 **Four threads, one counter**
 

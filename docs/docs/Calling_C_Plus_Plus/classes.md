@@ -9,9 +9,9 @@ A C++ `class` is **opaque**: Rune never holds one by value, copies one, or destr
 | `fn name(&self) -> T` | a `const` member function |
 | `fn name(&var self) -> T` | a non-const member function |
 | `fn name(args) -> T` | a `static` member function |
-| `@operator("[]") fn at(&self, ...)` | `operator[]` |
+| `#operator("[]") fn at(&self, ...)` | `operator[]` |
 | `class D : B` | single, non-virtual inheritance |
-| `@size(N)` | `sizeof` on the C++ side; what `cxx::alloc` needs |
+| `#size(N)` | `sizeof` on the C++ side; what `cxx::alloc` needs |
 
 **A class, its destructor, and a class derived from it**
 
@@ -20,7 +20,7 @@ extern "C++" {
     namespace shim {
         struct Pair { a: c_int, b: c_int }
 
-        @size(8)
+        #size(8)
         class Counter {
             fn init(&var self, start: c_int)
             fn deinit(&var self)
@@ -34,7 +34,7 @@ extern "C++" {
 
         /// `this` is one address for both halves, so the base's members are
         /// reached through a pointer to the derived class unchanged.
-        @size(8)
+        #size(8)
         class Stepper : Counter {
             fn init(&var self, start: c_int, step: c_int)
             fn twice(&var self) -> c_int

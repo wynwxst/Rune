@@ -29,7 +29,7 @@ extend String {
 
 extern "C" { fn sqrt(v: f64) -> f64 }
 
-@safe("sqrt of a sum of squares is always in libm's domain")
+#safe("sqrt of a sum of squares is always in libm's domain")
 fn squareRoot(v: f64) -> f64 { sqrt(v) }
 
 fn main() -> i64 {

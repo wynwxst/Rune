@@ -4,10 +4,12 @@ A fixed-size run of values on the heap, checked on every access. An array's leng
 
 | Member | Signature | Does |
 | --- | --- | --- |
-| `Buffer<T>` | `(size: i64, fill: T)` | `size` slots, each holding `fill` |
+| `Buffer<T>` | `(size: i64)` | `size` zeroed slots |
+| `mem::filled` | `<T: Clone>(size: i64, value: T) -> Buffer<T>` | `size` slots, each holding a copy of `value` |
 | `length` | `(&self) -> i64` | how many, fixed for its life |
 | `isEmpty` | `(&self) -> bool` |  |
 | `holds` | `(&self, index: i64) -> bool` | is that a slot? |
+| `occupied` | `(&self, index: i64) -> bool` | has something been written there? Always true in range for a value type, where zero is a value |
 | `at` | `(&self, index: i64) -> T?` | the value, or nothing — a slot of all zero bytes reads as nothing |
 | `read` | `(&self, index: i64) -> T?` | the value, whatever its bytes are; only the index is checked |
 | `get` | `(&self, index: i64) -> T` | the value; **aborts** if absent |
@@ -27,7 +29,7 @@ import std::io
 import std::mem
 
 fn main() -> i64 {
-    var b = mem::Buffer<i64>(size: 4, fill: 0)
+    var b = mem::filled<i64>(4, 0)
     b[0] = 10
     b[1] = 20
     b[2] = b[0] + b[1]
@@ -49,7 +51,7 @@ import std::io
 import std::mem
 
 fn main() -> i64 {
-    var b = mem::Buffer<i64>(size: 2, fill: 0)
+    var b = mem::filled<i64>(2, 0)
     io::println("about to read past the end")
     io::println(b[5].$str())
     0
@@ -57,6 +59,6 @@ fn main() -> i64 {
 ```
 
 > [!NOTE]
-> **Why a fill**
+> **Never uninitialised**
 >
-> The `fill` is required rather than optional. A buffer with uninitialised slots would hand out whatever the allocator left there — the one thing a safe container must not do — so every slot holds a real value from the moment it exists. For a reference-counted `T` the buffer owns one reference per slot and gives them all back.
+> A buffer never hands out whatever the allocator left there — the one thing a safe container must not do: a new one is zeroed, and `mem::filled` writes a copy of its value into every slot. Copies, so `filled` asks for a `T` that can be copied; a buffer of `Box`es or `File`s starts zeroed and is written slot by slot.

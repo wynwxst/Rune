@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 // The documentation generator, written in Rune.
 //
 //     rune-doc <input.rdoc|-> <docs-dir> <out-dir> [style.css] [app.js]
@@ -46,7 +46,7 @@ class Entry {
     pub isPublic: bool
     pub doc: String
     pub decl: String
-    /// The standard library's: `bare` when a `@runtime(none)` program has
+    /// The standard library's: `bare` when a `#runtime(none)` program has
     /// it, `hosted <symbol>` when it needs what that names. Empty elsewhere.
     pub tier: String
 
@@ -733,7 +733,7 @@ fn endSection() {
 fn tierBadge(tier: &String) -> String {
     if tier.$isEmpty() { return "" }
     if *tier == "bare" {
-        return "<span class=\"tier bare\" title=\"works in a @runtime(none) program\">bare metal</span>"
+        return "<span class=\"tier bare\" title=\"works in a #runtime(none) program\">bare metal</span>"
     }
     let needs = if tier.$length() > 7 { tier.$substring(7, tier.$length()) } else { "" }
     "<span class=\"tier hosted\" title=\"needs the hosted runtime: " + attr(needs) +

@@ -1,0 +1,24 @@
+// EXPECT: registering GET /health
+// EXPECT: 49
+//
+// `#name` is a decorator the compiler provides; `@name` is one the program
+// declares. The two never look alike, so a reader can tell at a glance
+// which lines change how the compiler treats a function and which run code
+// of the program's own.
+import std::io
+
+fn route(method: String, path: String, handler: @function() -> ()) {
+    io::println("registering " + method + " " + path)
+}
+
+#inline
+fn square(n: i64) -> i64 { n * n }
+
+@route("GET", "/health")
+fn health() { }
+
+#safe("nothing here is unchecked; the decorator only records a reason")
+fn main() -> i64 {
+    io::println(square(7))
+    0
+}

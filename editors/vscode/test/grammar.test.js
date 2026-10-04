@@ -76,7 +76,7 @@ pub struct Point {
     pub y: f64
 }
 
-@safe("the runtime owns it")
+#safe("the runtime owns it")
 pub fn describe(p: &Point, count: i64) -> String {
     let label = "at {} and {:>8.2}\\n"
     var total = 0x1F_u8 + 0b1010 + 1_000i64 + 2.5e-3
@@ -94,7 +94,7 @@ pub fn describe(p: &Point, count: i64) -> String {
         two
         """
     let f: @function(i64) -> bool = ||(n: i64) -> bool { n > 0 }
-    @lint(allow(unused-variable), warn(todo))
+    #lint(allow(unused-variable), warn(todo))
     match opt { Some(v) => v, None => 0 }
 }
 
@@ -146,8 +146,8 @@ macro twice { ($e: expr) => { $e + $e } }
   check("block strings span lines", tokens.some((t) => t.text.includes("two") && t.scopes.includes("string.quoted.triple.rune")));
   check("@function is a type, not a decorator", has(tokens, "function", "storage.type.function.rune"));
   check("closure arrows", has(tokens, "->", "keyword.operator.arrow.rune") && has(tokens, "=>", "keyword.operator.arrow.rune"));
-  check("@lint levels are keywords", has(tokens, "allow", "keyword.other.lint.rune") && has(tokens, "warn", "keyword.other.lint.rune"));
-  check("@lint rule names", has(tokens, "unused-variable", "constant.other.lint-rule.rune") && has(tokens, "todo", "constant.other.lint-rule.rune"));
+  check("#lint levels are keywords", has(tokens, "allow", "keyword.other.lint.rune") && has(tokens, "warn", "keyword.other.lint.rune"));
+  check("#lint rule names", has(tokens, "unused-variable", "constant.other.lint-rule.rune") && has(tokens, "todo", "constant.other.lint-rule.rune"));
   check("`bind` and `to` are keywords", has(tokens, "bind", "keyword.other.rune") && has(tokens, "to", "keyword.other.rune"));
   check("a type alias's name", has(tokens, "Alias", "entity.name.type.alias.rune"));
   check("a global's name", has(tokens, "failed", "variable.other.global.rune"));

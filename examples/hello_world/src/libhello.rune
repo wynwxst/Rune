@@ -1,4 +1,4 @@
-@type(Library)
+#type(Library)
 // Extends the greeter with two more languages.
 
 import hello_world

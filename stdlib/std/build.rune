@@ -4,7 +4,7 @@
 // it for the machine doing the building — whatever the package itself is
 // built for — and runs it twice per build:
 //
-//   prepare   before the package is compiled. It can set `@Config` flags,
+//   prepare   before the package is compiled. It can set `#Config` flags,
 //             and add link arguments, libraries and library directories.
 //   finish    after each executable is linked, once per executable. It can
 //             post-process the file (strip it, lay it out as a disk image,
@@ -136,10 +136,10 @@ pub fn linkInputs() -> vector::Vector<String> {
 
 //=== Answers =============================================================//
 
-/// Sets `@Config(name)` for this package's own sources.
+/// Sets `#Config(name)` for this package's own sources.
 pub fn cfg(name: String) { io::println("rune:cfg=" + name) }
 
-/// Sets `@Config(key == "value")` for this package's own sources.
+/// Sets `#Config(key == "value")` for this package's own sources.
 pub fn cfgValue(key: String, value: String) {
     io::println("rune:cfg=" + key + "=" + value)
 }

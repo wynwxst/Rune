@@ -42,7 +42,7 @@ extern "C" {
 
 struct Rect { x: f64, y: f64, w: f64, h: f64 }
 
-@unsafe fn main() -> i64 {
+#unsafe fn main() -> i64 {
     let obj = 0 as *var u8
     let r = Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 }
     // Stands for a call through

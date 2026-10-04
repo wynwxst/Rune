@@ -1,10 +1,10 @@
 // The macro package `B1_proc_macros` uses.
 //
-// A `@type(Macros)` file is a package of its own: the compiler builds it for
+// A `#type(Macros)` file is a package of its own: the compiler builds it for
 // the machine doing the compiling and runs it to expand each invocation. So
 // everything here is ordinary compiled Rune — generics, `Map`, `Vector`,
 // whatever it needs — and none of it reaches the program.
-@type(Macros)
+#type(Macros)
 
 import std::Macro
 import std::text
@@ -24,14 +24,14 @@ fn joined<T: io::Display>(items: vector::Vector<T>, between: String) -> String {
     out
 }
 
-@macro
+#macro
 pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
     let it = input.text()
     Macro::parse("((" + it + ") + (" + it + "))")
 }
 
 /// One accessor per name given.
-@macro
+#macro
 pub fn getters(input: Macro::Tokens) -> Macro::Tokens {
     var lines = vector::Vector<String>()
     for field in input.split(",") {
@@ -43,7 +43,7 @@ pub fn getters(input: Macro::Tokens) -> Macro::Tokens {
 }
 
 /// Arithmetic done while compiling: the program only sees the answer.
-@macro
+#macro
 pub fn total(input: Macro::Tokens) -> Macro::Tokens {
     var sum = 0
     for part in input.split("+") {
@@ -53,7 +53,7 @@ pub fn total(input: Macro::Tokens) -> Macro::Tokens {
 }
 
 /// What a run of tokens is made of. A group counts as one.
-@macro
+#macro
 pub fn kinds(input: Macro::Tokens) -> Macro::Tokens {
     var out = vector::Vector<String>()
     var i = 0
@@ -64,12 +64,12 @@ pub fn kinds(input: Macro::Tokens) -> Macro::Tokens {
     Macro::string(joined<String>(out, " "))
 }
 
-@macro
+#macro
 pub fn quoted(input: Macro::Tokens) -> Macro::Tokens {
     Macro::string(input.text())
 }
 
-@macro
+#macro
 pub fn shout(input: Macro::Tokens) -> Macro::Tokens {
     if input.isEmpty() { Macro::error("shout! needs something to shout") }
     Macro::string(input.text() + "!")
@@ -78,7 +78,7 @@ pub fn shout(input: Macro::Tokens) -> Macro::Tokens {
 /// A block arrives as one token, so a body can be handed back as written —
 /// which is also how an expansion comes to contain `std::reflect`, answering
 /// about the *program's* types rather than this package's.
-@macro
+#macro
 pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
     let label = input.at(0).text()
     let body = input.at(input.length() - 1)
@@ -89,19 +89,19 @@ pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
                  body.inner().text() + " }")
 }
 
-@macro
+#macro
 pub fn describeBlock(input: Macro::Tokens) -> Macro::Tokens {
     let body = input.at(0)
     Macro::string(body.kind() + " of " + body.inner().length().$str())
 }
 
-@macro
+#macro
 pub fn nameOf(input: Macro::Tokens) -> Macro::Tokens {
     Macro::parse("std::reflect::typeName<" + input.text() + ">()")
 }
 
 /// A table built with a real `Map`.
-@macro
+#macro
 pub fn lookup(input: Macro::Tokens) -> Macro::Tokens {
     var table = dictionary::Map<String, i64>()
     var n = 0
@@ -124,7 +124,7 @@ pub fn lookup(input: Macro::Tokens) -> Macro::Tokens {
 
 /// A list comprehension, taken apart by a pattern and written back through a
 /// template: `value for item in source [if condition]`.
-@macro
+#macro
 pub fn comprehend(input: Macro::Tokens) -> Macro::Tokens {
     let c = input.capture("$value for $item in $source [if $condition]")
     if !c.matched() { return Macro::fail("comprehend! " + c.why()) }
@@ -135,7 +135,7 @@ pub fn comprehend(input: Macro::Tokens) -> Macro::Tokens {
 }
 
 /// The helpers that find a word in a run: `before`, `after`, `contains`.
-@macro
+#macro
 pub fn around(input: Macro::Tokens) -> Macro::Tokens {
     if !input.contains("=>") { return Macro::fail("around! needs `=>`") }
     Macro::string(input.before("=>").text() + " | " + input.after("=>").text())

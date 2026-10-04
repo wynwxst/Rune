@@ -14,20 +14,20 @@ import std::mem
 pub class Arena {
     block: *var u8
     size: usize
-    used: usize
-    handed: i64
+    used: mem::Cell<usize>
+    handed: mem::Cell<i64>
 
     fn init(self, size: usize) {
         self.block = mem::allocator.allocate(size)
         self.size = size
-        self.used = 0
-        self.handed = 0
+        self.used = mem::cell<usize>(0)
+        self.handed = mem::cell<i64>(0)
     }
 
-    fn deinit(self) { mem::allocator.deallocate(self.block) }
+    fn deinit(self) { mem::allocator.deallocate(self.block, self.size) }
 
-    pub fn handedOut(&self) -> i64 { self.handed }
-    pub fn usedBytes(&self) -> i64 { self.used as i64 }
+    pub fn handedOut(&self) -> i64 { self.handed.get() }
+    pub fn usedBytes(&self) -> i64 { self.used.get() as i64 }
 }
 
 bind mem::Allocator to Arena {
@@ -35,32 +35,30 @@ bind mem::Allocator to Arena {
     /// `mem::isNull` is for.
     ///
     /// `Allocator` hands out memory through `&self` — every container shares
-    /// one — so the cursor is moved through a raw pointer to it, as an
-    /// atomic counter changes its number. An arena is one thread's.
-    @safe("the cursor never passes the size checked on the line above")
+    /// one — so the cursor lives in a `mem::Cell`, which can change through a
+    /// shared borrow. An arena is one thread's, as a `Cell` is.
+    #safe("the cursor never passes the size checked on the line above")
     fn allocate(&self, bytes: usize) -> *var u8 {
         // Keep every block 8-aligned, as the system allocator would.
         let need = (bytes + 7) / 8 * 8
-        if self.used + need > self.size { return mem::noBlock() }
-        let at = self.used
-        unsafe {
-            (&self.used as *var usize)[0] = at + need
-            (&self.handed as *var i64)[0] = self.handed + 1
-        }
+        let at = self.used.get()
+        if at + need > self.size { return mem::noBlock() }
+        self.used.set(at + need)
+        self.handed.set(self.handed.get() + 1)
         unsafe { (self.block as u64 + at as u64) as *var u8 }
     }
 
     /// An arena frees in one go, so a single block going back is a no-op.
-    fn deallocate(&self, block: *var u8) {}
+    fn deallocate(&self, block: *var u8, bytes: usize) {}
 
     /// Growing in place is not something a bump allocator can do; hand back a
     /// fresh block and let the caller copy.
-    fn reallocate(&self, block: *var u8, bytes: usize) -> *var u8 {
+    fn reallocate(&self, block: *var u8, oldBytes: usize, bytes: usize) -> *var u8 {
         self.allocate(bytes)
     }
 }
 
-@safe("every block below is sized and written through its own pointer")
+#safe("every block below is sized and written through its own pointer")
 fn main() -> i64 {
     let arena = Arena(1024 as usize)
 
@@ -89,4 +87,4 @@ fn main() -> i64 {
 > [!NOTE]
 > **Three methods**
 >
-> The three methods are the whole contract: `allocate` returns a block or null, `deallocate` takes one back, and `reallocate` resizes. Nothing else in the language needs to know which allocator it is talking to.
+> The three methods are the whole contract: `allocate` returns a block or null, `deallocate` takes one back and is told how big it was, and `reallocate` resizes one, told its old size too. Nothing else in the language needs to know which allocator it is talking to.

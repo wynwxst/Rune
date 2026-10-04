@@ -42,7 +42,7 @@ allocation's own count becomes the binding's.
 
 | Linkage | Given to |
 | --- | --- |
-| `External` | `main`, `extern` declarations, `@export` |
+| `External` | `main`, `extern` declarations, `#export` |
 | `WeakODR` (or COMDAT on COFF) | This artefact's own public functions and methods |
 | `LinkOnceODR` (plus COMDAT on COFF) | Anything borrowed: the standard library, an imported library's generics |
 | `Internal` / `Private` | Thunks, string literals, non-public non-methods |
@@ -60,12 +60,12 @@ symbols mean.
 
 ## Intrinsics
 
-An `@intrinsic("name")` function in the standard library has no body. The
+An `#intrinsic("name")` function in the standard library has no body. The
 compiler answers the call itself, in `CodeGenExpr.cpp`, from the layout it is
 already computing:
 
 ```rune
-@intrinsic("size_of")
+#intrinsic("size_of")
 pub fn sizeOf<T>() -> usize
 ```
 

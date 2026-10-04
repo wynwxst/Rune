@@ -7,14 +7,14 @@ pub class hello {
 
     fn init(self, name: String) { self.name = name }
 
-    @Doc("""
+    #Doc("""
     Greets in Spanish.
 
     `Hola` is the everyday greeting, used at any hour and with anyone.
     """)
     pub fn spanish(&self) -> String { "Hola, " + self.name }
 
-    @Doc("""
+    #Doc("""
     Greets in English.
 
     The most ordinary greeting there is, and the one to reach for when nothing else fits.

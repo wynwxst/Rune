@@ -1,4 +1,4 @@
-@type(Exec)
+#type(Exec)
 // A bounds check doing its job: reading past the end of a `Buffer` aborts,
 // naming the index, rather than handing back whatever was in that memory.
 import std::io

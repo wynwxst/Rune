@@ -19,14 +19,14 @@ statistics = { path = "../statistics" }
 **What that makes true**
 
 ```rune
-@Config(telemetry)
+#Config(telemetry)
 fn record(event: String) { /* ... */ }
 
-@Config(!telemetry)
+#Config(!telemetry)
 fn record(event: String) {}
 
 // True exactly when `statistics` is in [dependencies].
-@Config(statistics)
+#Config(statistics)
 fn summarise() -> String { "with statistics" }
 ```
 
@@ -38,4 +38,4 @@ $ rune build --cfg verbose       # telemetry, statistics, verbose
 > [!NOTE]
 > **Declarations only**
 >
-> `@Config` applies to declarations, not to statements. To make part of a body conditional, put it in a function of its own and give every branch a definition — which also means a missing case is a name that cannot be found, rather than silence.
+> `#Config` applies to declarations, not to statements. To make part of a body conditional, put it in a function of its own and give every branch a definition — which also means a missing case is a name that cannot be found, rather than silence.

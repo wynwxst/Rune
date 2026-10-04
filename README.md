@@ -109,7 +109,7 @@ runec -o hello examples/kitchen_sink.rune && ./hello
 Rune.toml            manifest
 src/main.rune        binary root   -> target/<profile>/<name>
 src/lib.rune         library root  -> target/<profile>/<name>.rul
-src/*.rune           a `main` or @type(...) makes its own target;
+src/*.rune           a `main` or #type(...) makes its own target;
                      anything else is a component, compiled into them
 tests/*.rune         one test program per file
 docs/                yours: every .md under it is a page
@@ -118,8 +118,8 @@ target/              build output
 ```
 
 Every file under `src/` that declares an output gets one: a top-level `main` or
-`@type(Executable)` becomes its own binary, `@type(Library)` its own `.rul`,
-and `@type(Object | Assembly | LLVM)` an `.o`, `.s` or `.ll`. Files that
+`#type(Executable)` becomes its own binary, `#type(Library)` its own `.rul`,
+and `#type(Object | Assembly | LLVM)` an `.o`, `.s` or `.ll`. Files that
 declare nothing are components — importable, and compiled into each target
 that needs them.
 
@@ -213,31 +213,31 @@ The reference's *Cross compilation* section has the rest, including driving
 
 ### Bare metal
 
-`@runtime(none)` builds a freestanding program — a kernel, firmware — with no
-C library and no hosted runtime; `@entry(none)` generates no `main`. What the
+`#runtime(none)` builds a freestanding program — a kernel, firmware — with no
+C library and no hosted runtime; `#entry(none)` generates no `main`. What the
 generated code needs of a runtime is Rune (`runetime/freestanding.rune`),
 compiled in for the target, and it asks the program for three things:
 
 ```rune
-@runtime(none)
-@entry(none)
+#runtime(none)
+#entry(none)
 
-@panicHandler
+#panicHandler
 fn panicked(message: CString, location: CString) -> Never { ... }
 
-@allocator
+#allocator
 fn allocate(size: usize, align: usize) -> *var u8 { ... }
 
-@deallocator
+#deallocator
 fn release(block: *var u8) { ... }
 
-@export("kernel_main")
+#export("kernel_main")
 fn kernelMain(magic: u32, info: u32) -> Never { ... }
 ```
 
 `--safety full` means the same there as anywhere: every bounds, overflow,
 division and nil check is inserted, the Zombie borrow checker proves every
-borrow, and a failed check goes to the `@panicHandler`. Classes, `Unique<T>`
+borrow, and a failed check goes to the `#panicHandler`. Classes, `Unique<T>`
 and optionals work, on the program's own heap; `String`, `std::io` and
 threads are refused at compile time. `bare-x86`, `bare-x86_64`, `bare-arm64`
 and `bare-riscv64` build with clang and ld.lld unless told otherwise: name any
@@ -478,21 +478,21 @@ casts, and every foreign call — produce a warning in a safe context:
 │ 25 ║     poke(&var n as *var i64)
 │          ^^^^^^^^^^^^^^^^^^^^^^^^ WARNING: call to unsafe function 'poke' in a safe context [W0001]
 │ 26 ║     0
-│     ─  note: wrap it in `unsafe { ... }`, mark the caller @unsafe, or justify it with @safe("reason")
+│     ─  note: wrap it in `unsafe { ... }`, mark the caller #unsafe, or justify it with #safe("reason")
 │
 │ ○ demo.rune [24:3..7]
 └▶ 'main' is not marked unsafe
   24 ║ fn main() -> i64 {
-          ─────────────> hint: annotate it with @unsafe, or justify the use with @safe("reason")
+          ─────────────> hint: annotate it with #unsafe, or justify the use with #safe("reason")
 ```
 
 Three ways to resolve one:
 
 ```rune
-@unsafe                      // this function is unsafe; callers are warned instead
+#unsafe                      // this function is unsafe; callers are warned instead
 fn poke(p: *var i64) { *p = 1 }
 
-@safe("abs is total: every i32 input has a defined result")
+#safe("abs is total: every i32 input has a defined result")
 fn absolute(v: i32) -> i32 { abs(v) }   // justified, no warning
 
 unsafe { printf("%s\n", text) }         // a scoped opt-out
@@ -604,7 +604,7 @@ do about it, and which of their answers would fit here.
 * A `deinit` on a struct or an enum, written in the body, in an `extend` or in
   a `bind`, runs when the value it lives in is destroyed — so a value can own
   a descriptor or a lock, not only memory. Handing one on is a move
-* `@resource` on a field says `deinit` has to release it, and `--safety full`
+* `#resource` on a field says `deinit` has to release it, and `--safety full`
   holds the type to that
 * Operator overloading via `bind operator::add to Type`, or the punctuation
   itself: `bind operator::"*" to Handle<T>` — overloaded once per right-hand
@@ -631,8 +631,8 @@ do about it, and which of their answers would fit here.
 * A mark requirement may carry type parameters and a `where` clause of its
   own, including one about the mark's associated type
   (`fn render(&self) -> String where Self::Item: Display`)
-* `@alias("name")` gives any declaration a second, string-based name
-* `@as("name")` renames a foreign declaration for Rune's side only, so a
+* `#alias("name")` gives any declaration a second, string-based name
+* `#as("name")` renames a foreign declaration for Rune's side only, so a
   program can import C's `bind` and still declare a `bind` of its own
 * Iterator adaptors: `map`, `filter`, `zip`, `take`, `skip`, `take_while`,
   `skip_while`, `enumerate`, `chain`, `step_by`, `inspect`, and `collect`,
@@ -646,9 +646,9 @@ do about it, and which of their answers would fit here.
   the bind, `Self::Item` in between
 * Bounds that name an operator: `fn largest<T: operator::cmp>(a: T, b: T)`
 * `while value is Some(v) { ... }` destructures each turn
-* `@link("m")` / `@linkpath("/opt/lib")` at the top of a file
+* `#link("m")` / `#linkpath("/opt/lib")` at the top of a file
 * `-g` emits DWARF and prints a demangled traceback when a program aborts
-* `@type(Executable | Library | Object | Assembly | LLVM)` at the top of a file
+* `#type(Executable | Library | Object | Assembly | LLVM)` at the top of a file
   says what it produces; a `main` implies an executable
 * `@cfunction(T) -> U` is a bare C function pointer, and a declared function
   can become one with `as`
@@ -682,7 +682,7 @@ do about it, and which of their answers would fit here.
   layered error type needs, and `process::panic` is `-> Never`, so it can end
   a function that promised a value
 * Labelled loops with `break :label`
-* Decorators: `@unsafe`, `@safe("...")`, `@inline`, `@export("name")`
+* Decorators: `#unsafe`, `#safe("...")`, `#inline`, `#export("name")`
 * FFI: `extern "C" { printf(text: CString, ...) -> i32 }`
 * Modules with `pub` visibility, `import a::b`, `import a::{b, c}`, `import a::*`
 * A fully qualified path needs no import — `std::io::println("hi")` just works;
@@ -694,15 +694,15 @@ do about it, and which of their answers would fit here.
 
 ### Conditional compilation and inline assembly
 
-`@Config(...)` decides whether a declaration exists at all. It is answered
+`#Config(...)` decides whether a declaration exists at all. It is answered
 before anything is checked, so what it rules out may name types and foreign
 symbols that exist on no other target.
 
 ```rune
-@Config(family == "unix")
+#Config(family == "unix")
 fn lineEnding() -> String { "\n" }
 
-@Config(family == "windows")
+#Config(family == "windows")
 fn lineEnding() -> String { "\r\n" }
 ```
 
@@ -714,15 +714,15 @@ Fields, methods, variants and `extern` declarations may each carry one.
 `std::asm` hands instructions to the assembler as written:
 
 ```rune
-@Config(arch == "aarch64")
+#Config(arch == "aarch64")
 fn addUp(a: i64, b: i64) -> i64 {
     unsafe { asm::value<i64>("add $0, $1, $2", "=r,r,r", a, b) }
 }
 ```
 
 `asm::run` is for instructions written for their effects and is never elided;
-`asm::value<R>` is treated as a pure function of its inputs. Both are `@unsafe`,
-and both want a `@Config` around them.
+`asm::value<R>` is treated as a pure function of its inputs. Both are `#unsafe`,
+and both want a `#Config` around them.
 
 ---
 
@@ -746,7 +746,7 @@ runec [options] <input.rune>...
                      wrap instead (the default at -O1 and above)
   -I <dir>           module search path (.rul libraries)
   -L <dir> -l <name> native library search path and libraries
-  --cfg <name>       set <name> for `@Config(...)`
+  --cfg <name>       set <name> for `#Config(...)`
   --dump-tokens      token stream
   --dump-ast         parse tree
   --dump-symbols     resolved module scope

@@ -27,11 +27,11 @@ extern "C" {
 /// between neighbouring elements of an array of `T`.
 ///
 ///     let n = mem::size_of<i64>()     // 8
-@intrinsic("size_of")
+#intrinsic("size_of")
 pub fn size_of<T>() -> usize
 
 /// The alignment `T` requires, in bytes.
-@intrinsic("align_of")
+#intrinsic("align_of")
 pub fn align_of<T>() -> usize
 
 /// True when `T` is reference counted — a class, a `String`, a `dyn Mark`, or
@@ -48,7 +48,7 @@ pub fn align_of<T>() -> usize
 /// or `bool`, and are never a valid reference. A container that zeroes its
 /// storage can therefore hand back zeroed slots for one kind of `T` and must
 /// call them empty for the other.
-@intrinsic("is_counted")
+#intrinsic("is_counted")
 pub fn is_counted<T>() -> bool
 
 /// A hash of `value`, worked out from its layout.
@@ -62,7 +62,7 @@ pub fn is_counted<T>() -> bool
 /// A `String` hashes its contents; a class hashes its address, because two
 /// distinct objects are two distinct keys even when their fields agree. An
 /// aggregate hashes its parts, and an enum its tag and live payload.
-@intrinsic("hash")
+#intrinsic("hash")
 pub fn hash<T>(value: &T) -> u64
 
 /// True when `a` and `b` are structurally equal, worked out from the layout.
@@ -70,7 +70,7 @@ pub fn hash<T>(value: &T) -> u64
 /// Contents for a `String`, address for a class, part by part for anything
 /// aggregate. This is the comparison `hash` is consistent with, and it needs
 /// no bound on `T`.
-@intrinsic("equals")
+#intrinsic("equals")
 pub fn equals<T>(a: &T, b: &T) -> bool
 
 //===--------------------------------------------------------------------===//
@@ -98,17 +98,17 @@ pub mark Allocator {
 pub struct SystemAllocator {}
 
 bind Allocator to SystemAllocator {
-    @safe("the runtime returns either a valid block of this size or null")
+    #safe("the runtime returns either a valid block of this size or null")
     fn allocate(&self, bytes: usize) -> *var u8 {
         unsafe { rune_raw_alloc(bytes as u64) }
     }
 
-    @safe("the runtime ignores a null block")
+    #safe("the runtime ignores a null block")
     fn deallocate(&self, block: *var u8, bytes: usize) {
         unsafe { rune_raw_free(block, bytes as u64) }
     }
 
-    @safe("the runtime copies the contents it can keep")
+    #safe("the runtime copies the contents it can keep")
     fn reallocate(&self, block: *var u8, oldBytes: usize, bytes: usize) -> *var u8 {
         unsafe { rune_raw_realloc(block, oldBytes as u64, bytes as u64) }
     }
@@ -119,15 +119,15 @@ pub global allocator: SystemAllocator = SystemAllocator {}
 
 /// A block pointer that refers to nothing yet. `deallocate` and `reallocate`
 /// both accept it, so a container can start out holding one.
-@safe("a null block is never read through; it only marks 'nothing allocated'")
+#safe("a null block is never read through; it only marks 'nothing allocated'")
 pub fn noBlock() -> *var u8 { unsafe { 0 as *var u8 } }
 
 /// True when a block pointer refers to nothing.
-@safe("comparing an address to zero reads no memory")
+#safe("comparing an address to zero reads no memory")
 pub fn isNull(block: *var u8) -> bool { unsafe { block as u64 == 0 } }
 
 /// Copies `bytes` from one block to another. The two must not overlap.
-@safe("both blocks are sized by the caller, which is where the invariant is")
+#safe("both blocks are sized by the caller, which is where the invariant is")
 pub fn copy(dst: *var u8, src: *u8, bytes: usize) {
     if bytes == 0 { return }
     unsafe { rune_raw_copy(dst, src, bytes as u64) }
@@ -135,20 +135,20 @@ pub fn copy(dst: *var u8, src: *u8, bytes: usize) {
 
 /// The address `bytes` further into a block. The caller is responsible for
 /// that address still being inside it.
-@safe("address arithmetic reads nothing; the block's extent is the caller's")
+#safe("address arithmetic reads nothing; the block's extent is the caller's")
 pub fn offset(block: *var u8, bytes: usize) -> *var u8 {
     unsafe { (block as u64 + bytes as u64) as *var u8 }
 }
 
 /// Sets `bytes` of a block to zero. A null block is accepted and ignored.
-@safe("the block is sized by the caller, which is where the invariant is")
+#safe("the block is sized by the caller, which is where the invariant is")
 pub fn zero(block: *var u8, bytes: usize) {
     unsafe { rune_raw_zero(block, bytes as u64) }
 }
 
 /// True when `bytes` of a block are all zero — the test for "never written",
 /// worth making only when `T` has no all-zero value. See `is_counted`.
-@safe("reads exactly the bytes the caller sized, and only to compare them")
+#safe("reads exactly the bytes the caller sized, and only to compare them")
 pub fn isZeroed(block: *u8, bytes: usize) -> bool {
     unsafe { rune_raw_is_zero(block, bytes as u64) }
 }
@@ -166,8 +166,8 @@ pub fn isZeroed(block: *u8, bytes: usize) -> bool {
 /// block holding `count` initialised elements.
 ///
 ///     let view = unsafe { mem::slice_of<T>(self.block as *var T, self.count) }
-@unsafe
-@intrinsic("slice_of")
+#unsafe
+#intrinsic("slice_of")
 pub fn slice_of<T>(block: *var T, count: usize) -> [T]
 
 /// Where a slice's elements start.
@@ -177,8 +177,8 @@ pub fn slice_of<T>(block: *var T, count: usize) -> [T]
 /// the values needs — `&values[i]` hands back the value where `T` is a
 /// handle, which is the right answer for reading and the wrong one for
 /// emptying.
-@unsafe
-@intrinsic("slice_data")
+#unsafe
+#intrinsic("slice_data")
 pub fn slice_data<T>(values: [T]) -> *var T
 
 //===--------------------------------------------------------------------===//
@@ -194,31 +194,31 @@ pub fn slice_data<T>(values: [T]) -> *var T
 
 /// Puts `value` into the slot at `slot`, which the slot then owns. Whatever
 /// the slot held before is not released — see `drop_at`.
-@unsafe
-@intrinsic("store")
+#unsafe
+#intrinsic("store")
 pub fn store<T>(slot: *var T, value: T)
 
 /// Takes the value out of the slot at `slot`, leaving it empty.
-@unsafe
-@intrinsic("take")
+#unsafe
+#intrinsic("take")
 pub fn take<T>(slot: *var T) -> T
 
 /// Destroys the value in the slot at `slot` and leaves the slot empty.
-@unsafe
-@intrinsic("drop_at")
+#unsafe
+#intrinsic("drop_at")
 pub fn drop_at<T>(slot: *var T)
 
 /// All-zero bytes, read as a `T`. Not a value: a null reference, an empty
 /// string that is no string, a struct of nothing. For the one place that
 /// has to hand back a `T` it does not have — a task leaving a suspension
 /// point because it was cancelled, whose result nothing will look at.
-@unsafe
-@intrinsic("zeroed")
+#unsafe
+#intrinsic("zeroed")
 pub fn zeroed<T>() -> T
 
 /// Puts `value` into `place` and hands back what was there.
-@safe("the place is a live borrow, and every write into it is balanced")
-@intrinsic("replace")
+#safe("the place is a live borrow, and every write into it is balanced")
+#intrinsic("replace")
 pub fn replace<T>(place: &var T, value: T) -> T
 
 //===--------------------------------------------------------------------===//
@@ -229,13 +229,13 @@ pub fn replace<T>(place: &var T, value: T) -> T
 ///
 /// Only needed when a value is stored somewhere the compiler cannot see — raw
 /// memory. Everything else is balanced for you.
-@unsafe
-@intrinsic("retain")
+#unsafe
+#intrinsic("retain")
 pub fn retain<T>(value: T)
 
 /// Gives up a reference to `value`. Must balance a `retain`.
-@unsafe
-@intrinsic("release")
+#unsafe
+#intrinsic("release")
 pub fn release<T>(value: T)
 
 //===--------------------------------------------------------------------===//
@@ -266,9 +266,9 @@ pub fn release<T>(value: T)
 ///         (value.$clone(), value.$clone())
 ///     }
 ///
-/// `@never(mem::Clone)` on a type refuses it outright, whatever its parts
+/// `#never(mem::Clone)` on a type refuses it outright, whatever its parts
 /// say.
-@auto
+#auto
 pub mark Clone {}
 
 /// A `String` is immutable and counted: a copy of one is a copy of a value.
@@ -341,7 +341,7 @@ pub class Handle<T> {
     pub fn touch(&var self) -> &var T from self { &var self.value }
 
     /// `look` under its older name.
-    @alias("get_ref")
+    #alias("get_ref")
     pub fn borrowed(&self) -> &T from self { &self.value }
 
     /// Replaces the value. Every handle sharing it sees the change.
@@ -394,10 +394,10 @@ bind<T: io::Display> io::Display to Handle<T> {
 // `deref` and `derefSet` are the two halves; `operator::"*"` is the same
 // operator written as punctuation.
 bind<T> operator::"*" to Handle<T> {
-    @alias("Asterisk")
+    #alias("Asterisk")
     fn deref(&self) -> T where T: Clone { self.value.$clone() }
 
-    @alias("AsteriskEquals")
+    #alias("AsteriskEquals")
     fn derefSet(&var self, value: T) { self.value = value }
 }
 
@@ -468,7 +468,7 @@ pub struct Box<T> {
 /// with an owner per value cannot be.
 ///
 ///     var row = mem::filled<i64>(8, 0)
-@safe("each slot below the count is written once, with a copy of its own")
+#safe("each slot below the count is written once, with a copy of its own")
 pub fn filled<T>(size: i64, value: T) -> Buffer<T> where T: Clone {
     var b = Buffer<T>(size)
     var i: i64 = 0
@@ -510,7 +510,7 @@ pub fn tryBoxed<T>(value: T) -> Result<Box<T>, T> {
 /// A `Cell` is not `Sync`: two threads changing one would race. Share
 /// across threads through a `thread::Mutex`, or `atomic::Counter` for a
 /// number — both of which are built on this.
-@interior
+#interior
 pub struct Cell<T> {
     value: T
 
@@ -518,7 +518,7 @@ pub struct Cell<T> {
     pub fn get(&self) -> T where T: Clone { self.value.$clone() }
 
     /// Replaces what is inside, destroying what was there.
-    @safe("nothing ever borrows the inside of a cell, so nothing sees it change")
+    #safe("nothing ever borrows the inside of a cell, so nothing sees it change")
     pub fn set(&self, next: T) {
         let slot = unsafe { &self.value as *var T }
         unsafe {
@@ -528,7 +528,7 @@ pub struct Cell<T> {
     }
 
     /// Puts `next` in and hands back what was there.
-    @safe("nothing ever borrows the inside of a cell, so nothing sees it change")
+    #safe("nothing ever borrows the inside of a cell, so nothing sees it change")
     pub fn replace(&self, next: T) -> T {
         let slot = unsafe { &self.value as *var T }
         let old = unsafe { take<T>(slot) }
@@ -539,7 +539,7 @@ pub struct Cell<T> {
     /// The address of what is inside, for code that reaches it through a
     /// raw pointer by design: an atomic instruction, a value a lock guards.
     /// Whatever is done through it is the caller's to justify.
-    @unsafe
+    #unsafe
     pub fn asPtr(&self) -> *var T { &self.value as *var T }
 }
 
@@ -558,10 +558,10 @@ pub fn boxed<T>(value: T) -> Box<T> {
 
 // A box behaves like a pointer: `*b` reads the value, `*b = v` writes it.
 bind<T> operator::"*" to Box<T> {
-    @alias("Asterisk")
+    #alias("Asterisk")
     fn deref(&self) -> T where T: Clone { self.look().$clone() }
 
-    @alias("AsteriskEquals")
+    #alias("AsteriskEquals")
     fn derefSet(&var self, value: T) { *self.touch() = value }
 }
 
@@ -596,16 +596,16 @@ fn rcValueOffset<T>() -> usize {
     ((head + a - 1) / a) * a
 }
 
-@safe("the counts are the first two words of a block this module allocated")
+#safe("the counts are the first two words of a block this module allocated")
 fn rcStrong(block: *var u8) -> i64 { unsafe { (block as *var i64)[0] } }
 
-@safe("the counts are the first two words of a block this module allocated")
+#safe("the counts are the first two words of a block this module allocated")
 fn rcSetStrong(block: *var u8, n: i64) { unsafe { (block as *var i64)[0] = n } }
 
-@safe("the counts are the first two words of a block this module allocated")
+#safe("the counts are the first two words of a block this module allocated")
 fn rcWeakCount(block: *var u8) -> i64 { unsafe { (block as *var i64)[1] } }
 
-@safe("the counts are the first two words of a block this module allocated")
+#safe("the counts are the first two words of a block this module allocated")
 fn rcSetWeak(block: *var u8, n: i64) { unsafe { (block as *var i64)[1] = n } }
 
 /// A `T` on the heap shared by as many owners as ask for one, each of which
@@ -692,7 +692,7 @@ pub struct Rc<T> {
 bind<T> Clone to Rc<T> {}
 
 bind<T> operator::"*" to Rc<T> {
-    @alias("Asterisk")
+    #alias("Asterisk")
     fn deref(&self) -> T where T: Clone { self.look().$clone() }
 }
 
@@ -836,7 +836,7 @@ pub class Buffer<T> {
     /// For a value type every slot in range is occupied, because zero is a
     /// value. For a counted type a slot is occupied once something has been
     /// written to it.
-    @safe("the index is compared against the count before the block is read")
+    #safe("the index is compared against the count before the block is read")
     pub fn occupied(&self, index: i64) -> bool {
         if !self.holds(index) { return false }
         if !is_counted<T>() { return true }
@@ -849,7 +849,7 @@ pub class Buffer<T> {
 
     /// The value at `index`, borrowed, or nothing when there is no such slot
     /// or nothing has been written to it — the borrowing form of `at`.
-    @safe("the slot is checked for range and for contents before the borrow")
+    #safe("the slot is checked for range and for contents before the borrow")
     pub fn peek(&self, index: i64) -> (&T from self)? {
         if !self.occupied(index) { return nil }
         Some(unsafe { &(self.block as *var T)[index] })
@@ -861,7 +861,7 @@ pub class Buffer<T> {
     /// Like `read`, it takes the caller's word that the slot has been
     /// written: a table that keeps its own record of which slots are live
     /// borrows through this.
-    @safe("the index is compared against the count before the borrow")
+    #safe("the index is compared against the count before the borrow")
     pub fn look(&self, index: i64) -> &T from self {
         if !self.holds(index) { process::panic("Buffer index out of range") }
         unsafe { &(self.block as *var T)[index] }
@@ -869,7 +869,7 @@ pub class Buffer<T> {
 
     /// The value at `index`, borrowed to write through. Aborts when there is
     /// no such slot.
-    @safe("the index is compared against the count before the borrow")
+    #safe("the index is compared against the count before the borrow")
     pub fn touch(&var self, index: i64) -> &var T from self {
         if !self.holds(index) { process::panic("Buffer index out of range") }
         unsafe { &var (self.block as *var T)[index] }
@@ -891,7 +891,7 @@ pub class Buffer<T> {
     /// happen to all be zero — an empty `String`, or the first variant of a
     /// counted enum that carries nothing. A caller that keeps its own record
     /// of which slots are live wants `read`, which asks no such question.
-    @safe("the slot is checked for range and for contents before the read")
+    #safe("the slot is checked for range and for contents before the read")
     pub fn at(&self, index: i64) -> T? where T: Clone {
         match self.peek(index) {
             Some(r) => Some(r.$clone())
@@ -903,7 +903,7 @@ pub class Buffer<T> {
     /// — written or not: a slot nobody wrote is zero bytes here too. What
     /// `$clone()` does to a `Buffer`; the memberwise copy would share the
     /// block.
-    @safe("both blocks are sized by the same count; every slot below it is read once")
+    #safe("both blocks are sized by the same count; every slot below it is read once")
     pub fn clone(&self) -> Self where T: Clone {
         var out = Buffer<T>(self.count)
         var i = 0
@@ -926,7 +926,7 @@ pub class Buffer<T> {
     /// been written, so a value of all zero bytes comes back as the value it
     /// is rather than as nothing. A hash table with a state buffer of its own
     /// already knows which slots are live, and this is the read for it.
-    @safe("the index is compared against the count before the read")
+    #safe("the index is compared against the count before the read")
     pub fn read(&self, index: i64) -> T? where T: Clone {
         if !self.holds(index) { return nil }
         Some(self.look(index).$clone())
@@ -952,7 +952,7 @@ pub class Buffer<T> {
 
     /// Replaces the value at `index`. Returns false when there is no such
     /// slot, leaving the buffer untouched.
-    @safe("the index is compared against the count before the write")
+    #safe("the index is compared against the count before the write")
     pub fn put(&var self, index: i64, value: T) -> bool {
         if !self.holds(index) { return false }
         let slot = unsafe { self.block as *var T }
@@ -967,7 +967,7 @@ pub class Buffer<T> {
     /// Takes the value out of the slot at `index`, handing it back and leaving
     /// the slot empty (zeroed). Nothing when there is no such slot. The caller
     /// owns what comes out; the buffer no longer does.
-    @safe("the index is compared against the count before the move")
+    #safe("the index is compared against the count before the move")
     pub fn take(&var self, index: i64) -> T? {
         if !self.holds(index) { return nil }
         let slot = unsafe { self.block as *var T }
@@ -982,7 +982,7 @@ pub class Buffer<T> {
     /// For a counted type the slot reads as `nil` afterwards. For a value type
     /// there is no such thing as an empty slot, so this sets it back to zero.
     /// Returns false when there is no such slot.
-    @safe("the index is compared against the count before the write")
+    #safe("the index is compared against the count before the write")
     pub fn clear(&var self, index: i64) -> bool {
         if !self.holds(index) { return false }
         let stride = size_of<T>()
@@ -1063,7 +1063,7 @@ pub class Checked<T> {
         self.state = 0
     }
 
-    @safe("the state word belongs to this Checked and is written only here")
+    #safe("the state word belongs to this Checked and is written only here")
     fn setState(&self, next: i64) {
         unsafe { store<i64>(&self.state as *var i64, next) }
     }
@@ -1102,7 +1102,7 @@ pub struct Ref<T> {
     pub fn look(&self) -> &T from self { &self.owner.value }
 }
 bind<T> operator::"*" to Ref<T> {
-    @alias("Asterisk")
+    #alias("Asterisk")
     fn deref(&self) -> T where T: Clone { self.owner.value.$clone() }
 }
 
@@ -1113,7 +1113,7 @@ pub struct RefVar<T> {
 
     fn deinit(&self) { self.owner.setState(0) }
 
-    @safe("the run-time check makes this the only borrow, so the write is exclusive")
+    #safe("the run-time check makes this the only borrow, so the write is exclusive")
     fn write(&self, value: T) {
         unsafe {
             drop_at<T>(&self.owner.value as *var T)
@@ -1126,16 +1126,16 @@ pub struct RefVar<T> {
 
     /// The value where it lies, to write: the run-time check has already
     /// made this the only borrow.
-    @safe("the run-time check makes this the only borrow out")
+    #safe("the run-time check makes this the only borrow out")
     pub fn touch(&var self) -> &var T from self {
         unsafe { &var (&self.owner.value as *var T)[0] }
     }
 }
 bind<T> operator::"*" to RefVar<T> {
-    @alias("Asterisk")
+    #alias("Asterisk")
     fn deref(&self) -> T where T: Clone { self.owner.value.$clone() }
 
-    @alias("AsteriskEquals")
+    #alias("AsteriskEquals")
     fn derefSet(&var self, value: T) { self.write(value) }
 }
 
@@ -1193,7 +1193,7 @@ pub class Arena<T> {
     /// True when it holds none.
     pub fn isEmpty(&self) -> bool { self.live == 0 }
 
-    @safe("the new buffer is sized for every slot before any value moves into it")
+    #safe("the new buffer is sized for every slot before any value moves into it")
     fn grow(&var self, wanted: i64) {
         if wanted <= self.values.length() { return }
         var cap = self.values.length() * 2

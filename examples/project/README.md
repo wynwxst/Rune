@@ -41,7 +41,7 @@ propagated to whatever links against it.
 * `Option` for "there might be nothing to measure"
 * `Result` plus `?` for argument parsing that reports the first bad value
 * A `bind io::Display to Summary` so the summary prints itself
-* `@safe("...")` justifying a foreign call to `sqrt`
+* `#safe("...")` justifying a foreign call to `sqrt`
 
 ## The other packages here
 

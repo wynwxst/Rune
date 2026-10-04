@@ -8,16 +8,16 @@ Every method below is an ordinary method on an ordinary enum. The sugar — `T?`
 | `hasValue` | `(&self) -> bool` | true when `Some` |
 | `isNil` | `(&self) -> bool` | true when `None` |
 | `isSuchThat` | `(&self, @function(T) -> bool) -> bool` | true when present *and* it passes |
-| `or` | `(&self, fallback: T) -> T` | the value, or the fallback |
-| `orElse` | `(&self, @function() -> T) -> T` | same, producing the fallback only if needed |
-| `unwrap` | `(&self) -> T` | the value; **aborts** on `None` |
-| `expect` | `(&self, message: CString) -> T` | same, with your message |
-| `map` | `<U>(&self, @function(T) -> U) -> Option<U>` | the value transformed; empty passes through |
-| `mapOr` | `<U>(&self, fallback: U, @function(T) -> U) -> U` | `map` then `or`, in one step |
-| `andThen` | `<U>(&self, @function(T) -> Option<U>) -> Option<U>` | `map` for a function that may itself come up empty |
-| `filter` | `(&self, @function(T) -> bool) -> Option<T>` | the value, but only if it passes |
-| `otherwise` | `(&self, other: Option<T>) -> Option<T>` | this one if present, else the other; stays an `Option` |
-| `zip` | `<U>(&self, Option<U>) -> Option<(T, U)>` | both as a pair, or nothing |
+| `or` | `(self, fallback: T) -> T` | the value, or the fallback |
+| `orElse` | `(self, @function() -> T) -> T` | same, producing the fallback only if needed |
+| `unwrap` | `(self) -> T` | the value; **aborts** on `None` |
+| `expect` | `(self, message: CString) -> T` | same, with your message |
+| `map` | `<U>(self, @function(T) -> U) -> Option<U>` | the value transformed; empty passes through |
+| `mapOr` | `<U>(self, fallback: U, @function(T) -> U) -> U` | `map` then `or`, in one step |
+| `andThen` | `<U>(self, @function(T) -> Option<U>) -> Option<U>` | `map` for a function that may itself come up empty |
+| `filter` | `(self, @function(T) -> bool) -> Option<T>` | the value, but only if it passes |
+| `otherwise` | `(self, other: Option<T>) -> Option<T>` | this one if present, else the other; stays an `Option` |
+| `zip` | `<U>(self, Option<U>) -> Option<(T, U)>` | both as a pair, or nothing |
 | `take` | `(&var self) -> Option<T>` | hands the value over and leaves this one empty |
 | `replace` | `(&var self, value: T) -> Option<T>` | stores one, returns what was there |
 | `clear` | `(&var self)` | empties it |

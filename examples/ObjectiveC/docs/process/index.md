@@ -58,10 +58,10 @@ bind ObjC_Object to Class {
 // A C string is already the address of NUL-terminated bytes, which is exactly
 // what `stringWithUTF8String:` is asking for.
 bind ObjC_Object to CString {
-    @safe("a CString is already the address of NUL-terminated bytes")
+    #safe("a CString is already the address of NUL-terminated bytes")
     pub fn from_ptr(ptr: objc_object) -> Self { unsafe { ptr as CString } }
 
-    @safe("the same address, read back as the pointer it is")
+    #safe("the same address, read back as the pointer it is")
     pub fn as_ptr(&self) -> objc_object { unsafe { self as *var u8 } }
 }
 ```
@@ -133,7 +133,7 @@ enum Style {
 }
 
 /// A `String` is what one writes; `stringWithUTF8String:` wants bytes.
-@unsafe pub fn nsstring(text: String) -> id {
+#unsafe pub fn nsstring(text: String) -> id {
     Class::new("NSString").call("stringWithUTF8String:", text.$cstr())
 }
 ```

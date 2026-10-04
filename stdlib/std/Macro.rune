@@ -5,13 +5,13 @@
 // one method per field, a table read off its own entries, a name derived
 // from another name. That is what this is for.
 //
-// A procedural macro is an ordinary function marked `@macro`, in a file that
+// A procedural macro is an ordinary function marked `#macro`, in a file that
 // says it is a macro package:
 //
-//     @type(Macros)
+//     #type(Macros)
 //     import std::Macro
 //
-//     @macro
+//     #macro
 //     pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
 //         let it = input.text()
 //         Macro::parse("((" + it + ") + (" + it + "))")
@@ -25,7 +25,7 @@
 // How it runs
 //===--------------------------------------------------------------------===//
 //
-// A `@type(Macros)` file is a **package of its own**. The compiler builds it
+// A `#type(Macros)` file is a **package of its own**. The compiler builds it
 // first — for the machine doing the compiling, whatever the program is being
 // built for — and then runs it to expand each invocation.
 //
@@ -51,7 +51,7 @@
 // is inside it. So a macro can take a body, look through it, and hand it
 // back untouched:
 //
-//     @macro
+//     #macro
 //     pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
 //         let body = input.at(input.length() - 1)      // the `{ ... }`
 //         Macro::parse("{ io::println(\"in\"); " + body.inner().text() + " }")

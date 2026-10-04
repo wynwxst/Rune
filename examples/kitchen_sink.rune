@@ -130,12 +130,12 @@ extend Point {
 // Safety
 //===--------------------------------------------------------------------===//
 
-@unsafe
+#unsafe
 fn pokeRaw(target: *var i64, value: i64) {
     *target = value
 }
 
-@safe("the pointer comes from a live local in this same function")
+#safe("the pointer comes from a live local in this same function")
 fn bumped(start: i64) -> i64 {
     var slot = start
     pokeRaw(&var slot as *var i64, start + 1)
@@ -146,7 +146,7 @@ fn bumped(start: i64) -> i64 {
 // Generics and first-order functions
 //===--------------------------------------------------------------------===//
 
-@inline
+#inline
 pub fn describeAny<T: Show>(value: T) -> String {
     value.shout()
 }

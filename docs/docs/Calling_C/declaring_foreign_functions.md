@@ -3,7 +3,7 @@
 **Three from libm**
 
 ```rune
-@link("m")
+#link("m")
 
 import std::io
 
@@ -13,7 +13,7 @@ extern "C" {
     fn ldexp(value: f64, exponent: i32) -> f64
 }
 
-@safe("libm's contract for these is total over the values passed below")
+#safe("libm's contract for these is total over the values passed below")
 fn main() -> i64 {
     io::println(unsafe { fmod(10.0, 3.0) }.$str())
     io::println(unsafe { ldexp(1.5, 3) }.$str())

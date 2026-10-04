@@ -18,28 +18,28 @@ tracing = false
 **What a value key answers**
 
 ```text
-@Config(backend == "metal")
+#Config(backend == "metal")
 fn present() -> String { "metal" }
 
-@Config(backend == "vulkan")
+#Config(backend == "vulkan")
 fn present() -> String { "vulkan" }
 
-@Config(backend != "metal" && backend != "vulkan")
+#Config(backend != "metal" && backend != "vulkan")
 fn present() -> String { "software" }
 
 // `=` reads as the comparison: there is nothing else it could mean in a
 // condition, and `tracing = true` is how the key was written in the manifest.
-@Config(tracing = true)
+#Config(tracing = true)
 fn trace(what: String) { /* ... */ }
 
-@Config(tracing = false)
+#Config(tracing = false)
 fn trace(what: String) {}
 
-@Config(api_level == 3)
+#Config(api_level == 3)
 fn modern() -> bool { true }
 ```
 
-The value may be a string, a number, a boolean or a bare word, and either side of the comparison may be the key — `@Config("metal" == backend)` says the same thing. A key the package never declared is an error rather than a silently false condition, so a typo is caught where it is written.
+The value may be a string, a number, a boolean or a bare word, and either side of the comparison may be the key — `#Config("metal" == backend)` says the same thing. A key the package never declared is an error rather than a silently false condition, so a typo is caught where it is written.
 
 ```sh
 $ runec --cfg backend=metal --cfg api_level=3 --cfg tracing=true app.rune

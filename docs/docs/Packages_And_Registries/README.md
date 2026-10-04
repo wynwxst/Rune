@@ -7,6 +7,8 @@ How a package is made, how one is used, and how a registry is run. A package is 
 - [Making a package](making_a_package.md)
 - [What a version promises](what_a_version_promises.md)
 - [Using a package](using_a_package.md)
+- [Local units](local_units.md)
+- [Workspaces](workspaces.md)
 - [Which registry](which_registry.md)
 - [Making a registry](making_a_registry.md)
 - [Releasing a new version](releasing_a_new_version.md)

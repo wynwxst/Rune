@@ -1432,7 +1432,7 @@ pub fn sourcesUnder(dir: &String) -> vector::Vector<String> {
 }
 
 /// Whether the module at `path` is a package's output root: it has a
-/// `main`, or says with `@type` what it produces (a macro package aside).
+/// `main`, or says with `#type` what it produces (a macro package aside).
 pub fn isRootModule(ix: &index::Index) -> bool {
     if !ix.fileType.$isEmpty() && ix.fileType != "Macros" { return true }
     for s in ix.symbols {

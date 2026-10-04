@@ -7,9 +7,9 @@ A C++ object lives where C++ can destroy it, so its storage comes from `operator
 ```text
 import std::cxx
 
-@safe("the storage is ours from `alloc` until `free`, and nothing else holds it")
+#safe("the storage is ours from `alloc` until `free`, and nothing else holds it")
 fn counting() -> i64 {
-    let c = cxx::alloc<Counter>()   // @size(8) bytes from `operator new`
+    let c = cxx::alloc<Counter>()   // #size(8) bytes from `operator new`
     c.init(10)                      // Counter::Counter(10), on that storage
     c.setStep(5)
     let first = c.next()

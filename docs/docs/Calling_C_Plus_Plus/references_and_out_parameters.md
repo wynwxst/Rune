@@ -14,7 +14,7 @@ extern "C++" {
 }
 
 /// The borrows live for the call, which is all a reference needs.
-@safe("both borrows name locals that outlive the call")
+#safe("both borrows name locals that outlive the call")
 pub fn bumped(start: i64, by: i64) -> i64 {
     var x = start as c_int
     bump(&var x, by as c_int)

@@ -47,7 +47,7 @@ private:
 
   void attrs(const std::vector<Attribute> &as) {
     for (const auto &a : as) {
-      line("@" + a.Name + (a.Args.empty() ? "" : "(...)"));
+      line((a.Builtin ? "#" : "@") + a.Name + (a.Args.empty() ? "" : "(...)"));
     }
   }
 
@@ -176,14 +176,14 @@ private:
       if (f->IsPublic) s += " pub";
       if (f->IsExtern) s += " extern(\"" + f->ExternABI + "\")";
       if (f->IsUnsafe) s += " unsafe";
-      if (f->IsSafeJustified) s += " @safe(\"" + f->SafetyReason + "\")";
+      if (f->IsSafeJustified) s += " #safe(\"" + f->SafetyReason + "\")";
       if (f->IsVariadic) s += " variadic";
       // Written `async fn`: what follows is the rewrite — a `Future` result
       // and a body that hands a closure to `std::task::spawn`.
       if (f->IsAsync) s += " async";
       line(s + loc(d));
       Scope sc(*this);
-      // Prose the compiler kept, from `@Doc` or a `///` comment. Shown as one
+      // Prose the compiler kept, from `#Doc` or a `///` comment. Shown as one
       // line so a dump stays a dump. Only populated after Sema.
       if (!f->Doc.empty()) {
         std::string one;

@@ -8,7 +8,7 @@ lower to a specific instruction.
 ## 1. Declare it in the standard library
 
 ```rune
-@intrinsic("align_of")
+#intrinsic("align_of")
 pub fn alignOf<T>() -> usize
 ```
 

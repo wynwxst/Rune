@@ -6,6 +6,7 @@ An `extern "C"` block declares functions that exist somewhere else. There is no 
 
 - [Declaring foreign functions](declaring_foreign_functions.md)
 - [Structs](structs.md)
+- [#Convention("C")](convention_c.md)
 - [Pointers and out-parameters](pointers_and_out_parameters.md)
 - [Callbacks](callbacks.md)
 - [Strings across the boundary](strings_across_the_boundary.md)
@@ -13,5 +14,6 @@ An `extern "C"` block declares functions that exist somewhere else. There is no 
 - [Wrapping a descriptor](wrapping_a_descriptor.md)
 - [Linking](linking.md)
 - [Packaging a C half](packaging_a_c_half.md)
+- [Bindings from a header: `rune ffi`](bindings_from_a_header_rune_ffi.md)
 - [Being called from C](being_called_from_c.md)
 - [C++ is its own block](c_plus_plus_is_its_own_block.md)

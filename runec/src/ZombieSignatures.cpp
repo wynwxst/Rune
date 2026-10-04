@@ -18,6 +18,7 @@
 #include "rune/ZombieIR.h"
 #include "rune/ZombieInternal.h"
 
+#include <algorithm>
 #include <set>
 
 namespace rune {

@@ -523,7 +523,7 @@ llvm::Type *CodeGen::lower(Type *t) {
     break;
   case TypeKind::Struct:
   case TypeKind::Enum:
-    // An opaque C++ class has no fields Rune knows; it is `@size` bytes.
+    // An opaque C++ class has no fields Rune knows; it is `#size` bytes.
     if (t->nominal() && t->nominal()->Cxx && t->nominal()->Cxx->IsClass)
       r = lowerCxxClass(t->nominal());
     else
@@ -582,7 +582,7 @@ llvm::FunctionType *CodeGen::functionTypeFor(FunctionDecl *fn) {
 /// is the difference between one pass and two.
 ///
 /// Three things qualify. `String` is `Send`, so a thread can be handed one.
-/// Anything marked `@sync` says outright that it is reached from several
+/// Anything marked `#sync` says outright that it is reached from several
 /// threads — `Arc` and `Mutex` are the two. And nothing else is either,
 /// because nothing else is `Send`.
 bool CodeGen::isSharedRefType(Type *t) {
@@ -3299,10 +3299,10 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     // it was in, rather than showing a bare address. `weak_odr` rather than
     // `external`: two objects that both carry the standard library have to
     // merge those definitions, not collide over them.
-    // `@export` is different in kind: it says this function is *the* one
+    // `#export` is different in kind: it says this function is *the* one
     // that answers to that name from outside. A weak definition would not
     // pull its object out of an archive on COFF, which is how the runtime is
-    // linked, and merging two different `@export("rune_alloc")`s was never
+    // linked, and merging two different `#export("rune_alloc")`s was never
     // wanted anyway. Give it strong external linkage.
     if (isExportedFunction(fn))
       f->setLinkage(GlobalValue::ExternalLinkage);
@@ -3315,7 +3315,7 @@ Function *CodeGen::declareFunction(FunctionDecl *fn) {
     else
       f->setLinkage(GlobalValue::InternalLinkage);
   }
-  // `@weak`: a definition another object may replace — a default handler a
+  // `#weak`: a definition another object may replace — a default handler a
   // program overrides by defining its own under the same name.
   if (hasDefinition && fn->hasAttr("weak"))
     f->setLinkage(GlobalValue::WeakAnyLinkage);
@@ -3489,7 +3489,7 @@ GlobalVariable *CodeGen::declareGlobal(GlobalVarDecl *g) {
   // Foreign globals keep the name the C side gave them. Rune globals are
   // mangled with their module so two modules may each have a `counter`.
   bool isForeign = g->Parent && isa<ExternDecl>(g->Parent);
-  // `@as` renamed the Rune-side name only; the symbol stays what C exports.
+  // `#as` renamed the Rune-side name only; the symbol stays what C exports.
   std::string name = g->LinkName.empty() ? g->Name : g->LinkName;
   if (!isForeign && !g->ModulePath.empty()) {
     std::string mod = g->ModulePath;
@@ -4117,7 +4117,7 @@ void CodeGen::emitEntryPoint() {
   if (Opts.Output == OutputKind::Library)
     return;
 
-  // `@entry(none)`: the program starts wherever it says — a boot stub's
+  // `#entry(none)`: the program starts wherever it says — a boot stub's
   // `call`, a reset vector. What `main` would have done first is handed to
   // it as one function, `rune_init`, to call before touching a global whose
   // value is worked out at run time. A global whose value is a constant is
@@ -4129,7 +4129,7 @@ void CodeGen::emitEntryPoint() {
     Function *init = M->getFunction("rune_init");
     if (init && (!init->isDeclaration() || init->getFunctionType() != ft)) {
       Diags.error(SourceRange(), "`rune_init` is the compiler's under "
-                                 "`@entry(none)`")
+                                 "`#entry(none)`")
           .note("declare it as `fn rune_init()` in an `extern \"C\"` block, "
                 "and define nothing by that name")
           .code(501);
@@ -4228,7 +4228,7 @@ static const char *hostedFeatureOf(llvm::StringRef name) {
 
 /// What `freestanding_type = "minimal"` leaves out of the freestanding
 /// runtime, by symbol; null for what the minimal runtime keeps, or what no
-/// freestanding runtime has. Kept in step with the `@Config` marks in
+/// freestanding runtime has. Kept in step with the `#Config` marks in
 /// runetime/.
 static const char *minimalLeavesOut(llvm::StringRef name) {
   if (name.starts_with("rune_string_from_f64"))
@@ -4354,13 +4354,13 @@ void CodeGen::reportHostedRuntimeUses() {
                                "program is built without one",
                 fn->Name)
         .note("it uses {}", hostedFeatureOf(symbol))
-        .note("`@runtime(none)` links only the program and the freestanding "
+        .note("`#runtime(none)` links only the program and the freestanding "
               "runtime compiled with it")
         .code(542);
   }
 }
 
-/// Two definitions of one symbol in this module: a `@weak` default and the
+/// Two definitions of one symbol in this module: a `#weak` default and the
 /// definition that replaces it — the freestanding runtime's panic handler and
 /// the program's own, compiled together. Across objects the linker would pick
 /// the strong one; within a module that choice is made here, and the default
@@ -4375,7 +4375,7 @@ void CodeGen::resolveWeakDefinitions() {
       bySymbol[it->second].push_back(fn);
   }
   for (auto &[f, decls] : bySymbol) {
-    // One symbol, several declarations, and no `@weak` among them is the
+    // One symbol, several declarations, and no `#weak` among them is the
     // ordinary case of a generic instantiated twice: one function.
     if (decls.size() < 2 ||
         std::none_of(decls.begin(), decls.end(), [](FunctionDecl *fn) {
@@ -4388,7 +4388,7 @@ void CodeGen::resolveWeakDefinitions() {
         if (winner) {
           auto d = Diags.error(fn->NameRange, "'{}' is defined twice",
                                f->getName().str());
-          d.note("mark the default `@weak` so another definition can replace "
+          d.note("mark the default `#weak` so another definition can replace "
                  "it")
               .code(501);
           continue;
@@ -4610,7 +4610,7 @@ bool CodeGen::run() {
 /// Not the C library's names, nor the 64-bit division helpers: the back end
 /// calls those itself, after the IR is final, for a large copy or a `/` the
 /// processor cannot do.
-/// An `@export`ed function is called from C, by C's rules. Where those
+/// An `#export`ed function is called from C, by C's rules. Where those
 /// differ from how Rune passes the same signature — a struct by value — the
 /// exported symbol is an adapter that takes its arguments the C way and makes
 /// the Rune call; the Rune body keeps an internal name, and Rune's own calls

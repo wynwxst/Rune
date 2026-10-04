@@ -2,7 +2,7 @@
 """A package's build.rune, end to end, on this machine.
 
 A package with a build script is built and run through `rune`, and each
-thing a script can do is checked: its prepare phase sets `@Config` flags the
+thing a script can do is checked: its prepare phase sets `#Config` flags the
 package's sources see; its finish phase runs once per executable, after the
 link, and can name a different file for `rune run` to start; a warning it
 gives is shown; a failure it reports stops the build with its message; and a
@@ -31,14 +31,14 @@ version = "0.1.0"
 
 MAIN = """import std::io
 
-@Config(generated)
+#Config(generated)
 fn origin() -> String { "set by build.rune" }
-@Config(!generated)
+#Config(!generated)
 fn origin() -> String { "not set" }
 
-@Config(mode == "fast")
+#Config(mode == "fast")
 fn mode() -> String { "fast" }
-@Config(!(mode == "fast"))
+#Config(!(mode == "fast"))
 fn mode() -> String { "other" }
 
 fn main() -> i64 {
@@ -118,7 +118,7 @@ def main():
         check("a package with a build script builds and runs", rc == 0, out)
         check("the build script is compiled for this machine",
               "(build script)" in out, out)
-        check("its prepare phase sets @Config flags, with and without a value",
+        check("its prepare phase sets #Config flags, with and without a value",
               "config: set by build.rune, mode fast" in out, out)
         check("a warning it gives is shown",
               "warning: scripted: prepared scripted for host" in out, out)

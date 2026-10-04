@@ -7,14 +7,14 @@
 ```rune
 import std::asm
 
-@Config(arch == "aarch64")
+#Config(arch == "aarch64")
 fn barrier() { unsafe { asm::run("dmb ish", "") } }
 
-@Config(arch == "x86_64")
+#Config(arch == "x86_64")
 fn barrier() { unsafe { asm::run("mfence", "") } }
 ```
 
 > [!WARNING]
-> **Always paired with `@Config`**
+> **Always paired with `#Config`**
 >
-> Assembly is text for one machine. Anything using it wants a `@Config(arch == "...")` around it and a definition for the architectures you do not handle — otherwise the build fails on the first machine nobody thought about.
+> Assembly is text for one machine. Anything using it wants a `#Config(arch == "...")` around it and a definition for the architectures you do not handle — otherwise the build fails on the first machine nobody thought about.

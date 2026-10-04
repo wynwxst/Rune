@@ -40,6 +40,44 @@ fn main() -> i64 {
 }
 ```
 
+## Implicitly, where the destination is written down
+
+A conversion the program defines is put in on its own wherever the type
+wanted is written down — an argument, an annotated binding, a field, a
+declared result, an assignment — so `(c into Fahrenheit)` is only needed
+where nothing says what is wanted.
+
+The source may be any type, a tuple or a **pointer** among them, and a bind
+may be generic. One binding lets every typed pointer go where C asks for
+bytes:
+
+```rune
+import std::io
+import std::mem
+
+bind<T> *var T into *var u8 {
+    fn convert(&self) -> *var u8 { unsafe { self as *var u8 } }
+}
+
+extern "C" {
+    fn realloc(ptr: *var u8, size: usize) -> *var u8
+    fn free(ptr: *var u8)
+}
+
+#unsafe
+fn main() -> i64 {
+    var items = 0 as *var i64
+    items = realloc(items, mem::size_of<i64>() * 4) as *var i64
+    items[0] = 7
+    io::println(items[0])
+    free(items)
+    0
+}
+```
+
+In a binding on a pointer type, `self` is the pointer itself. Importing a
+file or a library that declares such a binding brings it along.
+
 ## What `?` does with it
 
 ```rune

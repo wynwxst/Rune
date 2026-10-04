@@ -1,0 +1,560 @@
+// From libclang's cursors to the model.
+//
+// clang has already preprocessed, parsed and laid out the headers; this
+// walks what it found and writes it into the tables the emitter reads —
+// keeping clang's sizes and offsets. A struct or enum is recorded once, by
+// clang's unique name for its declaration, however many times it is named.
+//
+// libclang does not evaluate a `#define`. The tokens it gives are read here:
+// a number, a string, or an integer expression of numbers, enumerators and
+// constants defined before it.
+
+import std::collections::vector
+import std::dictionary
+import std::mem
+import interface::clang::*
+import interface::model::*
+import interface::literal
+
+pub class Ingest {
+    pub m: Model
+    unit: CXTranslationUnit
+    recordByUsr: dictionary::Map<String, i64>
+    enumByUsr: dictionary::Map<String, i64>
+    fileIndex: dictionary::Map<String, i64>
+
+    /// The model, handed over once the walk is done.
+    pub fn finish(&var self) -> Model {
+        mem::replace(&var self.m, Model(DataModel {}))
+    }
+
+    fn init(self, m: Model, unit: CXTranslationUnit) {
+        self.m = m
+        self.unit = unit
+        self.recordByUsr = dictionary::Map<String, i64>()
+        self.enumByUsr = dictionary::Map<String, i64>()
+        self.fileIndex = dictionary::Map<String, i64>()
+    }
+
+    /// The index of a file, by its path.
+    fn fileOf(&var self, cursor: CXCursor) -> i64 {
+        let p = placeOf(cursor)
+        if p.file.$isEmpty() { return -1 }
+        if self.fileIndex.holds(&p.file) { return self.fileIndex.atOr(&p.file, -1) }
+        let i = self.m.files.length()
+        self.m.files.push(p.file.$clone())
+        self.fileIndex.put(p.file, i)
+        i
+    }
+
+    //=== The translation unit ============================================//
+
+    #safe("every cursor and type handed to libclang came from libclang")
+    pub fn run(&var self) {
+        let top = clang_getTranslationUnitCursor(self.unit)
+        var macros = dictionary::Map<String, CConst>()
+        var macroCursors = vector::Vector<CXCursor>()
+        for c in children(top) {
+            let kind = clang_getCursorKind(*c)
+            if kind == CXCursor_FunctionDecl { self.function(*c) }
+            elif kind == CXCursor_VarDecl { self.variable(*c) }
+            elif kind == CXCursor_TypedefDecl { self.typedef(*c) }
+            elif kind == CXCursor_StructDecl || kind == CXCursor_UnionDecl {
+                let t = clang_getCursorType(*c)
+                self.typeOf(t)
+            } elif kind == CXCursor_EnumDecl {
+                self.enumFor(*c)
+            } elif kind == CXCursor_MacroDefinition {
+                macroCursors.push(*c)
+            }
+        }
+        // Macros last: a `#define` may name an enumerator declared after it,
+        // and its value only exists once the enum has been read.
+        for c in macroCursors { self.macroDef(*c, &var macros) }
+    }
+
+    #safe("every cursor and type handed to libclang came from libclang")
+    fn function(&var self, c: CXCursor) {
+        if clang_Cursor_getStorageClass(c) == CX_SC_Static { return }
+        let name = take(clang_getCursorSpelling(c))
+        if name.$isEmpty() || self.m.funcIndex.holds(&name) { return }
+        let ty = self.typeOf(clang_getCursorType(c))
+        // The parameters' names live on the declaration, not on its type.
+        let n = clang_Cursor_getNumArguments(c)
+        if n > 0 && ty >= 0 && self.m.types.look(ty).kind == TK::Function {
+            var names = vector::Vector<String>()
+            var i = 0
+            while i < n {
+                names.push(take(clang_getCursorSpelling(clang_Cursor_getArgument(c, i as u32))))
+                i += 1
+            }
+            self.m.types.touch(ty).paramNames = names
+        }
+        let file = self.fileOf(c)
+        let symbol = self.asmLabel(c)
+        self.m.funcIndex.put(name.$clone(), self.m.funcs.length())
+        self.m.funcs.push(CFunc { name: name, ty: ty, file: file, symbol: symbol })
+    }
+
+    #safe("every cursor and type handed to libclang came from libclang")
+    fn variable(&var self, c: CXCursor) {
+        if clang_Cursor_getStorageClass(c) == CX_SC_Static { return }
+        let name = take(clang_getCursorSpelling(c))
+        if name.$isEmpty() || self.m.varIndex.holds(&name) { return }
+        let ty = self.typeOf(clang_getCursorType(c))
+        let file = self.fileOf(c)
+        let symbol = self.asmLabel(c)
+        self.m.varIndex.put(name.$clone(), self.m.vars.length())
+        self.m.vars.push(CVar { name: name, ty: ty, file: file, symbol: symbol })
+    }
+
+    /// An `__asm__("label")` on a declaration: the symbol it links to.
+    #safe("every cursor handed to libclang came from libclang")
+    fn asmLabel(&var self, c: CXCursor) -> String {
+        for a in children(c) {
+            if clang_getCursorKind(*a) == CXCursor_AsmLabelAttr { return take(clang_getCursorSpelling(*a)) }
+        }
+        ""
+    }
+
+    #safe("every cursor and type handed to libclang came from libclang")
+    fn typedef(&var self, c: CXCursor) -> i64 {
+        let name = take(clang_getCursorSpelling(c))
+        if self.m.typedefIndex.holds(&name) {
+            let i = self.m.typedefIndex.atOr(&name, 0)
+            return self.m.typedefs.look(i).ty
+        }
+        // Registered before what it stands for is read, so a typedef that
+        // reaches itself — `typedef struct n *np;` inside `struct n` — ends.
+        let t = self.m.add(CType { kind: TK::Typedef, name: name.$clone() })
+        let file = self.fileOf(c)
+        self.m.typedefIndex.put(name.$clone(), self.m.typedefs.length())
+        self.m.typedefs.push(CTypedef { name: name.$clone(), ty: t, file: file })
+        let under = clang_getTypedefDeclUnderlyingType(c)
+        let inner = self.typeOf(under)
+        self.m.types.touch(t).inner = inner
+        self.m.types.touch(t).size = clang_Type_getSizeOf(under)
+        self.m.types.touch(t).align = clang_Type_getAlignOf(under)
+        // A typedef naming an anonymous struct or enum gives it its name.
+        let r = self.m.resolve(inner)
+        if r >= 0 && self.m.types.look(r).kind == TK::Record {
+            let rec = self.m.types.look(r).inner
+            if self.m.records.look(rec).tag.$isEmpty() && self.m.records.look(rec).alias.$isEmpty() &&
+                    self.m.records.look(rec).parent < 0 {
+                self.m.records.touch(rec).alias = name.$clone()
+            }
+        }
+        if r >= 0 && self.m.types.look(r).kind == TK::Enum {
+            let e = self.m.types.look(r).inner
+            if self.m.enums.look(e).tag.$isEmpty() && self.m.enums.look(e).alias.$isEmpty() {
+                self.m.enums.touch(e).alias = name
+            }
+        }
+        t
+    }
+
+    //=== Types ===========================================================//
+
+    /// A clang type, as a type in the model.
+    #safe("every cursor and type handed to libclang came from libclang")
+    pub fn typeOf(&var self, t: CXType) -> i64 {
+        let k = t.kind
+        // Sugar that says nothing about layout: `struct s` spelled out, and
+        // `_Nullable` and friends.
+        if k == CXType_Elaborated {
+            let named = self.typeOf(clang_Type_getNamedType(t))
+            return self.withConst(t, named)
+        }
+        if k == CXType_Attributed {
+            let modified = self.typeOf(clang_Type_getModifiedType(t))
+            return self.withConst(t, modified)
+        }
+        if k == CXType_Atomic { return self.typeOf(clang_Type_getValueType(t)) }
+        let size = clang_Type_getSizeOf(t)
+        let align = clang_Type_getAlignOf(t)
+        let isConst = clang_isConstQualifiedType(t) != 0
+        if k == CXType_Typedef {
+            let decl = clang_getTypeDeclaration(t)
+            let td = self.typedef(decl)
+            if isConst { return self.constCopy(td) }
+            return td
+        }
+        if k == CXType_Pointer {
+            let inner = self.typeOf(clang_getPointeeType(t))
+            return self.m.add(CType { kind: TK::Pointer, inner: inner, isConst: isConst, size: size, align: align })
+        }
+        if k == CXType_BlockPointer {
+            return self.m.add(CType { kind: TK::Block, size: size, align: align })
+        }
+        if k == CXType_ConstantArray || k == CXType_IncompleteArray {
+            let elem = self.typeOf(clang_getArrayElementType(t))
+            let count = if k == CXType_ConstantArray { clang_getArraySize(t) } else { -1 }
+            return self.m.add(CType { kind: TK::Array, inner: elem, count: count, isConst: isConst,
+                                      size: size, align: align })
+        }
+        if k == CXType_FunctionProto || k == CXType_FunctionNoProto {
+            let result = self.typeOf(clang_getResultType(t))
+            var f = CType { kind: TK::Function, inner: result }
+            let n = clang_getNumArgTypes(t)
+            var i = 0
+            while i < n {
+                f.params.push(self.typeOf(clang_getArgType(t, i as u32)))
+                i += 1
+            }
+            f.variadic = clang_isFunctionTypeVariadic(t) != 0
+            return self.m.add(f)
+        }
+        if k == CXType_Record {
+            let r = self.recordFor(clang_getTypeDeclaration(t))
+            return self.m.add(CType { kind: TK::Record, inner: r, isConst: isConst, size: size, align: align })
+        }
+        if k == CXType_Enum {
+            let e = self.enumFor(clang_getTypeDeclaration(t))
+            return self.m.add(CType { kind: TK::Enum, inner: e, isConst: isConst, size: size, align: align })
+        }
+        var p = TK::Unknown
+        if k == CXType_Void { p = TK::Void }
+        elif k == CXType_Bool { p = TK::Bool }
+        elif k == CXType_Char_S { p = TK::Char; self.m.dm.charSigned = true }
+        elif k == CXType_Char_U { p = TK::Char; self.m.dm.charSigned = false }
+        elif k == CXType_SChar { p = TK::SChar }
+        elif k == CXType_UChar { p = TK::UChar }
+        elif k == CXType_Short { p = TK::Short }
+        elif k == CXType_UShort || k == CXType_Char16 { p = TK::UShort }
+        elif k == CXType_Int { p = TK::Int }
+        elif k == CXType_UInt || k == CXType_Char32 { p = TK::UInt }
+        elif k == CXType_WChar { p = if size == 2 { TK::UShort } else { TK::Int } }
+        elif k == CXType_Long { p = TK::Long; self.m.dm.long = size }
+        elif k == CXType_ULong { p = TK::ULong; self.m.dm.long = size }
+        elif k == CXType_LongLong { p = TK::LongLong }
+        elif k == CXType_ULongLong { p = TK::ULongLong }
+        elif k == CXType_Int128 { p = TK::Int128 }
+        elif k == CXType_UInt128 { p = TK::UInt128 }
+        elif k == CXType_Float { p = TK::Float }
+        elif k == CXType_Double { p = TK::Double }
+        elif k == CXType_LongDouble { p = TK::LongDouble; self.m.dm.longDouble = size }
+        elif k == CXType_Float128 { p = TK::Float128 }
+        var name = ""
+        if p == TK::Unknown { name = take(clang_getTypeSpelling(t)) }
+        self.m.add(CType { kind: p, isConst: isConst, size: size, align: align, name: name })
+    }
+
+    /// `inner` marked `const` when `outer` was.
+    #safe("the type came from libclang")
+    fn withConst(&var self, outer: CXType, inner: i64) -> i64 {
+        if clang_isConstQualifiedType(outer) != 0 { return self.constCopy(inner) }
+        inner
+    }
+
+    fn constCopy(&var self, t: i64) -> i64 {
+        if t < 0 { return t }
+        var c = self.m.types.look(t).$clone()
+        if c.isConst { return t }
+        c.isConst = true
+        self.m.add(c)
+    }
+
+    /// The record a struct or union declaration is, recorded once.
+    #safe("every cursor and type handed to libclang came from libclang")
+    fn recordFor(&var self, decl: CXCursor) -> i64 {
+        let usr = take(clang_getCursorUSR(decl))
+        if !usr.$isEmpty() && self.recordByUsr.holds(&usr) { return self.recordByUsr.atOr(&usr, 0) }
+        let anonymous = clang_Cursor_isAnonymous(decl) != 0
+        let tag = if anonymous { "" } else { take(clang_getCursorSpelling(decl)) }
+        let isUnion = clang_getCursorKind(decl) == CXCursor_UnionDecl
+        let r = self.m.records.length()
+        self.m.records.push(CRecord { tag: tag, isUnion: isUnion, file: self.fileOf(decl) })
+        if !usr.$isEmpty() { self.recordByUsr.put(usr, r) }
+
+        let def = clang_getCursorDefinition(decl)
+        if clang_Cursor_isNull(def) != 0 { return r }
+        let recType = clang_getCursorType(def)
+        var fields = vector::Vector<CField>()
+        var anon = 0
+        var packed = false
+        for c in children(def) {
+            let kind = clang_getCursorKind(*c)
+            if kind == CXCursor_PackedAttr { packed = true; continue }
+            if kind == CXCursor_FieldDecl {
+                let name = take(clang_getCursorSpelling(*c))
+                let ty = self.typeOf(clang_getCursorType(*c))
+                var bits = -1
+                if clang_Cursor_isBitField(*c) != 0 { bits = clang_getFieldDeclBitWidth(*c) as i64 }
+                let off = clang_Cursor_getOffsetOfField(*c)
+                // An anonymous struct or union member is a field whose
+                // record the walk has already met as a child.
+                if name.$isEmpty() { continue }
+                fields.push(CField { name: name, ty: ty, bits: bits, offsetBits: off })
+                continue
+            }
+            if (kind == CXCursor_StructDecl || kind == CXCursor_UnionDecl) &&
+                    clang_Cursor_isAnonymousRecordDecl(*c) != 0 {
+                // `struct { union { int a; float b; }; }` — the union's
+                // members belong to the struct. It becomes a member of its
+                // own, found where its first member is.
+                let innerType = clang_getCursorType(*c)
+                let inner = self.typeOf(innerType)
+                let ir = self.m.types.look(inner).inner
+                self.m.records.touch(ir).parent = r
+                self.m.records.touch(ir).anonIndex = anon
+                var off = 0
+                if self.m.records.look(ir).fields.length() > 0 {
+                    let first = self.m.records.look(ir).fields.look(0).name.$clone()
+                    let firstC = first.$cstr()
+                    off = clang_Type_getOffsetOf(recType, firstC)
+                    if off < 0 { off = 0 }
+                    off = off - self.m.records.look(ir).fields.look(0).offsetBits
+                }
+                fields.push(CField { name: "anon" + anon.$str(), ty: inner, offsetBits: off })
+                anon += 1
+            }
+        }
+        self.m.records.touch(r).fields = fields
+        self.m.records.touch(r).complete = true
+        self.m.records.touch(r).packed = packed
+        self.m.records.touch(r).size = clang_Type_getSizeOf(recType)
+        self.m.records.touch(r).align = clang_Type_getAlignOf(recType)
+        self.m.records.touch(r).file = self.fileOf(def)
+        r
+    }
+
+    /// The enum a declaration is, recorded once.
+    #safe("every cursor and type handed to libclang came from libclang")
+    fn enumFor(&var self, decl: CXCursor) -> i64 {
+        let usr = take(clang_getCursorUSR(decl))
+        if !usr.$isEmpty() && self.enumByUsr.holds(&usr) { return self.enumByUsr.atOr(&usr, 0) }
+        let anonymous = clang_Cursor_isAnonymous(decl) != 0
+        let tag = if anonymous { "" } else { take(clang_getCursorSpelling(decl)) }
+        let e = self.m.enums.length()
+        self.m.enums.push(CEnum { tag: tag, file: self.fileOf(decl) })
+        if !usr.$isEmpty() { self.enumByUsr.put(usr, e) }
+        let def = clang_getCursorDefinition(decl)
+        if clang_Cursor_isNull(def) != 0 { return e }
+        let under = self.typeOf(clang_getEnumDeclIntegerType(def))
+        let unsigned = self.m.isUnsignedInt(under)
+        var items = vector::Vector<CEnumItem>()
+        for c in children(def) {
+            if clang_getCursorKind(*c) != CXCursor_EnumConstantDecl { continue }
+            let name = take(clang_getCursorSpelling(*c))
+            let v = if unsigned { clang_getEnumConstantDeclUnsignedValue(*c) as i64 }
+                    else { clang_getEnumConstantDeclValue(*c) }
+            self.m.enumConsts.put(name.$clone(), v)
+            items.push(CEnumItem { name: name, value: v })
+        }
+        self.m.enums.touch(e).items = items
+        self.m.enums.touch(e).complete = true
+        self.m.enums.touch(e).underlying = under
+        self.m.enums.touch(e).file = self.fileOf(def)
+        e
+    }
+
+    //=== Macros ==========================================================//
+
+    #safe("every cursor handed to libclang came from libclang")
+    fn macroDef(&var self, c: CXCursor, known: &var dictionary::Map<String, CConst>) {
+        if clang_Cursor_isMacroBuiltin(c) != 0 || clang_Cursor_isMacroFunctionLike(c) != 0 { return }
+        let file = self.fileOf(c)
+        if file < 0 { return }
+        let toks = tokens(self.unit, c)
+        if toks.length() < 2 { return }
+        let name = toks.look(0).$clone()
+        var body = vector::Vector<String>()
+        var i = 1
+        while i < toks.length() { body.push(toks.look(i).$clone()); i += 1 }
+        let v = self.evaluate(&body, known)
+        if v.kind == 0 { return }
+        let k = CConst { name: name.$clone(), kind: v.kind, int: v.int, float: v.float, text: v.text.$clone(),
+                         unsigned: v.unsigned, wide: v.wide, file: file }
+        known.put(name, k.$clone())
+        self.m.consts.push(k)
+    }
+
+    /// What a macro's body stands for, or kind 0 when it is not a constant.
+    fn evaluate(&var self, body: &vector::Vector<String>, known: &dictionary::Map<String, CConst>) -> Value {
+        var none = Value {}
+        // A string, or several side by side.
+        var allStrings = true
+        for t in body { if t.$length() == 0 || t.$byteAt(0) != 34 { allStrings = false } }
+        if allStrings {
+            var s = ""
+            for t in body { s = s + literal::stringBody(t) }
+            return Value { kind: 3, text: s }
+        }
+        // A float, perhaps negated, perhaps in brackets.
+        var k = 0
+        var negative = false
+        while k < body.length() && (body.look(k) == "(" || body.look(k) == "-" || body.look(k) == "+") {
+            if body.look(k) == "-" { negative = !negative }
+            k += 1
+        }
+        if k < body.length() && isNumberText(body.look(k)) && literal::isFloatText(body.look(k)) {
+            var rest = k + 1
+            while rest < body.length() && body.look(rest) == ")" { rest += 1 }
+            if rest != body.length() { return none }
+            let txt = body.look(k).$clone()
+            var f = literal::floatValue(&txt)
+            if negative { f = 0.0 - f }
+            let last = txt.$byteAt(txt.$length() - 1)
+            return Value { kind: 2, float: f, wide: !(last == 102 || last == 70) }
+        }
+        // An integer expression. A name must be an enumerator or a constant
+        // already defined; another constant that was a float or a string
+        // makes this none.
+        var e = Expr { toks: vector::Vector<String>(), pos: 0, ok: true, unsigned: false }
+        for t in body {
+            if isNumberText(t) {
+                if literal::isUnsignedText(t) { e.unsigned = true }
+                e.toks.push(t.$clone())
+                continue
+            }
+            let first = if t.$length() > 0 { t.$byteAt(0) as i64 } else { 0 }
+            let isName = (first >= 97 && first <= 122) || (first >= 65 && first <= 90) || first == 95
+            if isName {
+                if self.m.enumConsts.holds(t) { e.toks.push(self.m.enumConsts.atOr(t, 0).$str()); continue }
+                if known.holds(t) {
+                    let kc = known.look(t)
+                    if kc.kind != 1 { return none }
+                    if kc.unsigned { e.unsigned = true }
+                    e.toks.push(kc.int.$str())
+                    continue
+                }
+                // Casts to an integer type: `((int)5)`, `(unsigned)~0`.
+                if isIntegerTypeWord(t) { e.toks.push("@" + t.$clone()); continue }
+                return none
+            }
+            if first == 39 { e.toks.push(literal::charValue(t).$str()); continue }
+            if first == 34 || t == "{" || t == ";" || t == "=" || t == "," { return none }
+            e.toks.push(t.$clone())
+        }
+        let v = e.cond()
+        if !e.ok || e.pos != e.toks.length() { return none }
+        Value { kind: 1, int: v, unsigned: e.unsigned }
+    }
+}
+
+/// A constant, while it is being worked out.
+struct Value {
+    kind: i64 = 0
+    int: i64 = 0
+    float: f64 = 0.0
+    text: String = ""
+    unsigned: bool = false
+    wide: bool = true
+}
+
+fn isNumberText(t: &String) -> bool {
+    if t.$length() == 0 { return false }
+    let c = t.$byteAt(0) as i64
+    (c >= 48 && c <= 57) || (c == 46 && t.$length() > 1)
+}
+
+fn isIntegerTypeWord(t: &String) -> bool {
+    t == "int" || t == "unsigned" || t == "signed" || t == "long" || t == "short" || t == "char" ||
+    t == "int8_t" || t == "int16_t" || t == "int32_t" || t == "int64_t" || t == "uint8_t" ||
+    t == "uint16_t" || t == "uint32_t" || t == "uint64_t" || t == "size_t" || t == "intptr_t" ||
+    t == "uintptr_t"
+}
+
+/// An integer expression over the spellings of a macro's tokens. A cast's
+/// type word arrives as `@word`; casts change nothing a binding needs.
+struct Expr {
+    toks: vector::Vector<String>
+    pos: i64
+    ok: bool
+    unsigned: bool
+}
+
+extend Expr {
+    fn cur(&self) -> String {
+        if self.pos < self.toks.length() { return self.toks.look(self.pos).$clone() }
+        ""
+    }
+
+    fn cond(&var self) -> i64 {
+        let c = self.binary(1)
+        if self.cur() == "?" {
+            self.pos += 1
+            let a = self.cond()
+            if self.cur() == ":" { self.pos += 1 } else { self.ok = false }
+            let b = self.cond()
+            return if c != 0 { a } else { b }
+        }
+        c
+    }
+
+    fn binary(&var self, min: i64) -> i64 {
+        var left = self.unary()
+        loop {
+            let op = self.cur()
+            let p = precedence(&op)
+            if p < 0 || p < min { break }
+            self.pos += 1
+            let right = self.binary(p + 1)
+            left = apply(&op, left, right)
+        }
+        left
+    }
+
+    fn unary(&var self) -> i64 {
+        let t = self.cur()
+        if t == "-" { self.pos += 1; return 0 - self.unary() }
+        if t == "+" { self.pos += 1; return self.unary() }
+        if t == "!" { self.pos += 1; return if self.unary() == 0 { 1 } else { 0 } }
+        if t == "~" { self.pos += 1; return ~self.unary() }
+        if t == "(" {
+            self.pos += 1
+            // `(int)` — a cast: the type words, then the closing bracket.
+            if self.cur().$length() > 0 && self.cur().$byteAt(0) == 64 {
+                while self.cur().$length() > 0 && self.cur().$byteAt(0) == 64 { self.pos += 1 }
+                if self.cur() == ")" { self.pos += 1 } else { self.ok = false }
+                return self.unary()
+            }
+            let v = self.cond()
+            if self.cur() == ")" { self.pos += 1 } else { self.ok = false }
+            return v
+        }
+        if self.pos >= self.toks.length() { self.ok = false; return 0 }
+        self.pos += 1
+        if t.$length() > 0 && t.$byteAt(0) == 64 { self.ok = false; return 0 }
+        match literal::intValue(&t) {
+            Some(v) => v,
+            None => { self.ok = false; 0 },
+        }
+    }
+}
+
+fn precedence(op: &String) -> i64 {
+    if op == "*" || op == "/" || op == "%" { return 10 }
+    if op == "+" || op == "-" { return 9 }
+    if op == "<<" || op == ">>" { return 8 }
+    if op == "<" || op == "<=" || op == ">" || op == ">=" { return 7 }
+    if op == "==" || op == "!=" { return 6 }
+    if op == "&" { return 5 }
+    if op == "^" { return 4 }
+    if op == "|" { return 3 }
+    if op == "&&" { return 2 }
+    if op == "||" { return 1 }
+    -1
+}
+
+fn apply(op: &String, a: i64, b: i64) -> i64 {
+    if op == "*" { return a.$wrappingMul(b) }
+    if op == "/" { return if b == 0 { 0 } else { a / b } }
+    if op == "%" { return if b == 0 { 0 } else { a % b } }
+    if op == "+" { return a.$wrappingAdd(b) }
+    if op == "-" { return a.$wrappingSub(b) }
+    if op == "<<" { return if b >= 0 && b < 64 { a << b } else { 0 } }
+    if op == ">>" { return if b >= 0 && b < 64 { a >> b } else { 0 } }
+    if op == "<" { return if a < b { 1 } else { 0 } }
+    if op == "<=" { return if a <= b { 1 } else { 0 } }
+    if op == ">" { return if a > b { 1 } else { 0 } }
+    if op == ">=" { return if a >= b { 1 } else { 0 } }
+    if op == "==" { return if a == b { 1 } else { 0 } }
+    if op == "!=" { return if a != b { 1 } else { 0 } }
+    if op == "&" { return a & b }
+    if op == "^" { return a ^ b }
+    if op == "|" { return a | b }
+    if op == "&&" { return if a != 0 && b != 0 { 1 } else { 0 } }
+    if op == "||" { return if a != 0 || b != 0 { 1 } else { 0 } }
+    0
+}

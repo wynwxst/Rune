@@ -1,8 +1,8 @@
-@runtime(none)
-@entry(none)
+#runtime(none)
+#entry(none)
 import std::io
 // Reading standard input needs an operating system: still the hosted
 // runtime's, and refused against the function that reached it.
 fn greet() { let line = io::readLine() }
-@export("_start")
+#export("_start")
 fn start() -> i64 { greet(); 0 }

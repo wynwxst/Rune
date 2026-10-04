@@ -20,7 +20,7 @@ pub fn byte(b: u8) {
     port::outb(com1, b)
 }
 
-@safe("a CString ends at its NUL, and nothing past it is read")
+#safe("a CString ends at its NUL, and nothing past it is read")
 pub fn print(text: CString) {
     let bytes = unsafe { text as *u8 }
     var i: i64 = 0

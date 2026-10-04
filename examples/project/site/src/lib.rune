@@ -40,7 +40,7 @@ class App {
 
     }
 
-    @safe("Safe usage of C apis")
+    #safe("Safe usage of C apis")
     fn setup_client(&self){
         var client_addr: SocketAddress
         var client_len: socklen_t = std::mem::size_of<SocketAddress>() as u32

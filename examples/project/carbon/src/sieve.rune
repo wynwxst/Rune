@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 import std::*
 class Sieve {
     var is_prime: [1000:bool] = [true;1000]

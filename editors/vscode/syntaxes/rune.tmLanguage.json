@@ -110,9 +110,9 @@
       ]
     },
     "lint-directive": {
-      "comment": "@lint(allow(rule, ...), warn(...), note(...)): the linter's directive.",
+      "comment": "#lint(allow(rule, ...), warn(...), note(...)): the linter's directive.",
       "name": "meta.attribute.lint.rune",
-      "begin": "(@)(lint)\\s*(\\()",
+      "begin": "([#@])(lint)\\s*(\\()",
       "beginCaptures": {
         "1": {
           "name": "punctuation.definition.decorator.rune"
@@ -190,7 +190,7 @@
         },
         {
           "name": "meta.attribute.rune",
-          "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "([#@])([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
               "name": "punctuation.definition.decorator.rune"

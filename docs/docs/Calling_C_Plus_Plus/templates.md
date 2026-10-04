@@ -15,7 +15,7 @@ extern "C++" {
 }
 
 /// A slice's two halves are exactly what a span holds.
-@safe("the pointer and the count come from one slice, so the extent is right")
+#safe("the pointer and the count come from one slice, so the extent is right")
 pub fn totalOf(values: [c_long]) -> i64 {
     if values.$isEmpty() { return 0 }
     total(Span<c_long> { data: &values[0] as *c_long,

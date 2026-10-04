@@ -1,6 +1,6 @@
 # Conditional compilation
 
-`@Config(...)` is answered in `Config.cpp`, between parsing and everything
+`#Config(...)` is answered in `Config.cpp`, between parsing and everything
 else. That position is the whole design: a declaration the condition rules out
 is removed from the module before `collectModule` ever sees it, so it is never
 named, never resolved, never checked, and never emitted.
@@ -15,7 +15,7 @@ so the parser has to have built one.
 ## The pipeline position
 
 ```
-  lex ─► macros ─► parse ─► @Config ─► collect ─► … ─► codegen
+  lex ─► macros ─► parse ─► #Config ─► collect ─► … ─► codegen
                              ▲
                              the module still has every declaration;
                              afterwards it has only this build's
@@ -78,7 +78,7 @@ new member list that carries an index needs the same treatment.
 
 ## What it does not cover
 
-`@Config` applies to declarations, because that is where the parser accepts
+`#Config` applies to declarations, because that is where the parser accepts
 decorators. Making a *statement* conditional would mean accepting attributes in
 statement position — see [Adding syntax](../Extending_The_Language/adding_syntax.md)
 — and the workaround is to put the statement in a function of its own, which

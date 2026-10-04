@@ -109,6 +109,7 @@ Three loop forms. `loop` can carry a value out through `break`; `while` and `for
 
 - [Every kind of pattern](Pattern_Matching/every_kind_of_pattern.md)
 - [Slice and array patterns](Pattern_Matching/slice_and_array_patterns.md)
+- [Bindings borrow; `take` moves](Pattern_Matching/bindings_borrow_take_moves.md)
 - [Bindings in alternatives](Pattern_Matching/bindings_in_alternatives.md)
 - [Exhaustiveness](Pattern_Matching/exhaustiveness.md)
 - [Matching through a borrow](Pattern_Matching/matching_through_a_borrow.md)
@@ -146,7 +147,7 @@ A struct is a value type: assigning one copies it. Fields are private unless mar
 - [Privacy](Structs/privacy.md)
 - [Destroying a value](Structs/destroying_a_value.md)
 - [Handing an owning value on](Structs/handing_an_owning_value_on.md)
-- [`@resource`: a field that has to be released](Structs/resource_a_field_that_has_to_be_released.md)
+- [`#resource`: a field that has to be released](Structs/resource_a_field_that_has_to_be_released.md)
 - [One struct extending another](Structs/one_struct_extending_another.md)
 
 ## Enums
@@ -316,8 +317,8 @@ Rune is memory safe by default and lets you turn that off deliberately, per buil
 
 - [The three levels](Safety_Levels/the_three_levels.md)
 - [Integer overflow](Safety_Levels/integer_overflow.md)
-- [`@unsafe` and `unsafe { }`](Safety_Levels/unsafe_and_unsafe_block.md)
-- [`@safe("reason")`](Safety_Levels/safe_reason.md)
+- [`#unsafe` and `unsafe { }`](Safety_Levels/unsafe_and_unsafe_block.md)
+- [`#safe("reason")`](Safety_Levels/safe_reason.md)
 - [Borrows and ownership](Safety_Levels/borrows_and_ownership.md)
 - [What it buys at run time](Safety_Levels/what_it_buys_at_run_time.md)
 - [What is still your responsibility](Safety_Levels/what_is_still_your_responsibility.md)
@@ -334,6 +335,7 @@ Reference counting is the default, but it is not the only choice. Built with `--
 - [Views: which fields a method touches](Single_Ownership_Without_A_Count/views_which_fields_a_method_touches.md)
 - [Internal references](Single_Ownership_Without_A_Count/internal_references.md)
 - [The standard library runs on it](Single_Ownership_Without_A_Count/the_standard_library_runs_on_it.md)
+- [Changing a value through a shared borrow](Single_Ownership_Without_A_Count/changing_a_value_through_a_shared_borrow.md)
 - [When a borrow has to wait for run time](Single_Ownership_Without_A_Count/when_a_borrow_has_to_wait_for_run_time.md)
 - [Handles instead of back-references](Single_Ownership_Without_A_Count/handles_instead_of_back_references.md)
 - [Threads that borrow shared data](Single_Ownership_Without_A_Count/threads_that_borrow_shared_data.md)
@@ -353,15 +355,15 @@ One file is one module. There are no headers and no forward declarations: the co
 
 ## Decorators
 
-A decorator is a compiler instruction attached to a declaration, written `@name` or `@name(arguments)`. They never change what code means — only how it is compiled, checked, or exposed.
+A decorator is attached to a declaration. The compiler's own are written `#name` or `#name(arguments)` and change how code is compiled, checked or exposed; one the program declares is written `@name` and runs code of the program's own. The sigil tells a reader which is which at a glance.
 
 - [Safety decorators](Decorators/safety_decorators.md)
-- [`@alias` and `@as`](Decorators/alias_and_as.md)
+- [`#alias` and `#as`](Decorators/alias_and_as.md)
 - [Code generation decorators](Decorators/code_generation_decorators.md)
 - [Decorators you write yourself](Decorators/decorators_you_write_yourself.md)
-- [`@alias`: a second name](Decorators/alias_a_second_name.md)
-- [`@type`: what a file produces](Decorators/type_what_a_file_produces.md)
-- [`@link` and `@linkpath`: what a file needs](Decorators/link_and_linkpath_what_a_file_needs.md)
+- [`#alias`: a second name](Decorators/alias_a_second_name.md)
+- [`#type`: what a file produces](Decorators/type_what_a_file_produces.md)
+- [`#link` and `#linkpath`: what a file needs](Decorators/link_and_linkpath_what_a_file_needs.md)
 - [Exporting to C](Decorators/exporting_to_c.md)
 - [Spelling and placement](Decorators/spelling_and_placement.md)
 
@@ -371,6 +373,7 @@ An `extern "C"` block declares functions that exist somewhere else. There is no 
 
 - [Declaring foreign functions](Calling_C/declaring_foreign_functions.md)
 - [Structs](Calling_C/structs.md)
+- [#Convention("C")](Calling_C/convention_c.md)
 - [Pointers and out-parameters](Calling_C/pointers_and_out_parameters.md)
 - [Callbacks](Calling_C/callbacks.md)
 - [Strings across the boundary](Calling_C/strings_across_the_boundary.md)
@@ -378,6 +381,7 @@ An `extern "C"` block declares functions that exist somewhere else. There is no 
 - [Wrapping a descriptor](Calling_C/wrapping_a_descriptor.md)
 - [Linking](Calling_C/linking.md)
 - [Packaging a C half](Calling_C/packaging_a_c_half.md)
+- [Bindings from a header: `rune ffi`](Calling_C/bindings_from_a_header_rune_ffi.md)
 - [Being called from C](Calling_C/being_called_from_c.md)
 - [C++ is its own block](Calling_C/c_plus_plus_is_its_own_block.md)
 
@@ -474,7 +478,11 @@ A macro is a rewrite from one run of tokens to another, chosen by pattern. Expan
 - [The macros the standard library provides](Macros/the_macros_the_standard_library_provides.md)
 - [What is reported](Macros/what_is_reported.md)
 - [When a pattern is not enough](Macros/when_a_pattern_is_not_enough.md)
+- [Declaring a macro anywhere](Macros/declaring_a_macro_anywhere.md)
+- [Macros a library exports](Macros/macros_a_library_exports.md)
+- [When the package is built again](Macros/when_the_package_is_built_again.md)
 - [What a macro is given](Macros/what_a_macro_is_given.md)
+- [Taking input apart by a pattern](Macros/taking_input_apart_by_a_pattern.md)
 - [What is reported, for these](Macros/what_is_reported_for_these.md)
 
 ## Reading a diagnostic
@@ -494,6 +502,7 @@ Every message has the same anatomy, so once you can read one you can read all of
 - [What ends up in the artefact](The_Toolchain/what_ends_up_in_the_artefact.md)
 - [Debug builds](The_Toolchain/debug_builds.md)
 - [rune](The_Toolchain/rune.md)
+- [Editor support](The_Toolchain/editor_support.md)
 - [How a build decides what to do](The_Toolchain/how_a_build_decides_what_to_do.md)
 - [Producing something other than a program](The_Toolchain/producing_something_other_than_a_program.md)
 - [Package layout](The_Toolchain/package_layout.md)
@@ -508,6 +517,8 @@ How a package is made, how one is used, and how a registry is run. A package is 
 - [Making a package](Packages_And_Registries/making_a_package.md)
 - [What a version promises](Packages_And_Registries/what_a_version_promises.md)
 - [Using a package](Packages_And_Registries/using_a_package.md)
+- [Local units](Packages_And_Registries/local_units.md)
+- [Workspaces](Packages_And_Registries/workspaces.md)
 - [Which registry](Packages_And_Registries/which_registry.md)
 - [Making a registry](Packages_And_Registries/making_a_registry.md)
 - [Releasing a new version](Packages_And_Registries/releasing_a_new_version.md)
@@ -581,17 +592,18 @@ Programs with nothing underneath them: a kernel, a boot loader, firmware. The la
 - [The hooks](Bare_Metal/the_hooks.md)
 - [Safety on bare metal](Bare_Metal/safety_on_bare_metal.md)
 - [What the freestanding runtime provides](Bare_Metal/what_the_freestanding_runtime_provides.md)
+- [A minimal runtime](Bare_Metal/a_minimal_runtime.md)
 - [Starting without main](Bare_Metal/starting_without_main.md)
-- [@weak](Bare_Metal/weak.md)
+- [#weak](Bare_Metal/weak.md)
 - [Bare-metal targets](Bare_Metal/bare_metal_targets.md)
 - [Your own toolchain](Bare_Metal/your_own_toolchain.md)
 - [Tables in the image](Bare_Metal/tables_in_the_image.md)
 
 ## Conditional compilation
 
-`@Config(...)` decides whether a declaration exists at all. It is answered before anything is checked, so what it rules out is not merely unused — it is gone, and may name types and foreign symbols that exist on no other target.
+`#Config(...)` decides whether a declaration exists at all. It is answered before anything is checked, so what it rules out is not merely unused — it is gone, and may name types and foreign symbols that exist on no other target.
 
-- [`@Config`](Conditional_Compilation/config.md)
+- [`#Config`](Conditional_Compilation/config.md)
 - [What a condition can ask](Conditional_Compilation/what_a_condition_can_ask.md)
 - [Conditions on members](Conditional_Compilation/conditions_on_members.md)
 - [Keys with a value of your own](Conditional_Compilation/keys_with_a_value_of_your_own.md)

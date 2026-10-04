@@ -17,6 +17,8 @@
 #include "rune/Source.h"
 
 #include <cstdio>
+#include <cstring>
+#include <mutex>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -235,18 +237,32 @@ std::vector<Token> lexText(const std::string &text, SourceRange at, bool &ok) {
 
 int runWithFiles(const std::string &program, const std::string &request,
                  const std::string &answer) {
+  // Files are parsed on several threads, and each may be expanding a macro
+  // at once. The two paths must reach this run alone: set in the process's
+  // own environment, one thread's could be overwritten by another's before
+  // its spawn read them, and two macros would answer into one file.
 #if defined(_WIN32)
+  static std::mutex spawnLock;
+  std::lock_guard<std::mutex> hold(spawnLock);
   std::string command = "\"" + program + "\"";
   _putenv_s("RUNE_MACRO_REQUEST", request.c_str());
   _putenv_s("RUNE_MACRO_ANSWER", answer.c_str());
   return std::system(command.c_str());
 #else
-  setenv("RUNE_MACRO_REQUEST", request.c_str(), 1);
-  setenv("RUNE_MACRO_ANSWER", answer.c_str(), 1);
+  std::vector<std::string> own{"RUNE_MACRO_REQUEST=" + request,
+                               "RUNE_MACRO_ANSWER=" + answer};
+  std::vector<char *> envp;
+  for (char **e = environ; e && *e; ++e)
+    if (std::strncmp(*e, "RUNE_MACRO_REQUEST=", 19) != 0 &&
+        std::strncmp(*e, "RUNE_MACRO_ANSWER=", 18) != 0)
+      envp.push_back(*e);
+  for (std::string &kv : own)
+    envp.push_back(kv.data());
+  envp.push_back(nullptr);
   std::vector<char *> argv{const_cast<char *>(program.c_str()), nullptr};
   pid_t pid = 0;
   if (posix_spawn(&pid, program.c_str(), nullptr, nullptr, argv.data(),
-                  environ) != 0)
+                  envp.data()) != 0)
     return 127;
   int status = 0;
   if (waitpid(pid, &status, 0) < 0)
@@ -270,10 +286,11 @@ std::filesystem::path scratchFile(const char *suffix) {
                 "-" + std::to_string(counter++) + suffix);
 }
 
-/// True when the attribute at `i` is `@macro`. `macro` is a keyword, so it
+/// True when the attribute at `i` is `#macro`. `macro` is a keyword, so it
 /// arrives as one rather than as a name.
 bool isMacroAttribute(const std::vector<Token> &t, size_t i) {
-  return i + 1 < t.size() && t[i].Kind == Tok::At &&
+  return i + 1 < t.size() &&
+         (t[i].Kind == Tok::At || t[i].Kind == Tok::Hash) &&
          (t[i + 1].Kind == Tok::KwMacro ||
           (t[i + 1].Kind == Tok::Identifier && t[i + 1].Text == "macro"));
 }
@@ -281,18 +298,18 @@ bool isMacroAttribute(const std::vector<Token> &t, size_t i) {
 } // namespace
 
 bool declaresMacroPackage(const std::vector<Token> &toks) {
-  // `@type(Macros)` is a file directive, so it stands before everything but
-  // layout and other directives. Looking only at the head keeps an `@type`
+  // `#type(Macros)` is a file directive, so it stands before everything but
+  // layout and other directives. Looking only at the head keeps an `#type`
   // written further down — which is a mistake the parser reports — from
   // quietly deciding what the file is.
   for (size_t i = 0; i + 3 < toks.size(); ++i) {
     if (isLayoutTok(toks[i]))
       continue;
-    if (toks[i].Kind != Tok::At)
+    if (toks[i].Kind != Tok::At && toks[i].Kind != Tok::Hash)
       return false;
     if (toks[i + 1].Kind != Tok::KwType &&
         !(toks[i + 1].Kind == Tok::Identifier && toks[i + 1].Text == "type")) {
-      // Some other directive — `@link`, `@linkpath` — so keep looking.
+      // Some other directive — `#link`, `#linkpath` — so keep looking.
       while (i < toks.size() && toks[i].Kind != Tok::RParen)
         ++i;
       continue;
@@ -320,7 +337,7 @@ void collectProcMacros(const std::vector<Token> &toks,
       ++j;
     }
     if (j >= toks.size() || toks[j].Kind != Tok::KwFn) {
-      diags.error(toks[i].Range, "`@macro` belongs on a function")
+      diags.error(toks[i].Range, "`#macro` belongs on a function")
           .note("a procedural macro is a `fn` taking and returning "
                 "`Macro::Tokens`")
           .code(125);
@@ -341,7 +358,7 @@ void collectProcMacros(const std::vector<Token> &toks,
       diags.error(m.Range, "a macro has to be `pub`")
           .note("the program it expands into is not this package, so the "
                 "dispatcher the compiler writes has to be able to see it")
-          .note("write `@macro\\npub fn {}(...)`", m.Name)
+          .note("write `#macro\\npub fn {}(...)`", m.Name)
           .code(128);
       continue;
     }
@@ -356,49 +373,168 @@ void collectProcMacros(const std::vector<Token> &toks,
   }
 }
 
-void rejectProcMacros(std::vector<Token> &toks, DiagnosticEngine &diags) {
-  bool sawOne = false;
-  for (size_t i = 0; i + 1 < toks.size(); ++i)
-    if (isMacroAttribute(toks, i)) {
-      sawOne = true;
-      break;
-    }
-  if (!sawOne)
-    return;
+namespace {
 
-  std::vector<Token> kept;
-  kept.reserve(toks.size());
-  for (size_t i = 0; i < toks.size();) {
+/// One past the end of the `#macro fn` whose attribute is at `i`: its body's
+/// closing brace, or the end of the stream when it has none.
+size_t procMacroEnd(const std::vector<Token> &toks, size_t i) {
+  size_t j = i + 2;
+  while (j < toks.size() && toks[j].Kind != Tok::LBrace)
+    ++j;
+  if (j >= toks.size())
+    return toks.size();
+  int depth = 0;
+  for (; j < toks.size(); ++j) {
+    if (opensGroup(toks[j].Kind))
+      ++depth;
+    else if (closesGroup(toks[j].Kind) && --depth == 0)
+      return j + 1;
+  }
+  return toks.size();
+}
+
+/// The `[begin, end)` token spans of every `#macro fn` in `toks`.
+std::vector<std::pair<size_t, size_t>>
+procMacroSpans(const std::vector<Token> &toks) {
+  std::vector<std::pair<size_t, size_t>> spans;
+  for (size_t i = 0; i + 1 < toks.size();) {
     if (!isMacroAttribute(toks, i)) {
-      kept.push_back(toks[i++]);
+      ++i;
       continue;
     }
-    diags.error(toks[i].Range,
-                "a procedural macro belongs in a macro package")
-        .note("a `@macro fn` is built and run while this program is compiled, "
-              "so it lives in a file of its own that opens with "
-              "`@type(Macros)`")
-        .note("nothing that file imports or declares reaches this one; only "
-              "the tokens its macros hand back do")
-        .code(129);
-    // Skip the whole function so the grammar does not trip over what is left.
-    size_t j = i + 2;
-    while (j < toks.size() && toks[j].Kind != Tok::LBrace)
-      ++j;
-    if (j < toks.size()) {
-      int depth = 0;
-      for (; j < toks.size(); ++j) {
-        if (opensGroup(toks[j].Kind))
-          ++depth;
-        else if (closesGroup(toks[j].Kind) && --depth == 0) {
-          ++j;
-          break;
-        }
-      }
+    size_t end = procMacroEnd(toks, i);
+    spans.push_back({i, end});
+    i = end;
+  }
+  return spans;
+}
+
+void eraseSpans(std::vector<Token> &toks,
+                const std::vector<std::pair<size_t, size_t>> &spans) {
+  if (spans.empty())
+    return;
+  std::vector<Token> kept;
+  kept.reserve(toks.size());
+  size_t next = 0;
+  for (size_t i = 0; i < toks.size();) {
+    if (next < spans.size() && i == spans[next].first) {
+      i = spans[next++].second;
+      continue;
     }
-    i = j;
+    kept.push_back(toks[i++]);
   }
   toks.swap(kept);
+}
+
+void stampToken(const Token &t, uint64_t &stamp) {
+  if (isLayoutTok(t) || t.Kind == Tok::EndOfFile)
+    return;
+  stampText(std::to_string(static_cast<int>(t.Kind)), stamp);
+  stampText(spellOne(t), stamp);
+  stampText(t.Suffix, stamp);
+  stampText("\x1f", stamp);
+}
+
+} // namespace
+
+void stampText(const std::string &s, uint64_t &stamp) {
+  for (unsigned char c : s) {
+    stamp ^= c;
+    stamp *= 1099511628211ull;
+  }
+}
+
+void stampTokens(const std::vector<Token> &toks, uint64_t &stamp) {
+  for (const Token &t : toks)
+    stampToken(t, stamp);
+}
+
+bool hasProcMacros(const std::vector<Token> &toks) {
+  for (size_t i = 0; i + 1 < toks.size(); ++i)
+    if (isMacroAttribute(toks, i))
+      return true;
+  return false;
+}
+
+void stripProcMacros(std::vector<Token> &toks) {
+  if (hasProcMacros(toks))
+    eraseSpans(toks, procMacroSpans(toks));
+}
+
+std::string liftProcMacros(std::vector<Token> &toks, const std::string &buffer,
+                           uint32_t startOffset, uint64_t &stamp) {
+  const auto spans = procMacroSpans(toks);
+  if (spans.empty())
+    return "";
+
+  // Everything blank but the line breaks, so what is copied in below keeps
+  // its line and column.
+  std::string text = buffer;
+  while (!text.empty() && text.back() == '\0')
+    text.pop_back();
+  for (char &c : text)
+    if (c != '\n' && c != '\r')
+      c = ' ';
+  auto keep = [&](const Token &first, const Token &last) {
+    if (!first.Range.isValid() || !last.Range.isValid())
+      return;
+    size_t from = first.Range.begin().raw() - startOffset;
+    size_t to = last.Range.end().raw() - startOffset;
+    for (size_t k = from; k < to && k < text.size(); ++k)
+      text[k] = buffer[k];
+  };
+
+  // The file's `std` imports come along: a macro reaches for `std::Macro`
+  // and whatever else it likes from the standard library. Its other imports
+  // name the program's own modules, which the macro package does not have.
+  int depth = 0;
+  for (size_t i = 0; i < toks.size(); ++i) {
+    if (opensGroup(toks[i].Kind))
+      ++depth;
+    else if (closesGroup(toks[i].Kind))
+      --depth;
+    if (depth != 0 || toks[i].Kind != Tok::KwImport)
+      continue;
+    size_t first = i + 1;
+    while (first < toks.size() && isLayoutTok(toks[first]))
+      ++first;
+    if (first >= toks.size() || toks[first].Kind != Tok::Identifier ||
+        toks[first].Text != "std")
+      continue;
+    // To the end of the line, or of a braced list that spans several.
+    size_t last = first;
+    int inner = 0;
+    for (size_t k = first; k < toks.size(); ++k) {
+      if (toks[k].Kind == Tok::EndOfFile)
+        break;
+      if (opensGroup(toks[k].Kind))
+        ++inner;
+      else if (closesGroup(toks[k].Kind))
+        --inner;
+      else if (isLayoutTok(toks[k]) && inner <= 0)
+        break;
+      if (!isLayoutTok(toks[k]))
+        last = k;
+    }
+    keep(toks[i], toks[last]);
+    for (size_t k = i; k <= last; ++k)
+      stampToken(toks[k], stamp);
+  }
+
+  for (const auto &span : spans) {
+    size_t last = span.second;
+    while (last > span.first &&
+           (isLayoutTok(toks[last - 1]) || toks[last - 1].Kind == Tok::EndOfFile))
+      --last;
+    if (last == span.first)
+      continue;
+    keep(toks[span.first], toks[last - 1]);
+    for (size_t k = span.first; k < last; ++k)
+      stampToken(toks[k], stamp);
+  }
+
+  eraseSpans(toks, spans);
+  return text;
 }
 
 bool runProcMacro(const ProcMacro &m, const std::string &program,

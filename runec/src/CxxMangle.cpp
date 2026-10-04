@@ -654,7 +654,7 @@ std::string CxxMangler::mangleFunction(const FunctionDecl *fn) {
   Subs.clear();
   Problem.clear();
 
-  // What the C++ side calls it: `@as` renamed it for Rune only.
+  // What the C++ side calls it: `#as` renamed it for Rune only.
   const std::string &written = fn->LinkName.empty() ? fn->Name : fn->LinkName;
   NominalDecl *owner = cxxOwnerOf(fn);
 

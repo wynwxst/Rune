@@ -12,6 +12,9 @@
 | `panic` | `<M: io::Display>(message: M) -> Never` | aborts with your message — a literal, a built `String`, or anything else printable |
 | `assert` | `<M: io::Display>(condition: bool, message: M)` | panics if false |
 | `liveObjectCount` | `() -> i64` | objects the runtime is still counting |
+| `Command` | `class` | `Command(program)` — a program to run; `arg(value)` adds one argument, `inDirectory(path)` starts it elsewhere, `run()` runs it to completion |
+| `run` | `(program: String, args: Vector<String>) -> Output?` | the same, in one call |
+| `Output` | `struct { status, stdout, stderr }` | what a finished program left; `succeeded()` is status zero |
 
 > [!NOTE]
 > **They do not return**

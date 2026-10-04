@@ -15,6 +15,7 @@ The everyday half of `std::text`. These work on bytes rather than code points, a
 | `join` | `(Vector<String>, String) -> String` | the other half of `split` |
 | `padStart` / `padEnd` | `(String, i64, Character) -> String` | to a width; longer text is returned rather than cut |
 | `lower` / `upper` | `(String) -> String` | case, **ASCII only** — every other byte is left as it is |
+| `isSpace` | `(byte: i64) -> bool` | space, tab, carriage return, newline or form feed — what `trim` strips |
 
 > [!NOTE]
 > **Why only ASCII**

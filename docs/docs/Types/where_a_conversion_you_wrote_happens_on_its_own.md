@@ -68,6 +68,39 @@ fn main() -> i64 {
 >
 > A mark is always named, so a `bind` whose first type is not a name can only be the `into` form — there is nothing else it could mean. `bind` on a named type still reads as a mark, as it always did.
 
+The source may be generic, and may be a **pointer**. A binding written once for every `*var T` lets a typed pointer go wherever C asks for bytes, with no cast at each call. Importing a file or library that declares the binding brings it along, like any other.
+
+**Converting out of a pointer**
+
+```rune
+import std::io
+import std::mem
+
+bind<T> *var T into *var u8 {
+    fn convert(&self) -> *var u8 { unsafe { self as *var u8 } }
+}
+
+extern "C" {
+    fn realloc(ptr: *var u8, size: usize) -> *var u8
+    fn free(ptr: *var u8)
+}
+
+#unsafe
+fn main() -> i64 {
+    var items = 0 as *var i64
+    items = realloc(items, mem::size_of<i64>() * 4) as *var i64
+    items[3] = 42
+    io::println(items[3])
+    free(items)
+    0
+}
+```
+
+> [!NOTE]
+> **What `self` is**
+>
+> In a binding on a pointer type, `self` is the pointer — not the place it was read from. `self as *var u8` is the address it holds.
+
 > [!NOTE]
 > **No import needed**
 >

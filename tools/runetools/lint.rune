@@ -7,14 +7,14 @@
 // applies them, and an editor offers them as quick fixes.
 //
 // A rule is turned off or on for one item — a declaration, a field, a
-// statement — with an `@lint` directive before it, for the whole file with
+// statement — with an `#lint` directive before it, for the whole file with
 // one at the top that nothing follows but imports, and for a package in the
 // `[lint]` table of its `Rune.toml`:
 //
-//     @lint(allow(line-too-long, todo))     // the file's: only imports follow
+//     #lint(allow(line-too-long, todo))     // the file's: only imports follow
 //     import std::io
 //
-//     @lint(allow(unused-variable))
+//     #lint(allow(unused-variable))
 //     let unused = 1
 //
 //     [lint]
@@ -69,7 +69,7 @@ pub fn rules() -> vector::Vector<Rule> {
     r.push(Rule("line-too-long", "note", "a line longer than the limit (120 by default)"))
     r.push(Rule("missing-docs", "allow", "a `pub` declaration with no `///` comment"))
     r.push(Rule("todo", "allow", "a TODO, FIXME or XXX comment"))
-    r.push(Rule("invalid-lint", "warn", "an `@lint` directive that names no rule or applies to nothing"))
+    r.push(Rule("invalid-lint", "warn", "an `#lint` directive that names no rule or applies to nothing"))
     r
 }
 
@@ -165,7 +165,7 @@ pub fn isRule(name: &String) -> bool {
 //===--------------------------------------------------------------------===//
 
 /// Collects findings, dropping those the configuration or a comment turns off.
-/// One `@lint(...)` that covers part of a file: bytes `from..upto`.
+/// One `#lint(...)` that covers part of a file: bytes `from..upto`.
 class Scope {
     pub from: i64
     pub upto: i64
@@ -180,14 +180,14 @@ class Scope {
     }
 }
 
-/// Collects findings at the level the configuration and the file's `@lint`
+/// Collects findings at the level the configuration and the file's `#lint`
 /// directives give them, dropping those turned off.
 class Sink {
     pub found: vector::Vector<Finding>
     config: Config
-    /// A file-wide `@lint(...)`: rule (or `all`) to level.
+    /// A file-wide `#lint(...)`: rule (or `all`) to level.
     fileLevels: dictionary::Map<String, String>
-    /// Every scoped `@lint(...)`, in the order they appear.
+    /// Every scoped `#lint(...)`, in the order they appear.
     scopes: vector::Vector<Scope>
 
     fn init(self, config: Config) {
@@ -258,12 +258,12 @@ fn finding(rule: String, message: String, start: i64, end: i64) -> Finding {
 }
 
 //===--------------------------------------------------------------------===//
-// `@lint(...)` directives
+// `#lint(...)` directives
 //===--------------------------------------------------------------------===//
 
-/// Whether token `i` is the `@` of an `@lint`.
+/// Whether token `i` is the `#` of a `#lint` (or the `@` of the older spelling).
 fn isLintAt(lx: &syntax::Lexed, i: i64) -> bool {
-    lx.isText(i, "@") && lx.text(i + 1) == "lint" && lx.at(i + 1).start == lx.at(i).end
+    lx.isSigil(i) && lx.text(i + 1) == "lint" && lx.at(i + 1).start == lx.at(i).end
 }
 
 /// The token after the decorator whose `@` is at `i`: past its name and
@@ -279,7 +279,7 @@ fn pastDecorators(lx: &syntax::Lexed, i: i64) -> i64 {
     var j = i
     loop {
         while !lx.isEnd(j) && (lx.isNewline(j) || lx.isText(j, ";")) { j += 1 }
-        if lx.isText(j, "@") && (lx.isIdent(j + 1) || lx.at(j + 1).kind == syntax::Kind::Keyword) {
+        if lx.isSigil(j) && (lx.isIdent(j + 1) || lx.at(j + 1).kind == syntax::Kind::Keyword) {
             j = afterDecorator(lx, j)
             continue
         }
@@ -322,7 +322,7 @@ fn readLintArgs(sink: &var Sink, lx: &syntax::Lexed, from: i64, upto: i64,
         if lx.isText(i, ",") || lx.isNewline(i) { i += 1; continue }
         let level = lx.text(i)
         if !(level == "allow" || level == "warn" || level == "note") || !lx.isText(i + 1, "(") {
-            var f = finding("invalid-lint", "`@lint` takes `allow(...)`, `warn(...)` or `note(...)`, not `" +
+            var f = finding("invalid-lint", "`#lint` takes `allow(...)`, `warn(...)` or `note(...)`, not `" +
                             lx.text(i) + "`", lx.at(i).start, lx.at(i).end)
             f.level = "warn"
             sink.found.push(f)
@@ -355,7 +355,7 @@ fn readLintArgs(sink: &var Sink, lx: &syntax::Lexed, from: i64, upto: i64,
     }
 }
 
-/// Reads every `@lint(...)` in the file.
+/// Reads every `#lint(...)` in the file.
 ///
 /// One at the top — nothing above it but comments and other directives —
 /// with nothing after it but directives, imports or the end of the file is
@@ -366,7 +366,7 @@ fn readDirectives(sink: &var Sink, lx: &syntax::Lexed) {
     var i = 0
     while !lx.isEnd(i) {
         if lx.isNewline(i) || lx.isText(i, ";") { i += 1; continue }
-        if !lx.isText(i, "@") {
+        if !lx.isSigil(i) {
             atTop = false
             i += 1
             continue
@@ -388,7 +388,7 @@ fn readDirectives(sink: &var Sink, lx: &syntax::Lexed) {
                 k += 1
             }
         } elif lx.isEnd(next) || lx.isText(next, "}") {
-            var f = finding("invalid-lint", "this `@lint` applies to nothing: there is no item after it",
+            var f = finding("invalid-lint", "this `#lint` applies to nothing: there is no item after it",
                             lx.at(i).start, lx.at(after - 1).end)
             f.level = "warn"
             sink.found.push(f)
@@ -507,7 +507,7 @@ fn locals(sink: &var Sink, ix: &index::Index) {
         }
         var i = s.bodyOpen + 1
         while i < s.bodyClose {
-            // `@lint(allow(unused-variable))` names rules, not variables.
+            // `#lint(allow(unused-variable))` names rules, not variables.
             if isLintAt(lx, i) { i = afterDecorator(lx, i); continue }
             if lx.isIdent(i) && !lx.isText(i - 1, ".") && !lx.isText(i - 1, "::") && !lx.isText(i + 1, "::") &&
                     !(lx.isText(i - 1, "$") && lx.isText(i - 2, ".")) {

@@ -118,3 +118,77 @@ endforeach()
 add_custom_target(rune_editor_tools ALL
   DEPENDS ${CMAKE_BINARY_DIR}/bin/rune-lint ${CMAKE_BINARY_DIR}/bin/rune-fmt
           ${CMAKE_BINARY_DIR}/bin/rune-lsp)
+
+# ---------------------------------------------------------------------------
+# The tools in ~/.rune/bin
+# ---------------------------------------------------------------------------
+# `rune` runs its tools from ~/.rune/bin (or $RUNE_HOME/bin), copying them
+# there from beside the compiler when it first needs one. A build does the
+# same as soon as they are built, so an editor finds the newest straight
+# away. Off for packaging and CI, where nothing should touch the home
+# directory.
+option(RUNE_COPY_TOOLS_TO_HOME "Copy the built tools into ~/.rune/bin" ON)
+if(RUNE_COPY_TOOLS_TO_HOME)
+  if(DEFINED ENV{RUNE_HOME})
+    set(RUNE_TOOLS_HOME "$ENV{RUNE_HOME}/bin")
+  elseif(DEFINED ENV{HOME})
+    set(RUNE_TOOLS_HOME "$ENV{HOME}/.rune/bin")
+  else()
+    set(RUNE_TOOLS_HOME "$ENV{USERPROFILE}/.rune/bin")
+  endif()
+  set(RUNE_TOOL_BINARIES)
+  foreach(tool rune-doc rune-lint rune-fmt rune-lsp)
+    list(APPEND RUNE_TOOL_BINARIES ${CMAKE_BINARY_DIR}/bin/${tool}${CMAKE_EXECUTABLE_SUFFIX})
+  endforeach()
+  add_custom_target(rune_tools_home ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${RUNE_TOOLS_HOME}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RUNE_TOOL_BINARIES} "${RUNE_TOOLS_HOME}"
+    DEPENDS rune_doc_tool rune_editor_tools
+    COMMENT "Copying the tools to ${RUNE_TOOLS_HOME}")
+endif()
+
+# ---------------------------------------------------------------------------
+# rune-ffi: built on first use, not here
+# ---------------------------------------------------------------------------
+# It needs libclang, which not every machine has, so the toolchain never
+# builds it: `rune ffi` does, the first time it is run. Its tests run when
+# this machine has a libclang to build it against.
+find_library(RUNE_LIBCLANG NAMES clang libclang HINTS ${LLVM_LIBRARY_DIRS})
+if(RUNE_LIBCLANG)
+  get_filename_component(RUNE_LIBCLANG_DIR "${RUNE_LIBCLANG}" DIRECTORY)
+  add_test(NAME rune_ffi
+    COMMAND ${CMAKE_COMMAND}
+      -DRUNEC=$<TARGET_FILE:runec>
+      -DSTDLIB_DIR=${CMAKE_SOURCE_DIR}/stdlib
+      -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+      -DWORK_DIR=${CMAKE_BINARY_DIR}/tests/ffi
+      -DLIBCLANG_DIR=${RUNE_LIBCLANG_DIR}
+      -P ${CMAKE_SOURCE_DIR}/tests/RunFfi.cmake)
+endif()
+
+# ---------------------------------------------------------------------------
+# Installing: the layout a release archive has
+# ---------------------------------------------------------------------------
+#   bin/              rune, runec and the tools
+#   lib/rune/         the runtime library
+#   share/rune/       the standard library, the runtime's sources (cross
+#                     targets build theirs from them) and the tools' sources
+# The binaries find all of it relative to themselves (runec/include/rune/
+# Install.h), so the archive can be unpacked anywhere.
+install(TARGETS runec rune RUNTIME DESTINATION bin)
+install(PROGRAMS
+  ${CMAKE_BINARY_DIR}/bin/rune-doc${CMAKE_EXECUTABLE_SUFFIX}
+  ${CMAKE_BINARY_DIR}/bin/rune-lint${CMAKE_EXECUTABLE_SUFFIX}
+  ${CMAKE_BINARY_DIR}/bin/rune-fmt${CMAKE_EXECUTABLE_SUFFIX}
+  ${CMAKE_BINARY_DIR}/bin/rune-lsp${CMAKE_EXECUTABLE_SUFFIX}
+  DESTINATION bin)
+install(TARGETS runeruntime ARCHIVE DESTINATION lib/rune)
+install(DIRECTORY stdlib/ DESTINATION share/rune/stdlib)
+install(DIRECTORY runetime/ DESTINATION share/rune/runetime)
+install(DIRECTORY runtime/src runtime/include DESTINATION share/rune/runtime)
+install(DIRECTORY tools/ DESTINATION share/rune/tools
+  PATTERN "target" EXCLUDE
+  PATTERN "node_modules" EXCLUDE
+  PATTERN "*.py" EXCLUDE)
+install(DIRECTORY editors/ DESTINATION share/rune/editors
+  PATTERN "node_modules" EXCLUDE)

@@ -22,7 +22,7 @@ Every rule Zombie enforces has a code and a message that says what to do about i
 | E0290 | no write to a field through a shared `&self` |
 | E0292 | a reference-counting-only declaration is unavailable |
 | E0293 | a `from` place must name a parameter, `self`, or `global` |
-| E0294 | `@zombie` needs a reason |
+| E0294 | `#zombie` needs a reason |
 | E0296 | an internal reference must point into a heap-owned field |
 | E0297 | an internal reference must borrow from a field of its own value |
 | E0298 | a field that borrows another must be declared after it |

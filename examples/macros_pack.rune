@@ -1,6 +1,6 @@
 // The macro package for `examples/macros.rune`.
 //
-// `@type(Macros)` makes this a package of its own: the compiler builds it
+// `#type(Macros)` makes this a package of its own: the compiler builds it
 // first — for the machine doing the compiling, whatever the program is being
 // built for — and runs it to expand each invocation.
 //
@@ -11,7 +11,7 @@
 //     language and the whole standard library are available in one.
 //   * nothing leaks. What this file imports and declares is its own
 //     business; the program sees only the tokens its macros hand back.
-@type(Macros)
+#type(Macros)
 
 import std::Macro
 import std::text
@@ -31,7 +31,7 @@ fn joined<T: io::Display>(items: vector::Vector<T>, between: String) -> String {
 }
 
 /// `enumerate!(Red, Green, Blue)` writes the enum and a `nameOf` for it.
-@macro
+#macro
 pub fn enumerate(input: Macro::Tokens) -> Macro::Tokens {
     var variants = vector::Vector<String>()
     var arms = vector::Vector<String>()
@@ -49,7 +49,7 @@ pub fn enumerate(input: Macro::Tokens) -> Macro::Tokens {
 
 /// The sum of whatever numbers it is given, worked out while compiling. The
 /// program only ever sees the answer.
-@macro
+#macro
 pub fn total(input: Macro::Tokens) -> Macro::Tokens {
     var sum = 0
     for part in input.split("+") {
@@ -59,7 +59,7 @@ pub fn total(input: Macro::Tokens) -> Macro::Tokens {
 }
 
 /// Refuses what it cannot use, pointing at the invocation.
-@macro
+#macro
 pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
     if input.isEmpty() {
         Macro::error("firstWord! needs a word")
@@ -74,7 +74,7 @@ pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
 /// Wraps a block. The block arrives as **one** token, so it is handed back
 /// exactly as written — which is how whatever is inside it, `std::reflect`
 /// included, comes to be compiled in the program rather than here.
-@macro
+#macro
 pub fn timed(input: Macro::Tokens) -> Macro::Tokens {
     let label = input.at(0).text()
     let body = input.at(input.length() - 1)
@@ -87,7 +87,7 @@ pub fn timed(input: Macro::Tokens) -> Macro::Tokens {
 
 /// What the program calls a type. Written as an expansion, so it is the
 /// program's `reflect` that answers.
-@macro
+#macro
 pub fn typeNameOf(input: Macro::Tokens) -> Macro::Tokens {
     Macro::parse("std::reflect::typeName<" + input.text() + ">()")
 }

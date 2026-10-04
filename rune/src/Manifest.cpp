@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 namespace rune {
 
 namespace {
-/// A `[config]` value as `@Config` compares it: a string as itself, a number
+/// A `[config]` value as `#Config` compares it: a string as itself, a number
 /// or a boolean as it prints. Anything else — an array, a table — has no
 /// spelling a condition could compare against.
 std::string configText(const TomlValue &v) {
@@ -57,7 +57,7 @@ std::vector<std::string> stringList(const TomlValue *v) {
 
 /// What a file says it produces, read from the file itself.
 ///
-/// A `@type(...)` decorator is the explicit answer. Failing that, a top-level
+/// A `#type(...)` decorator is the explicit answer. Failing that, a top-level
 /// `fn main` makes the file an executable, because a program with an entry
 /// point is a program. Everything else is a component.
 static OutputKind kindOfSource(const fs::path &path) {
@@ -69,7 +69,7 @@ static OutputKind kindOfSource(const fs::path &path) {
   bool inBlockComment = false;
   bool sawDecl = false;
   while (std::getline(in, line)) {
-    // Strip comments so neither a `@type` nor a `fn main` inside one counts.
+    // Strip comments so neither a `#type` nor a `fn main` inside one counts.
     std::string code;
     for (size_t i = 0; i < line.size(); ++i) {
       if (inBlockComment) {
@@ -82,7 +82,10 @@ static OutputKind kindOfSource(const fs::path &path) {
       code += line[i];
     }
 
-    size_t at = code.find("@type(");
+    // `#type(...)`, or the older `@type(...)`.
+    size_t at = code.find("#type(");
+    if (at == std::string::npos)
+      at = code.find("@type(");
     if (at != std::string::npos && !sawDecl) {
       size_t close = code.find(')', at);
       if (close != std::string::npos) {
@@ -106,7 +109,7 @@ static OutputKind kindOfSource(const fs::path &path) {
     std::string trimmed = code;
     while (!trimmed.empty() && isspace((unsigned char)trimmed.front()))
       trimmed.erase(trimmed.begin());
-    if (!trimmed.empty() && trimmed[0] != '@')
+    if (!trimmed.empty() && trimmed[0] != '@' && trimmed[0] != '#')
       sawDecl = true;
   }
   return OutputKind::Component;
@@ -114,7 +117,7 @@ static OutputKind kindOfSource(const fs::path &path) {
 
 
 /// The value of `@<name>(...)` among the directives at the top of a file —
-/// `@runtime(none)` gives "none" — or empty when the file does not say.
+/// `#runtime(none)` gives "none" — or empty when the file does not say.
 static std::string programDirectiveOf(const fs::path &path,
                                       const std::string &name) {
   std::ifstream in(path);
@@ -123,9 +126,9 @@ static std::string programDirectiveOf(const fs::path &path,
     size_t i = line.find_first_not_of(" \t\r");
     if (i == std::string::npos || line.compare(i, 2, "//") == 0)
       continue;
-    if (line[i] != '@')
+    if (line[i] != '@' && line[i] != '#')
       return ""; // the first declaration: the directives are over
-    const std::string open = "@" + name + "(";
+    const std::string open = std::string(1, line[i]) + name + "(";
     if (line.compare(i, open.size(), open) == 0) {
       size_t close = line.find(')', i);
       if (close == std::string::npos)
@@ -192,7 +195,7 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
     if (const TomlValue *v = build->find("memory")) out.Memory = v->stringOr("zombie");
     if (const TomlValue *v = build->find("emit")) out.Emit = v->stringOr("");
     if (const TomlValue *v = build->find("optimize"))
-      out.OptLevel = static_cast<unsigned>(std::min<int64_t>(3, std::max<int64_t>(0, v->intOr(0))));
+      out.OptLevel = static_cast<unsigned>(std::min<int64_t>(3, std::max<int64_t>(0, v->intOr(2))));
     if (const TomlValue *v = build->find("debug")) out.Debug = v->boolOr(true);
     if (const TomlValue *v = build->find("overflow-checks"))
       out.OverflowChecks = v->boolOr(true) ? 1 : 0;
@@ -301,7 +304,7 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
     }
   }
 
-  // `[config]`: this package's own keys, as `@Config` compares them.
+  // `[config]`: this package's own keys, as `#Config` compares them.
   if (const TomlValue *cfg = doc.get("config"))
     if (cfg->isTable())
       for (const auto &kv : cfg->Tbl)
@@ -381,11 +384,11 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
 
   // Every file that declares an output of its own becomes a target. A file
   // named `lib.rune` or `main.rune` says so by its name; anything else says so
-  // with `@type(...)` or by defining `main`.
+  // with `#type(...)` or by defining `main`.
   for (const std::string &f : out.Sources) {
     fs::path p(f);
     std::string stem = p.stem().string();
-    // A source that says `@runtime(none)` or `@entry(none)` says it for the
+    // A source that says `#runtime(none)` or `#entry(none)` says it for the
     // program, as the manifest would.
     if (programDirectiveOf(p, "runtime") == "none")
       out.Freestanding = true;
@@ -458,7 +461,7 @@ std::string defaultManifestText(const std::string &name, bool isLibrary) {
      << "# zombie | arc — single ownership proven by the Zombie borrow\n"
      << "# checker with no counting at all, or reference counting.\n"
      << "memory = \"zombie\"\n"
-     << "optimize = 0\n"
+     << "optimize = 2\n"
      << "debug = true\n"
      << "warnings-as-errors = false\n"
      << "\n"

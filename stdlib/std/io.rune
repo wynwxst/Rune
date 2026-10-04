@@ -8,7 +8,7 @@
 //     io::println(42)
 //     io::println(Point { x: 1.0, y: 2.0 })   // needs `bind Display to Point`
 //
-// The wrappers around the runtime carry @safe because the runtime owns and
+// The wrappers around the runtime carry #safe because the runtime owns and
 // bounds-checks its buffers; calling the extern declarations directly would
 // (correctly) warn.
 
@@ -73,7 +73,7 @@ pub struct Chars {
 bind iter::Iterator to Chars {
     type Item = Character
 
-    @safe("the runtime reads within the string's length and says where it stopped")
+    #safe("the runtime reads within the string's length and says where it stopped")
     fn next(&var self) -> Character? {
         if self.at >= self.text.$length() { return nil }
         var after = self.at
@@ -197,37 +197,37 @@ bind<A, B, C> Display to (A, B, C) where A: Display, B: Display, C: Display {
 //===--------------------------------------------------------------------===//
 
 /// Writes `value` to standard output with no trailing newline.
-@safe("the runtime owns and bounds-checks the output buffer")
+#safe("the runtime owns and bounds-checks the output buffer")
 pub fn print<T: Display>(value: &T) {
     rune_print(value.display())
 }
 
 /// Writes `value` to standard output followed by a newline.
-@safe("the runtime owns and bounds-checks the output buffer")
+#safe("the runtime owns and bounds-checks the output buffer")
 pub fn println<T: Display>(value: &T) {
     rune_println(value.display())
 }
 
 /// Writes `value` to standard error with no trailing newline.
-@safe("the runtime owns and bounds-checks the output buffer")
+#safe("the runtime owns and bounds-checks the output buffer")
 pub fn eprint<T: Display>(value: &T) {
     rune_eprint(value.display())
 }
 
 /// Writes `value` to standard error followed by a newline.
-@safe("the runtime owns and bounds-checks the output buffer")
+#safe("the runtime owns and bounds-checks the output buffer")
 pub fn eprintln<T: Display>(value: &T) {
     rune_eprintln(value.display())
 }
 
 /// Writes the debugging form of `value`, followed by a newline.
-@safe("the runtime owns and bounds-checks the output buffer")
+#safe("the runtime owns and bounds-checks the output buffer")
 pub fn debug<T: Display>(value: &T) {
     rune_println(value.describe())
 }
 
 /// Writes a bare newline.
-@safe("the runtime owns and bounds-checks the output buffer")
+#safe("the runtime owns and bounds-checks the output buffer")
 pub fn newline() {
     rune_println("")
 }
@@ -270,7 +270,7 @@ pub macro print {
 ///
 /// An empty string is what a blank line gives *and* what the end of input
 /// gives, so a loop over standard input wants `readLineOrEnd` instead.
-@safe("the runtime allocates and terminates the returned String")
+#safe("the runtime allocates and terminates the returned String")
 pub fn readLine() -> String {
     rune_read_line()
 }
@@ -281,7 +281,7 @@ pub fn readLine() -> String {
 /// end of the input:
 ///
 ///     while io::readLineOrEnd() is Some(line) { io::println(line) }
-@safe("the runtime allocates the String and sets the flag beside it")
+#safe("the runtime allocates the String and sets the flag beside it")
 pub fn readLineOrEnd() -> String? {
     var more = 0i8
     let line = unsafe { rune_read_line_checked(&var more as *var i8) }
@@ -301,7 +301,7 @@ pub fn readLineOrEnd() -> String? {
 /// binary mode, so that a count means bytes. Anything `readLine` buffered
 /// before that call was read in text mode, with its `\r`s already removed —
 /// a byte protocol should read with this from its very first byte.
-@safe("the runtime sizes the buffer from the count and reports a short read")
+#safe("the runtime sizes the buffer from the count and reports a short read")
 pub fn readExactly(count: i64) -> String? {
     var ok = 0i8
     let text = unsafe { rune_read_stdin_exact(count, &var ok as *var i8) }
@@ -314,7 +314,7 @@ pub fn readExactly(count: i64) -> String? {
 /// Standard output is buffered when it is not a terminal, so a program
 /// answering requests over a pipe calls this after each answer, or the
 /// other side waits for a reply that is sitting in the buffer.
-@safe("fflush on the process's own standard output")
+#safe("fflush on the process's own standard output")
 pub fn flush() { rune_flush_stdout() }
 
 /// Stops standard input being buffered inside the program, so that
@@ -323,7 +323,7 @@ pub fn flush() { rune_flush_stdout() }
 ///
 /// A server that answers messages as they come and does slower work between
 /// them — an editor's language server, say — reads this way.
-@safe("setvbuf on the process's own standard input")
+#safe("setvbuf on the process's own standard input")
 pub fn unbufferInput() { rune_stdin_unbuffer() }
 
 /// Whether standard input has something to read — or has ended — within
@@ -332,7 +332,7 @@ pub fn unbufferInput() { rune_stdin_unbuffer() }
 /// Input already read into a buffer is invisible to this, so call
 /// `unbufferInput` first. On Windows only a pipe can be asked: anything else
 /// answers `false`.
-@safe("poll on the process's own standard input")
+#safe("poll on the process's own standard input")
 pub fn inputWaiting(millis: i64) -> bool { rune_stdin_waiting(millis) != 0i8 }
 
 //===--------------------------------------------------------------------===//
@@ -381,7 +381,7 @@ pub enum FileError {
     Other,
 }
 
-@safe("reads a code the runtime classified; touches no memory")
+#safe("reads a code the runtime classified; touches no memory")
 fn lastError() -> FileError {
     match unsafe { rune_last_file_error() } {
         1 => FileError::NotFound,
@@ -426,7 +426,7 @@ pub class File {
     pub fn name(&self) -> String { self.path.$clone() }
 
     /// Closes it now. Calling this twice is harmless.
-    @safe("the handle is nulled before anything else can reach it again")
+    #safe("the handle is nulled before anything else can reach it again")
     pub fn close(&var self) {
         if mem::isNull(self.handle) { return }
         unsafe { fclose(self.handle) }
@@ -434,7 +434,7 @@ pub class File {
     }
 
     /// Pushes buffered writes out to the operating system.
-    @safe("fflush on a live handle, or nothing at all")
+    #safe("fflush on a live handle, or nothing at all")
     pub fn flush(&var self) {
         if mem::isNull(self.handle) { return }
         unsafe { fflush(self.handle) }
@@ -443,7 +443,7 @@ pub class File {
     //=== Reading ========================================================//
 
     /// The next line, without its newline, or nothing at end of file.
-    @safe("fgets never writes past the size it is given")
+    #safe("fgets never writes past the size it is given")
     pub fn readLine(&var self) -> String? {
         if mem::isNull(self.handle) { return nil }
         let cap = 4096
@@ -465,7 +465,7 @@ pub class File {
     }
 
     /// Everything left in the file, as text.
-    @safe("the block is sized from the file's own length and NUL terminated")
+    #safe("the block is sized from the file's own length and NUL terminated")
     pub fn readAll(&var self) -> String {
         if mem::isNull(self.handle) { return "" }
         unsafe { fseek(self.handle, 0, 2) }          // SEEK_END
@@ -485,7 +485,7 @@ pub class File {
     //=== Writing ========================================================//
 
     /// Writes `text`, and says how many bytes went out.
-    @safe("fwrite is given the string's own length, and its own bytes")
+    #safe("fwrite is given the string's own length, and its own bytes")
     pub fn write(&var self, text: String) -> Result<i64, FileError> {
         if mem::isNull(self.handle) { return Err(FileError::Closed) }
         let n = text.$length()
@@ -507,7 +507,7 @@ pub class File {
 // Opening, and the one-line forms
 //===--------------------------------------------------------------------===//
 
-@safe("fopen either returns a handle or reports why it did not")
+#safe("fopen either returns a handle or reports why it did not")
 fn openWith(path: &String, mode: CString) -> Result<File, FileError> {
     let handle = unsafe { fopen(path.$cstr(), mode) }
     if mem::isNull(handle) { return Err(lastError()) }
@@ -556,7 +556,7 @@ pub fn exists(path: &String) -> bool {
 }
 
 /// Deletes a file. The error, if there was one — `nil` means it is gone.
-@safe("remove either unlinks the path or reports why it did not")
+#safe("remove either unlinks the path or reports why it did not")
 pub fn delete(path: &String) -> FileError? {
     if unsafe { remove(path.$cstr()) } == 0 { return nil }
     lastError()
@@ -564,7 +564,7 @@ pub fn delete(path: &String) -> FileError? {
 
 /// Creates a directory. Succeeds when it already exists, so a generator can
 /// call it without checking first.
-@safe("mkdir either creates the directory or reports why it did not")
+#safe("mkdir either creates the directory or reports why it did not")
 pub fn makeDirectory(path: &String) -> FileError? {
     let rc = unsafe { mkdir(path.$cstr(), 493 as u32) }   // 0755
     if rc == 0 { return nil }
@@ -579,7 +579,7 @@ pub fn makeDirectory(path: &String) -> FileError? {
 ///
 /// False for anything else, a missing path included, so this answers "can I
 /// list it" rather than "does it exist".
-@safe("stat either answers or reports that it could not, and touches nothing")
+#safe("stat either answers or reports that it could not, and touches nothing")
 pub fn isDirectory(path: &String) -> bool {
     unsafe { rune_path_is_dir(path.$cstr()) } == 1
 }
@@ -603,7 +603,7 @@ pub struct DirEntry {
 ///         Ok(entries) => for e in entries { io::println(e.name) },
 ///         Err(e) => io::println(io::describe(e)),
 ///     }
-@safe("the handle is opened, walked and closed here; nothing escapes")
+#safe("the handle is opened, walked and closed here; nothing escapes")
 pub fn readDirectory(path: &String) -> Result<vector::Vector<DirEntry>, FileError> {
     let handle = unsafe { rune_dir_open(path.$cstr()) }
     if mem::isNull(handle) { return lastError() }
@@ -722,7 +722,7 @@ pub class Bytes {
     /// A buffer of its own holding the same bytes. This is what `$clone()`
     /// does to a `Bytes`: the compiler's memberwise copy would give two
     /// buffers one block, and the second to go would free it again.
-    @safe("the copy is sized to the count and filled from bytes below it")
+    #safe("the copy is sized to the count and filled from bytes below it")
     pub fn clone(&self) -> Self {
         var out = Bytes()
         if self.count > 0 {
@@ -734,7 +734,7 @@ pub class Bytes {
     }
 
     /// Room for `wanted` bytes in total, without changing what is there.
-    @safe("the block is only ever grown, and the count is left alone")
+    #safe("the block is only ever grown, and the count is left alone")
     pub fn reserve(&var self, wanted: i64) {
         if wanted <= self.capacity { return }
         var next = if self.capacity == 0 { 32 } else { self.capacity }
@@ -749,14 +749,14 @@ pub class Bytes {
     }
 
     /// The byte at `index`, or nothing when the index is past the end.
-    @safe("the index is checked against the count before the block is read")
+    #safe("the index is checked against the count before the block is read")
     pub fn at(&self, index: i64) -> u8? {
         if index < 0 || index >= self.count { return nil }
         unsafe { (self.block as *u8)[index] }
     }
 
     /// Adds one byte to the end.
-    @safe("space is reserved before the write, and the count follows it")
+    #safe("space is reserved before the write, and the count follows it")
     pub fn push(&var self, value: u8) {
         self.reserve(self.count + 1)
         unsafe { self.block[self.count] = value }
@@ -764,7 +764,7 @@ pub class Bytes {
     }
 
     /// Adds every byte of `text` — its UTF-8, without a terminator.
-    @safe("the copy is bounded by the string's own length")
+    #safe("the copy is bounded by the string's own length")
     pub fn appendText(&var self, text: String) {
         let n = text.$length()
         if n == 0 { return }
@@ -777,7 +777,7 @@ pub class Bytes {
     }
 
     /// Adds every byte of `other`.
-    @safe("the copy is bounded by the other buffer's own count")
+    #safe("the copy is bounded by the other buffer's own count")
     pub fn append(&var self, other: Bytes) {
         let n = other.length()
         if n == 0 { return }
@@ -794,7 +794,7 @@ pub class Bytes {
 
     /// Drops the first `n` bytes, moving what is left to the front. This is
     /// what a buffered reader does once it has handed a line out.
-    @safe("the move is bounded by the count, and the count follows it")
+    #safe("the move is bounded by the count, and the count follows it")
     pub fn consume(&var self, n: i64) {
         if n <= 0 { return }
         if n >= self.count { self.count = 0; return }
@@ -826,7 +826,7 @@ pub class Bytes {
 
     /// The contents read as text. Invalid UTF-8 is left as it is: this is a
     /// reinterpretation, not a conversion.
-    @safe("the runtime copies exactly the count of bytes it is given")
+    #safe("the runtime copies exactly the count of bytes it is given")
     pub fn toString(&self) -> String {
         if self.count == 0 { return "" }
         unsafe { rune_string_from_bytes(self.block as *u8, self.count) }
@@ -1196,7 +1196,7 @@ extend File {
 }
 
 bind Reader to FileStream {
-    @safe("fread is given the buffer's own spare room and never exceeds it")
+    #safe("fread is given the buffer's own spare room and never exceeds it")
     fn read(&var self, sink: &var Bytes, most: i64) -> Result<i64, StreamError> {
         if !self.file.isOpen() { return Err(StreamError::Closed) }
         if most <= 0 { return Ok(0) }
@@ -1210,7 +1210,7 @@ bind Reader to FileStream {
 }
 
 bind Writer to FileStream {
-    @safe("fwrite is given the buffer's own count, and its own bytes")
+    #safe("fwrite is given the buffer's own count, and its own bytes")
     fn write(&var self, data: Bytes) -> Result<i64, StreamError> {
         if !self.file.isOpen() { return Err(StreamError::Closed) }
         let n = data.length()
@@ -1222,7 +1222,7 @@ bind Writer to FileStream {
         Ok(wrote as i64)
     }
 
-    @safe("fflush on a live handle, or nothing at all")
+    #safe("fflush on a live handle, or nothing at all")
     fn flush(&var self) -> Result<i64, StreamError> {
         if !self.file.isOpen() { return Err(StreamError::Closed) }
         unsafe { fflush(self.file.handle) }

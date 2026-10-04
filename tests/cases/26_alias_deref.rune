@@ -1,4 +1,4 @@
-// `@alias` gives a declaration another name, string-based so it can hold
+// `#alias` gives a declaration another name, string-based so it can hold
 // spellings no identifier can. Operators use it to answer to punctuation, and
 // `deref`/`derefSet` make a value behave like a pointer.
 // EXPECT: 3 3 3
@@ -15,21 +15,21 @@ import std::mem
 struct Bag { count: i64 }
 
 extend Bag {
-    @alias("size")
-    @alias("howMany")
+    #alias("size")
+    #alias("howMany")
     pub fn length(&self) -> i64 { self.count }
 }
 
-@alias("makeBag")
+#alias("makeBag")
 fn bag(n: i64) -> Bag { Bag { count: n } }
 
-@alias("Tote")
+#alias("Tote")
 struct Sack { label: String }
 
 struct Celsius { deg: f64 }
 
 // The punctuation spelling of the operator, plus an alias for it.
-@alias("degrees")
+#alias("degrees")
 bind operator::"*" to Celsius {
     fn deref(&self) -> f64 { self.deg }
     fn derefSet(&var self, value: f64) { (*self).deg = value }

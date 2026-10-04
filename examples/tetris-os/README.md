@@ -56,10 +56,10 @@ Rune.
 
 ## Built with every check on
 
-The kernel is built `@runtime(none)` with `safety = "full"`: every array
+The kernel is built `#runtime(none)` with `safety = "full"`: every array
 index is checked, every integer operation that can overflow is checked, and
 the Zombie borrow checker proves every borrow. A failed check reaches the
-kernel's `@panicHandler`, which does what the original's `panic` did — a red
+kernel's `#panicHandler`, which does what the original's `panic` did — a red
 screen with the message on it — and logs where on the serial port.
 
 Porting it turned up six bugs in the original, each silent in C — most

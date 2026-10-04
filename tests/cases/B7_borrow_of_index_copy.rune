@@ -1,0 +1,15 @@
+// EXPECT-ERROR: hands back a copy of the element
+// An overloaded `[]` that returns its element by value hands back a copy,
+// and a copy has no place to borrow: `&var bag[0]` is refused rather than
+// borrowing a temporary that writes would vanish into.
+struct Bag { items: [3:i64] = [1, 2, 3] }
+
+bind operator::"[]" to Bag {
+    fn index(&self, i: i64) -> i64 { self.items[i] }
+}
+
+fn main() -> i64 {
+    var bag = Bag {}
+    let r = &var bag[0]
+    0
+}

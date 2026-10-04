@@ -97,7 +97,7 @@ void rune_weak_clear(void **slot);
 /* Raw, non-refcounted allocation used for array storage and FFI buffers. */
 void *rune_raw_alloc(uint64_t size);
 /* The size a block was allocated with travels with it: the freestanding
-   runtime hands it to the program's @deallocator, which keeps no header. */
+   runtime hands it to the program's #deallocator, which keeps no header. */
 void *rune_raw_realloc(void *p, uint64_t old_size, uint64_t size);
 void rune_raw_free(void *p, uint64_t size);
 /// Copies `size` bytes; the blocks must not overlap.

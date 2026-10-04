@@ -1,0 +1,9 @@
+// EXPECT-ERROR: `#route` is not one of the compiler's decorators
+// `#` is for the compiler's own decorators. One the program declares is
+// written `@route`, and spelling it with `#` is refused rather than guessed.
+fn route(handler: @function() -> ()) { }
+
+#route
+fn health() { }
+
+fn main() -> i64 { 0 }

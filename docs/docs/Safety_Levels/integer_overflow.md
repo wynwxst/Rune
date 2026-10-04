@@ -1,6 +1,6 @@
 # Integer overflow
 
-`+`, `-`, `*` and unary `-` on a fixed-width integer can produce a result that does not fit. What happens then follows the build rather than the safety level: a **debug build** (`-O0`, which is what `rune build` produces) traps with a panic, the way a bounds check does, and a **release build** (`-O1` and above, `rune build --release`) wraps in two's complement. The mistake is caught while the program is being written and costs nothing once it is shipped. `--overflow-checks` and `--no-overflow-checks` pin it either way, `overflow-checks = true|false` under `[build]` does the same for a package, and `--safety none` never traps.
+`+`, `-`, `*` and unary `-` on a fixed-width integer can produce a result that does not fit. A build with safety checks — any build, at any optimisation level, `-O2` being the default — traps with a panic, the way a bounds check does; a **release build** (`rune build --release`) wraps in two's complement. The mistake is caught while the program is being written and costs nothing once it is shipped. `--overflow-checks` and `--no-overflow-checks` pin it either way, `overflow-checks = true|false` under `[build]` does the same for a package, and `--safety none` never traps.
 
 **Overflow in a debug build**
 
@@ -40,7 +40,7 @@ fn main() -> i64 {
 
 | Form | On overflow |
 | --- | --- |
-| `a + b`, `a - b`, `a * b`, `-a` | traps at `-O0`, wraps at `-O1` and above |
+| `a + b`, `a - b`, `a * b`, `-a` | traps, or wraps in a release build |
 | `a.$wrappingAdd(b)` `$wrappingSub` `$wrappingMul` | wraps |
 | `a.$saturatingAdd(b)` `$saturatingSub` `$saturatingMul` | clamps to the type's limits |
 | `a.$checkedAdd(b)` `$checkedSub` `$checkedMul` | `nil`; otherwise `Some(result)` |
@@ -51,4 +51,4 @@ fn main() -> i64 {
 > [!NOTE]
 > **Asking at compile time**
 >
-> `@Config(overflow_checks == "on")` tells a declaration which world it is in, for the rare case that wants to know.
+> `#Config(overflow_checks == "on")` tells a declaration which world it is in, for the rare case that wants to know.

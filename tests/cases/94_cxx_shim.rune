@@ -73,7 +73,7 @@ extern "C++" {
         fn sumSpanD(s: Span<f64>) -> f64
         var counter: c_int
 
-        @size(8)
+        #size(8)
         class Counter {
             fn init(&var self, start: c_int)        // Counter::Counter(int)
             fn deinit(&var self)                    // Counter::~Counter()
@@ -84,15 +84,15 @@ extern "C++" {
             fn destroy(c: *var Counter)
             fn pair(&self) -> Pair
             fn bigOf(&self) -> Big
-            @operator("[]")
+            #operator("[]")
             fn at(&self, i: c_int) -> c_int
-            @operator("new")
+            #operator("new")
             fn allocate(n: c_size_t, tag: c_int) -> *var c_void
-            @operator("delete")
+            #operator("delete")
             fn release(p: *var c_void)
         }
 
-        @size(16)
+        #size(16)
         class Named : Counter {
             fn init(&var self, start: c_int, name: CString)
             fn name(&self) -> CString
@@ -102,7 +102,7 @@ extern "C++" {
 
 fn mul(a: c_int, b: c_int) -> c_int { a * b }
 
-@safe("the shim is linked, and every pointer below is one it handed out or a live local")
+#safe("the shim is linked, and every pointer below is one it handed out or a live local")
 fn main() -> i64 {
     io::println("add: " + add(2, 3).$str())
     io::println("addLong: " + addLong(1000000, 2).$str())

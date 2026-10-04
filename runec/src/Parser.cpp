@@ -247,7 +247,7 @@ Parser::Parser(const SourceManager &sm, DiagnosticEngine &diags, unsigned fileID
   if (macros) {
     // The tables already hold this file's definitions, gathered along with
     // every other file's, so here they are only taken out of the way.
-    // Whether a `@macro fn` belongs here is decided by the compilation, not
+    // Whether a `#macro fn` belongs here is decided by the compilation, not
     // by the file: inside a macro package it is the whole point, and outside
     // one it is a mistake. So that check is made where the difference is
     // known, before this runs.
@@ -258,7 +258,7 @@ Parser::Parser(const SourceManager &sm, DiagnosticEngine &diags, unsigned fileID
     collectMacros(Toks, diags, ignored, /*record=*/false);
     expandMacros(Toks, diags, *macros, ModuleName, 128, procs);
   } else {
-    rejectProcMacros(Toks, diags);
+    stripProcMacros(Toks);
     MacroTable own;
     collectMacros(Toks, diags, own, /*record=*/true, ModuleName);
     expandMacros(Toks, diags, own, ModuleName, 128, procs);
@@ -373,19 +373,24 @@ void Parser::synchronize() {
 // Module and declarations
 //===----------------------------------------------------------------------===//
 
-/// `@link("m")` and `@linkpath("...")` at the very top of a file, before any
+/// `#link("m")` and `#linkpath("...")` at the very top of a file, before any
 /// declaration. They belong to the file rather than to anything in it, which
 /// is why they may only appear there.
 void Parser::parseFileDirectives(Module &mod) {
   for (;;) {
-    if (!check(Tok::At))
+    if (!atDecorator())
       return;
     // `type` is a keyword, so it does not arrive as an identifier.
     if (!peek(1).is(Tok::Identifier) && !peek(1).is(Tok::KwType))
       return;
     std::string name =
         peek(1).is(Tok::KwType) ? std::string("type") : peek(1).Text;
-    // `@lint(...)` at the top belongs to the file when nothing but other
+    if (name == "link" || name == "linkpath" || name == "type" ||
+        name == "runtime" || name == "entry" ||
+        (name == "lint" && lintIsFileDirective()))
+      checkDecoratorSigil(cur(), name,
+                          SourceRange(cur().Range.begin(), peek(1).Range.end()));
+    // `#lint(...)` at the top belongs to the file when nothing but other
     // directives, imports or the end of the file follow it. Before a
     // declaration it is that declaration's, and is left for it.
     if (name == "lint") {
@@ -402,7 +407,7 @@ void Parser::parseFileDirectives(Module &mod) {
         name != "runtime" && name != "entry")
       return;
     if (name == "runtime" || name == "entry") {
-      // `@runtime(none)` and `@entry(none)` belong to the program: what it is
+      // `#runtime(none)` and `#entry(none)` belong to the program: what it is
       // linked with, and where it starts. `rune` and `runec` read them before
       // parsing; this is where a misspelling is caught.
       std::string &value =
@@ -421,11 +426,11 @@ void Parser::parseFileDirectives(Module &mod) {
           range = cur().Range;
           advance();
         } else {
-          Diags.error(cur().Range, "`@{}` takes one of {}", name, choices)
+          Diags.error(cur().Range, "`#{}` takes one of {}", name, choices)
               .note(name == "runtime"
-                        ? "`@runtime(none)` builds a freestanding program: "
+                        ? "`#runtime(none)` builds a freestanding program: "
                           "no C library and no hosted runtime"
-                        : "`@entry(none)` generates no `main`; an `@export`ed "
+                        : "`#entry(none)` generates no `main`; an `#export`ed "
                           "function is where the program starts")
               .code(109);
           if (!check(Tok::RParen))
@@ -437,15 +442,15 @@ void Parser::parseFileDirectives(Module &mod) {
       continue;
     }
     if (name == "type") {
-      // `@type` decides what the file produces, which is what everything else
+      // `#type` decides what the file produces, which is what everything else
       // about linking depends on, so it comes before them.
       if (!mod.LinkLibraries.empty() || !mod.LinkPaths.empty())
-        Diags.error(peek(0).Range, "`@type` must come before `@link` and "
-                                   "`@linkpath`")
+        Diags.error(peek(0).Range, "`#type` must come before `#link` and "
+                                   "`#linkpath`")
             .note("what the file produces decides how the rest is used")
             .code(109);
       if (!mod.DeclaredOutput.empty())
-        Diags.error(peek(0).Range, "`@type` is already set for this file")
+        Diags.error(peek(0).Range, "`#type` is already set for this file")
             .code(109);
       size_t tstart = Pos;
       advance();
@@ -456,7 +461,7 @@ void Parser::parseFileDirectives(Module &mod) {
           mod.DeclaredOutputRange = cur().Range;
           advance();
         } else {
-          Diags.error(cur().Range, "`@type` takes a name")
+          Diags.error(cur().Range, "`#type` takes a name")
               .note("one of Executable, Library, Object, Assembly or LLVM")
               .code(109);
         }
@@ -466,41 +471,69 @@ void Parser::parseFileDirectives(Module &mod) {
       skipSeparators();
       continue;
     }
-    size_t start = Pos;
-    advance(); // @
-    advance(); // link / linkpath
-    if (!expect(Tok::LParen, "a link directive")) {
-      skipSeparators();
-      continue;
-    }
-    bool any = false;
-    while (!check(Tok::RParen) && !atEnd()) {
-      skipNewlines();
-      if (check(Tok::StringLiteral)) {
-        if (name == "link")
-          mod.LinkLibraries.push_back(cur().Text);
-        else
-          mod.LinkPaths.push_back(cur().Text);
-        any = true;
-        advance();
-      } else {
-        Diags.error(cur().Range, "`@{}` takes string arguments", name)
-            .note(name == "link"
-                      ? "write `@link(\"m\")` — the name you would pass to `-l`"
-                      : "write `@linkpath(\"/usr/local/lib\")`")
-            .code(107);
-        break;
-      }
-      skipNewlines();
-      if (!match(Tok::Comma))
-        break;
-    }
-    expect(Tok::RParen, "a link directive");
-    if (!any)
-      Diags.error(rangeFrom(start), "`@{}` needs at least one name", name)
-          .code(107);
+    parseLinkDirective(name, mod.LinkLibraries, mod.LinkPaths);
     skipSeparators();
   }
+}
+
+void Parser::parseLinkDirective(const std::string &name, std::vector<std::string> &libs,
+                                std::vector<std::string> &paths) {
+  size_t start = Pos;
+  advance(); // @
+  advance(); // link / linkpath
+  if (!expect(Tok::LParen, "a link directive"))
+    return;
+  bool any = false;
+  // `#link("raylib", type: static)` forces how it is linked: the archive,
+  // or the shared library, and nothing else. The names are recorded with
+  // the kind in front — `static:raylib` — which is how `-l` and a
+  // manifest's `link = [...]` spell it too.
+  std::vector<std::string> names;
+  std::string kind;
+  while (!check(Tok::RParen) && !atEnd()) {
+    skipNewlines();
+    if (name == "link" && (check(Tok::KwType) || (check(Tok::Identifier) && cur().Text == "type")) &&
+        (peek(1).is(Tok::Colon) || peek(1).is(Tok::Eq))) {
+      advance();
+      advance();
+      std::string value;
+      if (check(Tok::Identifier) || check(Tok::StringLiteral))
+        value = cur().Text;
+      if (value != "static" && value != "dynamic" && value != "framework") {
+        Diags.error(cur().Range, "`#link`'s `type` is `static`, `dynamic` or `framework`")
+            .note("`static` links the archive (`libname.a`), `dynamic` the shared "
+                  "library, `framework` an Apple framework; without it, the linker picks")
+            .code(107);
+      } else {
+        kind = value;
+      }
+      if (!check(Tok::RParen) && !check(Tok::Comma))
+        advance();
+    } else if (check(Tok::StringLiteral)) {
+      if (name == "link")
+        names.push_back(cur().Text);
+      else
+        paths.push_back(cur().Text);
+      any = true;
+      advance();
+    } else {
+      Diags.error(cur().Range, "`#{}` takes string arguments", name)
+          .note(name == "link"
+                    ? "write `#link(\"m\")` — the name you would pass to `-l`"
+                    : "write `#linkpath(\"/usr/local/lib\")`")
+          .code(107);
+      break;
+    }
+    skipNewlines();
+    if (!match(Tok::Comma))
+      break;
+  }
+  expect(Tok::RParen, "a link directive");
+  for (const std::string &lib : names)
+    libs.push_back(kind.empty() ? lib : kind + ":" + lib);
+  if (!any)
+    Diags.error(rangeFrom(start), "`#{}` needs at least one name", name)
+        .code(107);
 }
 
 std::unique_ptr<Module> Parser::parseModule() {
@@ -530,15 +563,48 @@ std::unique_ptr<Module> Parser::parseModule() {
     if (Diags.reachedLimit())
       break;
   }
+  for (auto &cl : PendingLinks)
+    mod->ConditionalLinks.push_back(std::move(cl));
+  PendingLinks.clear();
   return mod;
+}
+
+bool Parser::checkDecoratorSigil(const Token &sigil, const std::string &name,
+                                 SourceRange at) {
+  const bool builtin = isBuiltinDecoratorName(name);
+  if (sigil.is(Tok::Hash) && !builtin) {
+    Diags.error(at, "`#{}` is not one of the compiler's decorators", name)
+        .note("`#` is for the compiler's own — `#inline`, `#safe(...)`, "
+              "`#Config(...)` and the rest")
+        .note("a decorator the program declares is written `@{}`", name)
+        .code(132);
+    return false;
+  }
+  if (sigil.is(Tok::At) && builtin)
+    Diags.warn(at, "the compiler's decorators are written with `#`")
+        .note("write `#{}`; `@` is for decorators the program declares",
+              name)
+        .code(133);
+  return true;
 }
 
 std::vector<Attribute> Parser::parseAttributes() {
   std::vector<Attribute> attrs;
-  while (check(Tok::At)) {
+  while (atDecorator()) {
+    // `#Config(...)` then `#link(...)`: the directive is read by the caller,
+    // which knows it as a conditional one.
+    if (atLinkDirective()) {
+      bool conditioned = false;
+      for (const Attribute &prev : attrs)
+        conditioned = conditioned || prev.Name == "Config" || prev.Name == "config";
+      if (conditioned)
+        break;
+    }
     // `@function(...)` in type position is a function type, never a decorator,
     // but decorators only appear before declarations so there is no clash.
+    // `#name` is the compiler's own decorator; `@name`, the program's.
     size_t start = Pos;
+    const Token sigil = cur();
     advance();
     Attribute a;
     if (check(Tok::Identifier)) {
@@ -550,7 +616,9 @@ std::vector<Attribute> Parser::parseAttributes() {
     } else {
       Diags.error(cur().Range, "Expected '{}' — Got: '{}'", "decorator name",
                   cur().Text.empty() ? tokenSpelling(cur().Kind) : cur().Text)
-          .note("decorators are written `@name` or `@name(arguments)`")
+          .note("decorators are written `#name(arguments)` for the "
+                "compiler's own, `@name(arguments)` for one the program "
+                "declares")
           .code(102);
       advance();
       continue;
@@ -568,7 +636,11 @@ std::vector<Attribute> Parser::parseAttributes() {
       expect(Tok::RParen, "a decorator argument list");
     }
     a.Range = rangeFrom(start);
-    attrs.push_back(std::move(a));
+    a.Builtin = sigil.is(Tok::Hash);
+    if (checkDecoratorSigil(sigil, a.Name,
+                            SourceRange(sigil.Range.begin(),
+                                        Toks[start + 1].Range.end())))
+      attrs.push_back(std::move(a));
     skipSeparators();
   }
   return attrs;
@@ -579,14 +651,34 @@ DeclPtr Parser::parseTopLevelDecl() {
   // one, before any decorators are consumed.
   std::string doc = cur().Doc;
   std::vector<Attribute> attrs = parseAttributes();
+  // `#Config(...)` and then `#link` / `#linkpath`, anywhere in the file: a
+  // native library some builds need — `type: framework` on macOS, say. The
+  // condition is answered with every other `#Config`; what the directives
+  // name is linked when it holds.
+  if (atLinkDirective()) {
+    Module::ConditionalLink cl;
+    for (Attribute &a : attrs)
+      if (a.Name == "Config" || a.Name == "config")
+        cl.Conditions.push_back(std::move(a));
+    while (atLinkDirective()) {
+      std::string which = peek(1).Text;
+      checkDecoratorSigil(cur(), which, SourceRange(cur().Range.begin(), peek(1).Range.end()));
+      parseLinkDirective(which, cl.Libraries, cl.Paths);
+      skipSeparators();
+    }
+    PendingLinks.push_back(std::move(cl));
+    return nullptr;
+  }
   // These belong to the file, not to a declaration, so they are only read at
   // the very top. Reaching one here means it came too late.
   for (const Attribute &a : attrs)
     if (a.Name == "link" || a.Name == "linkpath" || a.Name == "type" ||
         a.Name == "runtime" || a.Name == "entry")
-      Diags.error(a.Range, "`@{}` must be at the top of the file", a.Name)
+      Diags.error(a.Range, "`#{}` must be at the top of the file", a.Name)
           .note("it applies to the whole file, so it goes before every "
                 "declaration — imports included")
+          .note("`#link` and `#linkpath` may come later with a `#Config(...)` "
+                "straight before them")
           .code(107);
   bool isPublic = false;
   if (check(Tok::KwPub)) {
@@ -594,14 +686,14 @@ DeclPtr Parser::parseTopLevelDecl() {
     advance();
     skipNewlines();
     // `pub` may also precede decorators.
-    if (check(Tok::At)) {
+    if (atDecorator()) {
       auto more = parseAttributes();
       for (auto &a : more)
         attrs.push_back(std::move(a));
     }
   }
   DeclPtr d = parseDecl(std::move(attrs), isPublic);
-  // `@Doc` wins when both are present: it was written for the reader, the
+  // `#Doc` wins when both are present: it was written for the reader, the
   // comment may only have been written for whoever is editing the code.
   if (d && !doc.empty())
     d->Doc = std::move(doc);
@@ -991,8 +1083,8 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(std::vector<Attribute> attrs
         if (auto *s = dyn_cast<StringLitExpr>(a.Args[0].get()))
           fn->SafetyReason = s->Value;
     }
-    // `@zombie("reason")`: the borrow checker takes this body on trust. The
-    // reason is checked for in Sema, the way `@safe` without one warns.
+    // `#zombie("reason")`: the borrow checker takes this body on trust. The
+    // reason is checked for in Sema, the way `#safe` without one warns.
     if (a.Name == "zombie") {
       fn->IsZombieTrusted = true;
       if (!a.Args.empty())
@@ -1681,7 +1773,7 @@ std::unique_ptr<ImportDecl> Parser::parseImport(std::vector<Attribute> attrs,
 }
 
 namespace {
-/// `@as("newName")` on a foreign declaration: the C side keeps the name that
+/// `#as("newName")` on a foreign declaration: the C side keeps the name that
 /// was written, and Rune sees the new one instead.
 ///
 /// This is what lets a program import C's `bind` and still declare a Rune
@@ -1692,15 +1784,15 @@ void applyForeignRename(ValueDecl *d, DiagnosticEngine &diags) {
   if (!a)
     return;
   if (a->Args.size() != 1) {
-    diags.error(a->Range, "`@as` takes one string — the name Rune should use")
-        .note("write `@as(\"cbind\")` above the declaration")
+    diags.error(a->Range, "`#as` takes one string — the name Rune should use")
+        .note("write `#as(\"cbind\")` above the declaration")
         .code(234);
     return;
   }
   const auto *lit = dyn_cast<StringLitExpr>(a->Args[0].get());
   if (!lit || lit->Value.empty()) {
-    diags.error(a->Args[0]->Range, "`@as` takes a non-empty string")
-        .note("write `@as(\"cbind\")` above the declaration")
+    diags.error(a->Args[0]->Range, "`#as` takes a non-empty string")
+        .note("write `#as(\"cbind\")` above the declaration")
         .code(234);
     return;
   }
@@ -1710,7 +1802,7 @@ void applyForeignRename(ValueDecl *d, DiagnosticEngine &diags) {
   d->Name = lit->Value;
 }
 
-/// `@operator("new")` on an `extern "C++"` member names the C++ operator the
+/// `#operator("new")` on an `extern "C++"` member names the C++ operator the
 /// declaration stands for. The Rune name is whatever was written after `fn`;
 /// only the symbol changes.
 void applyCxxOperator(FunctionDecl *f, DiagnosticEngine &diags) {
@@ -1721,8 +1813,8 @@ void applyCxxOperator(FunctionDecl *f, DiagnosticEngine &diags) {
                         ? dyn_cast<StringLitExpr>(a->Args[0].get())
                         : nullptr;
   if (!lit || lit->Value.empty()) {
-    diags.error(a->Range, "`@operator` takes one string — the C++ operator")
-        .note("write `@operator(\"new\")` or `@operator(\"[]\")` above the "
+    diags.error(a->Range, "`#operator` takes one string — the C++ operator")
+        .note("write `#operator(\"new\")` or `#operator(\"[]\")` above the "
               "declaration")
         .code(234);
     return;
@@ -1730,7 +1822,7 @@ void applyCxxOperator(FunctionDecl *f, DiagnosticEngine &diags) {
   f->CxxOperator = lit->Value;
 }
 
-/// `@size(N)` / `@align(N)` on an `extern "C++"` type: how much room an
+/// `#size(N)` / `#align(N)` on an `extern "C++"` type: how much room an
 /// instance takes, which is what lets Rune allocate one.
 bool readLayoutAttr(const Decl *d, const char *name, uint64_t &out,
                     DiagnosticEngine &diags) {
@@ -1741,8 +1833,8 @@ bool readLayoutAttr(const Decl *d, const char *name, uint64_t &out,
                         ? dyn_cast<IntLitExpr>(a->Args[0].get())
                         : nullptr;
   if (!lit || lit->Value == 0) {
-    diags.error(a->Range, "`@{}` takes one positive integer literal", name)
-        .note("write `@{}(1048)` — `sizeof` on the C++ side is where the "
+    diags.error(a->Range, "`#{}` takes one positive integer literal", name)
+        .note("write `#{}(1048)` — `sizeof` on the C++ side is where the "
               "number comes from",
               name)
         .code(234);
@@ -2902,7 +2994,7 @@ StmtPtr Parser::parseStatement() {
   size_t start = Pos;
 
   // Nested declarations keep their decorators.
-  if (check(Tok::At) || check(Tok::KwPub) || startsDecl(cur().Kind) ||
+  if (atDecorator() || check(Tok::KwPub) || startsDecl(cur().Kind) ||
       atFunctionStart()) {
     std::vector<Attribute> attrs = parseAttributes();
     bool isPublic = match(Tok::KwPub);
@@ -2917,7 +3009,7 @@ StmtPtr Parser::parseStatement() {
       return ds;
     }
     // Decorators on an expression statement are not meaningful; fall through
-    // with them dropped after reporting. `@lint` is the exception: it is the
+    // with them dropped after reporting. `#lint` is the exception: it is the
     // linter's, and a statement is exactly what it may cover.
     bool onlyLint = !attrs.empty();
     for (const Attribute &a : attrs)
@@ -2925,11 +3017,12 @@ StmtPtr Parser::parseStatement() {
         onlyLint = false;
     if (!attrs.empty() && !onlyLint)
       Diags.error(attrs.front().Range, "decorators may only precede declarations")
-          .note("move the `@{}` decorator onto a `fn`, `class`, `struct` or "
-                "`enum`", attrs.front().Name)
+          .note("move the `{}{}` decorator onto a `fn`, `class`, `struct` or "
+                "`enum`", attrs.front().Builtin ? "#" : "@",
+                attrs.front().Name)
           .code(113);
     if (onlyLint && (check(Tok::RBrace) || atEnd())) {
-      Diags.error(attrs.back().Range, "`@lint` has nothing after it to apply to")
+      Diags.error(attrs.back().Range, "`#lint` has nothing after it to apply to")
           .note("put it on the line before the declaration or statement it "
                 "is about")
           .code(113);

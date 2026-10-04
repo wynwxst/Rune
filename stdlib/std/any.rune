@@ -41,7 +41,7 @@ extend Any {
     ///
     /// Two types share this name only if they are the same type — the module
     /// path and any generic arguments are part of it.
-    @intrinsic("any_type_name")
+    #intrinsic("any_type_name")
     pub fn typeName(&self) -> String
 
     /// True when the value inside is a `T`.
@@ -53,7 +53,7 @@ extend Any {
     ///     if boxed.holds::<String>() { ... }
     ///
     /// `boxed is String` is the same test written as an operator.
-    @intrinsic("any_holds")
+    #intrinsic("any_holds")
     pub fn holds<T>(&self) -> bool
 
     /// The value as a `T`, or `nil` when it is something else. This is the
@@ -66,7 +66,7 @@ extend Any {
     ///     }
     ///
     ///     let n = boxed.get::<i64>() ?? 0
-    @intrinsic("any_get")
+    #intrinsic("any_get")
     pub fn get<T>(&self) -> T?
 
     /// The value as a `T`. Aborts when it is something else, naming both the
@@ -74,6 +74,6 @@ extend Any {
     ///
     /// Use it where the type is an invariant of the program rather than
     /// something to be checked; use `get` everywhere else.
-    @intrinsic("any_expect")
+    #intrinsic("any_expect")
     pub fn expect<T>(&self) -> T
 }

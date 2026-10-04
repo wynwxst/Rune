@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 
 extern "C" {
     fn strlen(Of: CString) -> i32
@@ -16,7 +16,7 @@ extend str {
 
 }
 
-@safe("CString points to NUL terminated and result becomes NUL terminated")
+#safe("CString points to NUL terminated and result becomes NUL terminated")
 fn new(string: CString /* literal or from String */) -> str {
     len = strlen(string)
     let block = mem::allocator.allocate((len+1) as u64)
@@ -27,7 +27,7 @@ fn new(string: CString /* literal or from String */) -> str {
 }
 
 bind operator::"[]" to str {
-    @safe("Bounds checking is implemented")
+    #safe("Bounds checking is implemented")
     fn index(&self,idx: i64) -> u8? {
         if (idx >= self.len || idx < 0) {
             nil
@@ -35,7 +35,7 @@ bind operator::"[]" to str {
             self.ptr[idx]
         }
     }
-    @safe("Bounds checking is implemented")
+    #safe("Bounds checking is implemented")
     fn indexSet(&var self, idx: i64, value: u8?) {
         if (idx < self.len && idx >= 0) {
             match value {
@@ -50,7 +50,7 @@ bind operator::"[]" to str {
 
 bind std::iter::Iterator to str {
     type Item = u8
-    @safe("Bounds checking is used")
+    #safe("Bounds checking is used")
     fn next(&var self) -> Self::Item? {
         //println!("Ctr: {}",self.ctr)
         self.ctr -= 1
@@ -68,7 +68,7 @@ bind std::iter::Iterator to str {
 
 
 bind std::io::Display to str {
-    @safe("Safe cast")
+    #safe("Safe cast")
     fn display(&self) -> String {
         var res = ""
         for i in 0..self.len {

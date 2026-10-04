@@ -1,24 +1,24 @@
 # Inline assembly
 
-`std::asm` is two `@intrinsic` declarations with no bodies, answered in
+`std::asm` is two `#intrinsic` declarations with no bodies, answered in
 `CodeGen::emitInlineAsm`. There is no new syntax: the intrinsic mechanism
 already exists for exactly this — things the compiler must answer itself — and
 using it meant no change to the lexer, the parser, the AST or any of the three
 tree helpers.
 
 ```rune
-@unsafe
-@intrinsic("asm")
+#unsafe
+#intrinsic("asm")
 pub fn run(template: String, constraints: String, ...)
 
-@unsafe
-@intrinsic("asm_value")
+#unsafe
+#intrinsic("asm_value")
 pub fn value<R>(template: String, constraints: String, ...) -> R
 ```
 
 Three things come for free from that declaration:
 
-- `@unsafe` means a call needs `unsafe { ... }`, through the same check that guards foreign calls. Nothing had to be taught about assembly.
+- `#unsafe` means a call needs `unsafe { ... }`, through the same check that guards foreign calls. Nothing had to be taught about assembly.
 - `...` makes the operand list variadic, so the operands keep their own types.
 - `<R>` gives the value form its result type, reachable in the code generator as `target->TypeArguments[0]`.
 

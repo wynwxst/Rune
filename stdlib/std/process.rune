@@ -39,7 +39,7 @@ extern "C" {
 
 /// How many command line arguments there are, counting the program name at
 /// index 0. A program run with no arguments of its own reports 1.
-@safe("reads a value the runtime captured at start-up")
+#safe("reads a value the runtime captured at start-up")
 pub fn argCount() -> i64 {
     rune_arg_count()
 }
@@ -49,7 +49,7 @@ pub fn argCount() -> i64 {
 /// Out of range is empty rather than an abort, because a missing argument is
 /// an ordinary thing for a program to be run without. Use `argument` when the
 /// difference between absent and empty matters.
-@safe("the runtime range-checks the index and returns an empty String")
+#safe("the runtime range-checks the index and returns an empty String")
 pub fn arg(index: i64) -> String {
     rune_arg_at(index)
 }
@@ -57,20 +57,20 @@ pub fn arg(index: i64) -> String {
 /// The argument at `index`, or `nil` when there is none.
 ///
 ///     let path = process::argument(1) ?? "input.txt"
-@safe("the runtime range-checks the index and returns an empty String")
+#safe("the runtime range-checks the index and returns an empty String")
 pub fn argument(index: i64) -> String? {
     if index < 0 || index >= rune_arg_count() { return nil }
     rune_arg_at(index)
 }
 
 /// The program's own name, as it was invoked — argument 0.
-@safe("the runtime range-checks the index and returns an empty String")
+#safe("the runtime range-checks the index and returns an empty String")
 pub fn programName() -> String {
     rune_arg_at(0)
 }
 
 /// Every argument, program name included.
-@safe("each index is checked against the count the runtime captured")
+#safe("each index is checked against the count the runtime captured")
 pub fn args() -> vector::Vector<String> {
     vec = vector::Vector<String>()
     for i in 0..rune_arg_count() {
@@ -83,7 +83,7 @@ pub fn args() -> vector::Vector<String> {
 /// actually wants.
 ///
 ///     for flag in process::arguments() { ... }
-@safe("each index is checked against the count the runtime captured")
+#safe("each index is checked against the count the runtime captured")
 pub fn arguments() -> vector::Vector<String> {
     vec = vector::Vector<String>()
     for i in 1..rune_arg_count() {
@@ -99,19 +99,19 @@ pub fn arguments() -> vector::Vector<String> {
 ///
 /// Nothing is unwound: no `deinit` runs and no destructor is called. Return
 /// from `main` instead wherever that matters.
-@safe("flushing and exiting is the runtime's own responsibility")
+#safe("flushing and exiting is the runtime's own responsibility")
 pub fn exit(code: i32) -> Never {
     rune_exit(code)
 }
 
 /// Ends the process with status 0.
-@safe("flushing and exiting is the runtime's own responsibility")
+#safe("flushing and exiting is the runtime's own responsibility")
 pub fn succeed() -> Never {
     rune_exit(0)
 }
 
 /// Ends the process with status 1, the conventional "something went wrong".
-@safe("flushing and exiting is the runtime's own responsibility")
+#safe("flushing and exiting is the runtime's own responsibility")
 pub fn fail() -> Never {
     rune_exit(1)
 }
@@ -128,17 +128,17 @@ pub fn fail() -> Never {
 /// This is the deliberate way to stop. A failed bounds check inside the
 /// library stops the same way, and prints the same shape of report: the
 /// message, then a traceback when the program was built with `-g`.
-@Config(runtime == "hosted")
-@safe("the runtime prints the message and aborts")
+#Config(runtime == "hosted")
+#safe("the runtime prints the message and aborts")
 pub fn panic<M: io::Display>(message: M) -> Never {
     rune_panic(message.display().$cstr(), "explicit call to std::process::panic")
 }
 
-/// The same, built `@runtime(none)`: there is no `String` to display a
+/// The same, built `#runtime(none)`: there is no `String` to display a
 /// message into, so the message is the `CString` a literal already is, and
-/// it goes as it is to the program's `@panicHandler`.
-@Config(runtime == "none")
-@safe("the program's own panic handler takes the message")
+/// it goes as it is to the program's `#panicHandler`.
+#Config(runtime == "none")
+#safe("the program's own panic handler takes the message")
 pub fn panic(message: CString) -> Never {
     rune_panic(message, "explicit call to std::process::panic")
 }
@@ -150,14 +150,14 @@ pub fn panic(message: CString) -> Never {
 /// expression it was given.
 ///
 ///     process::assert(index < count, "index out of range")
-@Config(runtime == "hosted")
+#Config(runtime == "hosted")
 pub fn assert<M: io::Display>(condition: bool, message: M) {
     if !condition {
         panic(message)
     }
 }
 
-@Config(runtime == "none")
+#Config(runtime == "none")
 pub fn assert(condition: bool, message: CString) {
     if !condition {
         panic(message)
@@ -174,7 +174,7 @@ pub fn assert(condition: bool, message: CString) {
 ///     before = process::liveObjectCount()
 ///     { let held = Thing() }
 ///     testing::equal("released", process::liveObjectCount(), before)
-@safe("reads a counter the runtime maintains")
+#safe("reads a counter the runtime maintains")
 pub fn liveObjectCount() -> i64 {
     rune_live_object_count()
 }
@@ -233,7 +233,7 @@ pub class Command {
     /// Runs it to completion. `nil` when it could not be started at all —
     /// not found, not executable, or the directory is missing — which is a
     /// different thing from starting and then failing.
-    @safe("the command handle is made, used and freed within this call")
+    #safe("the command handle is made, used and freed within this call")
     pub fn run(&self) -> Output? {
         let handle = rune_command_new(self.program)
         for a in self.arguments { rune_command_arg(handle, a) }

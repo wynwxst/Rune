@@ -7,6 +7,17 @@
 fn f() -> i64 { 0 }
 ```
 
+**`#` is only for the compiler's own**
+
+```rune
+fn route(handler: @function() -> ()) { }
+
+#route
+fn health() { }
+
+fn main() -> i64 { 0 }
+```
+
 > [!NOTE]
 > **Placement**
 >

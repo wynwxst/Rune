@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 // The Rune language server.
 //
 //     rune-lsp [--stdlib <dir>] [--runec <path>] [--rune <path>]
@@ -1352,7 +1352,9 @@ fn escapeSnippet(s: &String) -> String {
 
 fn decoratorNames() -> vector::Vector<String> {
     vector::from(["safe", "unsafe", "inline", "noinline", "export", "alias", "as", "resource",
-                  "intrinsic", "sync", "Doc", "type", "link", "linkpath", "Config", "macro", "auto"])
+                  "intrinsic", "sync", "Doc", "type", "link", "linkpath", "Config", "macro", "auto",
+                  "never", "lint", "Convention", "weak", "runtime", "entry", "panicHandler",
+                  "allocator", "deallocator", "output", "zombie", "zombie_unavailable"])
 }
 
 //===--------------------------------------------------------------------===//
@@ -1547,8 +1549,9 @@ fn completion(srv: &var Server, params: &json::Value) -> String {
     let tokBefore = lx.tokenAt(wordStart - 1)
     let fnSym = srv.project.module(m).enclosingFunction(if tokBefore >= 0 { tokBefore } else { 0 })
 
-    // `@` — decorators.
-    if prevByte == 64 {
+    // `#` — the compiler's decorators. (`@` names one the program declares,
+    // which completes like any other function.)
+    if prevByte == 35 || prevByte == 64 {
         for d in decoratorNames() { c.add(d, 14, "decorator", "", "", "0") }
         return "{\"isIncomplete\":false,\"items\":[" + joinItems(c.items) + "]}"
     }
@@ -1661,7 +1664,9 @@ fn completion(srv: &var Server, params: &json::Value) -> String {
         if r.importedModule >= 0 {
             let mod = srv.project.module(r.importedModule)
             for s in mod.symbols {
-                if s.container.$isEmpty() && s.isPublic && !s.isExtern { c.symbol(s,
+                // Foreign functions too: a `pub extern "C"` block — what
+                // `rune ffi` writes — is the module's API.
+                if s.container.$isEmpty() && s.isPublic { c.symbol(s,
                         if s.isType() { "1" } else { "0" }) }
             }
         } elif r.symbol >= 0 && srv.project.module(r.module).symbol(r.symbol).isType() {
@@ -1836,7 +1841,7 @@ fn capabilities() -> String {
     "{\"capabilities\":{" +
     "\"positionEncoding\":\"utf-16\"," +
     "\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":false}}," +
-    "\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"$\",\"@\"],\"resolveProvider\":false}," +
+    "\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"$\",\"@\",\"#\"],\"resolveProvider\":false}," +
     "\"hoverProvider\":true," +
     "\"definitionProvider\":true," +
     "\"referencesProvider\":true," +

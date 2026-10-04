@@ -96,7 +96,7 @@ pub enum Result<T, E> {
     }
 
     /// The value. Aborts when this is an error.
-    @safe("the runtime prints the location and aborts; it never returns")
+    #safe("the runtime prints the location and aborts; it never returns")
     pub fn unwrap(self) -> T {
         match self {
             Result::Ok(take v) => v,
@@ -108,7 +108,7 @@ pub enum Result<T, E> {
     ///
     /// Prefer this to `unwrap` wherever the reason it should have succeeded
     /// can be written down: the message is what the traceback leads with.
-    @safe("the runtime prints the message and aborts; it never returns")
+    #safe("the runtime prints the message and aborts; it never returns")
     pub fn expect(self, message: CString) -> T {
         match self {
             Result::Ok(take v) => v,
@@ -119,7 +119,7 @@ pub enum Result<T, E> {
     /// The error. Aborts when this holds a value.
     ///
     /// The mirror of `unwrap`, for a test that means to check the failure.
-    @safe("the runtime prints the location and aborts; it never returns")
+    #safe("the runtime prints the location and aborts; it never returns")
     pub fn unwrapErr(self) -> E {
         match self {
             Result::Ok(v) => rune_panic_unwrap("Result", "Result::unwrapErr"),
@@ -136,7 +136,7 @@ pub enum Result<T, E> {
     ///     })
     pub fn map<U>(self, f: @function(T) -> U) -> Result<U, E> {
         match self {
-            Result::Ok(v) => Result::<U, E>::Ok(f(v)),
+            Result::Ok(take v) => Result::<U, E>::Ok(f(v)),
             Result::Err(take e) => Result::<U, E>::Err(e),
         }
     }
@@ -151,7 +151,7 @@ pub enum Result<T, E> {
     ///     })
     pub fn mapErr<F>(self, f: @function(E) -> F) -> Result<T, F> {
         match self {
-            Result::Ok(v) => Result::<T, F>::Ok(v),
+            Result::Ok(take v) => Result::<T, F>::Ok(v),
             Result::Err(take e) => Result::<T, F>::Err(f(e)),
         }
     }
@@ -166,7 +166,7 @@ pub enum Result<T, E> {
     ///     })
     pub fn andThen<U>(self, f: @function(T) -> Result<U, E>) -> Result<U, E> {
         match self {
-            Result::Ok(v) => f(v),
+            Result::Ok(take v) => f(v),
             Result::Err(take e) => Result::<U, E>::Err(e),
         }
     }

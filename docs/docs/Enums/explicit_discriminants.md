@@ -47,3 +47,44 @@ fn main() -> i64 {
     0
 }
 ```
+
+An alias is written as the other variant's name, as `Osi = Iso` is. Two variants that land on one value any other way — two equal numbers, or a value counted on from the variant before into one already taken — are usually a slip, and warn (W0402).
+
+**A value taken twice**
+
+```rune
+enum Step { First = 1, Reset = 0, Second }   // Second is 1 too
+
+fn main() -> i64 { 0 }
+```
+
+A value may be negative, and the counting goes on from it as from any other. It may also be a **float** — exchange rates, thresholds, the constants a C header names. A float cannot be a tag, so a float-valued enum keeps its tags counting up from zero and each variant's value beside its tag; `as` gives that value back as any number type. Since there is no next float to count on to, every variant of one has to be given a value (E0401). A suffix — `1f64`, `-40.5f32` — chooses the type; without one it is `f64`.
+
+**Negative and float values**
+
+```rune
+import std::io
+import std::fmt
+
+enum Level { Low = -1, Mid, High = 10, Top }        // Mid is 0, Top is 11
+enum Currency { USD = 1.0, AUD = 1.43, GBP = 0.76 }
+
+fn main() -> i64 {
+    io::println(Level::Low as i64)
+    io::println(Level::Top as i64)
+    io::println(Currency::AUD as f64)
+    var total = 0.0
+    for c in [Currency::USD, Currency::AUD, Currency::GBP] { total += c as f64 }
+    io::println(fmt::fixed(total, 2))
+    io::println(Currency::GBP == Currency::GBP)      // compared by tag
+    0
+}
+```
+
+**A float enum gives every variant its value**
+
+```rune
+enum Ratio { Half = 0.5, Third }
+
+fn main() -> i64 { 0 }
+```

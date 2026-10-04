@@ -61,3 +61,59 @@ in the expansion of `assert!`
 ```
 
 Long chains are elided in the middle; the ends are what tells you anything.
+
+## Procedural macros
+
+A `#macro fn` is not rewritten by matching: it is ordinary Rune, compiled into
+a program of its own and *run* to expand each invocation. The pieces live in
+`MacroEval.{h,cpp}` and in `Compilation.cpp`.
+
+**Gathering.** Right after lexing, `compileWithOptions` walks every unit that
+is not the standard library — this package's files and the units of every
+imported `.rul` — and sorts them:
+
+- a file that opens with `#type(Macros)` (`declaresMacroPackage`) is a macro source as it stands, and is taken out of the compilation;
+- any other file with a `#macro` in it (`hasProcMacros`) has its macros *lifted*: `liftProcMacros` erases each `#macro fn` from the token stream and returns the file's text with everything blanked except those functions and its `import std::...` lines, so lines and columns survive;
+- `collectProcMacros` records each macro's name and the module it will have inside the package, and reports a duplicate or a missing `pub`.
+
+Lifted files are written into the package as `lifted/<basename>`, so a
+diagnostic from the nested build names the file the macro was written in. A
+library's units are generated under a prefixed name, since two libraries may
+both have a `macros.rune`.
+
+**Building.** `buildMacroPackage` writes a dispatcher `main`
+(`macroDispatcherSource`) and calls `compileWithOptions` again with
+`MacroPackage = true`: for the host triple, under ARC, with minimal safety and
+**no import paths**, because the libraries on them were built for the target
+and the program's memory mode and could not be linked into a host program.
+
+**Running.** `runProcMacro` writes `<name>\n<serialised tokens>` to a request
+file, runs the package with `RUNE_MACRO_REQUEST` and `RUNE_MACRO_ANSWER` set,
+and reads back `ok\n<source>` or `error\n<message>`. A bracketed group travels
+as one token with its children after it.
+
+## The macro package cache
+
+The built package lives in `$TMPDIR/rune-macros/macros-<identity>-<stamp>`.
+
+- **identity** hashes where the sources came from and the module each became — which package this is, whatever its macros currently say;
+- **stamp** hashes what the sources *say*, token by token (`stampTokens`: kinds and spellings, never positions or comments), plus the size and time of every standard library file and of `runec` itself.
+
+So editing a macro builds the package again, and editing the code around a
+lifted macro, moving it, or rewording a comment does not. A stdlib or compiler
+fix always does.
+
+The program is linked to a `.partial` name and renamed into place, so a build
+that fails or is killed never leaves a file that a later build takes for a
+finished one. After a successful build, older builds with the same identity
+are deleted, and so is anything in the directory nobody has used for a
+fortnight; a cache hit touches the program's time to say it is still in use.
+
+## Exporting macros
+
+A library's `.rul` stores its `#type(Macros)` files as extra units
+(`exportedMacroFiles`, appended in the library branch of `compileWithOptions`),
+and its lifted `#macro`s are still in the sources it stores anyway. An importer
+gathers both like its own, as above, so importing a library brings its macros
+along. Erasing a library's macro unit shifts `firstStdlibUnit`,
+`firstUserModule` and `libraryConfigs` with it.

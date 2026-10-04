@@ -1,0 +1,28 @@
+// EXPECT: twice 14
+// EXPECT: shout HELLO!
+//
+// A `#macro fn` may be written in any file, among the program's own code.
+// It is lifted out — with the file's `std` imports, and nothing else — and
+// built into the macro package beside any `#type(Macros)` file; the program
+// never sees it. Only what it hands back reaches here.
+import std::io
+import std::{Macro, text}
+
+/// Doubles whatever it is given.
+#macro
+pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
+    Macro::parse("((" + input.text() + ") * 2)")
+}
+
+fn helper() -> i64 { 7 }
+
+#macro
+pub fn shout(input: Macro::Tokens) -> Macro::Tokens {
+    Macro::parse("\"" + text::upper(input.text()) + "!\"")
+}
+
+fn main() -> i64 {
+    io::println("twice " + twice!(helper()).$str())
+    io::println("shout " + shout!(hello))
+    0
+}

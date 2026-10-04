@@ -2,7 +2,8 @@ file(GLOB RUNE_PM_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c
 
 add_executable(rune ${RUNE_PM_SOURCES})
 
-target_include_directories(rune PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(rune PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/runec/include)
 
 target_compile_definitions(rune PRIVATE
   RUNE_VERSION_STRING="${PROJECT_VERSION}"

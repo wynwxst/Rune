@@ -9,8 +9,8 @@
 //   2. what the compiler knows written out: the type of every binding that
 //      has none, and the label of every argument given by position — the
 //      same things an editor shows greyed out as inlay hints;
-//   3. the top of the file put in order: its directives (`@type`, `@link`,
-//      a file-wide `@lint`), then its imports, standard library first, then
+//   3. the top of the file put in order: its directives (`#type`, `#link`,
+//      a file-wide `#lint`), then its imports, standard library first, then
 //      type aliases, then globals, then everything else as it was;
 //   4. indentation worked out again from the brackets, four spaces a level,
 //      with a statement that runs onto another line indented once more;
@@ -75,7 +75,7 @@ pub fn styleRules() -> vector::Vector<String> {
     out
 }
 
-/// `text` with the style fixes applied — those the file's own `@lint`
+/// `text` with the style fixes applied — those the file's own `#lint`
 /// directives have not turned off.
 pub fn styleFixes(p: &var project::Project, path: &String, text: String) -> String {
     p.setOverlay(path.$clone(), text.$clone())
@@ -259,7 +259,7 @@ fn pastDecorators(lx: &syntax::Lexed, i: i64) -> i64 {
     var j = i
     loop {
         if lx.isNewline(j) { j += 1 }
-        elif lx.isText(j, "@") && !lx.isText(j + 1, "function") && !lx.isText(j + 1, "cfunction") {
+        elif lx.isSigil(j) && !lx.isText(j + 1, "function") && !lx.isText(j + 1, "cfunction") {
             j = pastDecorator(lx, j)
         } else { break }
     }
@@ -359,7 +359,7 @@ pub fn arrange(text: &String) -> String {
         // one of the file's own directives.
         var body = pastDecorators(lx, i)
         var kind = "item"
-        if lx.isText(i, "@") {
+        if lx.isSigil(i) {
             let name = lx.text(i + 1)
             let after = pastDecorator(lx, i)
             let next = pastDecorators(lx, after)

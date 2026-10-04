@@ -114,20 +114,20 @@ pub fn install(index: i64, handler: @cfunction(*var Registers) -> ()) {
 /// Called by every stub in boot/start.S, with the registers it saved. The
 /// interrupt number indexes a checked array: a number past the table is a
 /// panic here, not a jump through whatever follows it.
-@export("isr_handler")
-@safe("the stub passes the frame it just pushed")
+#export("isr_handler")
+#safe("the stub passes the frame it just pushed")
 fn handle(regs: *var Registers) {
     let handler = handlers[unsafe { regs[0].intNo } as i64]
     unsafe { handler(regs) }
 }
 
-@safe("reads the frame the stub pushed")
+#safe("reads the frame the stub pushed")
 fn exception(regs: *var Registers) {
     system::panicScreen(names[unsafe { regs[0].intNo } as i64])
     loop {}
 }
 
-@safe("the stubs are code in this image; only their addresses are taken")
+#safe("the stubs are code in this image; only their addresses are taken")
 pub fn init() {
     for i in 0..count {
         idt::set(i, unsafe { stubs[i] as usize }, 8, 142)   // 0x08, 0x8E

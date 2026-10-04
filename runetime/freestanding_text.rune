@@ -1,13 +1,13 @@
 // The freestanding runtime's `String`, numbers as text, and output — compiled
-// into a program built `@runtime(none)` beside freestanding.rune.
+// into a program built `#runtime(none)` beside freestanding.rune.
 //
 // The hosted runtime keeps these in C, over the C library; here there is no C
-// library, so they are Rune over the program's `@allocator`. A `String` is the
+// library, so they are Rune over the program's `#allocator`. A `String` is the
 // same object the code generator expects everywhere — a header, a length, a
 // capacity and a NUL-terminated block of UTF-8 — so `+`, interpolation,
 // `$str()`, `Display`, `std::fmt` and `io::println` work unchanged.
 //
-// Printing goes to the program's `@output` hook, `fn(bytes: *u8, count:
+// Printing goes to the program's `#output` hook, `fn(bytes: *u8, count:
 // usize)`: a serial port, the screen, a semihosting call. Without one,
 // output is discarded.
 //
@@ -45,26 +45,26 @@ fn emitNewline() {
     emit(unsafe { &nl[0] as *u8 }, 1)
 }
 
-@export("rune_print")
+#export("rune_print")
 pub fn print(s: *var u8) { emit(stringData(s), stringLength(s)) }
 
-@export("rune_println")
+#export("rune_println")
 pub fn println(s: *var u8) {
     print(s)
     emitNewline()
 }
 
-@export("rune_eprint")
+#export("rune_eprint")
 pub fn eprint(s: *var u8) { print(s) }
 
-@export("rune_eprintln")
+#export("rune_eprintln")
 pub fn eprintln(s: *var u8) { println(s) }
 
-@export("rune_print_cstr")
+#export("rune_print_cstr")
 pub fn printCString(text: *u8) { emit(text, cLength(text)) }
 
 /// Nothing is buffered: each print went out as it was made.
-@export("rune_flush_stdout")
+#export("rune_flush_stdout")
 pub fn flushStdout() {}
 
 //===--------------------------------------------------------------------===//
@@ -98,7 +98,7 @@ global stringInfo: StringInfo = StringInfo {
     vtable: unsafe { 0 as *var u8 }, vtableCount: 0, clone: stringClone
 }
 
-@safe("a String's block is its own, and goes with it")
+#safe("a String's block is its own, and goes with it")
 fn stringDeinit(obj: *var u8) {
     let s = unsafe { obj as *var StringObject }
     let block = unsafe { s[0].data }
@@ -110,13 +110,13 @@ fn stringDeinit(obj: *var u8) {
 
 fn stringClone(obj: *var u8) -> *var u8 { copy(obj) }
 
-@safe("reads the header of a String the code generator handed over")
+#safe("reads the header of a String the code generator handed over")
 fn stringLength(s: *var u8) -> i64 {
     if unsafe { s as usize } == 0 { return 0 }
     unsafe { (s as *var StringObject)[0].length }
 }
 
-@safe("reads the header of a String the code generator handed over")
+#safe("reads the header of a String the code generator handed over")
 fn stringData(s: *var u8) -> *u8 {
     if unsafe { s as usize } == 0 { return unsafe { emptyText() } }
     unsafe { (s as *var StringObject)[0].data as *u8 }
@@ -124,10 +124,10 @@ fn stringData(s: *var u8) -> *u8 {
 
 global emptyByte: [1:u8] = [0]
 
-@unsafe
+#unsafe
 fn emptyText() -> *u8 { &emptyByte[0] as *u8 }
 
-@safe("the block is sized for the capacity and its NUL")
+#safe("the block is sized for the capacity and its NUL")
 fn allocString(capacity: i64) -> *var u8 {
     let cap = if capacity < 0 { 0 } else { capacity }
     let obj = unsafe { rune_alloc(40, &stringInfo as *var u8) }
@@ -142,7 +142,7 @@ fn allocString(capacity: i64) -> *var u8 {
     obj
 }
 
-@safe("copies `n` bytes the caller has, then terminates them")
+#safe("copies `n` bytes the caller has, then terminates them")
 fn fromBytes(p: *u8, n: i64) -> *var u8 {
     let count = if n < 0 { 0 } else { n }
     let obj = allocString(count)
@@ -157,7 +157,7 @@ fn fromBytes(p: *u8, n: i64) -> *var u8 {
     obj
 }
 
-@safe("counts up to the NUL a CString ends with")
+#safe("counts up to the NUL a CString ends with")
 fn cLength(p: *u8) -> i64 {
     if unsafe { p as usize } == 0 { return 0 }
     var n: i64 = 0
@@ -169,15 +169,15 @@ fn cLength(p: *u8) -> i64 {
 // Making strings
 //===--------------------------------------------------------------------===//
 
-@export("rune_string_new")
+#export("rune_string_new")
 pub fn newString() -> *var u8 { allocString(0) }
 
-@export("rune_string_from_bytes")
+#export("rune_string_from_bytes")
 pub fn stringFromBytes(p: *u8, n: i64) -> *var u8 { fromBytes(p, n) }
 
 /// One object per literal, made on first use and never freed.
-@export("rune_string_literal")
-@safe("the slot is the per-literal cache the compiler allocated")
+#export("rune_string_literal")
+#safe("the slot is the per-literal cache the compiler allocated")
 pub fn literal(p: *u8, n: i64, slot: *var *var u8) -> *var u8 {
     if unsafe { slot as usize } != 0 && unsafe { slot[0] as usize } != 0 {
         return unsafe { slot[0] }
@@ -188,14 +188,14 @@ pub fn literal(p: *u8, n: i64, slot: *var *var u8) -> *var u8 {
     s
 }
 
-@export("rune_string_from_cstr")
+#export("rune_string_from_cstr")
 pub fn fromCString(p: *u8) -> *var u8 { fromBytes(p, cLength(p)) }
 
-@export("rune_string_copy")
+#export("rune_string_copy")
 pub fn copy(s: *var u8) -> *var u8 { fromBytes(stringData(s), stringLength(s)) }
 
-@export("rune_string_concat")
-@safe("both lengths are read from the strings themselves")
+#export("rune_string_concat")
+#safe("both lengths are read from the strings themselves")
 pub fn concat(a: *var u8, b: *var u8) -> *var u8 {
     let la = stringLength(a)
     let lb = stringLength(b)
@@ -213,9 +213,9 @@ pub fn concat(a: *var u8, b: *var u8) -> *var u8 {
     obj
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_substring")
-@safe("the range is checked against the length before the copy")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_substring")
+#safe("the range is checked against the length before the copy")
 pub fn substring(s: *var u8, start: i64, end: i64, location: CString) -> *var u8 {
     let len = stringLength(s)
     if start < 0 || end > len || start > end {
@@ -224,9 +224,9 @@ pub fn substring(s: *var u8, start: i64, end: i64, location: CString) -> *var u8
     fromBytes(unsafe { (stringData(s) as usize + start as usize) as *u8 }, end - start)
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_repeat")
-@safe("each copy lands inside the block sized for all of them")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_repeat")
+#safe("each copy lands inside the block sized for all of them")
 pub fn repeat(s: *var u8, timesIn: i64) -> *var u8 {
     let times = if timesIn < 0 { 0 } else { timesIn }
     let l = stringLength(s)
@@ -251,12 +251,12 @@ pub fn repeat(s: *var u8, timesIn: i64) -> *var u8 {
 // Asking about strings
 //===--------------------------------------------------------------------===//
 
-@export("rune_string_length")
+#export("rune_string_length")
 pub fn length(s: *var u8) -> i64 { stringLength(s) }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_char_count")
-@safe("reads the bytes below the length")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_char_count")
+#safe("reads the bytes below the length")
 pub fn charCount(s: *var u8) -> i64 {
     let p = stringData(s)
     let len = stringLength(s)
@@ -269,10 +269,10 @@ pub fn charCount(s: *var u8) -> i64 {
     n
 }
 
-@export("rune_string_cstr")
+#export("rune_string_cstr")
 pub fn cstr(s: *var u8) -> *u8 { stringData(s) }
 
-@safe("reads the bytes below each length")
+#safe("reads the bytes below each length")
 fn sameBytes(a: *u8, b: *u8, n: i64) -> i32 {
     var i: i64 = 0
     while i < n {
@@ -284,7 +284,7 @@ fn sameBytes(a: *u8, b: *u8, n: i64) -> i32 {
     0
 }
 
-@export("rune_string_equal")
+#export("rune_string_equal")
 pub fn equal(a: *var u8, b: *var u8) -> i32 {
     if unsafe { a as usize } == unsafe { b as usize } { return 1 }
     let la = stringLength(a)
@@ -292,7 +292,7 @@ pub fn equal(a: *var u8, b: *var u8) -> i32 {
     if sameBytes(stringData(a), stringData(b), la) == 0 { 1 } else { 0 }
 }
 
-@export("rune_string_compare")
+#export("rune_string_compare")
 pub fn compare(a: *var u8, b: *var u8) -> i32 {
     let la = stringLength(a)
     let lb = stringLength(b)
@@ -304,7 +304,7 @@ pub fn compare(a: *var u8, b: *var u8) -> i32 {
 
 /// FNV-1a, as the hosted runtime hashes, so a hash is the same number on
 /// either.
-@safe("reads the bytes below the length")
+#safe("reads the bytes below the length")
 fn fnv(p: *u8, n: i64) -> u64 {
     var h: u64 = 1469598103934665603
     var i: i64 = 0
@@ -315,16 +315,16 @@ fn fnv(p: *u8, n: i64) -> u64 {
     h
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_cstring_hash")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_cstring_hash")
 pub fn cstringHash(p: *u8) -> u64 { fnv(p, cLength(p)) }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_hash")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_hash")
 pub fn stringHash(s: *var u8) -> u64 { fnv(stringData(s), stringLength(s)) }
 
-@export("rune_string_byte_at")
-@safe("the index is checked against the length")
+#export("rune_string_byte_at")
+#safe("the index is checked against the length")
 pub fn byteAt(s: *var u8, i: i64, location: CString) -> u8 {
     let len = stringLength(s)
     if i < 0 || i >= len { unsafe { rune_panic_bounds(i, len, location) } }
@@ -333,7 +333,7 @@ pub fn byteAt(s: *var u8, i: i64, location: CString) -> u8 {
 
 /// The character starting at byte `at`, and in `next` where the one after
 /// it starts.
-@safe("reads no further than the length")
+#safe("reads no further than the length")
 fn decodeAt(p: *u8, len: i64, at: i64, next: *var i64) -> u32 {
     let lead = unsafe { p[at] } as u32
     var extra: i64 = if lead < 128 { 0 } else if lead < 224 { 1 } else if lead < 240 { 2 } else { 3 }
@@ -355,9 +355,9 @@ fn decodeAt(p: *u8, len: i64, at: i64, next: *var i64) -> u32 {
 }
 
 /// `i` counts characters, not bytes.
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_char_at")
-@safe("every byte read is below the length")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_char_at")
+#safe("every byte read is below the length")
 pub fn charAt(s: *var u8, i: i64, next: *var i64, location: CString) -> u32 {
     let p = stringData(s)
     let bytes = stringLength(s)
@@ -374,9 +374,9 @@ pub fn charAt(s: *var u8, i: i64, next: *var i64, location: CString) -> u32 {
     decodeAt(p, bytes, at, next)
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_char_after")
-@safe("past the end it reads nothing")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_char_after")
+#safe("past the end it reads nothing")
 pub fn charAfter(s: *var u8, at: i64, next: *var i64) -> u32 {
     let len = stringLength(s)
     if at < 0 || at >= len {
@@ -386,9 +386,9 @@ pub fn charAfter(s: *var u8, at: i64, next: *var i64) -> u32 {
     decodeAt(stringData(s), len, at, next)
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_find")
-@safe("every comparison stays inside both strings")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_find")
+#safe("every comparison stays inside both strings")
 pub fn find(hay: *var u8, needle: *var u8) -> i64 {
     let n = stringLength(needle)
     let h = stringLength(hay)
@@ -423,7 +423,7 @@ fn put(b: u8) {
     }
 }
 
-@safe("reads up to the NUL")
+#safe("reads up to the NUL")
 fn putC(p: CString) {
     let bytes = unsafe { p as *u8 }
     var i: i64 = 0
@@ -449,14 +449,14 @@ fn putUnsigned(vIn: u64) {
     }
 }
 
-@safe("the scratch text is copied out whole")
+#safe("the scratch text is copied out whole")
 fn textString() -> *var u8 { fromBytes(unsafe { &scratch[0] as *u8 }, textLength) }
 
 //===--------------------------------------------------------------------===//
 // Integers, booleans, characters, pointers
 //===--------------------------------------------------------------------===//
 
-@export("rune_string_from_i64")
+#export("rune_string_from_i64")
 pub fn fromI64(v: i64) -> *var u8 {
     textReset()
     if v < 0 {
@@ -469,22 +469,22 @@ pub fn fromI64(v: i64) -> *var u8 {
     textString()
 }
 
-@export("rune_string_from_u64")
+#export("rune_string_from_u64")
 pub fn fromU64(v: u64) -> *var u8 {
     textReset()
     putUnsigned(v)
     textString()
 }
 
-@export("rune_string_from_bool")
+#export("rune_string_from_bool")
 pub fn fromBool(v: i8) -> *var u8 {
     textReset()
     putC(if v != 0 { "true" } else { "false" })
     textString()
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_from_char")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_from_char")
 pub fn fromChar(cp: u32) -> *var u8 {
     textReset()
     if cp < 128 {
@@ -505,8 +505,8 @@ pub fn fromChar(cp: u32) -> *var u8 {
     textString()
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_from_ptr")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_from_ptr")
 pub fn fromPointer(p: *u8) -> *var u8 {
     textReset()
     putC("0x")
@@ -825,13 +825,13 @@ fn roundTo(src: &Decimal, keep: i64, out: &var Decimal) {
 // Doubles as text
 //===--------------------------------------------------------------------===//
 
-@safe("reads the bits of a double through its own address")
+#safe("reads the bits of a double through its own address")
 fn bitsOf(v: f64) -> u64 {
     var copy = v
     unsafe { (&var copy as *var f64 as *var u64)[0] }
 }
 
-@safe("reads a double through the address of its bits")
+#safe("reads a double through the address of its bits")
 fn fromBits(bits: u64) -> f64 {
     var copy = bits
     unsafe { (&var copy as *var u64 as *var f64)[0] }
@@ -1008,15 +1008,15 @@ fn formatFixed(v: f64, placesIn: i64) {
     }
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_from_f64")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_from_f64")
 pub fn fromF64(v: f64) -> *var u8 {
     formatDouble(v)
     textString()
 }
 
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_from_f64_fixed")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_from_f64_fixed")
 pub fn fromF64Fixed(v: f64, places: i64) -> *var u8 {
     formatFixed(v, places)
     textString()
@@ -1028,16 +1028,16 @@ pub fn fromF64Fixed(v: f64, places: i64) -> *var u8 {
 
 fn isSpace(c: u8) -> bool { c == 32 || (c >= 9 && c <= 13) }
 
-@safe("reads below the length, and writes the flag the caller gave")
+#safe("reads below the length, and writes the flag the caller gave")
 fn setOk(ok: *var i8, v: bool) {
     if unsafe { ok as usize } != 0 { unsafe { ok[0] = if v { 1 } else { 0 } } }
 }
 
 /// As C's `strtoll` with base 10, and true only when the whole string was
 /// the number.
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_to_i64")
-@safe("reads below the length")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_to_i64")
+#safe("reads below the length")
 pub fn toI64(s: *var u8, ok: *var i8) -> i64 {
     let p = stringData(s)
     let len = stringLength(s)
@@ -1128,7 +1128,7 @@ fn compose(mantIn: u64, exp2In: i64, stickyIn: bool, negative: bool) -> f64 {
     fromBits(sign | ((biased as u64) << 52) | (mant & 4503599627370495))
 }
 
-@safe("reads below the length")
+#safe("reads below the length")
 fn matchWord(p: *u8, at: i64, len: i64, word: CString) -> bool {
     let w = unsafe { word as *u8 }
     var i: i64 = 0
@@ -1145,9 +1145,9 @@ fn matchWord(p: *u8, at: i64, len: i64, word: CString) -> bool {
 /// As C's `strtod` for decimal text — `inf`, `infinity` and `nan` too — and
 /// true only when the whole string was the number. Correctly rounded: the
 /// digits are an exact fraction, divided out in big integers.
-@Config(!(freestanding_type == "minimal"))
-@export("rune_string_to_f64")
-@safe("reads below the length")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_string_to_f64")
+#safe("reads below the length")
 pub fn toF64(s: *var u8, ok: *var i8) -> f64 {
     let p = stringData(s)
     let len = stringLength(s)

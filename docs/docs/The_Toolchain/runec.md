@@ -9,7 +9,7 @@
 | `--emit-lib` | emit a `.rul` library |
 | `--shared` | emit a native shared library (`.dylib` / `.so` / `.dll`) |
 | `--check` | type-check only, produce nothing |
-| `-O0` … `-O3` | optimisation level, default `-O0` |
+| `-O0` … `-O3` | optimisation level, default `-O2` |
 | `-g` | emit debug information |
 | `--target <triple>` | cross-compile; see **Cross compilation** |
 | `--cc <program>` | the toolchain driver used to link |
@@ -27,7 +27,7 @@
 | `-I <dir>` | add a module search path |
 | `-L <dir>` / `-l <name>` | native library path / library |
 | `--module <name>` | set the module name |
-| `--cfg <name>` | set *name* for `@Config(...)` |
+| `--cfg <name>` | set *name* for `#Config(...)` |
 | `--stdlib <dir>` | where the standard library lives |
 | `--no-stdlib` | do not import it implicitly |
 | `-Werror` / `-w` | warnings as errors / silence warnings |
@@ -37,8 +37,19 @@
 | `--dump-ast` | print the parse tree |
 | `--dump-symbols` | print the symbol table |
 | `--dump-types` | print the type of every expression |
+| `--dump-zombie` | print the borrow checker's view of every body |
+| `--entry <kind>` / `--no-main` | `main` (default) or `none`: generate no `main`, an `#export`ed function is the entry |
+| `--tiers` | say which standard library functions work on bare metal and what the rest need |
+| `--emit-docs` / `--docs-stdlib` | write the documentation sidecar `rune doc` reads; with the second, for the standard library's modules too |
+| `--diagnostic-format <f>` | `human` (default), `json` — one object per line, for tools — or `short`, gcc-style `file:line:col: error: message` |
 | `-v` | report each pipeline stage |
 | `--time` | report how long each stage took |
+
+| For editors | Does |
+| --- | --- |
+| `--source <path>=<file>` | compile *path* as the text in *file* — an unsaved buffer — reporting it as *path* |
+| `--query-members <file>:<start>:<end>` | after checking, the type and members of the expression at those byte offsets, as JSON: what completion after a `.` shows |
+| `--query-hints <file>` | after checking, every unannotated binding's type and every positional argument's parameter name, as JSON: what inlay hints and `rune fmt` write in |
 
 | Environment | Does |
 | --- | --- |

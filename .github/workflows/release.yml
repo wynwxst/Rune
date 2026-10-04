@@ -1,0 +1,161 @@
+# Release builds of the Rune toolchain for macOS, Linux and Windows.
+#
+# Every platform builds the same way: a static LLVM with Rune's five
+# backends and no optional dependencies (scripts/build-llvm.sh, cached
+# between runs), then Rune against it, tested and packed as an archive that
+# works wherever it is unpacked (scripts/package.sh).
+#
+# A tag `v*` publishes the archives as a GitHub release; any other run keeps
+# them as workflow artifacts. rune-ffi is not built: it needs libclang, and
+# `rune ffi` builds it on the user's machine the first time it is run.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LLVM_VERSION: "22.1.4"
+
+jobs:
+  unix:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-14
+          - platform: macos-x86_64
+            runner: macos-13
+          # An old glibc, so the binaries run on any distribution newer than
+          # it; everything but the C library is linked in.
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pipx install cmake || python3 -m pip install cmake
+          pipx install ninja || python3 -m pip install ninja
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cached LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: llvm-install
+          key: llvm-${{ env.LLVM_VERSION }}-${{ matrix.platform }}-${{ hashFiles('scripts/build-llvm.sh') }}
+
+      - name: Build LLVM
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: scripts/build-llvm.sh "$LLVM_VERSION" "$PWD/llvm-install"
+
+      - name: Build, test and pack
+        shell: bash
+        run: scripts/package.sh "$PWD/llvm-install" "${{ steps.version.outputs.version }}" "${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rune-${{ matrix.platform }}
+          path: dist/*.tar.gz
+
+  windows:
+    name: windows-x86_64
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      # MinGW-w64 GCC: what builds Rune, and what `runec` links programs
+      # with on Windows (it looks for `cc`/`gcc` on PATH).
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            p7zip curl tar xz
+
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cached LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: llvm-install
+          key: llvm-${{ env.LLVM_VERSION }}-windows-x86_64-${{ hashFiles('scripts/build-llvm.sh') }}
+
+      - name: Build LLVM
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: scripts/build-llvm.sh "$LLVM_VERSION" "$PWD/llvm-install"
+
+      # The test harness is written for a POSIX shell's view of processes;
+      # its results on Windows are reported but do not stop the release.
+      - name: Build and pack
+        run: scripts/package.sh "$PWD/llvm-install" "${{ steps.version.outputs.version }}" windows-x86_64 --no-tests
+
+      - name: Tests (informational)
+        continue-on-error: true
+        run: cd build-release-windows-x86_64 && ctest --output-on-failure -R rune_end_to_end
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rune-windows-x86_64
+          path: dist/*.zip
+
+  publish:
+    name: publish
+    needs: [unix, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -14,4 +14,4 @@ Dependencies still build as libraries whatever `--emit` says, because a `.rul` i
 > [!NOTE]
 > **Three ways to ask**
 >
-> `[build] emit` in the manifest says the same thing when the command line does not, and `@type(...)` on a single file says it for that file alone. The command line wins over both.
+> `[build] emit` in the manifest says the same thing when the command line does not, and `#type(...)` on a single file says it for that file alone. The command line wins over both.

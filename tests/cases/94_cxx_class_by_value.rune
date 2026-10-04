@@ -6,7 +6,7 @@ import std::io
 
 extern "C++" {
     namespace demo {
-        @size(8)
+        #size(8)
         class Counter {
             fn peek(&self) -> c_int
         }

@@ -77,11 +77,11 @@ syn match   runeFuncCall  "\<\l\w*\ze\s*("
 syn match   runeFuncCall  "\<_\w*\ze\s*("
 syn match   runePath      "\<\h\w*\ze::"
 
-" Decorators and the linter's directive: `@lint(allow(rule, …), warn(…))`.
-syn match   runeDecorator "@\h\w*"
+" Decorators and the linter's directive: `#lint(allow(rule, …), warn(…))`.
+syn match   runeDecorator "[#@]\h\w*"
 " Defined after it, so it wins: `@function(…)` is a type, not a decorator.
 syn match   runeFnType    "@c\=function\>"
-syn region  runeLint matchgroup=runeDecorator start="@lint\s*(" end=")" contains=runeLintLevel,runeLintComma,runeLineComment,runeBlockComment
+syn region  runeLint matchgroup=runeDecorator start="[#@]lint\s*(" end=")" contains=runeLintLevel,runeLintComma,runeLineComment,runeBlockComment
 syn region  runeLintLevel contained matchgroup=runeLintKeyword start="\<\%(allow\|warn\|note\)\s*(" end=")" contains=runeLintAll,runeLintRule,runeLintComma
 syn match   runeLintRule  contained "\a[A-Za-z0-9_-]*"
 syn keyword runeLintAll   contained all

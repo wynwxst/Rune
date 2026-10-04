@@ -1,17 +1,20 @@
 # Strings
 
-With no hosted runtime there is no `String` to make, so a string literal nothing asks to be a `String` is a `CString`: it can be named, stored in a table and handed to a function without an annotation. Asking for `String` by name still means the hosted runtime's, and is refused like any other use of it. The same holds under `--no-stdlib`.
+A string literal nothing asks to be a `String` is a `CString`: it can be named, stored in a table and handed to a function without an annotation, and it costs nothing at run time. A `String` is there too — the freestanding runtime makes one over the program's `#allocator` — so asking for one, adding a literal to one, `format!`, `$str()`, `std::fmt` and `Display` all work. A literal that becomes a `String` is built into the image rather than the heap, so it never takes memory from the allocator. The same holds under `--no-stdlib`.
 
 **No annotations**
 
 ```text
 let banner = "TETRIS-OS\n"        // a CString
 
-fn greet() {
+fn greet(name: String) {
     serial::write(banner)
-    serial::write("ready\n")
+    let line = "ready, " + name       // a String: the literal follows `name`
+    println!("{line} at {} Hz", 1193182 / 65536)
 }
 ```
+
+Numbers become text exactly as they do on a hosted build, byte for byte — the shortest digits that read back as the same double, found with exact big-integer arithmetic rather than a C library — and `$toFloat()` rounds correctly the same way.
 
 > [!NOTE]
 > **Single ownership**

@@ -6,8 +6,8 @@ that, applied in this order, each over the one before:
 
 1. the package's `[lint]` table in `Rune.toml`;
 2. the command line, or the editor's settings;
-3. an `@lint(...)` directive at the top of a file, for the whole file;
-4. an `@lint(...)` directive before a declaration or statement, for just that
+3. an `#lint(...)` directive at the top of a file, for the whole file;
+4. an `#lint(...)` directive before a declaration or statement, for just that
    item — and a directive inside another's item wins over the outer one.
 
 ## For a package: `Rune.toml`
@@ -47,12 +47,12 @@ rune lint --max-line-length 100
 A rule name that does not exist is refused, with exit status 2, rather than
 quietly doing nothing.
 
-## In the source: `@lint`
+## In the source: `#lint`
 
-`@lint` is a directive, written like a decorator, that sets rules to a level:
+`#lint` is a directive, written like a decorator, that sets rules to a level:
 
 ```rune
-@lint(allow(naming, line-too-long), warn(missing-docs), note(todo))
+#lint(allow(naming, line-too-long), warn(missing-docs), note(todo))
 ```
 
 Each of `allow`, `warn` and `note` takes a list of rule names, and `all` stands
@@ -69,7 +69,7 @@ directives and `import`s follow it before the first declaration:
 
 ```rune
 // A module full of generated names.
-@lint(allow(naming))
+#lint(allow(naming))
 
 import std::io
 
@@ -83,14 +83,14 @@ straight after it — the directive covers only the next item: a whole declarati
 (its body included) or a single statement.
 
 ```rune
-@lint(allow(naming))          // just this function, not the file
+#lint(allow(naming))          // just this function, not the file
 fn Parse_Header() -> i64 { 0 }
 
 fn main() -> i64 {
-    @lint(allow(unused-variable))
+    #lint(allow(unused-variable))
     let spare = 1
 
-    @lint(allow(never-reassigned))
+    #lint(allow(never-reassigned))
     var total = 0
     total
 }

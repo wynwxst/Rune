@@ -63,7 +63,7 @@ struct ForeignTarget {
   std::vector<std::string> ToolchainCFlags;
   std::vector<std::string> ToolchainLinkArgs;
   /// Bare metal: no operating system, so no hosted runtime — the program is
-  /// built as `@runtime(none)` whatever its sources say.
+  /// built as `#runtime(none)` whatever its sources say.
   bool Freestanding = false;
   /// How to get the toolchain, for when it is missing.
   std::string InstallHint;

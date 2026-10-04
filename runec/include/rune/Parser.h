@@ -117,7 +117,7 @@ private:
       advance();
     } while (depth > 0 && !atEnd());
   }
-  /// At the `@` of an `@lint(...)`: whether it is the file's own, which it is
+  /// At the `@` of an `#lint(...)`: whether it is the file's own, which it is
   /// when every decorator after it is followed by an `import` or by the end
   /// of the file — nothing it could be attached to instead.
   bool lintIsFileDirective() const {
@@ -126,7 +126,7 @@ private:
       return k < Toks.size() ? Toks[k] : Toks.back();
     };
     // Over this directive and any after it, arguments and all.
-    while (at(i).is(Tok::At)) {
+    while (at(i).is(Tok::At) || at(i).is(Tok::Hash)) {
       i += 2;
       if (at(i).is(Tok::LParen)) {
         int depth = 0;
@@ -171,7 +171,26 @@ private:
   DeclPtr parseTopLevelDecl();
   DeclPtr parseDecl(std::vector<Attribute> attrs, bool isPublic);
   void parseFileDirectives(Module &mod);
+  /// `#link(...)` or `#linkpath(...)` at the sigil: the names and paths it
+  /// gives, `static:` / `dynamic:` / `framework:` in front of a library
+  /// when it says `type:`.
+  void parseLinkDirective(const std::string &name, std::vector<std::string> &libs,
+                          std::vector<std::string> &paths);
+  /// Whether the decorator at the sigil is `#link` or `#linkpath`.
+  bool atLinkDirective() const {
+    return atDecorator() && peek(1).is(Tok::Identifier) &&
+           (peek(1).Text == "link" || peek(1).Text == "linkpath");
+  }
+  /// Conditional link directives met while parsing, for the module.
+  std::vector<Module::ConditionalLink> PendingLinks;
   std::vector<Attribute> parseAttributes();
+  /// At `@` or `#`, the two ways a decorator begins.
+  bool atDecorator() const { return check(Tok::At) || check(Tok::Hash); }
+  /// Says so when `sigil` does not suit `name`: `#` is only for the
+  /// compiler's own decorators, and those are written with it. False when
+  /// the decorator is to be dropped.
+  bool checkDecoratorSigil(const Token &sigil, const std::string &name,
+                           SourceRange at);
   std::unique_ptr<FunctionDecl> parseFunction(std::vector<Attribute> attrs,
                                               bool isPublic, bool allowNoBody,
                                               bool implicitFnKeyword = false);

@@ -1,13 +1,13 @@
-# `@unsafe` and `unsafe { }`
+# `#unsafe` and `unsafe { }`
 
-`@unsafe` on a function says its body may perform unchecked operations and that calling it is itself unchecked. `unsafe { }` opens the same window for a single block. Both are visible at the call site, which is the point: unsafety is never inherited silently.
+`#unsafe` on a function says its body may perform unchecked operations and that calling it is itself unchecked. `unsafe { }` opens the same window for a single block. Both are visible at the call site, which is the point: unsafety is never inherited silently.
 
 **An unsafe function and its window**
 
 ```rune
 import std::io
 
-@unsafe
+#unsafe
 fn reinterpret(bits: u64) -> f64 {
     // Only legal because the caller has been told this is unchecked.
     *(&bits as *u64 as *f64)
@@ -23,7 +23,7 @@ fn main() -> i64 {
 **Unsafety does not leak into safe code**
 
 ```rune
-@unsafe
+#unsafe
 fn raw(p: *i64) -> i64 { *p }
 
 fn caller(p: *i64) -> i64 {

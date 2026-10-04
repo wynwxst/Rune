@@ -1,0 +1,17 @@
+// LIB: libmacros lib/libmacros.rune lib/libmacros_pack.rune
+// EXPECT: hello, world
+// EXPECT: square 25 area 36
+//
+// A library's procedural macros are exported with it. Its `.rul` carries
+// them as source — its `#type(Macros)` files and the `#macro fn`s written
+// among its code — and an importer builds them into its own macro package,
+// for the machine doing the expanding. The library's own source, which an
+// importer re-reads, expands with them too.
+import std::io
+import libmacros
+
+fn main() -> i64 {
+    io::println(greet!(world))
+    io::println("square " + (square!(5)).$str() + " area " + libmacros::area(6).$str())
+    0
+}

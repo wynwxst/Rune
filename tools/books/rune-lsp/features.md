@@ -103,7 +103,7 @@ because the file does not compile yet, say — it says in the server's log.
 ## Hover
 
 - On a declaration or a use of one: its signature, the kind of thing it is and
-  the module it is in, and its `///` documentation (or `@Doc`), rendered.
+  the module it is in, and its `///` documentation (or `#Doc`), rendered.
 - On a local or a parameter: its type, inferred where it is not written.
 - On an import: the module, and the comment at the top of its file.
 - On an intrinsic, `.$length`: its signature.

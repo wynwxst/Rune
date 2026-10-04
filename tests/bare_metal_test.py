@@ -5,7 +5,7 @@ Two halves, each skipped with a line saying so where the machine cannot run
 it:
 
 * Freestanding programs on this machine. Every case in tests/freestanding/
-  is compiled `@runtime(none)` for Linux x86_64 — no C library, no hosted
+  is compiled `#runtime(none)` for Linux x86_64 — no C library, no hosted
   runtime, two system calls by inline assembly — with `--safety full`, and
   run. Each failed check must reach the program's own panic handler with the
   right message; the heap must go through its own allocator; the Zombie
@@ -46,7 +46,7 @@ PROGRAMS = {
     "stdpanic": ("sys",  True,  101, "panic: out of fuel"),
     "heap":     ("sys",  True,  0,   "freed the pair\nfreed a leaf\nfreed a leaf\nlive after scope 0"),
     "optional": ("sys",  True,  23,  ""),
-    "noalloc":  ("mini", True,  101, "panic: this program allocates, and declares no @allocator"),
+    "noalloc":  ("mini", True,  101, "panic: this program allocates, and declares no #allocator"),
     "moved":    ("sys",  False, None, "'b' has been moved out of [E0273]"),
     "hosted":   (None,   False, None, "'greet' needs the hosted runtime, and this program is built without one [E0542]"),
     "literals": ("sys",  True,  0,   "no annotation needed\na literal is a CString here\nin an array\n"),
@@ -129,7 +129,7 @@ def minimal(tmp):
 
 
 def tiers():
-    """The whole standard library, built as a `@runtime(none)` program would
+    """The whole standard library, built as a `#runtime(none)` program would
     see it: every module has to compile that way, and `runec --tiers` says
     which functions work on bare metal. The answers the documentation's
     badges show are checked against what is known."""

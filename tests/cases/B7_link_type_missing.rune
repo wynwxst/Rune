@@ -1,0 +1,7 @@
+// EXPECT-ERROR: found no `libnosuchlibrary.a`
+// `#link("name", type: static)` links the archive and nothing else — so
+// when there is no archive, that is said, rather than the linker quietly
+// taking the shared library instead.
+#link("nosuchlibrary", type: static)
+
+fn main() -> i64 { 0 }

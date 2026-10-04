@@ -1,10 +1,13 @@
 #include "rune/Driver.h"
 
 #include "rune/Diagnostics.h"
+#include "rune/Install.h"
 #include "rune/Lexer.h"
 #include "rune/Source.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <llvm/Support/FileSystem.h>
 #include <cstring>
 #include <iostream>
 
@@ -28,16 +31,17 @@ OUTPUT
     --emit-docs          Emit a documentation sidecar (.rdoc)
     --docs-stdlib        With --emit-docs: cover the standard library's modules
     --tiers              Say which standard library functions work on bare
-                         metal (`@runtime(none)`) and what the rest need
+                         metal (`#runtime(none)`) and what the rest need
     --check              Type-check only; produce no output
 
 CODE GENERATION
-    -O0 -O1 -O2 -O3      Optimisation level (default -O0)
+    -O0 -O1 -O2 -O3      Optimisation level (default -O2)
     -g                   Emit debug information
     --target <triple>    Cross-compile for <triple>
     --safety <level>     none | minimal | full   (default full)
-    --overflow-checks    Trap when integer arithmetic overflows (default at -O0)
-    --no-overflow-checks Wrap instead (default at -O1 and above)
+    --overflow-checks    Trap when integer arithmetic overflows (the default,
+                         unless --safety none)
+    --no-overflow-checks Wrap instead (what `rune build --release` asks for)
     --memory <mode>      zombie | arc   (default zombie): single ownership
                          proven by the Zombie borrow checker, or reference
                          counting
@@ -49,8 +53,8 @@ MODULES AND LINKING
     -L <dir>             Add <dir> to the native library search path
     -l <name>            Link against native library <name>
     --module <name>      Set the module name (default: first input's stem)
-    --cfg <name>         Set <name> for `@Config(...)` conditions
-    --cfg <key>=<value>  Give <key> a value, compared with `@Config(k == v)`
+    --cfg <name>         Set <name> for `#Config(...)` conditions
+    --cfg <key>=<value>  Give <key> a value, compared with `#Config(k == v)`
     --no-stdlib          Do not implicitly import the standard library
     --stdlib <dir>       Override the standard library location
 
@@ -71,11 +75,11 @@ CROSS COMPILATION
 BARE METAL
     --runtime <kind>     hosted | none   (default hosted): `none` builds a
                          freestanding program — no C library, no hosted
-                         runtime; panics go to its @panicHandler and the heap
-                         to its @allocator (the same as `@runtime(none)`)
+                         runtime; panics go to its #panicHandler and the heap
+                         to its #allocator (the same as `#runtime(none)`)
     --entry <kind>       main | none     (default main): `none` generates no
-                         `main`; an @export-ed function is the entry (the
-                         same as `@entry(none)`)
+                         `main`; an #export-ed function is the entry (the
+                         same as `#entry(none)`)
     --no-main            The same as --entry none
 
 DIAGNOSTICS
@@ -137,15 +141,30 @@ std::string stemOf(const std::string &path) {
 
 } // namespace
 
+std::filesystem::path hostExecutableDir() {
+  static int anchor = 0;
+  std::string self = llvm::sys::fs::getMainExecutable(nullptr, &anchor);
+  if (self.empty())
+    return ".";
+  return std::filesystem::path(self).parent_path();
+}
+
+std::string hostRuntimeLibDir() {
+  return runtimeDirFor(hostExecutableDir(), RUNE_RUNTIME_LIB_DIR);
+}
+
 const char *memoryModeName(MemoryMode mode) {
   return mode == MemoryMode::Zombie ? "zombie" : "arc";
 }
 
 int runCompilerMain(int argc, char **argv) {
   CompilerOptions opts;
-  opts.StdlibDir = RUNE_DEFAULT_STDLIB_DIR;
-  opts.RuntimeLibDir = RUNE_RUNTIME_LIB_DIR;
-  opts.RunetimeDir = RUNE_RUNETIME_DIR;
+  // Installed — unpacked from a release anywhere — the library and runtime
+  // are beside the compiler; built from source, where the build left them.
+  const std::filesystem::path exeDir = hostExecutableDir();
+  opts.StdlibDir = stdlibDirFor(exeDir, RUNE_DEFAULT_STDLIB_DIR);
+  opts.RuntimeLibDir = runtimeDirFor(exeDir, RUNE_RUNTIME_LIB_DIR);
+  opts.RunetimeDir = runetimeDirFor(exeDir, RUNE_RUNETIME_DIR);
 
   auto needsValue = [&](int &i, const char *flag) -> const char * {
     if (i + 1 >= argc) {

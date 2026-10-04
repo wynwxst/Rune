@@ -12,6 +12,7 @@ Reference counting is the default, but it is not the only choice. Built with `--
 - [Views: which fields a method touches](views_which_fields_a_method_touches.md)
 - [Internal references](internal_references.md)
 - [The standard library runs on it](the_standard_library_runs_on_it.md)
+- [Changing a value through a shared borrow](changing_a_value_through_a_shared_borrow.md)
 - [When a borrow has to wait for run time](when_a_borrow_has_to_wait_for_run_time.md)
 - [Handles instead of back-references](handles_instead_of_back_references.md)
 - [Threads that borrow shared data](threads_that_borrow_shared_data.md)

@@ -1,0 +1,289 @@
+#link("clang")
+
+// libclang's C API — the part of `clang-c/Index.h` this unit uses — and a
+// few helpers that make it read like Rune.
+//
+// These are written by hand, since they are what the unit needs before it
+// can write bindings for anything. Every struct mirrors its C declaration
+// exactly: libclang passes `CXCursor`, `CXType` and `CXString` by value.
+//
+// Where libclang is, `rune ffi` works out when it builds the tool — from
+// `RUNE_LIBCLANG_DIR`, `llvm-config`, or Homebrew's LLVM — and hands the
+// linker; nothing here names a directory.
+
+import std::collections::vector
+import std::mem
+
+/// An index: a set of translation units, `CXIndex`.
+pub type CXIndex = *var u8
+/// A parsed header, `CXTranslationUnit`.
+pub type CXTranslationUnit = *var u8
+
+#Convention("C")
+pub struct CXCursor {
+    pub kind: i32 = 0
+    pub xdata: i32 = 0
+    pub data: [3:*u8] = [0 as *u8, 0 as *u8, 0 as *u8]
+}
+
+#Convention("C")
+pub struct CXType {
+    pub kind: i32 = 0
+    pub data: [2:*u8] = [0 as *u8, 0 as *u8]
+}
+
+#Convention("C")
+pub struct CXString {
+    pub data: *u8 = 0 as *u8
+    pub flags: u32 = 0
+}
+
+#Convention("C")
+pub struct CXSourceLocation {
+    pub ptr: [2:*u8] = [0 as *u8, 0 as *u8]
+    pub intData: u32 = 0
+}
+
+#Convention("C")
+pub struct CXSourceRange {
+    pub ptr: [2:*u8] = [0 as *u8, 0 as *u8]
+    pub begin: u32 = 0
+    pub end: u32 = 0
+}
+
+/// A header given as text rather than read from disk.
+#Convention("C")
+pub struct CXUnsavedFile {
+    pub filename: CString = 0 as CString
+    pub contents: CString = 0 as CString
+    pub length: u64 = 0
+}
+
+#Convention("C")
+pub struct CXToken {
+    pub intData: [4:u32] = [0, 0, 0, 0]
+    pub ptr: *u8 = 0 as *u8
+}
+
+/// What a visitor answers: stop, go on to the next sibling, or go inside.
+pub global CXChildVisit_Break: i32 = 0
+pub global CXChildVisit_Continue: i32 = 1
+pub global CXChildVisit_Recurse: i32 = 2
+
+pub global CXTranslationUnit_DetailedPreprocessingRecord: u32 = 1
+pub global CXTranslationUnit_SkipFunctionBodies: u32 = 64
+
+// Cursor kinds.
+pub global CXCursor_StructDecl: i32 = 2
+pub global CXCursor_UnionDecl: i32 = 3
+pub global CXCursor_EnumDecl: i32 = 5
+pub global CXCursor_FieldDecl: i32 = 6
+pub global CXCursor_EnumConstantDecl: i32 = 7
+pub global CXCursor_FunctionDecl: i32 = 8
+pub global CXCursor_VarDecl: i32 = 9
+pub global CXCursor_ParmDecl: i32 = 10
+pub global CXCursor_TypedefDecl: i32 = 20
+pub global CXCursor_AsmLabelAttr: i32 = 407
+pub global CXCursor_PackedAttr: i32 = 408
+pub global CXCursor_MacroDefinition: i32 = 501
+
+/// `static`, from `clang_Cursor_getStorageClass`.
+pub global CX_SC_Static: i32 = 3
+
+// Type kinds.
+pub global CXType_Invalid: i32 = 0
+pub global CXType_Unexposed: i32 = 1
+pub global CXType_Void: i32 = 2
+pub global CXType_Bool: i32 = 3
+pub global CXType_Char_U: i32 = 4
+pub global CXType_UChar: i32 = 5
+pub global CXType_Char16: i32 = 6
+pub global CXType_Char32: i32 = 7
+pub global CXType_UShort: i32 = 8
+pub global CXType_UInt: i32 = 9
+pub global CXType_ULong: i32 = 10
+pub global CXType_ULongLong: i32 = 11
+pub global CXType_UInt128: i32 = 12
+pub global CXType_Char_S: i32 = 13
+pub global CXType_SChar: i32 = 14
+pub global CXType_WChar: i32 = 15
+pub global CXType_Short: i32 = 16
+pub global CXType_Int: i32 = 17
+pub global CXType_Long: i32 = 18
+pub global CXType_LongLong: i32 = 19
+pub global CXType_Int128: i32 = 20
+pub global CXType_Float: i32 = 21
+pub global CXType_Double: i32 = 22
+pub global CXType_LongDouble: i32 = 23
+pub global CXType_Float128: i32 = 30
+pub global CXType_Float16: i32 = 32
+pub global CXType_Complex: i32 = 100
+pub global CXType_Pointer: i32 = 101
+pub global CXType_BlockPointer: i32 = 102
+pub global CXType_Record: i32 = 105
+pub global CXType_Enum: i32 = 106
+pub global CXType_Typedef: i32 = 107
+pub global CXType_FunctionNoProto: i32 = 110
+pub global CXType_FunctionProto: i32 = 111
+pub global CXType_ConstantArray: i32 = 112
+pub global CXType_Vector: i32 = 113
+pub global CXType_IncompleteArray: i32 = 114
+pub global CXType_Elaborated: i32 = 119
+pub global CXType_Attributed: i32 = 163
+pub global CXType_Atomic: i32 = 177
+
+// Token kinds.
+pub global CXToken_Punctuation: i32 = 0
+pub global CXToken_Keyword: i32 = 1
+pub global CXToken_Identifier: i32 = 2
+pub global CXToken_Literal: i32 = 3
+pub global CXToken_Comment: i32 = 4
+
+pub extern "C" {
+    fn clang_createIndex(excludeDeclarationsFromPCH: i32, displayDiagnostics: i32) -> CXIndex
+    fn clang_disposeIndex(index: CXIndex)
+    fn clang_parseTranslationUnit(index: CXIndex, sourceFilename: CString, commandLineArgs: *CString,
+                                  numCommandLineArgs: i32, unsavedFiles: *var CXUnsavedFile, numUnsavedFiles: u32,
+                                  options: u32) -> CXTranslationUnit
+    fn clang_disposeTranslationUnit(unit: CXTranslationUnit)
+    fn clang_getTranslationUnitCursor(unit: CXTranslationUnit) -> CXCursor
+    fn clang_getNumDiagnostics(unit: CXTranslationUnit) -> u32
+    fn clang_getDiagnostic(unit: CXTranslationUnit, index: u32) -> *var u8
+    fn clang_formatDiagnostic(diagnostic: *var u8, options: u32) -> CXString
+    fn clang_getDiagnosticSeverity(diagnostic: *var u8) -> i32
+    fn clang_disposeDiagnostic(diagnostic: *var u8)
+
+    fn clang_getCString(string: CXString) -> *u8
+    fn clang_disposeString(string: CXString)
+
+    fn clang_visitChildren(parent: CXCursor,
+                           visitor: @cfunction(CXCursor, CXCursor, *var u8) -> i32,
+                           clientData: *var u8) -> u32
+    fn clang_getCursorKind(cursor: CXCursor) -> i32
+    fn clang_getCursorSpelling(cursor: CXCursor) -> CXString
+    fn clang_getCursorType(cursor: CXCursor) -> CXType
+    fn clang_getCursorLocation(cursor: CXCursor) -> CXSourceLocation
+    fn clang_getCursorExtent(cursor: CXCursor) -> CXSourceRange
+    fn clang_getCursorDefinition(cursor: CXCursor) -> CXCursor
+    fn clang_isCursorDefinition(cursor: CXCursor) -> u32
+    fn clang_Cursor_isNull(cursor: CXCursor) -> i32
+    fn clang_equalCursors(a: CXCursor, b: CXCursor) -> u32
+    fn clang_hashCursor(cursor: CXCursor) -> u32
+    fn clang_Cursor_isAnonymous(cursor: CXCursor) -> u32
+    fn clang_Cursor_isAnonymousRecordDecl(cursor: CXCursor) -> u32
+    fn clang_Cursor_isBitField(cursor: CXCursor) -> u32
+    fn clang_getFieldDeclBitWidth(cursor: CXCursor) -> i32
+    fn clang_Cursor_getOffsetOfField(cursor: CXCursor) -> i64
+    fn clang_Cursor_isVariadic(cursor: CXCursor) -> u32
+    fn clang_Cursor_getNumArguments(cursor: CXCursor) -> i32
+    fn clang_Cursor_getArgument(cursor: CXCursor, index: u32) -> CXCursor
+    fn clang_Cursor_getStorageClass(cursor: CXCursor) -> i32
+    fn clang_getEnumConstantDeclValue(cursor: CXCursor) -> i64
+    fn clang_getEnumConstantDeclUnsignedValue(cursor: CXCursor) -> u64
+    fn clang_getEnumDeclIntegerType(cursor: CXCursor) -> CXType
+    fn clang_getTypedefDeclUnderlyingType(cursor: CXCursor) -> CXType
+    fn clang_Cursor_isMacroFunctionLike(cursor: CXCursor) -> u32
+    fn clang_Cursor_isMacroBuiltin(cursor: CXCursor) -> u32
+    fn clang_Cursor_isFunctionInlined(cursor: CXCursor) -> u32
+    fn clang_Cursor_getMangling(cursor: CXCursor) -> CXString
+    fn clang_getCursorUSR(cursor: CXCursor) -> CXString
+    fn clang_getCursorSemanticParent(cursor: CXCursor) -> CXCursor
+
+    fn clang_getTypeSpelling(t: CXType) -> CXString
+    fn clang_getCanonicalType(t: CXType) -> CXType
+    fn clang_getPointeeType(t: CXType) -> CXType
+    fn clang_getResultType(t: CXType) -> CXType
+    fn clang_getNumArgTypes(t: CXType) -> i32
+    fn clang_getArgType(t: CXType, index: u32) -> CXType
+    fn clang_isFunctionTypeVariadic(t: CXType) -> u32
+    fn clang_getArrayElementType(t: CXType) -> CXType
+    fn clang_getArraySize(t: CXType) -> i64
+    fn clang_getTypeDeclaration(t: CXType) -> CXCursor
+    fn clang_getTypedefName(t: CXType) -> CXString
+    fn clang_isConstQualifiedType(t: CXType) -> u32
+    fn clang_Type_getSizeOf(t: CXType) -> i64
+    fn clang_Type_getAlignOf(t: CXType) -> i64
+    fn clang_Type_getNamedType(t: CXType) -> CXType
+    fn clang_Type_getModifiedType(t: CXType) -> CXType
+    fn clang_Type_getValueType(t: CXType) -> CXType
+    fn clang_Type_getOffsetOf(t: CXType, field: CString) -> i64
+
+    fn clang_getSpellingLocation(location: CXSourceLocation, file: *var *var u8, line: *var u32,
+                                 column: *var u32, offset: *var u32)
+    fn clang_getFileName(file: *var u8) -> CXString
+    fn clang_Location_isInSystemHeader(location: CXSourceLocation) -> i32
+
+    fn clang_tokenize(unit: CXTranslationUnit, range: CXSourceRange, tokens: *var *var CXToken,
+                      numTokens: *var u32)
+    fn clang_getTokenSpelling(unit: CXTranslationUnit, token: CXToken) -> CXString
+    fn clang_getTokenKind(token: CXToken) -> i32
+    fn clang_disposeTokens(unit: CXTranslationUnit, tokens: *var CXToken, numTokens: u32)
+}
+
+/// A `CXString`, as a Rune string, given back to libclang afterwards.
+#safe("the CXString came from libclang, which owns it until it is disposed")
+pub fn take(s: CXString) -> String {
+    let p = clang_getCString(s)
+    var out = ""
+    if !((p as usize) == 0) {
+        let c = p as CString
+        out = c as String
+    }
+    clang_disposeString(s)
+    out
+}
+
+/// Appends each child to the vector `data` points at.
+#safe("`data` is the address of the vector `children` is filling, alive for the whole visit")
+fn collect(cursor: CXCursor, parent: CXCursor, data: *var u8) -> i32 {
+    let list = data as *var vector::Vector<CXCursor>
+    list[0].push(cursor)
+    CXChildVisit_Continue
+}
+
+/// The direct children of `parent`, in order.
+#safe("the visitor only appends what libclang hands it, to a vector that outlives the visit")
+pub fn children(parent: CXCursor) -> vector::Vector<CXCursor> {
+    var out = vector::Vector<CXCursor>()
+    clang_visitChildren(parent, collect as @cfunction(CXCursor, CXCursor, *var u8) -> i32,
+                        &var out as *var u8)
+    out
+}
+
+/// The file and line a cursor is at.
+#safe("libclang writes the out-parameters and owns the file handle")
+pub fn placeOf(cursor: CXCursor) -> Place {
+    let loc = clang_getCursorLocation(cursor)
+    var file = 0 as *var u8
+    var line: u32 = 0
+    var col: u32 = 0
+    var off: u32 = 0
+    clang_getSpellingLocation(loc, &var file as *var *var u8, &var line as *var u32,
+                              &var col as *var u32, &var off as *var u32)
+    var name = ""
+    if !((file as usize) == 0) { name = take(clang_getFileName(file)) }
+    Place { file: name, line: line as i64, system: clang_Location_isInSystemHeader(loc) != 0 }
+}
+
+pub struct Place {
+    pub file: String
+    pub line: i64
+    pub system: bool
+}
+
+/// The spelling of each token a cursor covers — a macro's name and body.
+#safe("the token buffer is libclang's, read within its length and disposed")
+pub fn tokens(unit: CXTranslationUnit, cursor: CXCursor) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    let range = clang_getCursorExtent(cursor)
+    var toks = 0 as *var CXToken
+    var n: u32 = 0
+    clang_tokenize(unit, range, &var toks as *var *var CXToken, &var n as *var u32)
+    var i: u32 = 0
+    while i < n {
+        out.push(take(clang_getTokenSpelling(unit, toks[i as i64])))
+        i += 1
+    }
+    if n > 0 { clang_disposeTokens(unit, toks, n) }
+    out
+}

@@ -6,7 +6,7 @@ extern "C" {
     fn time(time_t: i64) -> i64 
 }
 
-@safe("srand has been seeded properly with the current time, random is used properly as well")
+#safe("srand has been seeded properly with the current time, random is used properly as well")
 fn main() -> i64 {
     srand(time(0) as u32)
     toguess = rand() % 101

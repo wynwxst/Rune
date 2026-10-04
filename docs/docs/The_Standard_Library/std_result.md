@@ -5,17 +5,17 @@
 | `Result<T, E>` | `enum { Ok(T), Err(E) }` | success or failure |
 | `isOk` / `isErr` | `(&self) -> bool` | which one it is |
 | `isSuchThat` | `(&self, @function(T) -> bool) -> bool` | succeeded *and* the value passes |
-| `or` | `(&self, fallback: T) -> T` | the value, or the fallback |
-| `orElse` | `(&self, @function() -> T) -> T` | same, producing the fallback only if needed |
-| `recover` | `(&self, @function(E) -> T) -> T` | the value, or what the error is turned into |
-| `unwrap` | `(&self) -> T` | the value; **aborts** on `Err` |
-| `expect` | `(&self, message: CString) -> T` | same, with your message |
-| `unwrapErr` | `(&self) -> E` | the error; **aborts** on `Ok` |
-| `map` | `<U>(&self, @function(T) -> U) -> Result<U, E>` | the value transformed; an error passes through |
-| `mapErr` | `<F>(&self, @function(E) -> F) -> Result<T, F>` | the error transformed — a conversion local to one call, when a `bind As` would be too wide |
-| `andThen` | `<U>(&self, @function(T) -> Result<U, E>) -> Result<U, E>` | what `?` does, without the early return |
-| `ok` | `(&self) -> Option<T>` | the success as an `Option` |
-| `error` | `(&self) -> Option<E>` | the failure as an `Option` |
+| `or` | `(self, fallback: T) -> T` | the value, or the fallback |
+| `orElse` | `(self, @function() -> T) -> T` | same, producing the fallback only if needed |
+| `recover` | `(self, @function(E) -> T) -> T` | the value, or what the error is turned into |
+| `unwrap` | `(self) -> T` | the value; **aborts** on `Err` |
+| `expect` | `(self, message: CString) -> T` | same, with your message |
+| `unwrapErr` | `(self) -> E` | the error; **aborts** on `Ok` |
+| `map` | `<U>(self, @function(T) -> U) -> Result<U, E>` | the value transformed; an error passes through |
+| `mapErr` | `<F>(self, @function(E) -> F) -> Result<T, F>` | the error transformed — a conversion local to one call, when a `bind As` would be too wide |
+| `andThen` | `<U>(self, @function(T) -> Result<U, E>) -> Result<U, E>` | what `?` does, without the early return |
+| `ok` | `(self) -> Option<T>` | the success as an `Option` |
+| `error` | `(self) -> Option<E>` | the failure as an `Option` |
 | `ok` / `err` | `<T, E>(...) -> Result<T, E>` | constructors |
 | `from` | `<T, E>(Option<T>, error: E) -> Result<T, E>` | an empty lookup made into one that says why |
 | `flatten` | `<T, E>(Result<Result<T, E>, E>) -> Result<T, E>` | one out of two |

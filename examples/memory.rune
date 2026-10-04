@@ -71,7 +71,7 @@ fn handles() {
 // Everything below is what `Vector` does for you. Reach for it only when you
 // are building something like `Vector`.
 
-@safe("the block is sized for four i64 and every index written is below four")
+#safe("the block is sized for four i64 and every index written is below four")
 fn allocator() {
     io::println("allocator:")
     let count = 4

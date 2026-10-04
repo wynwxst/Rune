@@ -2,7 +2,7 @@
 // printed, and integers as text, with `freestanding_type = "minimal"`.
 // Compiled to an object only, so it is the same on every host; the hooks are
 // C's, for whoever links it.
-@runtime(none)
+#runtime(none)
 import std::io
 
 extern "C" {
@@ -12,20 +12,20 @@ extern "C" {
     fn exit(code: i32) -> Never
 }
 
-@allocator
-@safe("C's heap")
+#allocator
+#safe("C's heap")
 fn heapAllocate(size: usize, align: usize) -> *var u8 { unsafe { malloc(size) } }
 
-@deallocator
-@safe("C's heap")
+#deallocator
+#safe("C's heap")
 fn heapFree(block: *var u8, size: usize, align: usize) { unsafe { free(block) } }
 
-@output
-@safe("standard output")
+#output
+#safe("standard output")
 fn out(bytes: *u8, count: usize) { unsafe { write(1, bytes, count) } }
 
-@panicHandler
-@safe("C's exit")
+#panicHandler
+#safe("C's exit")
 fn onPanic(message: CString, location: CString) -> Never { unsafe { exit(101) } }
 
 fn main() -> i64 {

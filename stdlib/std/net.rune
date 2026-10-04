@@ -23,7 +23,7 @@
 // Owning a descriptor
 // -------------------
 // `TcpStream` and `TcpListener` are structs that own a file descriptor, and
-// they say so: the descriptor is marked `@resource`, and each has a `deinit`
+// they say so: the descriptor is marked `#resource`, and each has a `deinit`
 // that closes it. So a connection closes itself when the binding holding it
 // goes out of scope, and handing one on is a move — the binding it came from
 // stops owning it, and the descriptor is closed exactly once.
@@ -97,7 +97,7 @@ pub enum NetError {
     Failed,
 }
 
-@safe("reads a code the runtime classified; touches no memory")
+#safe("reads a code the runtime classified; touches no memory")
 fn lastError() -> NetError {
     match unsafe { rune_net_last_error() } {
         1 => NetError::Refused,
@@ -154,13 +154,13 @@ fn asStreamError(e: NetError) -> io::StreamError {
 /// out of scope is closed whether or not the code that had it remembered to.
 /// Handing one on moves it, so exactly one binding owns it at a time.
 pub struct TcpStream {
-    @resource descriptor: i64 = -1,
+    #resource descriptor: i64 = -1,
     peer: String = "",
     peerPort: i32 = 0
 }
 
 extend TcpStream {
-    @safe("the descriptor is nulled before anything else can reach it again")
+    #safe("the descriptor is nulled before anything else can reach it again")
     fn deinit(&var self) {
         if self.descriptor >= 0 {
             unsafe { rune_net_close(self.descriptor) }
@@ -173,7 +173,7 @@ extend TcpStream {
     /// copy would give two bindings one descriptor, and the second to go
     /// would close it again. Both see the same bytes; the connection stays
     /// open until the last of them closes.
-    @safe("the runtime duplicates the descriptor, or hands back a closed stream")
+    #safe("the runtime duplicates the descriptor, or hands back a closed stream")
     pub fn clone(&self) -> Self {
         let fd = if self.descriptor >= 0 { unsafe { rune_net_dup(self.descriptor) } } else { -1 }
         TcpStream { descriptor: fd, peer: self.peer.$clone(), peerPort: self.peerPort }
@@ -189,7 +189,7 @@ extend TcpStream {
     pub fn port(&self) -> i32 { self.peerPort }
 
     /// Closes it now. Calling this twice is harmless.
-    @safe("the descriptor is nulled before anything else can reach it again")
+    #safe("the descriptor is nulled before anything else can reach it again")
     pub fn close(&var self) {
         if self.descriptor < 0 { return }
         unsafe { rune_net_close(self.descriptor) }
@@ -201,7 +201,7 @@ extend TcpStream {
     ///
     /// Half-closing the write side is how a client says "that is the whole
     /// request" without giving up the reply.
-    @safe("shutdown on a live descriptor, or a reported failure")
+    #safe("shutdown on a live descriptor, or a reported failure")
     pub fn shutdown(&var self, how: Shutdown) -> NetError? {
         if self.descriptor < 0 { return NetError::Closed }
         let code = match how {
@@ -217,7 +217,7 @@ extend TcpStream {
 
     /// Sends small writes immediately instead of waiting to fill a packet.
     /// A request-response protocol wants this on.
-    @safe("setsockopt on a live descriptor, or a reported failure")
+    #safe("setsockopt on a live descriptor, or a reported failure")
     pub fn setNoDelay(&var self, on: bool) -> NetError? {
         if self.descriptor < 0 { return NetError::Closed }
         let flag = if on { 1i32 } else { 0i32 }
@@ -229,7 +229,7 @@ extend TcpStream {
 
     /// How long a read may wait before giving up with `TimedOut`. Zero waits
     /// for ever, which is what a socket does by default.
-    @safe("setsockopt on a live descriptor, or a reported failure")
+    #safe("setsockopt on a live descriptor, or a reported failure")
     pub fn setReadTimeout(&var self, milliseconds: i64) -> NetError? {
         if self.descriptor < 0 { return NetError::Closed }
         if unsafe { rune_net_set_timeout_ms(self.descriptor, milliseconds, 1i32) } != 0 {
@@ -239,7 +239,7 @@ extend TcpStream {
     }
 
     /// The same for a write.
-    @safe("setsockopt on a live descriptor, or a reported failure")
+    #safe("setsockopt on a live descriptor, or a reported failure")
     pub fn setWriteTimeout(&var self, milliseconds: i64) -> NetError? {
         if self.descriptor < 0 { return NetError::Closed }
         if unsafe { rune_net_set_timeout_ms(self.descriptor, milliseconds, 0i32) } != 0 {
@@ -284,7 +284,7 @@ pub fn adoptFrom(descriptor: i64, peer: String, port: i32) -> TcpStream {
 }
 
 bind io::Reader to TcpStream {
-    @safe("recv is given the buffer's own spare room and never exceeds it")
+    #safe("recv is given the buffer's own spare room and never exceeds it")
     fn read(&var self, sink: &var io::Bytes, most: i64) -> Result<i64, io::StreamError> {
         if self.descriptor < 0 { return Err(io::StreamError::Closed) }
         if most <= 0 { return Ok(0) }
@@ -299,7 +299,7 @@ bind io::Reader to TcpStream {
 }
 
 bind io::Writer to TcpStream {
-    @safe("send is given the buffer's own count, and its own bytes")
+    #safe("send is given the buffer's own count, and its own bytes")
     fn write(&var self, data: io::Bytes) -> Result<i64, io::StreamError> {
         if self.descriptor < 0 { return Err(io::StreamError::Closed) }
         let n = data.length()
@@ -327,13 +327,13 @@ bind io::Stream to TcpStream {}
 /// It owns its descriptor exactly as a `TcpStream` does, and closes it the
 /// same way.
 pub struct TcpListener {
-    @resource descriptor: i64 = -1,
+    #resource descriptor: i64 = -1,
     address: String = "",
     boundPort: i32 = 0
 }
 
 extend TcpListener {
-    @safe("the descriptor is nulled before anything else can reach it again")
+    #safe("the descriptor is nulled before anything else can reach it again")
     fn deinit(&var self) {
         if self.descriptor >= 0 {
             unsafe { rune_net_close(self.descriptor) }
@@ -344,7 +344,7 @@ extend TcpListener {
     /// A second listener on the same socket, with a descriptor of its own;
     /// what `$clone()` does. Either may accept; the socket stays open until
     /// the last of them closes.
-    @safe("the runtime duplicates the descriptor, or hands back a closed listener")
+    #safe("the runtime duplicates the descriptor, or hands back a closed listener")
     pub fn clone(&self) -> Self {
         let fd = if self.descriptor >= 0 { unsafe { rune_net_dup(self.descriptor) } } else { -1 }
         TcpListener { descriptor: fd, address: self.address.$clone(), boundPort: self.boundPort }
@@ -364,7 +364,7 @@ extend TcpListener {
     ///
     /// Blocks until one arrives, or until a read timeout expires. The stream
     /// that comes back owns its own descriptor, independent of this one.
-    @safe("the address buffer is sized here and the runtime terminates it")
+    #safe("the address buffer is sized here and the runtime terminates it")
     pub fn accept(&var self) -> Result<TcpStream, NetError> {
         if self.descriptor < 0 { return Err(NetError::Closed) }
 
@@ -384,7 +384,7 @@ extend TcpListener {
     }
 
     /// Stops listening. Anything already accepted is unaffected.
-    @safe("the descriptor is nulled before anything else can reach it again")
+    #safe("the descriptor is nulled before anything else can reach it again")
     pub fn close(&var self) {
         if self.descriptor < 0 { return }
         unsafe { rune_net_close(self.descriptor) }
@@ -412,14 +412,14 @@ extend TcpListener {
 ///
 /// An empty address, or `"0.0.0.0"`, means every interface. Port 0 asks the
 /// system to pick one; `port()` then says which.
-@safe("the runtime binds and listens, or reports why it could not")
+#safe("the runtime binds and listens, or reports why it could not")
 pub fn listen(address: String, port: i32) -> Result<TcpListener, NetError> {
     listenWith(address, port, 128)
 }
 
 /// The same, with the backlog said out loud: how many connections the system
 /// may hold for this listener before it starts refusing them.
-@safe("the runtime binds and listens, or reports why it could not")
+#safe("the runtime binds and listens, or reports why it could not")
 pub fn listenWith(address: String, port: i32,
                   backlog: i32) -> Result<TcpListener, NetError> {
     unsafe { rune_net_start() }
@@ -436,7 +436,7 @@ pub fn listenWith(address: String, port: i32,
 /// Connects to `host`:`port`. The host may be a name or a dotted address.
 ///
 ///     var conn = net::connect("localhost", 8080).unwrap()
-@safe("the runtime resolves and connects, or reports why it could not")
+#safe("the runtime resolves and connects, or reports why it could not")
 pub fn connect(host: String, port: i32) -> Result<TcpStream, NetError> {
     unsafe { rune_net_start() }
     let fd = unsafe { rune_net_connect(host.$cstr(), port) }
@@ -545,7 +545,7 @@ pub class AsyncStream {
     pub fn close(&var self) { self.stream.close() }
 
     /// Hands the descriptor back, blocking again, and stops owning it.
-    @safe("the descriptor is the caller's from here; nothing here reaches it again")
+    #safe("the descriptor is the caller's from here; nothing here reaches it again")
     pub fn release(&var self) -> i64 {
         let fd = self.stream.descriptorValue()
         if fd >= 0 { unsafe { rune_net_set_nonblocking(fd, 0) } }

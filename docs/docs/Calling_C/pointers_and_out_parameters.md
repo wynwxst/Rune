@@ -14,7 +14,7 @@ extern "C" {
     fn strtol(text: CString, end: *var u64, base: i32) -> i64
 }
 
-@safe("frexp is total over finite doubles")
+#safe("frexp is total over finite doubles")
 fn main() -> i64 {
     var exponent: i32 = 0
     let fraction = frexp(12.0, &var exponent as *var i32)

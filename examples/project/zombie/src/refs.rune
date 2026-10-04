@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 import std::io
 import std::task
 import std::time

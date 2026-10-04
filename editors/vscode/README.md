@@ -80,13 +80,13 @@ warn = ["missing-docs"]
 max-line-length = 100
 ```
 
-and a single declaration, statement or whole file with an `@lint` directive:
+and a single declaration, statement or whole file with an `#lint` directive:
 
 ```rune
-@lint(allow(naming))             // at the top, before any declaration: the file
+#lint(allow(naming))             // at the top, before any declaration: the file
 import std::io
 
-@lint(allow(unused-variable))    // anywhere else: just the next item
+#lint(allow(unused-variable))    // anywhere else: just the next item
 let spare = compute()
 ```
 

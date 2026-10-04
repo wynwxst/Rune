@@ -36,12 +36,12 @@ extern "C++" {
         struct ArrayRef<T> { data: *T, length: c_size_t }
 
         // --- the context and the module ----------------------------------
-        @size(8)
+        #size(8)
         class LLVMContext {
             fn init(&var self)
             fn deinit(&var self)
         }
-        @size(1048)
+        #size(1048)
         class Module {
             fn init(&var self, id: StringRef, ctx: &var LLVMContext)
             fn deinit(&var self)
@@ -58,7 +58,7 @@ extern "C++" {
         }
         class IntegerType : Type {}
         class FunctionType : Type {
-            @as("functionType")
+            #as("functionType")
             fn get(result: *var Type, params: ArrayRef<*var Type>,
                    isVarArg: bool) -> *var FunctionType
         }
@@ -72,24 +72,24 @@ extern "C++" {
             struct AllocInfo { bits: c_uint }
             /// `new (marker) Inst(...)`: room for the operands ahead of the
             /// object, which is why LLVM's instructions have their own.
-            @operator("new")
+            #operator("new")
             fn allocate(size: c_size_t, marker: IntrusiveOperandsAllocMarker) -> *var c_void
         }
         class Constant : User {}
         class ConstantInt : Constant {
             // LLVM 22 added `ImplicitTrunc`; before it, `get` took three.
-            @Config(llvm == "21")
-            @as("constantInt")
+            #Config(llvm == "21")
+            #as("constantInt")
             fn get(ty: *var IntegerType, value: c_uint64_t,
                    isSigned: bool) -> *var ConstantInt
-            @Config(!(llvm == "21"))
-            @as("constantInt")
+            #Config(!(llvm == "21"))
+            #as("constantInt")
             fn get(ty: *var IntegerType, value: c_uint64_t, isSigned: bool,
                    implicitTrunc: bool) -> *var ConstantInt
         }
         class GlobalValue : Constant {}
         class Function : GlobalValue {}
-        @size(80)
+        #size(80)
         class BasicBlock : Value {
             fn init(&var self, ctx: &var LLVMContext, name: &Twine,
                     parent: *var Function, insertBefore: *var BasicBlock)
@@ -98,11 +98,11 @@ extern "C++" {
             enum BinaryOps { Add = 13, Sub = 15, Mul = 17 }
         }
         class BinaryOperator : Instruction {
-            @as("createBinary")
+            #as("createBinary")
             fn Create(op: BinaryOps, lhs: *var Value, rhs: *var Value,
                       name: &Twine, at: InsertPosition) -> *var BinaryOperator
         }
-        @size(72)
+        #size(72)
         class ReturnInst : Instruction {
             fn init(&var self, ctx: &var LLVMContext, value: *var Value,
                     info: AllocInfo, at: InsertPosition)
@@ -112,7 +112,7 @@ extern "C++" {
         class raw_ostream {
             enum OStreamKind { OK_OStream = 0, OK_FDStream = 1 }
         }
-        @size(96)
+        #size(96)
         class raw_fd_ostream : raw_ostream {
             fn init(&var self, fd: c_int, shouldClose: bool, unbuffered: bool,
                     kind: OStreamKind)
@@ -132,12 +132,12 @@ fn stringRef(text: &String) -> StringRef {
     StringRef { data: text.$cstr(), length: text.$length() as c_size_t }
 }
 
-@safe("every pointer below is one LLVM handed out, or storage allocated here for it")
-@Config(llvm == "21")
+#safe("every pointer below is one LLVM handed out, or storage allocated here for it")
+#Config(llvm == "21")
 fn i32Constant(ty: *var IntegerType, value: c_uint64_t) -> *var ConstantInt {
     ConstantInt::constantInt(ty, value, false)
 }
-@Config(!(llvm == "21"))
+#Config(!(llvm == "21"))
 fn i32Constant(ty: *var IntegerType, value: c_uint64_t) -> *var ConstantInt {
     ConstantInt::constantInt(ty, value, false, false)
 }

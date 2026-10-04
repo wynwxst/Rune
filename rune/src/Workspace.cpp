@@ -53,10 +53,20 @@ std::string shellQuote(const std::string &s) {
 int run(const std::string &cmd, bool verbose) {
   if (verbose)
     std::cerr << c("\x1b[2m") << "  " << cmd << c("\x1b[0m") << "\n";
+#if defined(_WIN32)
+  // `cmd /c` drops the first and last quote of a line that starts with
+  // one; a pair around the whole line is what it drops.
+  int rc = std::system(("\"" + cmd + "\"").c_str());
+#else
   int rc = std::system(cmd.c_str());
+#endif
   if (rc == -1)
     return 127;
+#if defined(_WIN32)
+  return rc;          // the exit status itself, not a wait status
+#else
   return (rc & 0x7F) ? 128 + (rc & 0x7F) : ((rc >> 8) & 0xFF);
+#endif
 }
 
 /// A member's directory as it is written: relative, forward slashes, no

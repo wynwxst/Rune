@@ -43,11 +43,15 @@
 #include <cctype>
 #include <filesystem>
 #include <iostream>
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 extern "C" char **environ;
+#endif
 
 namespace rune {
 
@@ -366,6 +370,48 @@ bool writeMachineCode(llvm::Module &m, const std::string &path,
 /// whose arguments are already a list. Handing the list to the kernel skips
 /// both: nothing re-parses the arguments, so a path with a space, a quote or a
 /// dollar in it is simply an argument.
+#if defined(_WIN32)
+/// One argument as the Microsoft C runtime reads a command line back into
+/// `argv`: in quotes when it has a space, a tab or a quote, with the
+/// backslashes before a quote doubled. `_spawnvp` joins its arguments with
+/// spaces and nothing more, so without this a path with a space in it would
+/// arrive as two.
+std::string windowsArgument(const std::string &a) {
+  if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos)
+    return a;
+  std::string out = "\"";
+  size_t slashes = 0;
+  for (char ch : a) {
+    if (ch == '\\') {
+      ++slashes;
+      continue;
+    }
+    if (ch == '"') {
+      out.append(slashes * 2 + 1, '\\');
+      out += '"';
+    } else {
+      out.append(slashes, '\\');
+      out += ch;
+    }
+    slashes = 0;
+  }
+  out.append(slashes * 2, '\\');
+  return out + "\"";
+}
+
+int runProgram(const std::vector<std::string> &argv) {
+  std::vector<std::string> quoted;
+  for (const std::string &a : argv)
+    quoted.push_back(windowsArgument(a));
+  std::vector<const char *> raw;
+  for (const std::string &a : quoted)
+    raw.push_back(a.c_str());
+  raw.push_back(nullptr);
+  // `p` for the PATH search, as below.
+  intptr_t rc = _spawnvp(_P_WAIT, argv[0].c_str(), raw.data());
+  return rc < 0 ? 127 : static_cast<int>(rc);
+}
+#else
 int runProgram(const std::vector<std::string> &argv) {
   std::vector<char *> raw;
   raw.reserve(argv.size() + 1);
@@ -385,6 +431,7 @@ int runProgram(const std::vector<std::string> &argv) {
     return 128 + WTERMSIG(status);
   return WIFEXITED(status) ? WEXITSTATUS(status) : 127;
 }
+#endif
 
 /// The command, as it would have been typed, for `-v` and for a failure note.
 std::string spellCommand(const std::vector<std::string> &argv) {
@@ -416,7 +463,12 @@ bool linkExecutable(const std::string &objPath,
     if (const char *env = getenv("RUNE_CC"))
       cc = env;
     else
+#if defined(_WIN32)
+      // MinGW-w64 installs `gcc`; a `cc` is not something Windows has.
+      cc = "gcc";
+#else
       cc = "cc";
+#endif
   }
 
   // The link program may carry arguments of its own:
@@ -538,10 +590,93 @@ bool linkExecutable(const std::string &objPath,
   for (const std::string &arg : opts.LinkArgs)
     argv.push_back(arg);
   bool wantsMath = false;
-  for (const std::string &lib : opts.LinkLibraries) {
-    argv.push_back("-l" + lib);
+  bool addedFrameworkPaths = false;
+  for (const std::string &spec : opts.LinkLibraries) {
+    // `static:name` and `dynamic:name` — `#link("name", type: static)` — are
+    // the one file of that kind, found here and named in full: the linkers
+    // have no portable way to insist (ld64 has no `-Bstatic`, and GNU ld's
+    // `-Bdynamic` still settles for an archive).
+    std::string kind, lib = spec;
+    size_t colon = spec.find(':');
+    if (colon != std::string::npos &&
+        (spec.compare(0, colon, "static") == 0 || spec.compare(0, colon, "dynamic") == 0 ||
+         spec.compare(0, colon, "framework") == 0)) {
+      kind = spec.substr(0, colon);
+      lib = spec.substr(colon + 1);
+    }
     if (lib == "m")
       wantsMath = true;
+    if (kind.empty()) {
+      argv.push_back("-l" + lib);
+      continue;
+    }
+    // `#link("Cocoa", type: framework)`: an Apple framework, found on the
+    // framework path — which the `#linkpath`s join.
+    if (kind == "framework") {
+      if (!triple.isOSDarwin()) {
+        diags.fatal("`#link(\"{}\", type: framework)` is for Apple's platforms, "
+                    "and this build is for {}", lib, triple.str())
+            .note("put `#Config(os == \"macos\")` before it, so other "
+                  "targets leave it out")
+            .code(546);
+        return false;
+      }
+      if (!addedFrameworkPaths) {
+        for (const std::string &dir : opts.LinkPaths)
+          argv.push_back("-F" + dir);
+        addedFrameworkPaths = true;
+      }
+      argv.push_back("-framework");
+      argv.push_back(lib);
+      continue;
+    }
+    std::vector<std::string> files;
+    if (kind == "static") {
+      files = {"lib" + lib + ".a"};
+      if (isWindows)
+        files.push_back(lib + ".lib");
+    } else if (triple.isOSDarwin()) {
+      files = {"lib" + lib + ".dylib", "lib" + lib + ".tbd"};
+    } else if (isWindows) {
+      files = {"lib" + lib + ".dll.a", lib + ".dll.a", "lib" + lib + ".dll", lib + ".dll"};
+    } else {
+      files = {"lib" + lib + ".so"};
+    }
+    std::vector<std::string> dirs = opts.LinkPaths;
+    std::string root = opts.Sysroot;
+    std::string multiarch = triple.getArchName().str() + "-linux-gnu";
+    for (const char *d : {"/usr/local/lib", "/opt/homebrew/lib", "/usr/lib", "/usr/lib64", "/lib"})
+      dirs.push_back(root + d);
+    if (triple.isOSLinux())
+      dirs.push_back(root + "/usr/lib/" + multiarch);
+    if (triple.isOSDarwin() && !root.empty())
+      dirs.push_back(root + "/usr/lib");
+    std::string found;
+    for (const std::string &d : dirs) {
+      for (const std::string &f : files) {
+        std::error_code fec;
+        std::filesystem::path p = std::filesystem::path(d) / f;
+        if (std::filesystem::exists(p, fec)) {
+          found = p.string();
+          break;
+        }
+      }
+      if (!found.empty())
+        break;
+    }
+    if (found.empty()) {
+      std::string tried;
+      for (const std::string &f : files)
+        tried += (tried.empty() ? "`" : ", `") + f + "`";
+      diags.fatal("`#link(\"{}\", type: {})` found no {}", lib, kind, tried)
+          .note("looked in the `#linkpath`s and `-L` directories, then {}",
+                "/usr/local/lib, /opt/homebrew/lib and /usr/lib")
+          .note("add the directory with `#linkpath(\"...\")`, or drop `type:` to let "
+                "the linker choose")
+          .code(546);
+      return false;
+    }
+    argv.push_back(found);
   }
   // A program that calls C++ needs the C++ runtime — `operator new`, the
   // standard library's own objects, static initialisers. The driver is a C
@@ -596,71 +731,86 @@ bool linkExecutable(const std::string &objPath,
   return true;
 }
 
-/// Builds the `@type(Macros)` files into a program, and records what it
-/// answers to.
+/// One module of a macro package: a `#type(Macros)` file, or the `#macro fn`s
+/// lifted out of an ordinary one.
+struct MacroSource {
+  /// Where the nested build reads it from.
+  std::string Path;
+  /// Written to `Path` before the build; empty when `Path` is the author's
+  /// own file, read as it stands.
+  std::string Text;
+  /// What it is called inside the package — `rune_macros::<stem of Path>`.
+  std::string Module;
+  /// The file or library module it came from, which is what tells one
+  /// package's cache entry from another's.
+  std::string Origin;
+};
+
+/// A module-path-safe stem for a generated macro source.
+std::string macroStem(const std::string &module, const char *suffix) {
+  std::string out;
+  for (char c : module)
+    out += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+  return out + suffix;
+}
+
+/// The module a file at `path` becomes inside the macro package — named the
+/// way any compilation names its files.
+std::string macroModuleFor(const std::string &path) {
+  const std::string stem = stemOf(path);
+  return stem == "main" || stem == "lib" ? "rune_macros" : "rune_macros::" + stem;
+}
+
+/// Builds a macro package out of `sources`, and records what it answers to.
 ///
 /// It is an ordinary Rune compilation — the same function, called again —
 /// with three differences: it is built for the machine doing the compiling
 /// rather than for the target, the compiler writes it a `main`, and its
-/// `@type(Macros)` files are treated as the package rather than skipped
-/// again.
-template <typename UnitT>
-bool buildMacroPackageImpl(const SourceManager &sm, DiagnosticEngine &diags,
-                           const CompilerOptions &opts,
-                           const std::vector<UnitT> &units,
-                           const std::vector<std::vector<Token>> &tokens,
-                           const std::vector<size_t> &macroFiles,
-                           MacroPackage &out) {
-  // What the package answers to, read off the files themselves.
-  std::vector<std::string> modules;
-  for (size_t i : macroFiles) {
-    std::string moduleName = "rune_macros";
-    const std::string stem = stemOf(sm.file(units[i].FileID).Path);
-    if (stem != "main")
-      moduleName += "::" + stem;
-    modules.push_back(moduleName);
-    collectProcMacros(tokens[i], diags, out.Macros, moduleName);
-  }
-  if (diags.hadError())
-    return false;
-  if (out.Macros.empty()) {
-    for (size_t i : macroFiles)
-      diags.warn(SourceRange(), "'{}' says it is a macro package but declares "
-                                "no macros",
-                 sm.file(units[i].FileID).Name)
-          .note("a macro is a `pub fn` marked `@macro`");
+/// `#macro fn`s are the package rather than something to take out.
+///
+/// `stamp` already holds what the sources say, token by token. The built
+/// program is cached under it, beside the stdlib and the compiler that made
+/// it, so a change to any macro — and only to a macro — builds it again.
+bool buildMacroPackage(DiagnosticEngine &diags, const CompilerOptions &opts,
+                       std::vector<MacroSource> &sources, uint64_t stamp,
+                       MacroPackage &out) {
+  if (out.Macros.empty())
     return true;
-  }
 
-  // Somewhere to put the package, keyed by what went into it so two builds
-  // of one project do not fight over the same file.
   std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "rune-macros";
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
 
-  // FNV-1a over everything the package is built from: its own sources, the
-  // standard library it is compiled with, and the compiler compiling it.
-  // Keyed on the sources alone, a package built before a fix to either of
-  // the others went on being run after it — with the bug the fix removed.
-  uint64_t stamp = 1469598103934665603ull;
-  auto mix = [&stamp](const std::string &s) {
-    for (unsigned char c : s) {
-      stamp ^= c;
-      stamp *= 1099511628211ull;
-    }
-  };
-  for (size_t i : macroFiles)
-    mix(sm.file(units[i].FileID).Buffer);
+  // Which package this is, whatever its macros currently say: the files it
+  // came from. Old builds of the same package are cleared away once a new
+  // one is in place, rather than accumulating one per edit.
+  std::vector<std::string> origins;
+  for (const MacroSource &src : sources)
+    origins.push_back(src.Origin + "=" + src.Module);
+  std::sort(origins.begin(), origins.end());
+  uint64_t identity = 1469598103934665603ull;
+  for (const std::string &o : origins)
+    stampText(o + "\n", identity);
+  // The module names are what the dispatcher is written against.
+  for (const std::string &o : origins)
+    stampText(o + "\n", stamp);
+
   // The library and the compiler by size and time rather than by content:
-  // a few dozen `stat`s, not reading a megabyte on every build.
+  // a few dozen `stat`s, not reading a megabyte on every build. Keyed on the
+  // sources alone, a package built before a fix to either went on being run
+  // after it — with the bug the fix removed.
   auto mixFile = [&](const std::filesystem::path &p) {
     std::error_code fec;
     auto size = std::filesystem::file_size(p, fec);
     auto when = std::filesystem::last_write_time(p, fec);
-    mix(p.string() + ":" +
-        std::to_string(fec ? 0ull : static_cast<unsigned long long>(size)) + ":" +
-        std::to_string(static_cast<long long>(when.time_since_epoch().count())));
+    stampText(p.string() + ":" +
+                  std::to_string(fec ? 0ull
+                                     : static_cast<unsigned long long>(size)) +
+                  ":" +
+                  std::to_string(static_cast<long long>(
+                      when.time_since_epoch().count())),
+              stamp);
   };
   if (!opts.StdlibDir.empty()) {
     std::error_code wec;
@@ -681,43 +831,85 @@ bool buildMacroPackageImpl(const SourceManager &sm, DiagnosticEngine &diags,
   std::string self = llvm::sys::fs::getMainExecutable(nullptr, &anchor);
   if (!self.empty())
     mixFile(self);
-  char stampText[32];
-  std::snprintf(stampText, sizeof stampText, "%016llx",
+
+  char identityText[32], stampText16[32];
+  std::snprintf(identityText, sizeof identityText, "%016llx",
+                static_cast<unsigned long long>(identity));
+  std::snprintf(stampText16, sizeof stampText16, "%016llx",
                 static_cast<unsigned long long>(stamp));
-  std::filesystem::path program = dir / ("macros-" + std::string(stampText));
+  const std::string prefix = "macros-" + std::string(identityText) + "-";
+  std::filesystem::path program = dir / (prefix + stampText16);
 #if defined(_WIN32)
   program += ".exe";
 #endif
 
-  // Already built from exactly these sources.
+  // Already built from exactly these macros. Its time is brought up to date,
+  // which is what says the entry is still in use.
   if (std::filesystem::exists(program)) {
+    std::filesystem::last_write_time(
+        program, std::filesystem::file_time_type::clock::now(), ec);
     out.Program = program.string();
     return true;
   }
 
-  const std::filesystem::path mainPath = dir / ("main-" + std::string(stampText) + ".rune");
+  // Generated sources — lifted functions, a library's macro files — and the
+  // dispatcher go in a directory of this build's own, so two compilers
+  // building the same package at once do not write over each other.
+  const std::string scratchName =
+      "src-" + std::string(stampText16) + "-" + std::to_string(getpid());
+  const std::filesystem::path scratch = dir / scratchName;
+  std::filesystem::create_directories(scratch, ec);
+  auto cleanup = [&] { std::filesystem::remove_all(scratch, ec); };
+
+  std::vector<std::string> modules;
+  for (MacroSource &src : sources) {
+    modules.push_back(src.Module);
+    if (src.Text.empty())
+      continue;
+    src.Path = (scratch / src.Path).string();
+    std::filesystem::create_directories(
+        std::filesystem::path(src.Path).parent_path(), ec);
+    std::ofstream f(src.Path, std::ios::binary);
+    if (!f) {
+      diags.fatal("cannot write a macro package source to '{}'", src.Path);
+      cleanup();
+      return false;
+    }
+    f << src.Text;
+  }
+  const std::filesystem::path mainPath =
+      scratch / ("main-" + std::string(stampText16) + ".rune");
   {
     std::ofstream f(mainPath, std::ios::binary);
     if (!f) {
       diags.fatal("cannot write the macro package's entry point to '{}'",
                   mainPath.string());
+      cleanup();
       return false;
     }
     f << macroDispatcherSource(out.Macros, modules);
   }
+
+  // Linked under a name of its own and renamed into place, so a build that
+  // fails halfway — or one killed while linking — never leaves a file that a
+  // later build takes for a finished package.
+  std::filesystem::path partial = program;
+  partial += "." + std::to_string(getpid()) + ".partial";
 
   CompilerOptions nested;
   nested.MacroPackage = true;
   nested.ModuleName = "rune_macros";
   nested.Output = OutputKind::Executable;
   nested.OutputKindFromFlag = true;
-  nested.OutputPath = program.string();
+  nested.OutputPath = partial.string();
   nested.StdlibDir = opts.StdlibDir;
   // A cross build's `--runtime-dir` is the target's runtime; the macro
   // program runs here, and links the one built for here.
   nested.RuntimeLibDir =
-      opts.TargetTriple.empty() ? opts.RuntimeLibDir : RUNE_RUNTIME_LIB_DIR;
-  nested.ImportPaths = opts.ImportPaths;
+      opts.TargetTriple.empty() ? opts.RuntimeLibDir : hostRuntimeLibDir();
+  // No import paths: the libraries on them were built for the program —
+  // for its target and its memory mode — and could not be linked into a
+  // program that runs here. A library's own macros come in as sources.
   nested.NoColor = opts.NoColor;
   nested.ForceColor = opts.ForceColor;
   nested.JsonDiagnostics = opts.JsonDiagnostics;
@@ -731,19 +923,57 @@ bool buildMacroPackageImpl(const SourceManager &sm, DiagnosticEngine &diags,
   nested.Safety = SafetyLevel::Minimal;
   nested.OptLevel = 0;
   nested.Inputs.push_back(mainPath.string());
-  for (size_t i : macroFiles)
-    nested.Inputs.push_back(sm.file(units[i].FileID).Path);
+  for (const MacroSource &src : sources)
+    nested.Inputs.push_back(src.Path);
 
   if (opts.Verbose)
     diags.status("building the macro package at " + program.string());
   const int rc = compileWithOptions(nested);
-  std::filesystem::remove(mainPath, ec);
-  if (rc != 0) {
+  cleanup();
+  if (rc != 0 || !std::filesystem::exists(partial)) {
+    std::filesystem::remove(partial, ec);
     diags.fatal("the macro package did not build")
         .note("its macros cannot run, so nothing that uses one can be "
               "expanded");
     return false;
   }
+  std::filesystem::rename(partial, program, ec);
+  if (ec && !std::filesystem::exists(program)) {
+    diags.fatal("cannot put the macro package in place at '{}'",
+                program.string());
+    return false;
+  }
+  std::filesystem::remove(partial, ec);
+
+  // Earlier builds of this package are out of date now, and any package no
+  // build has asked for in a fortnight — a project deleted, or moved — is
+  // only taking up room.
+  const auto stale = std::filesystem::file_time_type::clock::now() -
+                     std::chrono::hours(24 * 14);
+  std::vector<std::filesystem::path> unwanted;
+  for (auto it = std::filesystem::directory_iterator(dir, ec);
+       !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+    const std::string name = it->path().filename().string();
+    if (it->path() == program)
+      continue;
+    // Only a finished package — the prefix and a stamp, nothing after — is
+    // an earlier build. Anything longer belongs to a build still running:
+    // its `.partial`, and the object file it is about to link.
+    std::string finished = name;
+#if defined(_WIN32)
+    if (finished.size() > 4 &&
+        finished.compare(finished.size() - 4, 4, ".exe") == 0)
+      finished.resize(finished.size() - 4);
+#endif
+    const bool earlier = finished.rfind(prefix, 0) == 0 &&
+                         finished.size() == prefix.size() + 16;
+    std::error_code tec;
+    const auto when = std::filesystem::last_write_time(it->path(), tec);
+    if (earlier || (!tec && when < stale))
+      unwanted.push_back(it->path());
+  }
+  for (const auto &p : unwanted)
+    std::filesystem::remove_all(p, ec);
   out.Program = program.string();
   return true;
 }
@@ -1273,7 +1503,7 @@ int answerHintQuery(const SourceManager &sm, const SemaResult &result,
 /// The value of the program directive `@<name>(<value>)` at the top of
 /// `text`, or empty. Only the directives before the first declaration count,
 /// as the parser has it; this reads them before anything is parsed, because
-/// `@runtime(none)` decides which files the compilation is made of.
+/// `#runtime(none)` decides which files the compilation is made of.
 static std::string programDirective(const std::string &text,
                                     const std::string &name) {
   size_t i = 0;
@@ -1287,7 +1517,7 @@ static std::string programDirective(const std::string &text,
         ++i;
       continue;
     }
-    if (i >= n || text[i] != '@')
+    if (i >= n || (text[i] != '@' && text[i] != '#'))
       return "";
     size_t start = ++i;
     while (i < n && (std::isalnum(static_cast<unsigned char>(text[i])) ||
@@ -1379,7 +1609,7 @@ int compileWithOptions(const CompilerOptions &given) {
     fileIDs.push_back(*id);
   }
 
-  // `@runtime(none)` and `@entry(none)` in any of the program's own files say
+  // `#runtime(none)` and `#entry(none)` in any of the program's own files say
   // the same as the flags. They are read now because a freestanding program
   // is compiled together with the runtime it brings along.
   for (unsigned id : fileIDs) {
@@ -1405,7 +1635,7 @@ int compileWithOptions(const CompilerOptions &given) {
   if (opts.Freestanding && opts.Output != OutputKind::Library &&
       opts.Output != OutputKind::Docs && opts.Output != OutputKind::None) {
     // The core — panics, the heap, memory — and `String`, numbers as text,
-    // and printing to the program's `@output`.
+    // and printing to the program's `#output`.
     for (const char *part : {"freestanding.rune", "freestanding_text.rune"}) {
       const std::filesystem::path rt =
           std::filesystem::path(opts.RunetimeDir) / part;
@@ -1444,7 +1674,7 @@ int compileWithOptions(const CompilerOptions &given) {
   // imports the library.
   std::vector<std::pair<unsigned, std::string>> libraryUnits;
   /// One entry per library unit: the conditions that library was built with.
-  /// A `.rul` carries its own source, so its `@Config`s are answered again
+  /// A `.rul` carries its own source, so its `#Config`s are answered again
   /// here — and they have to be answered the way they were when its object
   /// code was made, or the interface would describe code that is not in it.
   std::vector<ConfigSet> libraryConfigs;
@@ -1592,10 +1822,10 @@ int compileWithOptions(const CompilerOptions &given) {
   std::vector<Unit> units;
   for (const auto &u : libraryUnits)
     units.push_back({u.first, u.second, /*FromLibrary=*/true, false});
-  const size_t firstStdlibUnit = units.size();
+  size_t firstStdlibUnit = units.size();
   for (const auto &u : stdlibUnits)
     units.push_back({u.first, u.second, false, /*IsStdlib=*/true});
-  const size_t firstUserModule = units.size();
+  size_t firstUserModule = units.size();
   for (unsigned id : fileIDs) {
     std::string stem = stemOf(sm.file(id).Path);
     units.push_back({id,
@@ -1645,31 +1875,108 @@ int compileWithOptions(const CompilerOptions &given) {
   // The definitions are taken out of the stream as they are read, which is
   // what the parser would otherwise have to do again for itself; what it gets
   // handed below is already free of them.
-  // A `@type(Macros)` file is a package of its own: it is built ahead of this
+  // A `#type(Macros)` file is a package of its own: it is built ahead of this
   // compilation, for the machine doing the compiling, and run to expand each
   // invocation. None of its names reach here, which is the point — what a
   // macro imports and declares is its own business.
+  //
+  // A `#macro fn` may also be written in any other file. Those are lifted
+  // out of it — the program never sees them — and built into the same
+  // package, so where a macro is declared is the author's choice. A library
+  // carries its macros the same way, as source, so importing one brings its
+  // macros along, built here for the machine doing the expanding.
   MacroPackage macroPackage;
+  /// This package's own `#type(Macros)` files, kept for a library's
+  /// interface so that whoever imports it gets its macros too.
+  std::vector<std::pair<std::string, std::string>> exportedMacroFiles;
   if (!opts.MacroPackage) {
+    std::vector<MacroSource> macroSources;
     std::vector<size_t> macroFiles;
-    for (size_t i = firstUserModule; i < units.size(); ++i)
-      if (declaresMacroPackage(tokens[i]))
-        macroFiles.push_back(i);
-    if (!macroFiles.empty()) {
+    uint64_t macroStamp = 1469598103934665603ull;
+    const unsigned errorsBefore = diags.errorCount();
+    timer.phase("macro package", [&] {
+      for (size_t i = 0; i < units.size(); ++i) {
+        if (units[i].IsStdlib)
+          continue;
+        const SourceFile &file = sm.file(units[i].FileID);
+        const bool fromLibrary = units[i].FromLibrary;
+        if (declaresMacroPackage(tokens[i])) {
+          MacroSource src;
+          if (fromLibrary) {
+            src.Path = macroStem(units[i].ModuleName, "") + ".rune";
+            src.Text = file.Buffer;
+            while (!src.Text.empty() && src.Text.back() == '\0')
+              src.Text.pop_back();
+            src.Origin = "library " + units[i].ModuleName;
+          } else {
+            src.Path = file.Path;
+            src.Origin = file.Path;
+            exportedMacroFiles.push_back({units[i].ModuleName, file.Buffer});
+          }
+          src.Module = macroModuleFor(src.Path);
+          stampText(src.Module, macroStamp);
+          stampTokens(tokens[i], macroStamp);
+          collectProcMacros(tokens[i], diags, macroPackage.Macros, src.Module);
+          macroSources.push_back(std::move(src));
+          macroFiles.push_back(i);
+          continue;
+        }
+        if (!hasProcMacros(tokens[i]))
+          continue;
+        // Under its own name when it is this package's file, so what the
+        // nested build reports reads as the file the macro was written in.
+        MacroSource src;
+        src.Path = fromLibrary
+                       ? macroStem(units[i].ModuleName, "_lib_macros") + ".rune"
+                       : "lifted/" +
+                             std::filesystem::path(file.Path).filename().string();
+        src.Module = macroModuleFor(src.Path);
+        src.Origin = fromLibrary ? "library " + units[i].ModuleName
+                                 : file.Path;
+        collectProcMacros(tokens[i], diags, macroPackage.Macros, src.Module);
+        stampText(src.Module, macroStamp);
+        src.Text = liftProcMacros(tokens[i], file.Buffer, file.StartOffset,
+                                  macroStamp);
+        macroSources.push_back(std::move(src));
+      }
+    });
+    // A macro declared wrongly — twice, or not `pub` — leaves a package
+    // that cannot be built.
+    if (diags.errorCount() != errorsBefore) {
+      diags.statusFail("Build failed.");
+      return 1;
+    }
+    if (macroPackage.Macros.empty()) {
+      for (size_t i : macroFiles)
+        if (!units[i].FromLibrary)
+          diags.warn(SourceRange(), "'{}' says it is a macro package but "
+                                    "declares no macros",
+                     sm.file(units[i].FileID).Name)
+              .note("a macro is a `pub fn` marked `#macro`");
+    } else {
       bool built = false;
       timer.phase("macro package", [&] {
-        built = buildMacroPackageImpl(sm, diags, opts, units, tokens,
-                                      macroFiles, macroPackage);
+        built = buildMacroPackage(diags, opts, macroSources, macroStamp,
+                                  macroPackage);
       });
       if (!built) {
         diags.statusFail("Build failed.");
         return 1;
       }
+    }
+    if (!macroFiles.empty()) {
       // Take them out of this compilation, innermost first so the indices
       // that follow stay put.
       for (auto it = macroFiles.rbegin(); it != macroFiles.rend(); ++it) {
         units.erase(units.begin() + static_cast<long>(*it));
         tokens.erase(tokens.begin() + static_cast<long>(*it));
+        // A library's file was counted among the libraries, which come
+        // before the user's own modules.
+        if (*it < firstStdlibUnit) {
+          --firstStdlibUnit;
+          --firstUserModule;
+          libraryConfigs.erase(libraryConfigs.begin() + static_cast<long>(*it));
+        }
       }
       macroOrder.clear();
       for (size_t i = 0; i < units.size(); ++i)
@@ -1685,11 +1992,8 @@ int compileWithOptions(const CompilerOptions &given) {
 
   MacroTable macros;
   timer.phase("macros", [&] {
-    // A `@macro fn` in a file that is part of the program is a mistake: it
+    // A `#macro fn` in a file that is part of the program is a mistake: it
     // belongs in a macro package. Inside one, it is the whole point.
-    if (!opts.MacroPackage)
-      for (size_t i = firstUserModule; i < units.size(); ++i)
-        rejectProcMacros(tokens[i], diags);
     for (size_t i : macroOrder)
       collectMacros(tokens[i], diags, macros, /*record=*/true,
                     units[i].ModuleName);
@@ -1709,7 +2013,7 @@ int compileWithOptions(const CompilerOptions &given) {
       parsed[i]->IsStdlib = units[i].IsStdlib;
     });
   });
-  // `@Config` decides which declarations exist at all, and is answered here:
+  // `#Config` decides which declarations exist at all, and is answered here:
   // after parsing, because it is written as an expression, and before anything
   // is collected, so what it rules out is never named, never resolved and
   // never checked. A declaration for another platform may mention types and
@@ -1784,7 +2088,7 @@ int compileWithOptions(const CompilerOptions &given) {
   }
 
 
-  // `@type(...)` at the top of a file says what it produces. A file that
+  // `#type(...)` at the top of a file says what it produces. A file that
   // declares nothing and has a `main` is an executable, which is what the
   // driver already assumed; this makes it possible to say otherwise.
   {
@@ -1805,7 +2109,7 @@ int compileWithOptions(const CompilerOptions &given) {
           {"Asm", OutputKind::Assembly},
           {"LLVM", OutputKind::LLVMIR},
       };
-      // `@type(Macros)` says the file is a macro package, which the compiler
+      // `#type(Macros)` says the file is a macro package, which the compiler
       // has already acted on: those files were built and run before this
       // compilation began, and the package's own build treats them as
       // ordinary source. Either way there is nothing left to decide here.
@@ -1828,7 +2132,7 @@ int compileWithOptions(const CompilerOptions &given) {
     }
   }
 
-  // `@link` / `@linkpath` at the top of a file name what that file needs. They
+  // `#link` / `#linkpath` at the top of a file name what that file needs. They
   // are gathered here, after parsing, and joined with anything -l and -L asked
   // for; duplicates are dropped so a library named twice is passed once.
   {
@@ -2320,6 +2624,11 @@ int compileWithOptions(const CompilerOptions &given) {
     std::vector<std::pair<std::string, std::string>> units;
     for (size_t i = firstUserModule; i < modules.size(); ++i)
       units.emplace_back(modules[i]->Name, sm.file(modules[i]->FileID).Buffer);
+    // Its macro files too, which were never modules of the program: an
+    // importer builds them into its own macro package, so a library's
+    // macros are exported the way its functions are.
+    for (const auto &file : exportedMacroFiles)
+      units.push_back(file);
     bool ok = false;
     timer.phase("archive", [&] {
       ok = writeLibrary(outPath, objPath.string(), opts.ModuleName, units,

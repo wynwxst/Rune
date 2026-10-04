@@ -1,0 +1,21 @@
+// EXPECT: linked
+//
+// `#link` and `#linkpath` belong at the top of a file — unless a `#Config`
+// stands straight before them, which makes them a condition's: linked when
+// it holds, left out when it does not. A framework only macOS has, and a
+// library no build has, sit here side by side.
+import std::io
+
+fn helper() -> i64 { 1 }
+
+#Config(os == "macos")
+#link("CoreFoundation", type: framework)
+
+#Config(os == "no-such-os")
+#link("nosuchlibrary", type: static)
+#linkpath("/no/such/directory")
+
+fn main() -> i64 {
+    io::println(if helper() == 1 { "linked" } else { "not" })
+    0
+}

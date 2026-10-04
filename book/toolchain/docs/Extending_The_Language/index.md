@@ -37,7 +37,7 @@ a debugger.
 Both were added the same week, and they sit at opposite ends of how far a
 feature reaches:
 
-- **`@Config`** needed a phase of its own between parsing and checking, but no grammar: it is a decorator, and decorators already parse. See [Conditional compilation](../The_Compiler/conditional_compilation.md).
+- **`#Config`** needed a phase of its own between parsing and checking, but no grammar: it is a decorator, and decorators already parse. See [Conditional compilation](../The_Compiler/conditional_compilation.md).
 - **Inline assembly** needed nothing but two standard-library declarations and one case in the code generator, because the intrinsic mechanism already existed for it. See [Inline assembly](../The_Compiler/inline_assembly.md).
 
 Neither touched the lexer, the parser, the AST or the three tree helpers. That

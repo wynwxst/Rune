@@ -1,0 +1,112 @@
+// Reading C's numeric and character literals.
+
+/// Whether `text` — a preprocessing number — is a floating constant rather
+/// than an integer one.
+pub fn isFloatText(text: &String) -> bool {
+    let n = text.$length()
+    let hex = n > 1 && text.$byteAt(0) == 48 && (text.$byteAt(1) == 120 || text.$byteAt(1) == 88)
+    var i = 0
+    while i < n {
+        let c = text.$byteAt(i) as i64
+        if c == 46 { return true }
+        if !hex && (c == 101 || c == 69) { return true }
+        if hex && (c == 112 || c == 80) { return true }
+        i += 1
+    }
+    false
+}
+
+/// The value of an integer constant — decimal, `0x` hex, `0b` binary or
+/// leading-zero octal, with any `u`/`l` suffix — or nothing when `text` is
+/// not one.
+pub fn intValue(text: &String) -> i64? {
+    var s = text.$clone()
+    // Drop the suffix: any run of u, U, l, L at the end.
+    while s.$length() > 0 {
+        let c = s.$byteAt(s.$length() - 1) as i64
+        if c == 117 || c == 85 || c == 108 || c == 76 { s = s.$substring(0, s.$length() - 1) } else { break }
+    }
+    let n = s.$length()
+    if n == 0 { return nil }
+    var base = 10
+    var i = 0
+    if n > 1 && s.$byteAt(0) == 48 && (s.$byteAt(1) == 120 || s.$byteAt(1) == 88) { base = 16; i = 2 }
+    elif n > 1 && s.$byteAt(0) == 48 && (s.$byteAt(1) == 98 || s.$byteAt(1) == 66) { base = 2; i = 2 }
+    elif n > 1 && s.$byteAt(0) == 48 { base = 8; i = 1 }
+    if i >= n && base != 8 { return nil }
+    var v = 0
+    while i < n {
+        let c = s.$byteAt(i) as i64
+        var d = -1
+        if c >= 48 && c <= 57 { d = c - 48 }
+        elif c >= 97 && c <= 102 { d = c - 87 }
+        elif c >= 65 && c <= 70 { d = c - 55 }
+        elif c == 39 { i += 1; continue }        // C23 digit separator
+        if d < 0 || d >= base { return nil }
+        v = v.$wrappingMul(base).$wrappingAdd(d)
+        i += 1
+    }
+    Some(v)
+}
+
+/// Whether an integer constant's suffix makes it unsigned.
+pub fn isUnsignedText(text: &String) -> bool {
+    var i = text.$length() - 1
+    while i >= 0 {
+        let c = text.$byteAt(i) as i64
+        if c == 117 || c == 85 { return true }
+        if c != 108 && c != 76 { return false }
+        i -= 1
+    }
+    false
+}
+
+/// The value of a floating constant, suffix aside.
+pub fn floatValue(text: &String) -> f64 {
+    var s = text.$clone()
+    while s.$length() > 0 {
+        let c = s.$byteAt(s.$length() - 1) as i64
+        if c == 102 || c == 70 || c == 108 || c == 76 { s = s.$substring(0, s.$length() - 1) } else { break }
+    }
+    s.$toFloat() ?? 0.0
+}
+
+/// The value of a character constant: `'a'`, `'\n'`, `'\x41'`, `'\0'`.
+pub fn charValue(text: &String) -> i64 {
+    var s = text.$clone()
+    // Past any prefix to the opening quote.
+    var q = 0
+    while q < s.$length() && s.$byteAt(q) != 39 { q += 1 }
+    if q + 1 >= s.$length() { return 0 }
+    let c = s.$byteAt(q + 1) as i64
+    if c != 92 { return c }
+    if q + 2 >= s.$length() { return 0 }
+    let e = s.$byteAt(q + 2) as i64
+    if e == 110 { return 10 }
+    if e == 116 { return 9 }
+    if e == 114 { return 13 }
+    if e == 48 && (q + 3 >= s.$length() || s.$byteAt(q + 3) == 39) { return 0 }
+    if e == 97 { return 7 }
+    if e == 98 { return 8 }
+    if e == 102 { return 12 }
+    if e == 118 { return 11 }
+    if e == 120 {
+        let hex = "0x" + s.$substring(q + 3, s.$length() - 1)
+        return intValue(&hex) ?? 0
+    }
+    if e >= 48 && e <= 55 {
+        let oct = "0" + s.$substring(q + 2, s.$length() - 1)
+        return intValue(&oct) ?? 0
+    }
+    e
+}
+
+/// The bytes a string literal stands for, quotes and prefix gone and
+/// escapes decoded — as Rune source would write them again, so `"` and `\`
+/// stay escaped.
+pub fn stringBody(text: &String) -> String {
+    var q = 0
+    while q < text.$length() && text.$byteAt(q) != 34 { q += 1 }
+    if q + 1 >= text.$length() { return "" }
+    text.$substring(q + 1, text.$length() - 1)
+}

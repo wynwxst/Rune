@@ -15,7 +15,7 @@ pub struct Info {
 }
 
 /// The structure at `address`, copied out.
-@safe("the loader put the structure at this address before the kernel ran")
+#safe("the loader put the structure at this address before the kernel ran")
 pub fn read(address: u32) -> Info {
     let p = unsafe { address as usize as *var Info }
     unsafe { p[0] }
@@ -25,14 +25,14 @@ pub fn hasMemory(info: &Info) -> bool { (info.flags & 1) != 0 }
 pub fn hasCommandLine(info: &Info) -> bool { (info.flags & 4) != 0 }
 
 /// The kernel's command line — QEMU's `-append` — or an empty string.
-@safe("the loader's command line is NUL-terminated")
+#safe("the loader's command line is NUL-terminated")
 pub fn commandLine(info: &Info) -> CString {
     if !hasCommandLine(info) || info.cmdline == 0 { return "" }
     unsafe { info.cmdline as usize as *var u8 as CString }
 }
 
 /// Whether `word` appears in `text`.
-@safe("both strings are read up to their NUL and no further")
+#safe("both strings are read up to their NUL and no further")
 pub fn contains(text: CString, word: CString) -> bool {
     let t = unsafe { text as *u8 }
     let w = unsafe { word as *u8 }

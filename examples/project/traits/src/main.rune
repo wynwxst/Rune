@@ -34,7 +34,7 @@ mark Animal {
     fn name(&self) -> CString
     fn noise(&self) -> CString
     
-    @safe("Type checked")
+    #safe("Type checked")
     fn speak(&self){
         printf("%s said %s\n",self.name(),self.noise())
     }
@@ -59,13 +59,13 @@ bind Animal to Sheep {
         }
     }
 
-    @safe("Type Checked")
+    #safe("Type Checked")
     fn speak(&self){
         printf("Sheep go: %s\n",self.noise())
     }
 }
 
-@safe("Type Checking")
+#safe("Type Checking")
 fn main() -> i64 {
     io::println("Hello from traits!")
     io::println(OR::checked_division(2,5).unwrap())

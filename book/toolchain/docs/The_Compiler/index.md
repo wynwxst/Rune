@@ -6,7 +6,7 @@ runs, everything it could need has already been decided.
 
 ```
   ┌────────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌────────┐  ┌──────┐  ┌───────┐
-  │ Source │─►│Lexer │─►│Macros│─►│Parser│─►│ @Config│─►│ Sema │─►│CodeGen│
+  │ Source │─►│Lexer │─►│Macros│─►│Parser│─►│ #Config│─►│ Sema │─►│CodeGen│
   └────────┘  └──────┘  └──────┘  └──────┘  └────────┘  └──────┘  └───────┘
     bytes      tokens    tokens     AST       AST, this   typed      IR
                          rewritten            build's       AST       │

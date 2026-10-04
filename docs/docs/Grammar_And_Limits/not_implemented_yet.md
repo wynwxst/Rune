@@ -4,10 +4,9 @@ Stated plainly, because a reference that hides its edges wastes your time.
 
 | Area | Where it stops |
 | --- | --- |
-| packages | `{ path = ... }` only — no registry, no version resolution |
 | collections | arrays, slices, `Vector`, `Map` and `Set`; no ordered map, and no persistent collections |
-| concurrency | threads, channels, atomics, `Send`, `Sync`, `Arc` and `Mutex` on pthreads platforms; tasks with `async fn` and `.await` on one thread; no `select`, no cancellation, a thread entry is a `fn` rather than a closure, and the Windows thread backing still faults when a handle is destroyed and another thread spawned |
-| generics | monomorphised; no higher-kinded parameters, and no specialisation — a more specific implementation cannot displace a general one |
+| concurrency | threads, channels, atomics, `Send`, `Sync`, `Arc` and `Mutex` on pthreads platforms; tasks with `async fn` and `.await`, cancellation, timeouts and `task::first` to race them, on one executor thread with blocking work handed to others; a thread entry is a `@cfunction` rather than a closure, and the Windows thread backing still faults when a handle is destroyed and another thread spawned |
+| generics | monomorphised, and a narrower `bind` displaces a general one (see **Specialisation**); no higher-kinded parameters and no constant generics |
 | marks | associated types, their bounds and `where` clauses are all checked; a mark still cannot require an operator on an associated type of another mark |
 | leaks | at `--safety full` a class that can reach itself strongly is refused, so reference cycles cannot be built; the rule reads types rather than objects, so it also refuses shapes that would not have looped, and it cannot see a closure's captures |
 | closures | captures are copied into a heap environment when the closure is made; `move` says so explicitly, and a class is how you share one value instead |

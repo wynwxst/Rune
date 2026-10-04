@@ -126,6 +126,7 @@
  "Pattern_Matching": [
   "every_kind_of_pattern.md",
   "slice_and_array_patterns.md",
+  "bindings_borrow_take_moves.md",
   "bindings_in_alternatives.md",
   "exhaustiveness.md",
   "matching_through_a_borrow.md",
@@ -297,6 +298,7 @@
   "views_which_fields_a_method_touches.md",
   "internal_references.md",
   "the_standard_library_runs_on_it.md",
+  "changing_a_value_through_a_shared_borrow.md",
   "when_a_borrow_has_to_wait_for_run_time.md",
   "handles_instead_of_back_references.md",
   "threads_that_borrow_shared_data.md",
@@ -325,6 +327,7 @@
  "Calling_C": [
   "declaring_foreign_functions.md",
   "structs.md",
+  "convention_c.md",
   "pointers_and_out_parameters.md",
   "callbacks.md",
   "strings_across_the_boundary.md",
@@ -332,6 +335,7 @@
   "wrapping_a_descriptor.md",
   "linking.md",
   "packaging_a_c_half.md",
+  "bindings_from_a_header_rune_ffi.md",
   "being_called_from_c.md",
   "c_plus_plus_is_its_own_block.md"
  ],
@@ -410,7 +414,11 @@
   "the_macros_the_standard_library_provides.md",
   "what_is_reported.md",
   "when_a_pattern_is_not_enough.md",
+  "declaring_a_macro_anywhere.md",
+  "macros_a_library_exports.md",
+  "when_the_package_is_built_again.md",
   "what_a_macro_is_given.md",
+  "taking_input_apart_by_a_pattern.md",
   "what_is_reported_for_these.md"
  ],
  "Reading_A_Diagnostic": [
@@ -424,6 +432,7 @@
   "what_ends_up_in_the_artefact.md",
   "debug_builds.md",
   "rune.md",
+  "editor_support.md",
   "how_a_build_decides_what_to_do.md",
   "producing_something_other_than_a_program.md",
   "package_layout.md",
@@ -435,6 +444,8 @@
   "making_a_package.md",
   "what_a_version_promises.md",
   "using_a_package.md",
+  "local_units.md",
+  "workspaces.md",
   "which_registry.md",
   "making_a_registry.md",
   "releasing_a_new_version.md",
@@ -493,6 +504,7 @@
   "the_hooks.md",
   "safety_on_bare_metal.md",
   "what_the_freestanding_runtime_provides.md",
+  "a_minimal_runtime.md",
   "starting_without_main.md",
   "weak.md",
   "bare_metal_targets.md",

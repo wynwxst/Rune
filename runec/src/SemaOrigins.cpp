@@ -273,13 +273,13 @@ void Sema::resolveSignatureAnnotations(FunctionDecl *fn) {
   OriginContext ctx;
   ctx.Params = &fn->Params;
 
-  // `@zombie` without a reason: accepted, but the reason is the point.
+  // `#zombie` without a reason: accepted, but the reason is the point.
   if (fn->IsZombieTrusted && fn->ZombieReason.empty()) {
     if (const Attribute *a = fn->findAttr("zombie")) {
-      auto d = Diags.error(a->Range, "@zombie needs a reason, the way @safe "
+      auto d = Diags.error(a->Range, "#zombie needs a reason, the way #safe "
                                      "does");
       d.note("the borrow checker takes this body on trust; say why that is "
-             "sound — `@zombie(\"the task is joined before scope returns\")`");
+             "sound — `#zombie(\"the task is joined before scope returns\")`");
       d.code(294);
     }
   }

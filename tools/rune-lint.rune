@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 // The Rune linter.
 //
 //     rune-lint [options] [path...]

@@ -10,11 +10,14 @@ A growable array, and the worked example for everything above: every unsafe oper
 | `at` | `(&self, index: i64) -> T?` | the element, or nothing |
 | `get` | `(&self, index: i64) -> T` | the element; **aborts** if absent |
 | `last` | `(&self) -> T?` | the final element |
+| `peekFirst` / `peekLast` | `(&self) -> (&T from self)?` | the first or last element borrowed rather than copied |
 | `push` | `(&var self, value: T)` | appends, growing if needed |
 | `pop` | `(&var self) -> T?` | removes and returns the last |
 | `set` | `(&var self, index: i64, value: T) -> bool` | replaces; false if out of range |
 | `clear` | `(&var self)` | drops every element, keeps the storage |
 | `reserve` | `(&var self, wanted: i64)` | room for `wanted` |
+| `tryReserve` | `(&var self, wanted: i64) -> bool` | the same, or `false` and the vector untouched when there is no memory — for a kernel, where that is to be handled, not died of |
+| `tryPush` | `(&var self, value: T) -> Result<(), T>` | appends, or hands `value` back as `Err` when there is no memory |
 | `asSlice` | `(&self) -> [T]` | every element as a slice over the vector's own storage — no copy |
 | `v[i]` / `v[i] = x` |  | the direct forms — **abort** out of range, where `at` and `set` answer |
 | `from` | `<T>(values: [T]) -> Vector<T>` | builds one from an array or slice — every element is copied, so `T` must be copyable |

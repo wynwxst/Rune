@@ -90,6 +90,10 @@ pub class Lexed {
     }
 
     /// True when token `i` is the punctuation or keyword `what`.
+    /// Whether token `i` begins a decorator: `#name`, the compiler's own, or
+    /// `@name`, one the program declares.
+    pub fn isSigil(&self, i: i64) -> bool { self.isText(i, "#") || self.isText(i, "@") }
+
     pub fn isText(&self, i: i64, what: &String) -> bool {
         if i < 0 || i >= self.tokens.length() { return false }
         let t = self.tokens.look(i)

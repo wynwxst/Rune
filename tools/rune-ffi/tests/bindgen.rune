@@ -1,0 +1,65 @@
+// The generator itself: what it writes for a header given as text, and
+// what the options change.
+import std::testing
+import std::collections::vector
+import interface
+
+fn has(source: &String, line: String) -> bool { source.$find(line) >= 0 }
+
+fn generate(b: &interface::Builder) -> String {
+    match b.generate() {
+        Ok(out) => out.source.$clone(),
+        Err(why) => { testing::unreachable("generate: " + why); "" },
+    }
+}
+
+fn main() -> i64 {
+    let header = """
+#include <stddef.h>
+typedef struct widget widget;
+typedef void (*on_change)(widget *w, int value);
+struct options { const char *title; size_t width; on_change notify; };
+enum mood { MOOD_CALM = 1, MOOD_LOUD = 1 << 3 };
+#define WIDGET_LIMIT 64
+widget *widget_new(const struct options *opts);
+void widget_free(widget *w);
+int widget_count(void);
+int internal_helper(int);
+extern int widget_debug;
+"""
+    var b = interface::Builder()
+    b.headerText("widget.h", header.$clone())
+    let all = generate(&b)
+    testing::isTrue("an opaque struct", has(&all, "pub struct widget {}"))
+    testing::isTrue("a callback typedef", has(&all, "pub type on_change = @cfunction(*var widget, i32)"))
+    testing::isTrue("a struct with defaults", has(&all, "pub width: usize = 0"))
+    testing::isTrue("const char * as CString in a signature", has(&all, "fn widget_new(opts: *options) -> *var widget"))
+    testing::isTrue("a function with no parameters", has(&all, "fn widget_count() -> i32"))
+    testing::isTrue("an extern variable", has(&all, "var widget_debug: i32"))
+    testing::isTrue("enum constants", has(&all, "pub global MOOD_LOUD: mood = 8"))
+    testing::isTrue("a #define", has(&all, "pub global WIDGET_LIMIT: i32 = 64"))
+    testing::isTrue("system headers left out", !has(&all, "max_align_t"))
+
+    var only = interface::Builder()
+    only.headerText("widget.h", header.$clone())
+    only.allowFunction("widget_*")
+    only.block("widget_free")
+    let some = generate(&only)
+    testing::isTrue("allowlisted function kept", has(&some, "fn widget_new("))
+    testing::isTrue("not allowlisted left out", !has(&some, "internal_helper"))
+    testing::isTrue("blocklisted left out", !has(&some, "widget_free"))
+
+    var styled = interface::Builder()
+    styled.headerText("widget.h", header.$clone())
+    styled.options.enumStyle = "rune"
+    let rune = generate(&styled)
+    testing::isTrue("enum style rune", has(&rune, "pub enum mood {"))
+
+    var broken = interface::Builder()
+    broken.headerText("broken.h", "#include <no/such/header.h>\n")
+    match broken.generate() {
+        Ok(out) => testing::unreachable("a missing header should fail"),
+        Err(why) => testing::isTrue("a missing header is reported", has(&why, "no/such/header.h")),
+    }
+    testing::summary()
+}

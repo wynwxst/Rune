@@ -9,17 +9,17 @@ import std::io
 
 struct Handle {
     pub id: i64,
-    @Config(os == "windows")
+    #Config(os == "windows")
     pub winHandle: i64,
-    @Config(family == "unix")
+    #Config(family == "unix")
     pub fd: i64,
 }
 
 extend Handle {
-    @Config(family == "unix")
+    #Config(family == "unix")
     pub fn describe(&self) -> String { "fd " + self.fd.$str() }
 
-    @Config(os == "windows")
+    #Config(os == "windows")
     pub fn describe(&self) -> String { "handle " + self.winHandle.$str() }
 }
 

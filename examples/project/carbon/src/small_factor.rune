@@ -1,11 +1,11 @@
-@type(Executable)
-@link("m")
+#type(Executable)
+#link("m")
 
 extern "C" {
     fn sqrt(num: f64) -> f64
 }
 // Returns the smallest factor of `n` > 1, and whether `n` itself is prime.
-@unsafe
+#unsafe
 fn SmallestFactor(n: i32) -> (i32, bool) {
   let limit: i32 = sqrt(num: n as f64) as i32;
   var i: i32 = 2;
@@ -26,7 +26,7 @@ fn SmallestFactor(n: i32) -> (i32, bool) {
   return (n, true)
 }
 
-@unsafe
+#unsafe
 fn main() -> i64 {
     let (val, res) = SmallestFactor(192940)
     if !res {

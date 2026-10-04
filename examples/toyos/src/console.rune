@@ -48,7 +48,7 @@ pub fn init() {
     cpu::outb(com1 + 4, 11)     // ready
 }
 
-@safe("the index is inside the 80x25 buffer; every caller keeps it there")
+#safe("the index is inside the 80x25 buffer; every caller keeps it there")
 fn writeCell(index: i64, ch: u8) {
     unsafe { screen()[index] = (colour << 8) | (ch as u16) }
 }
@@ -92,7 +92,7 @@ pub fn putByte(ch: u8) {
 }
 
 /// A NUL-terminated string, to both.
-@safe("a CString ends at its NUL, and nothing past it is read")
+#safe("a CString ends at its NUL, and nothing past it is read")
 pub fn print(text: CString) {
     let bytes = unsafe { text as *u8 }
     var i: i64 = 0

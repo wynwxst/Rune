@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 struct Circle {
     var r: f32
 }

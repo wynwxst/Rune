@@ -2487,7 +2487,7 @@ int commandInstalled(const std::vector<std::string> &args, bool verbose) {
 //===----------------------------------------------------------------------===//
 
 /// A `--config` value as TOML: a number or a boolean as written, anything
-/// else quoted. `@Config` compares the text either way; this keeps the
+/// else quoted. `#Config` compares the text either way; this keeps the
 /// manifest reading the way somebody would have typed it.
 std::string tomlConfigValue(const std::string &v) {
   if (v == "true" || v == "false")

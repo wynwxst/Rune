@@ -163,7 +163,7 @@ CodeGen::CxxArg CodeGen::classifyCxxArgument(Type *t, unsigned &intRegs,
       return out;
     }
     // An enum with payloads is a tag and a union to C — what
-    // `@Convention("C")` promises, and how C classifies it.
+    // `#Convention("C")` promises, and how C classifies it.
     if (ClassifyingForC)
       break;
     return reject("a Rune enum with payloads is laid out Rune's way",
@@ -598,9 +598,9 @@ Value *CodeGen::emitCxxAlloc(CallExpr *c, Type *arg) {
   if (nd && nd->Cxx && nd->Cxx->IsClass) {
     size = nd->Cxx->Size;
     if (!size) {
-      Diags.error(c->Range, "'{}' has no `@size`, so nothing can allocate one",
+      Diags.error(c->Range, "'{}' has no `#size`, so nothing can allocate one",
                   t->toString())
-          .note("write `@size(N)` above its declaration, with `N` from "
+          .note("write `#size(N)` above its declaration, with `N` from "
                 "`sizeof` on the C++ side — or take instances from a "
                 "function that creates them")
           .code(527);

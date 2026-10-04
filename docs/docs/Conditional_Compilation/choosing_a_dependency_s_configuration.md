@@ -13,7 +13,7 @@ gfx = { path = "../gfx", config = { backend = "metal", tracing = true } }
 $ rune add gfx --config backend=vulkan
 ```
 
-The values a dependency was built with travel with it. A compiled `.rul` records them, and its interface is re-read with the answers *it* was built under — so a library's own `@Config` can never be re-decided by whoever imports it.
+The values a dependency was built with travel with it. A compiled `.rul` records them, and its interface is re-read with the answers *it* was built under — so a library's own `#Config` can never be re-decided by whoever imports it.
 
 | Situation | What happens |
 | --- | --- |
@@ -25,4 +25,4 @@ The values a dependency was built with travel with it. A compiled `.rul` records
 > [!NOTE]
 > **One mechanism, two spellings**
 >
-> A value key and a bare name are the same mechanism. `--cfg tracing` sets `tracing` with no value, which `@Config(tracing)` answers true and `@Config(tracing = false)` answers false.
+> A value key and a bare name are the same mechanism. `--cfg tracing` sets `tracing` with no value, which `#Config(tracing)` answers true and `#Config(tracing = false)` answers false.

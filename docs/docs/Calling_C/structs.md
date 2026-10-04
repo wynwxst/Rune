@@ -35,7 +35,7 @@ fn main() -> i64 {
 >
 > A struct, tuple or array passed to C by value, or returned from it, travels the way the platform's C compiler passes one: in registers, packed into them, or in memory, by the same rules the C++ interop follows. So does a call through a `@cfunction`, and a Rune function handed to C as one takes its arguments that way too. A pointer is still the cheaper way to hand over anything large.
 
-> [!WARNING]
-> **An export on Windows x64**
+> [!NOTE]
+> **Being called with a struct**
 >
-> A Rune function `@export`ed to C still takes its arguments as Rune passes them. On Windows x64 that differs from C for a struct that is not 1, 2, 4 or 8 bytes wide, and such a signature is refused with an error saying so; pass a pointer instead.
+> A Rune function `#export`ed to C takes its arguments the C way too: where C passes a signature differently from Rune — a struct by value — the exported symbol is an adapter that receives them as C sends them and makes the Rune call.

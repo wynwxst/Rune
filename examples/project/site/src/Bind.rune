@@ -3,7 +3,7 @@
 // Make easier llvm-ir target
 // Make Byte alias'd to u8
 // Fix namespace
-// Add @as
+// Add #as
 // Add support for extend deinit for structs/enums/traits
 // Allow enums/variables to have same name, means enums must be referred to explicitly
 import site::config::{Config}
@@ -132,7 +132,7 @@ extern "C" {
     fn setsockopt(fd: i32, set: i32, opt: SocketOption, flag: *var u8, flag_size: socklen_t) -> i32
 
     /*int     bind(int, const struct sockaddr *, socklen_t) __DARWIN_ALIAS(bind);*/
-    @alias("cbind")
+    #alias("cbind")
     fn bind(fd: i32, addr: *var SocketAddress, len: socklen_t) -> i32
     fn listen(fd: i32, count: i32) -> i32
 
@@ -144,8 +144,8 @@ extern "C" {
     fn close(fd: i32) -> i32
 }
 
-@Doc("Wrapper around perror, prints only if `config.debug` is `true`")
-@safe("Purely wrapper to print errors")
+#Doc("Wrapper around perror, prints only if `config.debug` is `true`")
+#safe("Purely wrapper to print errors")
 pub fn Perror(value: CString,cfg: Config) {
     if cfg.debug {
         perror(value)
@@ -155,16 +155,16 @@ pub fn Perror(value: CString,cfg: Config) {
 
 /// Struct containing filedescriptor.
 ///
-/// The descriptor is a `@resource`: `deinit` has to hand it back, and the
+/// The descriptor is a `#resource`: `deinit` has to hand it back, and the
 /// compiler says so at `safety = "full"` if it does not. So a `Bound` closes
 /// itself when the binding holding it goes out of scope, and passing one on
 /// hands it over rather than making a second owner of the same descriptor.
 pub struct Bound {
-    @resource server_fd: i32 = -1
+    #resource server_fd: i32 = -1
 }
 
 extend Bound {
-    @safe("Closing server fd if valid")
+    #safe("Closing server fd if valid")
     fn deinit(&var self){
         if (self.server_fd >= 0){
             close(self.server_fd)
@@ -183,7 +183,7 @@ pub enum BindError {
     FailedBind
 }
 
-@Doc("""
+#Doc("""
 Binds an address based on configuration. Example usage **after** setting configuration would look like:
 ```rune
 import site
@@ -193,7 +193,7 @@ site::Bind::bindToAddress(cfg: config)
 
 Note that this needs to be paired with `Listen` as well
 """)
-@safe("")
+#safe("")
 pub fn bindToAddress(cfg: Config) -> Result<Bound,BindError> {
     var reuse = 1i32
     if cfg.port == 0 && cfg.address.$length() == 0 {
@@ -244,8 +244,8 @@ pub fn bindToAddress(cfg: Config) -> Result<Bound,BindError> {
     bound
 }
 
-@Doc("Simple wrapper over the C function `listen`")
-@safe("listen is verified to be valid")
+#Doc("Simple wrapper over the C function `listen`")
+#safe("listen is verified to be valid")
 // `bound` is borrowed rather than taken: the caller goes on owning the
 // descriptor, and only one thing may own it.
 pub fn Listen(bound: &Bound, cfg: Config) -> bool {

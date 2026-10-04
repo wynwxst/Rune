@@ -1,14 +1,14 @@
 # Code generation decorators
 
-**@inline and @noinline**
+**#inline and #noinline**
 
 ```rune
 import std::io
 
-@inline
+#inline
 fn square(n: i64) -> i64 { n * n }
 
-@noinline
+#noinline
 fn shout(text: String) { io::println(text + "!") }
 
 fn main() -> i64 {

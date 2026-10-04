@@ -121,10 +121,10 @@ fn written() {
 // 4. Refusing it outright
 //===--------------------------------------------------------------------===//
 //
-// `@never(mem::Clone)` says no whatever the parts say — for a type whose
+// `#never(mem::Clone)` says no whatever the parts say — for a type whose
 // identity is the point, such as a ticket that must not be duplicated.
 
-@never(mem::Clone)
+#never(mem::Clone)
 struct Ticket { serial: i64 }
 
 fn refused() {

@@ -97,6 +97,10 @@ enum class AssignOp : uint8_t {
 };
 
 const char *binaryOpSpelling(BinaryOp op);
+/// True for a decorator the compiler provides, written `#name`: `#inline`,
+/// `#safe`, `#Config` and the rest. Anything else is one the program
+/// declared, written `@name`.
+bool isBuiltinDecoratorName(const std::string &name);
 const char *unaryOpSpelling(UnaryOp op);
 const char *assignOpSpelling(AssignOp op);
 /// Mark method that overloads `op`, e.g. BinaryOp::Add -> "add".
@@ -190,6 +194,9 @@ using PatternPtr = std::unique_ptr<Pattern>;
 /// A `@name(args)` decorator.
 struct Attribute {
   std::string Name;
+  /// Written `#name` — the compiler's own — rather than `@name`, which is a
+  /// decorator the program declared.
+  bool Builtin = false;
   std::vector<ExprPtr> Args;
   SourceRange Range;
   /// Resolved user-defined decorator function, if this is not a builtin.
@@ -933,8 +940,8 @@ struct Decl : Node {
   std::string ModulePath;
   /// The enclosing type for methods, null for free declarations.
   Decl *Parent = nullptr;
-  /// Prose attached to this declaration: the text of `@Doc("...")`, or the
-  /// `///` comment above it when there is no `@Doc`. Recorded at compile time
+  /// Prose attached to this declaration: the text of `#Doc("...")`, or the
+  /// `///` comment above it when there is no `#Doc`. Recorded at compile time
   /// rather than run, so documentation can be generated for a library that is
   /// never executed.
   std::string Doc;
@@ -953,7 +960,7 @@ struct Decl : Node {
 /// Anything that can be referenced as a value (functions, variables, params).
 struct ValueDecl : Decl {
   Type *Ty = nullptr;
-  /// The symbol the linker sees, when it differs from `Name`. Set by `@as`,
+  /// The symbol the linker sees, when it differs from `Name`. Set by `#as`,
   /// which renames a foreign declaration for Rune's side only: the C library
   /// still exports `bind`, and this file calls it `cbind`.
   std::string LinkName;
@@ -1020,10 +1027,10 @@ struct FunctionDecl : ValueDecl {
   std::unique_ptr<BlockExpr> Body;   ///< null for extern and mark requirements
 
   FunctionFlavour Flavour = FunctionFlavour::Free;
-  bool IsUnsafe = false;             ///< carries @unsafe
-  bool IsSafeJustified = false;      ///< carries @safe("...")
+  bool IsUnsafe = false;             ///< carries #unsafe
+  bool IsSafeJustified = false;      ///< carries #safe("...")
   std::string SafetyReason;
-  /// `@zombie("reason")`: the borrow checker does not read this body. Its
+  /// `#zombie("reason")`: the borrow checker does not read this body. Its
   /// signature — `from` clauses and views — is still the contract callers
   /// are checked against.
   bool IsZombieTrusted = false;
@@ -1036,7 +1043,7 @@ struct FunctionDecl : ValueDecl {
   /// For an `extern "C++"` free function: the namespaces it was declared in,
   /// outermost first. A method's scope is its owning type's.
   std::vector<std::string> CxxScope;
-  /// `@operator("new")` on an `extern "C++"` member: the C++ operator this
+  /// `#operator("new")` on an `extern "C++"` member: the C++ operator this
   /// declares, spelled as C++ spells it after the keyword.
   std::string CxxOperator;
   bool IsVariadic = false;
@@ -1112,15 +1119,15 @@ enum class LangItem : uint8_t { NotSpecial, Option, Result };
 /// What a type declared inside `extern "C++"` knows about its other half.
 ///
 /// A `struct` there is a C++ struct Rune lays out identically and may hold by
-/// value; a `class` is opaque — its size is `@size(N)` or unknown — and only
+/// value; a `class` is opaque — its size is `#size(N)` or unknown — and only
 /// ever reached through a pointer. `Scope` is the C++ path the name lives
 /// under (namespaces, then enclosing classes), which is what its mangled
 /// symbols are built from; Rune's own scope stays flat.
 struct CxxDeclInfo {
   std::vector<std::string> Scope;
   bool IsClass = false;
-  uint64_t Size = 0;           ///< `@size(N)`, or 0 when not given
-  unsigned Align = 0;          ///< `@align(N)`, or 0 for the default
+  uint64_t Size = 0;           ///< `#size(N)`, or 0 when not given
+  unsigned Align = 0;          ///< `#align(N)`, or 0 for the default
   /// `class Derived : Base` — a pointer to the derived class converts to one
   /// to the base, and the base's methods are reachable through it. Single,
   /// non-virtual inheritance only: `this` is the same address for both.
@@ -1229,9 +1236,9 @@ struct MarkDecl : NominalDecl {
   std::vector<MarkDecl *> Supers;
   /// `type Item` — every binding has to say what it is.
   std::vector<std::unique_ptr<AssociatedTypeDecl>> AssociatedTypes;
-  /// `@auto`: a mark nobody implements. It asks nothing of a type, so the
+  /// `#auto`: a mark nobody implements. It asks nothing of a type, so the
   /// compiler answers for it — a type has it when every part has it — and a
-  /// `bind` or a `@never` says otherwise where the structure cannot.
+  /// `bind` or a `#never` says otherwise where the structure cannot.
   bool IsAuto = false;
   MarkDecl() : NominalDecl(NodeKind::Mark) {}
 };
@@ -1332,18 +1339,26 @@ struct Module {
   bool FromLibrary = false;
   /// Set once Sema has run over this module.
   bool Checked = false;
-  /// `@link("m")` and `@linkpath("/usr/local/lib")` at the top of the file:
+  /// `#link("m")` and `#linkpath("/usr/local/lib")` at the top of the file:
   /// native libraries and search paths this module needs.
   std::vector<std::string> LinkLibraries;
   std::vector<std::string> LinkPaths;
+  /// `#Config(...)` and then `#link` or `#linkpath`, anywhere in the file:
+  /// what they name joins the lists above when every condition holds.
+  struct ConditionalLink {
+    std::vector<Attribute> Conditions;
+    std::vector<std::string> Libraries;
+    std::vector<std::string> Paths;
+  };
+  std::vector<ConditionalLink> ConditionalLinks;
   /// Other names this module answers to, so one implementation can live at
   /// more than one path.
   std::vector<std::string> Aliases;
-  /// `@type(Library)` — what this file produces. Empty when it did not say,
+  /// `#type(Library)` — what this file produces. Empty when it did not say,
   /// in which case a `main` makes it an executable.
   std::string DeclaredOutput;
   SourceRange DeclaredOutputRange;
-  /// `@runtime(none)` and `@entry(none)` — what the program has around it.
+  /// `#runtime(none)` and `#entry(none)` — what the program has around it.
   /// Empty when the file did not say.
   std::string RuntimeDirective;
   SourceRange RuntimeDirectiveRange;
@@ -1476,8 +1491,8 @@ template <> inline bool isa<ValueDecl>(const Node *n) {
 }
 /// The symbol a function answers to when it provides something the generated
 /// code relies on — the freestanding runtime's hooks, which a bare-metal
-/// program supplies itself: `@panicHandler`, `@allocator`, `@deallocator`,
-/// `@output`.
+/// program supplies itself: `#panicHandler`, `#allocator`, `#deallocator`,
+/// `#output`.
 /// Null for any other function.
 inline const char *langItemSymbol(const FunctionDecl *fn) {
   if (!fn)
@@ -1494,7 +1509,7 @@ inline const char *langItemSymbol(const FunctionDecl *fn) {
 }
 
 /// True when a function is reached from outside by a symbol name of its own:
-/// `@export`, or one of the hooks above.
+/// `#export`, or one of the hooks above.
 inline bool isExportedFunction(const FunctionDecl *fn) {
   return fn && (fn->hasAttr("export") || langItemSymbol(fn));
 }

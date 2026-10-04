@@ -1,10 +1,10 @@
-@runtime(none)
-@entry(none)
+#runtime(none)
+#entry(none)
 // toyos: a small operating system kernel in Rune.
 //
-// `@runtime(none)` builds it freestanding: no C library, no hosted runtime,
+// `#runtime(none)` builds it freestanding: no C library, no hosted runtime,
 // just this code and the Rune-written runtime the compiler brings along.
-// `@entry(none)` says it has no `main` — boot/boot.s calls `kernel_main`.
+// `#entry(none)` says it has no `main` — boot/boot.s calls `kernel_main`.
 //
 // It boots, looks at what the loader handed it, runs a handful of checks of
 // the machine and of itself, and switches the machine off — QEMU exits 0, or
@@ -27,7 +27,7 @@ extern "C" {
     fn rune_init()
 }
 
-@export("kernel_main")
+#export("kernel_main")
 fn kernelMain(magic: u32, infoAddress: u32) -> Never {
     unsafe { rune_init() }
     console::init()
@@ -123,7 +123,7 @@ fn theHeap() {
 
 /// The standard library's containers, on the kernel heap. They allocate
 /// through `std::mem`, which the freestanding runtime answers from the
-/// kernel's own `@allocator` — growing a vector copies it into a bigger
+/// kernel's own `#allocator` — growing a vector copies it into a bigger
 /// block, by the size the runtime keeps in front of each one.
 fn theStandardLibrary() {
     {
@@ -164,7 +164,7 @@ fn theStandardLibrary() {
 
 /// `String`, `+`, interpolation and `std::fmt`, on bare metal: the
 /// freestanding runtime makes them over the kernel heap, and `io::println`
-/// writes through `@output` — the console, below.
+/// writes through `#output` — the console, below.
 fn text() {
     let name: String = "toyos"
     let pi = 3.14159
@@ -177,12 +177,12 @@ fn text() {
     let negative: String = "-17"
     console::check((half.$toFloat() ?? 0.0) == 2.5 && (negative.$toInt() ?? 0) == -17,
                    "and read back")
-    println!("       println!, through @output: {greeting}")
+    println!("       println!, through #output: {greeting}")
 }
 
 /// Where `io::println` goes: the console, as the kernel's own printing does.
-@output
-@safe("writes the bytes the caller says it has")
+#output
+#safe("writes the bytes the caller says it has")
 fn consoleOutput(bytes: *u8, count: usize) {
     var i: usize = 0
     while i < count {
@@ -218,7 +218,7 @@ fn scheduling() {
 /// division by zero, an empty `Option` unwrapped. It says what and where on
 /// both outputs, then ends the run with status 1 — which QEMU's debug-exit
 /// device turns into its own exit status, 3.
-@panicHandler
+#panicHandler
 fn panicked(message: CString, location: CString) -> Never {
     console::line("")
     console::setColour(console::Colour::Bad)

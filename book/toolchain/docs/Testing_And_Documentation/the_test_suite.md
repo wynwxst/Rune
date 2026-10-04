@@ -31,7 +31,7 @@ fn main() -> i64 {
 | `// EXPECT-ERROR: <substring>` | Compilation must fail with this in the message (a regex — parenthesise nothing you mean literally) |
 | `// SAFETY: <level>` | Compile at this safety level |
 | `// FLAGS: <args...>` | Extra `runec` flags for this case — `--no-overflow-checks`, `-O2` |
-| `// LIB: <module> <path>` | Build `<path>` into `<module>.rul` first, and hand it over with `-I` |
+| `// LIB: <module> <path>...` | Build the `<path>`s into `<module>.rul` first, and hand it over with `-I`; several paths make one library of several files — a `#type(Macros)` file beside its code, say |
 
 `// LIB:` is how library-boundary behaviour is tested. The source lives under
 `cases/lib/` so the glob — which only looks at the top level — does not pick it

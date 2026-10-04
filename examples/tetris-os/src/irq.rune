@@ -13,7 +13,7 @@ fn ignore(regs: *var isr::Registers) {}
 
 global var handlers: [16:@cfunction(*var isr::Registers) -> ()] = [ignore; 16]
 
-@safe("reads the frame the stub pushed")
+#safe("reads the frame the stub pushed")
 fn stub(regs: *var isr::Registers) {
     let n = unsafe { regs[0].intNo } as i64
     if n >= 32 && n <= 47 {

@@ -194,6 +194,31 @@ Value *CodeGen::emitIndexAddress(IndexExpr *i) {
   return nullptr;
 }
 
+/// The call an overloaded `[]` makes — the element, or the borrow of it
+/// when the operator lends one.
+Value *CodeGen::emitIndexCall(IndexExpr *i) {
+  FunctionDecl *impl = i->OverloadResolved;
+  Function *f = declareFunction(impl);
+  Type *selfParam = nullptr, *idxParam = nullptr;
+  for (const Param &p : impl->Params) {
+    if (p.IsSelf) selfParam = p.Ty;
+    else if (!idxParam) idxParam = p.Ty;
+  }
+  Value *self = receiverFor(i->Base.get(), selfParam);
+  Value *idx = emitRValue(i->Index.get());
+  // A key taken by value is moved in, as any argument is.
+  const bool byValue = idxParam && !idxParam->is(TypeKind::Pointer);
+  if (zombie() && byValue)
+    takeOwnership(i->Index.get(), idx, i->Index->Ty);
+  if (idxParam) {
+    Value *coerced = coerce(idx, i->Index->Ty, idxParam);
+    if (zombie() && byValue && coerced != idx)
+      adopt(coerced);
+    idx = coerced;
+  }
+  return B->CreateCall(f, {self, idx});
+}
+
 Value *CodeGen::emitLValue(Expr *e) {
   if (!e)
     return nullptr;
@@ -258,6 +283,11 @@ Value *CodeGen::emitLValue(Expr *e) {
     // so it has no address either — materialise it below. Writing through one
     // does not come here; that is `index_set`, handled in emitAssign. A
     // character read out of a String is a value for the same reason.
+    // An operator that lends the element, though, hands back where it is,
+    // and that is its address: `&var b[0] as *var T` points into the buffer,
+    // not at a copy of what was there.
+    if (i->OverloadResolved && i->ReadsThrough)
+      return emitIndexCall(i);
     if (i->OverloadResolved || i->StringChar)
       break;
     return emitIndexAddress(i);
@@ -1063,7 +1093,7 @@ Value *CodeGen::emitBuiltinMethod(CallExpr *c) {
   }
 }
 
-/// A call to a `@suspend` function from inside an `async` body is a point
+/// A call to a `#suspend` function from inside an `async` body is a point
 /// where the task may be set aside — and so the point where a cancelled task
 /// leaves. The runtime is told the call is one, and asked afterwards whether
 /// the task is leaving; if it is, the body ends here the way `?` ends it:
@@ -1114,7 +1144,7 @@ Value *CodeGen::emitCallPlain(CallExpr *c) {
 
   auto *target = dyn_cast<FunctionDecl>(c->Target);
 
-  // `@intrinsic` functions have no body — the compiler answers them here, from
+  // `#intrinsic` functions have no body — the compiler answers them here, from
   // the layout it is already computing for the target machine.
   if (target && target->hasAttr("intrinsic")) {
     const Attribute *a = target->findAttr("intrinsic");
@@ -1346,7 +1376,7 @@ Value *CodeGen::emitCallPlain(CallExpr *c) {
     // --- std::arch -------------------------------------------------------
     // The one thing about a target that is not a fixed list: the triple
     // itself. Everything else `std::arch` offers is written in Rune, under
-    // `@Config`, because the compiler already answers those.
+    // `#Config`, because the compiler already answers those.
     if (which == "target_triple")
       return emitStringLiteral(M->getTargetTriple().str(), false);
 
@@ -2503,8 +2533,14 @@ Value *CodeGen::emitInto(IntoExpr *e) {
   for (const Param &p : impl->Params)
     if (p.IsSelf)
       selfParam = p.Ty;
+  // The conversion borrows its source when `self` is a pointer *to* it. A
+  // bind on a pointer type — `bind<T> *var T into *var u8` — takes the
+  // pointer itself, and its `self` is that pointer, not where it is kept.
+  Type *source = e->Operand->Ty;
+  bool selfIsSource = selfParam && source &&
+                      selfParam->canonical() == source->canonical();
   Value *self = selfParam && selfParam->is(TypeKind::Pointer) &&
-                        !handleBorrow(selfParam)
+                        !selfIsSource && !handleBorrow(selfParam)
                     ? emitLValue(e->Operand.get())
                     : emitRValue(e->Operand.get());
   if (!self)
@@ -2515,7 +2551,13 @@ Value *CodeGen::emitInto(IntoExpr *e) {
 Value *CodeGen::emitCast(CastExpr *c) {
   if (c->IsFunctionAddress) {
     auto *ref = cast<DeclRefExpr>(c->Operand.get());
-    return declareFunction(cast<FunctionDecl>(ref->Resolved));
+    auto *fd = cast<FunctionDecl>(ref->Resolved);
+    // Cast to a `@cfunction`, it is called the C way: through the adapter
+    // that takes struct arguments as C passes them, exactly as when it is
+    // handed over without a cast.
+    if (c->Ty && c->Ty->is(TypeKind::CFunction))
+      return cAdapterFor(fd, declareFunction(fd));
+    return declareFunction(fd);
   }
   // `&place as *var T`, where `T` is the place's own type and that type is
   // a handle — a `String`, a class: the address of the place, which is
@@ -2995,6 +3037,7 @@ Value *CodeGen::emitFor(ForExpr *f) {
   TempScope ownTemps(*this);
   Function *fn = fs().Fn;
   fs().Scopes.push_back(LexicalScope{});
+  const size_t loopDepth = fs().Scopes.size();
 
   Value *index = nullptr, *limit = nullptr, *dataPtr = nullptr;
   Type *elemTy = nullptr;
@@ -3032,7 +3075,18 @@ Value *CodeGen::emitFor(ForExpr *f) {
     index = createEntryAlloca(B->getInt64Ty(), "i");
     B->CreateStore(B->getInt64(0), index);
   }
-  emitStatementCleanup();
+  if (dataPtr) {
+    // What the sequence was made from — the array in `for x in ["a", "b"]`
+    // — is what the loop reads from, so it lives as long as the loop and
+    // goes when the loop does. Released here, it was gone before the first
+    // turn: empty under Zombie, a use after free under counting.
+    std::vector<OwnedSlot> &locals = fs().Scopes.back().Locals;
+    for (auto &t : fs().Temps)
+      locals.push_back({t.first, t.second});
+    fs().Temps.clear();
+  } else {
+    emitStatementCleanup();
+  }
 
   auto *condBB = BasicBlock::Create(*Ctx, "for.cond", fn);
   auto *bodyBB = BasicBlock::Create(*Ctx, "for.body", fn);
@@ -3108,6 +3162,7 @@ Value *CodeGen::emitFor(ForExpr *f) {
   B->CreateBr(condBB);
 
   B->SetInsertPoint(doneBB);
+  emitScopeCleanup(loopDepth - 1);
   fs().Scopes.pop_back();
   return nullptr;
 }
@@ -3808,26 +3863,8 @@ Value *CodeGen::emitRValue(Expr *e) {
                     {PtrTy, B->getInt64Ty(), PtrTy, PtrTy}),
           {s, idx, next, locationString(i->Range)});
     }
-    if (auto *impl = i->OverloadResolved) {
-      Function *f = declareFunction(impl);
-      Type *selfParam = nullptr, *idxParam = nullptr;
-      for (const Param &p : impl->Params) {
-        if (p.IsSelf) selfParam = p.Ty;
-        else if (!idxParam) idxParam = p.Ty;
-      }
-      Value *self = receiverFor(i->Base.get(), selfParam);
-      Value *idx = emitRValue(i->Index.get());
-      // A key taken by value is moved in, as any argument is.
-      const bool byValue = idxParam && !idxParam->is(TypeKind::Pointer);
-      if (zombie() && byValue)
-        takeOwnership(i->Index.get(), idx, i->Index->Ty);
-      if (idxParam) {
-        Value *coerced = coerce(idx, i->Index->Ty, idxParam);
-        if (zombie() && byValue && coerced != idx)
-          adopt(coerced);
-        idx = coerced;
-      }
-      Value *r = B->CreateCall(f, {self, idx});
+    if (i->OverloadResolved) {
+      Value *r = emitIndexCall(i);
       // A lent element of plain data is read out where it lies.
       if (i->ReadsThrough)
         return B->CreateLoad(lower(e->Ty), r);

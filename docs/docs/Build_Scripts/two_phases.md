@@ -4,7 +4,7 @@
 
 | Phase | Runs | Can |
 | --- | --- | --- |
-| **prepare** | before the package is compiled | set `@Config` flags; add link arguments, libraries and library directories |
+| **prepare** | before the package is compiled | set `#Config` flags; add link arguments, libraries and library directories |
 | **finish** | after each executable is linked, once per executable | post-process the file — strip it, sign it, lay it out as an image — and say what `rune run` should start in its place |
 
 It is an ordinary program with a `main`. `std::build` tells it which phase this is and everything else it may want to know, and gives it a function for each answer.

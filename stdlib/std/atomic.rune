@@ -27,27 +27,27 @@ import std::mem
 // to be the storage everyone shares, not a copy of it.
 //===--------------------------------------------------------------------===//
 
-@intrinsic("atomic_load")
+#intrinsic("atomic_load")
 fn rawLoad(slot: *i64) -> i64
 
-@intrinsic("atomic_store")
+#intrinsic("atomic_store")
 fn rawStore(slot: *var i64, value: i64)
 
 /// Adds and hands back the value as it was *before* — which is what lets one
 /// caller out of many know which turn it took.
-@intrinsic("atomic_add")
+#intrinsic("atomic_add")
 fn rawAdd(slot: *var i64, delta: i64) -> i64
 
-@intrinsic("atomic_sub")
+#intrinsic("atomic_sub")
 fn rawSub(slot: *var i64, delta: i64) -> i64
 
 /// Replaces, and hands back what was there.
-@intrinsic("atomic_exchange")
+#intrinsic("atomic_exchange")
 fn rawExchange(slot: *var i64, value: i64) -> i64
 
 /// Stores `desired` only if the value is still `expected`, and says whether
 /// it did.
-@intrinsic("atomic_compare_exchange")
+#intrinsic("atomic_compare_exchange")
 fn rawCompareExchange(slot: *var i64, expected: i64, desired: i64) -> bool
 
 //===--------------------------------------------------------------------===//
@@ -63,7 +63,7 @@ fn rawCompareExchange(slot: *var i64, expected: i64, desired: i64) -> bool
 ///     let served = atomic::Counter(0)
 ///     served.increment()
 ///     io::println(served.load().$str())
-@sync("every read and write is a single indivisible instruction")
+#sync("every read and write is a single indivisible instruction")
 pub class Counter {
     // A cell: changed through `&self`, and reached by address here because
     // the change has to be one indivisible instruction.
@@ -74,12 +74,12 @@ pub class Counter {
     /// The value now. Another thread may change it the instant after, so
     /// what this is good for is reporting, not deciding — decide with
     /// `compareExchange`.
-    @safe("an atomic read of a number this object owns")
+    #safe("an atomic read of a number this object owns")
     pub fn load(&self) -> i64 {
         unsafe { rawLoad(self.value.asPtr()) }
     }
 
-    @safe("an atomic write to a number this object owns")
+    #safe("an atomic write to a number this object owns")
     pub fn store(&self, next: i64) {
         unsafe { rawStore(self.value.asPtr(), next) }
     }
@@ -88,12 +88,12 @@ pub class Counter {
     ///
     /// Returning the old value is what makes this a hand-out rather than a
     /// count: each caller gets a number nobody else got.
-    @safe("an atomic read-modify-write of a number this object owns")
+    #safe("an atomic read-modify-write of a number this object owns")
     pub fn add(&self, delta: i64) -> i64 {
         unsafe { rawAdd(self.value.asPtr(), delta) }
     }
 
-    @safe("an atomic read-modify-write of a number this object owns")
+    #safe("an atomic read-modify-write of a number this object owns")
     pub fn sub(&self, delta: i64) -> i64 {
         unsafe { rawSub(self.value.asPtr(), delta) }
     }
@@ -105,7 +105,7 @@ pub class Counter {
     pub fn next(&self) -> i64 { self.add(1) }
 
     /// Replaces the value, handing back what was there.
-    @safe("an atomic read-modify-write of a number this object owns")
+    #safe("an atomic read-modify-write of a number this object owns")
     pub fn exchange(&self, next: i64) -> i64 {
         unsafe { rawExchange(self.value.asPtr(), next) }
     }
@@ -116,7 +116,7 @@ pub class Counter {
     /// This is how anything more complicated than adding is built: read,
     /// work out the new value, and swap it in only if nobody moved it
     /// meanwhile. If somebody did, read again and retry — see `update`.
-    @safe("an atomic compare-and-swap of a number this object owns")
+    #safe("an atomic compare-and-swap of a number this object owns")
     pub fn compareExchange(&self, expected: i64, desired: i64) -> bool {
         unsafe {
             rawCompareExchange(self.value.asPtr(), expected, desired)
@@ -164,27 +164,27 @@ bind io::Display to Counter {
 /// `true`. That is how something is arranged to happen once.
 ///
 ///     if ready.raise() { io::println("mine to do") }
-@sync("every read and write is a single indivisible instruction")
+#sync("every read and write is a single indivisible instruction")
 pub class Flag {
     // Held as a number because that is what the instructions work on.
     raised: mem::Cell<i64>
 
     fn init(self, initial: bool) { self.raised = mem::cell(if initial { 1 } else { 0 }) }
 
-    @safe("an atomic read of a number this object owns")
+    #safe("an atomic read of a number this object owns")
     pub fn isRaised(&self) -> bool {
         unsafe { rawLoad(self.raised.asPtr()) } != 0
     }
 
     /// Raises the flag, and says whether it was this call that raised it.
     /// Exactly one caller ever gets `true`.
-    @safe("an atomic exchange of a number this object owns")
+    #safe("an atomic exchange of a number this object owns")
     pub fn raise(&self) -> bool {
         unsafe { rawExchange(self.raised.asPtr(), 1) } == 0
     }
 
     /// Lowers it, and says whether it had been raised.
-    @safe("an atomic exchange of a number this object owns")
+    #safe("an atomic exchange of a number this object owns")
     pub fn lower(&self) -> bool {
         unsafe { rawExchange(self.raised.asPtr(), 0) } != 0
     }

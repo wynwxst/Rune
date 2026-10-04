@@ -4,7 +4,7 @@
 #   // EXPECT: <line of stdout>      one per expected line, in order
 #   // EXPECT-PANIC: <substring>     the program must abort, stderr must match
 #   // EXPECT-ERROR: <substring>     compilation must fail with this message
-#   // LIB: <module> <path>          build <path> into <module>.rul first
+#   // LIB: <module> <path>...       build <path>s into <module>.rul first
 #   // FLAGS: <args...>              extra `runec` flags for this case
 #   // WITH: <path>                  another source compiled with this case,
 #                                    which is how a macro package is brought in
@@ -153,11 +153,16 @@ foreach(CASE ${CASES})
         break()
       endif()
       set(LIB_MODULE "${CMAKE_MATCH_1}")
-      set(LIB_SOURCE "${CASE_DIR}/${CMAKE_MATCH_2}")
+      # Several sources may follow, for a library with more than one file.
+      separate_arguments(LIB_PATHS UNIX_COMMAND "${CMAKE_MATCH_2}")
+      set(LIB_SOURCE "")
+      foreach(LIB_PATH ${LIB_PATHS})
+        list(APPEND LIB_SOURCE "${CASE_DIR}/${LIB_PATH}")
+      endforeach()
       execute_process(
         COMMAND "${RUNEC}" --no-color --stdlib "${STDLIB_DIR}" ${SAFETY_ARGS}
                 ${IMPORT_ARGS} --emit-lib --module "${LIB_MODULE}"
-                -o "${LIB_DIR}/${LIB_MODULE}.rul" "${LIB_SOURCE}"
+                -o "${LIB_DIR}/${LIB_MODULE}.rul" ${LIB_SOURCE}
         RESULT_VARIABLE LIB_RC
         OUTPUT_VARIABLE LIB_OUT
         ERROR_VARIABLE LIB_ERR)

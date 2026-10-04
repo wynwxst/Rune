@@ -1,0 +1,19 @@
+// FLAGS: --memory zombie
+// EXPECT: 7 9
+//
+// `&var b[i]` through an overloaded `[]` that lends the element names the
+// element: a pointer made from it writes into the buffer. It used to borrow
+// a copy, so writes through `&var b[0] as *var u8` — how a C function is
+// handed a Rune buffer to fill — silently went nowhere.
+import std::io
+import std::mem
+
+#unsafe
+fn main() -> i64 {
+    var b = mem::filled<u8>(4, 0)
+    let p = &var b[0] as *var u8
+    p[0] = 7
+    p[1] = 9
+    io::println(b[0].$str() + " " + b[1].$str())
+    0
+}

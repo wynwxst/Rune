@@ -9,4 +9,4 @@ The generated code is correct for every target LLVM supports. A few things are n
 | `extern "C++"` | every Itanium-ABI target — Linux, macOS, the BSDs, MinGW, WebAssembly; not `-windows-msvc` |
 | Threads, sockets and processes on WebAssembly | what WASI preview 1 provides; see **WebAssembly** above |
 | Shared libraries on WebAssembly | none — a library is a `.rul`, linked into the module |
-| Everything else in the FFI | portable: scalars, pointers, `CString`, `@cfunction`, `@export` |
+| Everything else in the FFI | portable: scalars, pointers, `CString`, `@cfunction`, `#export` |

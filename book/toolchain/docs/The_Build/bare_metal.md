@@ -3,7 +3,7 @@
 ## The idea
 
 A hosted Rune program links two things it did not write: the C library and
-`libruneruntime.a`. A freestanding one — `@runtime(none)` — links neither.
+`libruneruntime.a`. A freestanding one — `#runtime(none)` — links neither.
 What the generated code still needs of a runtime is Rune source,
 `runetime/freestanding.rune`, compiled into the program for the program's own
 target, the way Rust builds `core` for whatever it is compiling for. That file
@@ -15,13 +15,13 @@ So the split is:
 | --- | --- | --- |
 | The language: checks, the borrow checker, classes, optionals | the compiler, and `std` where it is plain Rune | nothing |
 | The freestanding runtime: panics, the heap, `memcpy`, 32-bit division | `runetime/freestanding.rune` | three hooks |
-| The hooks: `@panicHandler`, `@allocator`, `@deallocator` | the program | whatever the machine offers |
+| The hooks: `#panicHandler`, `#allocator`, `#deallocator` | the program | whatever the machine offers |
 | The hosted runtime: `String`, files, threads, tasks, counting | `runtime/` and `runetime/core.rune` | an operating system |
 
 ## In the compiler
 
 **Options.** `CompilerOptions::Freestanding` and `NoEntry`, from
-`--runtime none` / `--entry none`, or from `@runtime(none)` / `@entry(none)`
+`--runtime none` / `--entry none`, or from `#runtime(none)` / `#entry(none)`
 atop any of the program's files. The directives are read by
 `programDirective` in `Compilation.cpp` *before* anything is parsed, because
 freestanding decides which files make up the compilation: the runtime file is
@@ -37,7 +37,7 @@ links the library brings one). The parser reads them again in
 - Every defined function gets `no-builtins`, as `-ffreestanding` does for C,
   so LLVM never rewrites the runtime's byte loops into calls to themselves.
 - `resolveWeakDefinitions` handles two definitions of one symbol in one
-  module where one is `@weak`: the program's `@panicHandler` and the
+  module where one is `#weak`: the program's `#panicHandler` and the
   runtime's default are both `rune_panic_handler`. The strong one is kept,
   the weak one is never emitted. Across objects the linker does the same.
 - The standard library's globals are initialised only when the program reads
@@ -66,7 +66,7 @@ annotation where `String` cannot exist. The standard library's modules are
 unaffected, and an expected `String` still gets one — and E0542.
 
 **The standard library, freestanding.** `ConfigSet::forOptions` sets the
-`@Config` key `runtime` to `none` or `hosted`, after the `@runtime(none)`
+`#Config` key `runtime` to `none` or `hosted`, after the `#runtime(none)`
 directive has been read, so the library can keep a second definition for a
 freestanding build. `process::panic` and `process::assert` do: the hosted ones
 take any `Display` and build a `String`, the freestanding ones take a
@@ -74,9 +74,9 @@ take any `Display` and build a `String`, the freestanding ones take a
 `Map` and `Set` — whose only hosted dependency was a literal panic message —
 build on bare metal; examples/toyos runs them on its own heap.
 
-**Sema.** `@panicHandler`, `@allocator` and `@deallocator` give a function a
+**Sema.** `#panicHandler`, `#allocator` and `#deallocator` give a function a
 fixed symbol (`langItemSymbol` in `AST.h`) and a fixed C signature, checked by
-`checkRuntimeHook` (E0248, and E0249 for a second one). `@weak` is linkage
+`checkRuntimeHook` (E0248, and E0249 for a second one). `#weak` is linkage
 only.
 
 **Linking.** `linkExecutable` passes `-nostdlib -static` to a compiler
@@ -87,7 +87,7 @@ driver — nothing to a linker run directly, and nothing at all under
 **Text.** `runetime/freestanding_text.rune` is compiled in beside it: every
 `rune_string_*` function the code generator and the standard library call,
 over `rune_alloc` and the raw blocks, with the C runtime's `RuneString`
-layout and FNV-1a hash; `rune_print` and friends over `@output`
+layout and FNV-1a hash; `rune_print` and friends over `#output`
 (`rune_output`, reached through the strong `rune_write_output`); and numbers
 as text. A double's exact decimal expansion is computed with big integers
 (m·5^k for a negative exponent), the shortest digits whose value lies inside
@@ -113,33 +113,33 @@ checks that every module builds and that known answers hold.
 
 ## In `runetime/freestanding.rune`
 
-Everything the code generator calls, as `@export`ed Rune: the panic entry
+Everything the code generator calls, as `#export`ed Rune: the panic entry
 points (formatting into a static buffer, since a panic may be the heap
 running out), `rune_alloc` / `rune_drop` over the hooks, `$clone`, `is`,
 `Any`, hashing, `memcpy` and friends, the raw blocks `std::mem` is built on
 (`rune_raw_alloc`, `_realloc`, `_free`, `_is_zero` — with no header: every
 caller passes the size back, `std::mem`'s `Allocator` included, and `rune_drop`
-reads an object's from its `TypeInfo`, so `@deallocator` is told both), and `__divdi3` and its three siblings
-under `@Config(pointer_width == "32")` — written with shifts and subtraction,
+reads an object's from its `TypeInfo`, so `#deallocator` is told both), and `__divdi3` and its three siblings
+under `#Config(pointer_width == "32")` — written with shifts and subtraction,
 since a `/` there would call itself. Everything a program might want to
-replace is `@weak`.
+replace is `#weak`.
 
 Adding something the code generator calls means adding it here too, or
 freestanding programs that reach it fail with E0542.
 
 ### The minimal subset
 
-`freestanding_type` is a `@Config` key every build knows, `full` unless a
+`freestanding_type` is a `#Config` key every build knows, `full` unless a
 package's `[config]` or `--cfg` says `minimal` (`ConfigSet::forOptions`; any
 other value is E0545 in `Compilation.cpp`). The runtime's optional exports —
 `rune_clone_object`, `rune_is_kind_of`, `rune_any_is`, `rune_hash_mix`, and in
 `freestanding_text.rune` floats as text, text as numbers, the string hashes
 and the string searching and slicing — carry
-`@Config(!(freestanding_type == "minimal"))`, so under `minimal` they are
+`#Config(!(freestanding_type == "minimal"))`, so under `minimal` they are
 never declared. A program that calls one then has an undefined `rune_*`
 symbol, which `reportHostedRuntimeUses` already turns into E0542 against the
 function responsible; `minimalLeavesOut` in `CodeGen.cpp` names the feature
-and says the full runtime has it. That table and the `@Config` marks have to
+and says the full runtime has it. That table and the `#Config` marks have to
 agree: moving a function in or out of the minimal set means changing both.
 `minimal()` in `tests/bare_metal_test.py` checks both directions.
 

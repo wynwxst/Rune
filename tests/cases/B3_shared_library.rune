@@ -11,7 +11,7 @@
 // can open too. Nothing here is special to Rune: `dlopen` and `dlsym` are
 // the C functions, declared the way any other foreign function is.
 //
-// `@export("name")` on the library's side is what makes a function findable:
+// `#export("name")` on the library's side is what makes a function findable:
 // it gives the function the symbol the outside world knows it by, rather
 // than the mangled one Rune uses among itself.
 import std::io
@@ -25,7 +25,7 @@ extern "C" {
 
 let RTLD_NOW: i32 = 2
 
-@unsafe fn main() -> i64 {
+#unsafe fn main() -> i64 {
     // The harness built the library beside this program and said where.
     let path = env::getOr("RUNE_TEST_SHARED_GREETER", "")
     let handle = dlopen(path.$cstr(), RTLD_NOW)

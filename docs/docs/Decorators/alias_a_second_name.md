@@ -1,6 +1,6 @@
-# `@alias`: a second name
+# `#alias`: a second name
 
-`@alias("other")` puts a declaration in scope under another name as well as its own, and more than one is allowed. The name is a string, so it can hold characters an identifier cannot — which is what lets an operator answer to its punctuation.
+`#alias("other")` puts a declaration in scope under another name as well as its own, and more than one is allowed. The name is a string, so it can hold characters an identifier cannot — which is what lets an operator answer to its punctuation.
 
 **One declaration, several names**
 
@@ -10,12 +10,12 @@ import std::io
 struct Bag { count: i64 }
 
 extend Bag {
-    @alias("size")
-    @alias("howMany")
+    #alias("size")
+    #alias("howMany")
     pub fn length(&self) -> i64 { self.count }
 }
 
-@alias("makeBag")
+#alias("makeBag")
 fn bag(n: i64) -> Bag { Bag { count: n } }
 
 fn main() -> i64 {

@@ -1,4 +1,4 @@
-# `@Config`
+# `#Config`
 
 Write the condition on the declaration. Two definitions of one name under conditions that cannot both hold are the ordinary way to give a function a different body per platform.
 
@@ -7,10 +7,10 @@ Write the condition on the declaration. Two definitions of one name under condit
 ```rune
 import std::io
 
-@Config(family == "unix")
+#Config(family == "unix")
 fn lineEnding() -> String { "\n" }
 
-@Config(family == "windows")
+#Config(family == "windows")
 fn lineEnding() -> String { "\r\n" }
 
 fn main() -> i64 {

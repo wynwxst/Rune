@@ -82,7 +82,7 @@ inline NominalDecl *cxxOwnerOf(const FunctionDecl *fn) {
 }
 
 /// The constructor and destructor are the members Rune calls `init` and
-/// `deinit`, whatever `@as` renamed them to on Rune's side.
+/// `deinit`, whatever `#as` renamed them to on Rune's side.
 inline bool isCxxConstructor(const FunctionDecl *fn) {
   if (!cxxOwnerOf(fn))
     return false;

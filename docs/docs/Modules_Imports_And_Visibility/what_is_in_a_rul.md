@@ -8,9 +8,9 @@ version     u32      the container's own version; 3 today
 memory      u32      0 = reference counting, 1 = Zombie
 name        string   the library's module name
 
-flagCount   u32      `@Config` names set when this was built
+flagCount   u32      `#Config` names set when this was built
   flag      string
-valueCount  u32      `@Config` keys that had values
+valueCount  u32      `#Config` keys that had values
   key       string
   value     string
 
@@ -27,7 +27,8 @@ Three things about it are worth knowing.
 |  | Why |
 | --- | --- |
 | The interface is **source**, not a symbol table | an importer re-parses it, so it gets the declarations exactly as they were written — including generic bodies, which monomorphisation needs, and `pub macro` definitions, which expansion needs. Everything not `pub` is stripped on the way in |
-| The **conditions** travel with it | the interface is source, so its `@Config` conditions are answered again on import — and have to be answered the way they were when the object code was made, not the way the importer's own build would answer them |
+| Its **procedural macros** are units too | a `#type(Macros)` file is stored as one more unit, and a `#macro fn` stays in the source it was written in. An importer finds both and builds them into its own macro package, for the machine doing the compiling — which is how a library exports its macros |
+| The **conditions** travel with it | the interface is source, so its `#Config` conditions are answered again on import — and have to be answered the way they were when the object code was made, not the way the importer's own build would answer them |
 | One target, one memory model | the object code bakes in retains and releases, or their absence and the moved-in argument convention. Importing a library built the other way is refused rather than linked, and there is no fat `.rul`: cross-compiling means building the dependency for that target too |
 
 > [!NOTE]

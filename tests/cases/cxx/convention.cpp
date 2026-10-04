@@ -1,5 +1,5 @@
-// The foreign half of `B6_convention_c`: C reading Rune's `@Convention("C")`
-// types by value and in memory, and calling `@export`ed Rune functions that
+// The foreign half of `B6_convention_c`: C reading Rune's `#Convention("C")`
+// types by value and in memory, and calling `#export`ed Rune functions that
 // take and return structs by value.
 #include <cstddef>
 #include <cstdint>
@@ -13,8 +13,8 @@ struct Value {                                       // a tagged union
     union { int64_t i; double d; } u;
 };
 
-extern "C" double rune_conv_area(Wide r);            // Rune, @export
-extern "C" Wide rune_conv_grow(Wide r, double by);   // Rune, @export
+extern "C" double rune_conv_area(Wide r);            // Rune, #export
+extern "C" Wide rune_conv_grow(Wide r, double by);   // Rune, #export
 
 extern "C" int64_t rune_conv_layout(void) {
     // Packed: 1, pad 3, 4, 2, pad 6, 8 => offsets 0 4 8 16, size 24.

@@ -1,4 +1,4 @@
-@type(Exec)
+#type(Exec)
 // Weak references, and the shapes reference counting can and cannot free.
 //
 // At `--safety full` a class that can reach itself through strong fields is

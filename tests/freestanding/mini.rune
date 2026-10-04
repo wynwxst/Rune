@@ -1,7 +1,7 @@
 // The same as sys.rune without the allocator: for a program that allocates
 // and should be told it has nowhere to.
-@runtime(none)
-@entry(none)
+#runtime(none)
+#entry(none)
 
 import std::asm
 
@@ -31,7 +31,7 @@ pub fn exit(code: i64) -> Never {
     loop {}
 }
 
-@panicHandler
+#panicHandler
 fn panicked(message: CString, location: CString) -> Never {
     say("panic: ")
     say(message)

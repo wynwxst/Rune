@@ -1,7 +1,7 @@
 # Rules
 
 Every rule has a name — the one in brackets after a finding, and the one you give
-`--allow`, `--warn`, `Rune.toml` and an `@lint(...)` directive. `rune lint --list`
+`--allow`, `--warn`, `Rune.toml` and an `#lint(...)` directive. `rune lint --list`
 prints them all with their levels.
 
 | Rule | Level | Fix |
@@ -147,9 +147,9 @@ fn main() -> i64 {
 }
 ```
 
-`main` is never reported, and neither is anything with a decorator (an `@export`
+`main` is never reported, and neither is anything with a decorator (an `#export`
 is used from C), anything in an `extern` block, or anything in a file that says
-`@type(Macros)`.
+`#type(Macros)`.
 
 ## unreachable-code
 
@@ -293,7 +293,7 @@ has no fix: where to break a line is a matter of reading it.
 
 ## missing-docs
 
-A `pub` declaration with no `///` comment and no `@Doc(...)`. Off by default; a
+A `pub` declaration with no `///` comment and no `#Doc(...)`. Off by default; a
 library that others read will want it on.
 
 ```rune
@@ -319,13 +319,13 @@ fn main() -> i64 {
 
 ## invalid-lint
 
-An `@lint(...)` directive the linter cannot act on: it names a rule that does
+An `#lint(...)` directive the linter cannot act on: it names a rule that does
 not exist, uses a level other than `allow`, `warn` or `note`, or has nothing
 after it to apply to. Without this, a misspelt rule name would leave the
 warning it was meant to silence in place with no hint why.
 
 ```rune
-@lint(allow(unused-varaible))
+#lint(allow(unused-varaible))
 fn main() -> i64 {
     0
 }

@@ -15,7 +15,7 @@ license = "MIT"
 safety = "full"                 # none | minimal | full
 memory = "zombie"               # zombie | arc (reference counting)
 emit = "exe"                    # exe | lib | obj | asm | llvm-ir
-optimize = 0                    # 0..3, or use --release
+optimize = 2                    # 0..3; 2 by default
 debug = true
 warnings-as-errors = false
 no-stdlib = false
@@ -56,7 +56,7 @@ src = "tests"                   # where `rune test` looks
 |  | `description`, `authors`, `license` | empty |
 | `[build]` | `safety` | `"full"` |
 |  | `emit` | empty, meaning an executable |
-|  | `optimize` | `0`, or `2` with `--release` |
+|  | `optimize` | `2`; `--release` raises it to at least `2` |
 |  | `debug` | `true`, `false` with `--release` |
 |  | `warnings-as-errors` | `false` |
 |  | `no-stdlib` | `false` |

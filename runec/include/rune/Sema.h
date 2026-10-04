@@ -373,7 +373,7 @@ private:
   void resolveFieldAnnotations(NominalDecl *nd);
   /// Resolves a `from` clause written on a local binding's type.
   void resolveLocalAnnotations(TypeRepr *repr);
-  /// E0292 when `d` carries `@zombie_unavailable` and this is a Zombie build.
+  /// E0292 when `d` carries `#zombie_unavailable` and this is a Zombie build.
   void checkAvailableUnderZombie(Decl *d, SourceRange at);
   /// True when `$clone()` applies to values of `t`.
   bool typeIsClonable(Type *t);
@@ -429,7 +429,7 @@ private:
   /// Methods a type declares itself, through its own body or an `extend`. A
   /// `bind` never displaces one of these.
   std::set<std::pair<Type *, std::string>> InherentMethods;
-  /// Extra operator spellings introduced with `@alias("...")`, mapping the
+  /// Extra operator spellings introduced with `#alias("...")`, mapping the
   /// alias to the canonical operator name it stands for.
   std::map<std::string, std::string> OperatorAliases;
   /// What each binding chose for a mark's associated types, keyed by the type
@@ -481,7 +481,7 @@ private:
   void resolveImports(Module *m);
 
   void collectDecl(Decl *d, Scope *scope);
-  /// The names `@alias("...")` adds to a declaration, with the decorator's
+  /// The names `#alias("...")` adds to a declaration, with the decorator's
   /// range for diagnostics.
   std::vector<std::pair<std::string, SourceRange>> aliasesOf(Decl *d);
   void registerMethods(NominalDecl *nd);
@@ -577,7 +577,7 @@ private:
   /// Refuses the parameters an `async fn` cannot take: borrows that would
   /// outlive the call. See the definition for the rule.
   void checkAsyncSignature(FunctionDecl *fn);
-  /// A closure argument to a `@sendable` function: written at the call, and
+  /// A closure argument to a `#sendable` function: written at the call, and
   /// capturing only `Send` values.
   void checkSendableClosure(Expr *arg, const std::string &calleeName);
   void checkNominalBodies(NominalDecl *nd);
@@ -838,6 +838,9 @@ private:
   /// it, or the mark has no such member.
   FunctionDecl *lookupMarkMethod(Type *receiver, MarkDecl *mark,
                                  const std::string &name);
+  /// The `convert` that `bind from into to` supplies — including a bind on
+  /// a pointer type itself, such as `bind<T> *var T into *var u8` — or null.
+  FunctionDecl *lookupConversion(Type *from, Type *to, SourceRange at);
   /// Checks that `impl` has the signature `req` asks for, with `Self` read as
   /// `target`. Reports on a mismatch.
   void checkRequirementSignature(FunctionDecl *req, FunctionDecl *impl,
@@ -863,9 +866,9 @@ private:
   void checkConventions();
   bool typeConformsTo(Type *t, MarkDecl *mark);
   //=== Automatic marks ===================================================//
-  /// Validates `@auto` on a mark and records it.
+  /// Validates `#auto` on a mark and records it.
   void checkAutoMark(MarkDecl *mk);
-  /// The automatic marks `@never(...)` refuses for this type.
+  /// The automatic marks `#never(...)` refuses for this type.
   const std::vector<MarkDecl *> &refusedMarks(NominalDecl *nd);
   /// Whether `t` has the automatic mark `mark`, structurally.
   bool typeHasAutoMark(Type *t, MarkDecl *mark, std::set<Type *> &seen);
@@ -1055,11 +1058,11 @@ private:
   /// signature is one the compiler can call on the way out of a scope.
   void resolveDeinitialisers();
   void checkDeinitSignature(NominalDecl *nd, FunctionDecl *fn);
-  /// Checks `@resource` fields: each has to be mentioned in the type's
+  /// Checks `#resource` fields: each has to be mentioned in the type's
   /// `deinit`, because a field marked that way holds something the compiler
   /// cannot release on its own.
   void checkResourceFields(NominalDecl *nd);
-  /// Types whose `@resource` fields have already been reported on, so the
+  /// Types whose `#resource` fields have already been reported on, so the
   /// second pass over instantiations does not say it all again.
   std::set<NominalDecl *> ResourcesChecked;
   /// True when `t` is a struct or enum that runs a `deinit`, directly or
@@ -1088,7 +1091,7 @@ private:
   void checkRuntimeHook(FunctionDecl *fn, const Attribute &a);
   std::map<std::string, FunctionDecl *> RuntimeHooks;
   void checkDecorators(FunctionDecl *fn);
-  /// Records `@Doc("...")` on any declaration into its `Doc` field.
+  /// Records `#Doc("...")` on any declaration into its `Doc` field.
   void collectDoc(Decl *d);
   /// True for a decorator the compiler handles itself.
   static bool isBuiltinDecorator(const std::string &name);

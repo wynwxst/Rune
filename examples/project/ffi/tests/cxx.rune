@@ -10,7 +10,7 @@ import std::testing
 import std::cxx
 import ffi
 
-@safe("every pointer here is one the C++ half handed out, or storage made for it")
+#safe("every pointer here is one the C++ half handed out, or storage made for it")
 fn main() -> i64 {
     // Structs by value, in and back out.
     assertEq!(ffi::vectorLengthSquared(ffi::Vec2 { x: 3.0, y: 4.0 }), 25.0)

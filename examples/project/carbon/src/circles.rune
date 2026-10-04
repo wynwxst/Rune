@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 
 class Circle {
   // Member variable

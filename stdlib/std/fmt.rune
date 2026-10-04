@@ -20,7 +20,7 @@ pub fn show<T: io::Display>(value: &T) -> String { value.display() }
 ///
 ///     fmt::fixed(3.14159, 2)   // "3.14"
 ///     fmt::fixed(2.0, 3)       // "2.000"
-@safe("the runtime bounds the buffer and clamps the places asked for")
+#safe("the runtime bounds the buffer and clamps the places asked for")
 pub fn fixed(value: f64, places: i64) -> String {
     rune_string_from_f64_fixed(value, places)
 }

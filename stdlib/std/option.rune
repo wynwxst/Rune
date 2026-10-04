@@ -74,7 +74,7 @@ pub enum Option<T> {
     }
 
     /// The value, borrowed. Aborts when empty.
-    @safe("the runtime prints the location and aborts; it never returns")
+    #safe("the runtime prints the location and aborts; it never returns")
     pub fn look(&self) -> &T from self {
         match self {
             Option::Some(v) => &v,
@@ -83,7 +83,7 @@ pub enum Option<T> {
     }
 
     /// The value, borrowed to write through. Aborts when empty.
-    @safe("the runtime prints the location and aborts; it never returns")
+    #safe("the runtime prints the location and aborts; it never returns")
     pub fn touch(&var self) -> &var T from self {
         match self {
             Option::Some(v) => &var v,
@@ -122,7 +122,7 @@ pub enum Option<T> {
     }
 
     /// The contained value. Aborts when empty.
-    @safe("the runtime prints the location and aborts; it never returns")
+    #safe("the runtime prints the location and aborts; it never returns")
     pub fn unwrap(self) -> T {
         match self {
             Option::Some(take v) => v,
@@ -134,7 +134,7 @@ pub enum Option<T> {
     ///
     /// Prefer this to `unwrap` wherever the reason it should not be empty can
     /// be written down: the message is what the traceback leads with.
-    @safe("the runtime prints the message and aborts; it never returns")
+    #safe("the runtime prints the message and aborts; it never returns")
     pub fn expect(self, message: CString) -> T {
         match self {
             Option::Some(take v) => v,
@@ -152,7 +152,7 @@ pub enum Option<T> {
     ///     let width = header.map(||(h: Row) -> i64 { h.columns })
     pub fn map<U>(self, f: @function(T) -> U) -> Option<U> {
         match self {
-            Option::Some(v) => Option::<U>::Some(f(v)),
+            Option::Some(take v) => Option::<U>::Some(f(v)),
             Option::None => Option::<U>::None,
         }
     }
@@ -162,7 +162,7 @@ pub enum Option<T> {
     /// `map` followed by `or`, in one step.
     pub fn mapOr<U>(self, fallback: U, f: @function(T) -> U) -> U {
         match self {
-            Option::Some(v) => f(v),
+            Option::Some(take v) => f(v),
             Option::None => fallback,
         }
     }
@@ -175,7 +175,7 @@ pub enum Option<T> {
     ///     let port = config.andThen(||(c: Config) -> i64? { c.port })
     pub fn andThen<U>(self, f: @function(T) -> Option<U>) -> Option<U> {
         match self {
-            Option::Some(v) => f(v),
+            Option::Some(take v) => f(v),
             Option::None => Option::<U>::None,
         }
     }
@@ -211,7 +211,7 @@ pub enum Option<T> {
     ///     }
     pub fn zip<U>(self, other: Option<U>) -> Option<(T, U)> {
         match self {
-            Option::Some(a) => match other {
+            Option::Some(take a) => match other {
                 Option::Some(take b) => Option::<(T, U)>::Some((a, b)),
                 Option::None => Option::<(T, U)>::None,
             },

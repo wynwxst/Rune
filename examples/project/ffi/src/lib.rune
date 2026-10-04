@@ -24,9 +24,9 @@ extern "C" {
     fn shim_length(text: CString) -> u64
 }
 
-/// `@safe` records why a foreign call needs no `unsafe` at each use: the
+/// `#safe` records why a foreign call needs no `unsafe` at each use: the
 /// reason is written once, beside the function that knows it.
-@safe("the shim is total over every value these wrappers accept")
+#safe("the shim is total over every value these wrappers accept")
 pub fn lengthSquared(p: Point) -> f64 {
     unsafe { shim_length_sq(&p as *Point) }
 }
@@ -64,16 +64,16 @@ pub fn applyTimes(f: @cfunction(i64) -> i64, start: i64, times: i64) -> i64 {
 
 /// `CString` is a borrowed pointer to NUL-terminated bytes. `.$str()` copies
 /// it into a Rune `String`, which owns its own storage.
-@safe("the shim returns a string literal, which outlives every caller")
+#safe("the shim returns a string literal, which outlives every caller")
 pub fn shimName() -> String { shim_name().$str() }
 
 /// Going the other way: a Rune `String` is a counted buffer, so C gets its
 /// `.$cstr()` view — valid for the duration of the call and no longer.
 pub fn cLength(text: String) -> u64 { unsafe { shim_length(text.$cstr()) } }
 
-/// `@export` fixes the symbol name so C can find it. This one is called by
+/// `#export` fixes the symbol name so C can find it. This one is called by
 /// `shim_apply` above, through the pointer `applyTimes` hands over.
-@export("ffi_triple")
+#export("ffi_triple")
 pub fn triple(x: i64) -> i64 { x * 3 }
 
 pub fn describe() {
@@ -113,8 +113,8 @@ extern "C++" {
         var liveCounters: c_int
 
         /// A C++ `class` is opaque: Rune never holds one by value, only a
-        /// pointer to one. `@size` is what lets `cxx::alloc` make room.
-        @size(8)
+        /// pointer to one. `#size` is what lets `cxx::alloc` make room.
+        #size(8)
         pub class Counter {
             fn init(&var self, start: c_int)   // Counter::Counter(int)
             fn deinit(&var self)               // Counter::~Counter()
@@ -126,7 +126,7 @@ extern "C++" {
             fn destroy(c: *var Counter)
         }
 
-        @size(8)
+        #size(8)
         pub class Stepper : Counter {
             fn init(&var self, start: c_int, step: c_int)
             fn twice(&var self) -> c_int
@@ -135,23 +135,23 @@ extern "C++" {
 }
 
 /// The C++ struct shapes, wrapped so callers see ordinary Rune values.
-@safe("these are total over every double and every int")
+#safe("these are total over every double and every int")
 pub fn vectorLengthSquared(v: Vec2) -> f64 { lengthSq(v) }
 
-@safe("as above")
+#safe("as above")
 pub fn vectorScaled(v: Vec2, factor: f64) -> Vec2 { scaled(v, factor) }
 
-@safe("as above")
+#safe("as above")
 pub fn pairSwapped(p: Pair) -> Pair { swapped(p) }
 
-@safe("as above")
+#safe("as above")
 pub fn wideTripled(w: Wide) -> Wide { tripled(w) }
 
-@safe("the borrow is live for the call, which is all the reference needs")
+#safe("the borrow is live for the call, which is all the reference needs")
 pub fn pairSum(p: Pair) -> i64 { sumRef(&p) as i64 }
 
 /// A C++ `int &` out-parameter, kept inside the wrapper.
-@safe("the borrow names a local that outlives the call")
+#safe("the borrow names a local that outlives the call")
 pub fn bumped(start: i64, by: i64) -> i64 {
     var x = start as c_int
     bump(&var x, by as c_int)
@@ -159,24 +159,24 @@ pub fn bumped(start: i64, by: i64) -> i64 {
 }
 
 /// A slice's two halves are exactly what a C++ span holds.
-@safe("the pointer and the count come from one slice, so the extent is right")
+#safe("the pointer and the count come from one slice, so the extent is right")
 pub fn totalOf(values: [c_long]) -> i64 {
     if values.$isEmpty() { return 0 }
     total(Span<c_long> { data: &values[0] as *c_long,
                          len: values.$length() as c_ulong }) as i64
 }
 
-@safe("as above")
+#safe("as above")
 pub fn totalOfDoubles(values: [f64]) -> f64 {
     if values.$isEmpty() { return 0.0 }
     totalD(Span<f64> { data: &values[0] as *f64,
                        len: values.$length() as c_ulong })
 }
 
-@safe("an enum declared in the block is C++'s `int`, and every value is one")
+#safe("an enum declared in the block is C++'s `int`, and every value is one")
 pub fn nextColour(c: Colour) -> Colour { brighter(c) }
 
 /// How many C++ `Counter`s exist. The destructor is what brings it back down,
 /// so a test that makes one and destroys it can see both happen.
-@safe("reading an `int` the C++ half owns")
+#safe("reading an `int` the C++ half owns")
 pub fn liveCount() -> i64 { liveCounters as i64 }

@@ -1,6 +1,6 @@
 # Decorators you write yourself
 
-Any name that is not one of the built-ins above is a decorator the program has to have declared: a function whose **last parameter is a function**. The earlier parameters are the decorator's own arguments, and the decorated function fills the last one.
+A decorator written `@name` is one the program has to have declared: a function whose **last parameter is a function**. The earlier parameters are the decorator's own arguments, and the decorated function fills the last one.
 
 **`@route(...)` is a call to `route(..., health)`**
 
@@ -37,7 +37,7 @@ import std::collections::vector
 // globals are still being set, so the list cannot count on being there yet.
 global var table: vector::Vector<String>? = nil
 
-@safe("decorators run one at a time, before main, and nothing else holds the list")
+#safe("decorators run one at a time, before main, and nothing else holds the list")
 fn route(path: String, handler: @function() -> ()) {
     if table.isNil() { table = vector::Vector<String>() }
     unsafe { table.touch().push(path) }
@@ -63,7 +63,7 @@ fn main() -> i64 {
 | the shapes have to agree | the decorator receives the function it is written on |
 | the decorator cannot be generic | there is nothing to infer its arguments from before `main` |
 | free functions only | a method carries `self`, and no instance exists yet |
-| a built-in name wins | `@inline` and the rest are the compiler's, and cannot be redefined |
+| a built-in name wins | `#inline` and the rest are the compiler's, and cannot be redefined |
 
 **An unknown decorator is an error, not a comment**
 

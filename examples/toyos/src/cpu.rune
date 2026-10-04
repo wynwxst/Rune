@@ -3,25 +3,25 @@
 import std::asm
 
 /// Writes a byte to an I/O port.
-@safe("a port write reaches a device, never Rune memory")
+#safe("a port write reaches a device, never Rune memory")
 pub fn outb(port: u16, value: u8) {
     unsafe { asm::run("outb %al, %dx", "{al},{dx}", value, port) }
 }
 
 /// Writes a 16-bit word to an I/O port.
-@safe("a port write reaches a device, never Rune memory")
+#safe("a port write reaches a device, never Rune memory")
 pub fn outw(port: u16, value: u16) {
     unsafe { asm::run("outw %ax, %dx", "{ax},{dx}", value, port) }
 }
 
 /// Reads a byte from an I/O port.
-@safe("a port read reaches a device, never Rune memory")
+#safe("a port read reaches a device, never Rune memory")
 pub fn inb(port: u16) -> u8 {
     unsafe { asm::value<u8>("inb %dx, %al", "={al},{dx}", port) }
 }
 
 /// Stops the processor for good: interrupts off, then halt.
-@safe("stops the processor; touches no memory")
+#safe("stops the processor; touches no memory")
 pub fn halt() -> Never {
     loop {
         unsafe { asm::run("cli; hlt", "") }

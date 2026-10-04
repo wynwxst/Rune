@@ -115,7 +115,7 @@ pub class Handle<R> {
     ///
     /// The result is moved out to the caller: it has one owner, as anything
     /// does, so there is no second one to give a second `join`, which aborts.
-    @safe("the box outlives the thread, and is freed in deinit")
+    #safe("the box outlives the thread, and is freed in deinit")
     pub fn join(&var self) -> R {
         unsafe { rune_thread_join(self.thread) }
         if self.joined {
@@ -129,7 +129,7 @@ pub class Handle<R> {
     /// joined it, discards the result. Detaching instead would leave the
     /// task's memory with nobody to free it, and a leak is a worse default
     /// than a wait.
-    @safe("the thread has finished, so the box is this handle's alone")
+    #safe("the thread has finished, so the box is this handle's alone")
     fn deinit(self) {
         unsafe { rune_thread_join(self.thread) }
         unsafe { rune_thread_dispose(self.thread) }
@@ -148,7 +148,7 @@ pub class Handle<R> {
 /// `entry` is a top-level `fn`, not a closure: a closure carries captured
 /// state, and sharing that is the thing this module exists to prevent. What
 /// the thread needs, it is given — as `argument`, which has to be `Send`.
-@safe("the box outlives the thread; the handle owns it and frees it")
+#safe("the box outlives the thread; the handle owns it and frees it")
 pub fn spawn<A: Send, R: Send>(entry: @cfunction(A) -> R,
                                argument: A) -> Handle<R> {
     let raw = mem::allocator.allocate(mem::size_of::<Task<A, R>>())
@@ -173,11 +173,11 @@ pub fn spawn<A: Send, R: Send>(entry: @cfunction(A) -> R,
 
 /// How many threads this machine runs at once. One when it cannot be found —
 /// never zero, so it is always safe to divide work by.
-@safe("reads a number from the operating system")
+#safe("reads a number from the operating system")
 pub fn hardwareThreads() -> i64 { rune_hardware_threads() }
 
 /// Offers the rest of this thread's turn to whatever else is waiting.
-@safe("a scheduling hint with no effect on memory")
+#safe("a scheduling hint with no effect on memory")
 pub fn yieldNow() { rune_thread_yield() }
 
 /// Stops this thread for at least `duration`.
@@ -186,7 +186,7 @@ pub fn yieldNow() { rune_thread_yield() }
 ///
 /// At least, not exactly: the operating system decides when to wake a thread,
 /// and it will not be early. A duration of zero or less returns at once.
-@safe("suspends the calling thread and touches no memory")
+#safe("suspends the calling thread and touches no memory")
 pub fn sleep(duration: time::Time) {
     rune_thread_sleep_ns(duration.asNanoseconds())
 }
@@ -198,7 +198,7 @@ pub fn sleep(duration: time::Time) {
 /// Something shared between threads, reachable only while locked.
 ///
 /// `Mutex` is the one type here that is `Sync` while holding something that
-/// is not, and `@sync` is where it says so. That claim is what the lock pays
+/// is not, and `#sync` is where it says so. That claim is what the lock pays
 /// for: whatever is inside is reached through `withLock`, and `withLock`
 /// holds the lock for exactly as long as the body runs.
 ///
@@ -210,7 +210,7 @@ pub fn sleep(duration: time::Time) {
 /// `thread::scope` — can all use it: the lock is what makes changing the value
 /// through a shared reference safe, as an atomic instruction is for a
 /// `Counter`.
-@sync("every read and write of the value happens with the lock held")
+#sync("every read and write of the value happens with the lock held")
 pub class Mutex<T> {
     // The methods take `&self`, so the value sits in a `Cell`, which can be
     // changed through a shared borrow; the lock is what makes that sound
@@ -230,7 +230,7 @@ pub class Mutex<T> {
     /// The body is a top-level `fn` taking the value and returning the value
     /// it should become — so there is no way to keep a reference to what is
     /// inside past the moment the lock is released.
-    @safe("the lock is taken before the body runs and released after")
+    #safe("the lock is taken before the body runs and released after")
     pub fn withLock(&self, body: @cfunction(T) -> T) {
         unsafe { rune_mutex_lock(self.handle) }
         defer unsafe { rune_mutex_unlock(self.handle) }
@@ -239,7 +239,7 @@ pub class Mutex<T> {
     }
 
     /// A copy of what is inside, taken with the lock held.
-    @safe("the lock is taken before the read and released after")
+    #safe("the lock is taken before the read and released after")
     pub fn get(&self) -> T where T: mem::Clone {
         unsafe { rune_mutex_lock(self.handle) }
         defer unsafe { rune_mutex_unlock(self.handle) }
@@ -247,14 +247,14 @@ pub class Mutex<T> {
     }
 
     /// Replaces what is inside, with the lock held.
-    @safe("the lock is taken before the write and released after")
+    #safe("the lock is taken before the write and released after")
     pub fn set(&self, next: T) {
         unsafe { rune_mutex_lock(self.handle) }
         defer unsafe { rune_mutex_unlock(self.handle) }
         self.value.set(next)
     }
 
-    @safe("the mutex is going away: nothing else holds it, or the lock")
+    #safe("the mutex is going away: nothing else holds it, or the lock")
     fn deinit(self) {
         unsafe { rune_mutex_dispose(self.handle) }
     }
@@ -279,7 +279,7 @@ pub class Mutex<T> {
 /// `Arc<T>` is `Send` and `Sync` when `T` is `Sync` — an `Arc` around
 /// something that could itself be written through would only move the
 /// problem one level down.
-@sync("the value is written once, when the Arc is made, and only read after")
+#sync("the value is written once, when the Arc is made, and only read after")
 pub class Arc<T: Sync> {
     value: T
 
@@ -314,7 +314,7 @@ pub class Arc<T: Sync> {
 /// is what lets the threads of a `thread::scope` all send and receive
 /// through a shared `&Channel` — and a value is moved through it, never
 /// copied.
-@sync("every touch of the queue happens with the lock held")
+#sync("every touch of the queue happens with the lock held")
 pub class Channel<T: Send> {
     // A ring of `capacity` slots in a block of its own, `count` of them live
     // from `head` on. The methods take `&self`, for threads that share the
@@ -342,11 +342,11 @@ pub class Channel<T: Send> {
 
     /// The ring's block. A raw pointer is not `Clone`, so it is read
     /// straight out of its cell rather than through `get`.
-    @safe("a pointer is plain data: reading it copies nothing it owns")
+    #safe("a pointer is plain data: reading it copies nothing it owns")
     fn ring(&self) -> *var u8 { unsafe { self.block.asPtr()[0] } }
 
     /// The slot `i` places after the oldest value.
-    @safe("the index is reduced into the ring, which the caller has sized")
+    #safe("the index is reduced into the ring, which the caller has sized")
     fn slot(&self, i: i64) -> *var T {
         let at = (self.head.get() + i) % self.capacity.get()
         unsafe { mem::offset(self.ring(), at as usize * mem::size_of<T>()) as *var T }
@@ -354,7 +354,7 @@ pub class Channel<T: Send> {
 
     /// Room for one more: a ring twice the size, the values moved across in
     /// order so the oldest is first again.
-    @safe("called with the lock held; each live value is moved exactly once")
+    #safe("called with the lock held; each live value is moved exactly once")
     fn grow(&self) {
         var size = self.capacity.get() * 2
         if size < 8 { size = 8 }
@@ -376,7 +376,7 @@ pub class Channel<T: Send> {
     ///
     /// Sending to a closed channel is a mistake worth hearing about rather
     /// than a value that quietly vanishes.
-    @safe("the queue is only ever touched with the lock held")
+    #safe("the queue is only ever touched with the lock held")
     pub fn send(&self, value: T) {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
@@ -389,7 +389,7 @@ pub class Channel<T: Send> {
 
     /// The oldest value, moved out of the ring. With the lock held, and only
     /// when there is one.
-    @safe("called with the lock held, and only while a value is queued")
+    #safe("called with the lock held, and only while a value is queued")
     fn takeNext(&self) -> T {
         let value = unsafe { mem::take<T>(self.slot(0)) }
         self.head.set((self.head.get() + 1) % self.capacity.get())
@@ -401,7 +401,7 @@ pub class Channel<T: Send> {
     ///
     /// `nil` means the channel is closed and empty: there will never be
     /// another, so a `while let` over this ends by itself.
-    @safe("the queue is only ever touched with the lock held")
+    #safe("the queue is only ever touched with the lock held")
     pub fn receive(&self) -> T? {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
@@ -415,7 +415,7 @@ pub class Channel<T: Send> {
     }
 
     /// Takes a value if one is already there, without waiting.
-    @safe("the queue is only ever touched with the lock held")
+    #safe("the queue is only ever touched with the lock held")
     pub fn tryReceive(&self) -> T? {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
@@ -427,7 +427,7 @@ pub class Channel<T: Send> {
     /// gets `nil` once what is left has been taken.
     ///
     /// Closing twice is harmless; the second says nothing new.
-    @safe("the flag is only ever touched with the lock held")
+    #safe("the flag is only ever touched with the lock held")
     pub fn close(&self) {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
@@ -436,17 +436,17 @@ pub class Channel<T: Send> {
     }
 
     /// How many values are waiting to be taken.
-    @safe("the queue is only ever touched with the lock held")
+    #safe("the queue is only ever touched with the lock held")
     pub fn pending(&self) -> i64 {
         unsafe { rune_mutex_lock(self.lock) }
         defer unsafe { rune_mutex_unlock(self.lock) }
         self.count.get()
     }
 
-    @safe("nothing else can be holding the lock: the channel is going away")
+    #safe("nothing else can be holding the lock: the channel is going away")
     pub fn isClosed(&self) -> bool { self.closed.get() }
 
-    @safe("the channel is going away: nothing else holds it, or the lock")
+    #safe("the channel is going away: nothing else holds it, or the lock")
     fn deinit(self) {
         var i: i64 = 0
         while i < self.count.get() {
@@ -484,7 +484,7 @@ pub class Scope<E> {
     /// Runs `entry(argument)` on a thread and hands back a `Handle` to join.
     /// `argument` must borrow from the scope (E0283), so a thread can never be
     /// handed a local of the body — only the environment, which outlives it.
-    @zombie("every handle joins its thread by the end of the scope, before the environment is dropped, so a borrow into `env` cannot dangle")
+    #zombie("every handle joins its thread by the end of the scope, before the environment is dropped, so a borrow into `env` cannot dangle")
     pub fn spawn<A: Send, R: Send>(&self, entry: @cfunction(A) -> R,
                                    argument: A from self) -> Handle<R> {
         spawn(entry, argument)

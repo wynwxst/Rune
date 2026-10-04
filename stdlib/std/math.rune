@@ -3,7 +3,7 @@
 //
 // The trigonometric and exponential functions are C's, declared here and
 // wrapped so that calling one is not a foreign call at the use site. Each is
-// marked `@safe` with the same reason: libm reports a domain error by
+// marked `#safe` with the same reason: libm reports a domain error by
 // returning NaN rather than by trapping, so there is nothing a caller could
 // do wrong that the value it gets back does not already say.
 //
@@ -67,7 +67,7 @@ extern "C" {
 
 //=== Roots and powers ====================================================//
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn squareRoot(value: f64) -> f64 { sqrt(value) }
 
 /// The real cube root, defined for negative values too — unlike
@@ -77,53 +77,53 @@ pub fn squareRoot(value: f64) -> f64 { sqrt(value) }
 /// 3.0000000000000004, Apple's is 3. A perfect cube's root is a whole
 /// number, so when the nearest whole number cubes back to exactly `value`,
 /// that is the answer — the same on every platform.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn cubeRoot(value: f64) -> f64 {
     let r = cbrt(value)
     let whole = round(r)
     if whole * whole * whole == value { whole } else { r }
 }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn power(base: f64, exponent: f64) -> f64 { pow(base, exponent) }
 
 /// The length of the hypotenuse: `sqrt(x*x + y*y)`, computed so that a large
 /// `x` does not overflow on the way.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn lengthOf(x: f64, y: f64) -> f64 { hypot(x, y) }
 
 //=== Trigonometry ========================================================//
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn sine(value: f64) -> f64 { sin(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn cosine(value: f64) -> f64 { cos(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn tangent(value: f64) -> f64 { tan(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn arcSine(value: f64) -> f64 { asin(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn arcCosine(value: f64) -> f64 { acos(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn arcTangent(value: f64) -> f64 { atan(value) }
 
 /// The angle of the point `(x, y)` from the positive x-axis, in radians and
 /// in the right quadrant — which `arcTangent(y / x)` cannot tell you.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn angleOf(y: f64, x: f64) -> f64 { atan2(y, x) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn hyperbolicSine(value: f64) -> f64 { sinh(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn hyperbolicCosine(value: f64) -> f64 { cosh(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn hyperbolicTangent(value: f64) -> f64 { tanh(value) }
 
 /// Radians from degrees.
@@ -134,52 +134,52 @@ pub fn degrees(radians: f64) -> f64 { radians * 180.0 / PI }
 
 //=== Logarithms and exponentials =========================================//
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn naturalLog(value: f64) -> f64 { log(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn log2Of(value: f64) -> f64 { log2(value) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn log10Of(value: f64) -> f64 { log10(value) }
 
 /// The logarithm of `value` in an arbitrary base.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn logOf(value: f64, base: f64) -> f64 { log(value) / log(base) }
 
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn exponential(value: f64) -> f64 { exp(value) }
 
 //=== Rounding ============================================================//
 
 /// Towards negative infinity.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn roundDown(value: f64) -> f64 { floor(value) }
 
 /// Towards positive infinity.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn roundUp(value: f64) -> f64 { ceil(value) }
 
 /// To the nearest whole number, halves away from zero.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn roundNearest(value: f64) -> f64 { round(value) }
 
 /// Towards zero: the whole part, with the fraction dropped.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn wholePart(value: f64) -> f64 { trunc(value) }
 
 /// What is left after `wholePart`, keeping the sign.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn fractionPart(value: f64) -> f64 { value - trunc(value) }
 
 /// The remainder of `a / b`, keeping the sign of `a`. This is C's `fmod`;
 /// `%` means the same thing for floats.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 pub fn remainderOf(a: f64, b: f64) -> f64 { fmod(a, b) }
 
 /// `magnitude` with the sign of `sign` — which is the only way to tell the
 /// two zeroes apart, since `-0.0 == 0.0`.
-@safe("copysign is total: every pair of inputs has a defined result")
+#safe("copysign is total: every pair of inputs has a defined result")
 pub fn withSignOf(magnitude: f64, sign: f64) -> f64 { copysign(magnitude, sign) }
 
 //=== Decimal places ======================================================//
@@ -240,7 +240,7 @@ fn slack(x: f64) -> f64 {
 }
 
 /// `x`, or the whole number it is float error away from.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 fn snapWhole(x: f64) -> f64 {
     let r = round(x)
     let d = if x > r { x - r } else { r - x }
@@ -248,7 +248,7 @@ fn snapWhole(x: f64) -> f64 {
 }
 
 /// `x`, or the half — n + 0.5 — it is float error away from.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 fn snapHalf(x: f64) -> f64 {
     let h = floor(x) + 0.5
     let d = if x > h { x - h } else { h - x }
@@ -256,7 +256,7 @@ fn snapHalf(x: f64) -> f64 {
 }
 
 /// `x` settled to a whole number by `mode`.
-@safe("libm handles its own domain errors by returning NaN")
+#safe("libm handles its own domain errors by returning NaN")
 fn settle(x: f64, mode: Rounding) -> f64 {
     let w = snapWhole(x)
     match mode {

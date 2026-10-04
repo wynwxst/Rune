@@ -352,16 +352,24 @@ fn main() -> i64 {
           label="Resolution order"),
 
         H("Reserved words"),
-        P("These 39 words are keywords and cannot be used as identifiers."),
+        P("These 47 words are keywords and cannot be used as identifiers."),
         T(["Group", "Words"],
           [["Declarations", "`fn` `struct` `enum` `class` `mark` `bind` `to` "
-            "`extend` `import` `extern` `type` `pub` `global`"],
+            "`extend` `import` `extern` `type` `pub` `global` `macro`"],
            ["Bindings", "`let` `var` `mut`"],
            ["Control flow", "`if` `elif` `else` `while` `loop` `for` `in` "
             "`match` `return` `break` `continue` `defer` `async` `await`"],
-           ["Types and values", "`self` `Self` `super` `dyn` `weak` `true` "
-            "`false` `nil`"],
-           ["Other", "`as` `is` `where` `unsafe` `operator`"]]),
+           ["Types and values", "`self` `Self` `super` `dyn` `weak` `uniq` "
+            "`true` `false` `nil`"],
+           ["Other", "`as` `into` `is` `where` `unsafe` `operator` `move`"]]),
+        P("`move` is a keyword only where it is an operator — `move value`, "
+          "or `move ||` before a closure. Followed by `(` it is a name like "
+          "any other, so a game's `fn move(&var self, dx: i64, dy: i64)` and "
+          "the call `piece.move(1, 0)` are both fine."),
+        P("A few more words mean something only in one position, and are "
+          "ordinary names everywhere else: `take` at the start of a pattern "
+          "binding, `some` and `typeof` where a type is written, and `from` "
+          "after a borrowed type in a signature."),
         P("`Option`, `Result`, `Some`, `None`, `Ok` and `Err` are not keywords "
           "— they are ordinary declarations the compiler happens to know by "
           "name, and a module may shadow them."),
@@ -721,7 +729,7 @@ extern "C" {
 
 struct Rect { x: f64, y: f64, w: f64, h: f64 }
 
-@unsafe fn main() -> i64 {
+#unsafe fn main() -> i64 {
     let obj = 0 as *var u8
     let r = Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 }
     // Stands for a call through
@@ -924,6 +932,36 @@ fn main() -> i64 {
           "can only be the `into` form — there is nothing else it could "
           "mean. `bind` on a named type still reads as a mark, as it always "
           "did.", label="Why only `into` takes an unnamed source"),
+
+        P("The source may be generic, and may be a **pointer**. A binding "
+          "written once for every `*var T` lets a typed pointer go wherever C "
+          "asks for bytes, with no cast at each call. Importing a file or "
+          "library that declares the binding brings it along, like any "
+          "other."),
+        S("""import std::io
+import std::mem
+
+bind<T> *var T into *var u8 {
+    fn convert(&self) -> *var u8 { unsafe { self as *var u8 } }
+}
+
+extern "C" {
+    fn realloc(ptr: *var u8, size: usize) -> *var u8
+    fn free(ptr: *var u8)
+}
+
+#unsafe
+fn main() -> i64 {
+    var items = 0 as *var i64
+    items = realloc(items, mem::size_of<i64>() * 4) as *var i64
+    items[3] = 42
+    io::println(items[3])
+    free(items)
+    0
+}""", mode="run", title="Converting out of a pointer"),
+        N("In a binding on a pointer type, `self` is the pointer — not the "
+          "place it was read from. `self as *var u8` is the address it "
+          "holds.", label="What `self` is"),
 
         N("`As` is in scope everywhere — the prelude puts it there alongside "
           "`Option` and `Result`, so a binding never needs an import. It is "
@@ -3048,8 +3086,8 @@ fn main() -> i64 {
           "saying whether it still owns anything, so a destructor never runs "
           "twice.", label="What the check covers"),
 
-        H("`@resource`: a field that has to be released"),
-        P("A field marked `@resource` holds something the compiler cannot "
+        H("`#resource`: a field that has to be released"),
+        P("A field marked `#resource` holds something the compiler cannot "
           "release on its own. Saying so makes the type's `deinit` "
           "responsible for it: at `--safety full` a `deinit` that never "
           "mentions the field is an error, and so is having no `deinit` at "
@@ -3059,12 +3097,12 @@ fn main() -> i64 {
 extern "C" { fn close(fd: i32) -> i32 }
 
 pub struct Socket {
-    @resource fd: i32 = -1,
+    #resource fd: i32 = -1,
     pub port: i32 = 0
 }
 
 extend Socket {
-    @safe("the descriptor is ours, and the flag stops a second close")
+    #safe("the descriptor is ours, and the flag stops a second close")
     fn deinit(&var self) {
         if self.fd >= 0 {
             io::println("close(" + self.fd.$str() + ")")
@@ -3081,7 +3119,7 @@ fn main() -> i64 {
         S("""import std::io
 
 struct Socket {
-    @resource fd: i32,
+    #resource fd: i32,
     port: i32
 }
 
@@ -3090,7 +3128,7 @@ extend Socket {
 }
 
 fn main() -> i64 { let s = Socket { fd: 3, port: 80 }; 0 }""",
-          mode="diag", title="A `@resource` the `deinit` forgets"),
+          mode="diag", title="A `#resource` the `deinit` forgets"),
         N("An enum may declare a `deinit` in exactly the same way, and a "
           "`mark` may require one — `std::net`'s `TcpStream` and "
           "`TcpListener` are both structs that own a descriptor this way."),
@@ -3253,6 +3291,34 @@ fn main() -> i64 {
         S("""enum Step { First = 1, Reset = 0, Second }   // Second is 1 too
 
 fn main() -> i64 { 0 }""", mode="warn", title="A value taken twice"),
+        P("A value may be negative, and the counting goes on from it as from "
+          "any other. It may also be a **float** — exchange rates, "
+          "thresholds, the constants a C header names. A float cannot be a "
+          "tag, so a float-valued enum keeps its tags counting up from zero "
+          "and each variant's value beside its tag; `as` gives that value "
+          "back as any number type. Since there is no next float to count "
+          "on to, every variant of one has to be given a value (E0401). A "
+          "suffix — `1f64`, `-40.5f32` — chooses the type; without one it is "
+          "`f64`."),
+        S("""import std::io
+import std::fmt
+
+enum Level { Low = -1, Mid, High = 10, Top }        // Mid is 0, Top is 11
+enum Currency { USD = 1.0, AUD = 1.43, GBP = 0.76 }
+
+fn main() -> i64 {
+    io::println(Level::Low as i64)
+    io::println(Level::Top as i64)
+    io::println(Currency::AUD as f64)
+    var total = 0.0
+    for c in [Currency::USD, Currency::AUD, Currency::GBP] { total += c as f64 }
+    io::println(fmt::fixed(total, 2))
+    io::println(Currency::GBP == Currency::GBP)      // compared by tag
+    0
+}""", mode="run", title="Negative and float values"),
+        S("""enum Ratio { Half = 0.5, Third }
+
+fn main() -> i64 { 0 }""", mode="diag", title="A float enum gives every variant its value"),
 
         H("Methods on an enum"),
         S("""import std::io
@@ -3712,8 +3778,8 @@ SECTIONS.append(Sec(
     keywords=["mark", "trait", "bind", "default method", "super-mark", "extend",
               "interface", "conformance", "protocol", "associated type",
               "Self::Item", "type Item", "where clause", "requirement",
-              "some", "opaque", "dyn", "auto", "automatic mark", "@auto",
-              "@never", "autotrait", "Clone", "Send", "Sync"],
+              "some", "opaque", "dyn", "auto", "automatic mark", "#auto",
+              "#never", "autotrait", "Clone", "Send", "Sync"],
     items=[
         H("Declaring a mark"),
         P("A method with no body is a requirement. A method with a body is a "
@@ -4237,7 +4303,7 @@ extend String {
 
 extern "C" { fn sqrt(v: f64) -> f64 }
 
-@safe("sqrt of a sum of squares is always in libm's domain")
+#safe("sqrt of a sum of squares is always in libm's domain")
 fn squareRoot(v: f64) -> f64 { sqrt(v) }
 
 fn main() -> i64 {
@@ -5119,14 +5185,14 @@ fn main() -> i64 {
     io::println(*s)
     0
 }""", mode="run", title="A handle is a pointer"),
-        P("`@alias` on the block registers a further spelling for the same "
+        P("`#alias` on the block registers a further spelling for the same "
           "operator, everywhere. That is the one case where an alias is not "
           "local to the declaration it decorates."),
         S("""import std::io
 
 struct Celsius { deg: f64 }
 
-@alias("degrees")
+#alias("degrees")
 bind operator::"*" to Celsius {
     fn deref(&self) -> f64 { self.deg }
 }
@@ -5194,12 +5260,12 @@ fn main() -> i64 { 0 }""", mode="diag", title="Redefining `String + String`"),
         P("Some marks are not promises a type makes but facts about it: it "
           "holds nothing that has to be destroyed, everything in it can be "
           "copied, nothing in it stops it crossing to another thread. "
-          "`@auto` says so, and the compiler answers for every type: a type "
+          "`#auto` says so, and the compiler answers for every type: a type "
           "has an automatic mark when **every part of it** has it."),
         S('''import std::io
 
 /// A claim about a type, not a promise it makes: it holds plain values.
-@auto
+#auto
 mark Plain {}
 
 struct Point { x: i64, y: i64 }        // has it: two integers
@@ -5217,16 +5283,16 @@ fn main() -> i64 {
           "is the rule, and two ways to override it where the structure has "
           "nothing to say."),
         T(["Written", "Means"],
-          [["`@auto mark M {}`", "M is automatic: every part decides"],
+          [["`#auto mark M {}`", "M is automatic: every part decides"],
            ["`bind M to T {}`", "T has it, whatever its parts say"],
-           ["`@never(M)` on `T`", "T does not have it, whatever its parts say"],
+           ["`#never(M)` on `T`", "T does not have it, whatever its parts say"],
            ["`reflect::conforms<T, M>()`", "the answer, at compile time"]]),
         P("Three things never have one on their own. A type that runs a "
           "`deinit` — a destructor is a promise the compiler cannot read. "
           "Anything it cannot look into: a closure and its captures, an "
           "`Any`, a `dyn Mark`, a raw or `weak` pointer. And a type that "
-          "refuses it with `@never`, along with everything holding one."),
-        S('''@auto
+          "refuses it with `#never`, along with everything holding one."),
+        S('''#auto
 mark Plain {}
 
 struct Descriptor { fd: i32 }
@@ -6405,7 +6471,9 @@ fn main() -> i64 {
            ["`padStart` / `padEnd`", "`(String, i64, Character) -> String`",
             "to a width; longer text is returned rather than cut"],
            ["`lower` / `upper`", "`(String) -> String`",
-            "case, **ASCII only** — every other byte is left as it is"]]),
+            "case, **ASCII only** — every other byte is left as it is"],
+           ["`isSpace`", "`(byte: i64) -> bool`", "space, tab, carriage "
+            "return, newline or form feed — what `trim` strips"]]),
         N("`lower` and `upper` deliberately stop at ASCII. Real case mapping "
           "depends on the language (Turkish dotless ı, German ß, Greek "
           "final sigma) and can change a string's length, so a function that "
@@ -7301,15 +7369,15 @@ fn main() -> i64 {
         P("A raw pointer is an address and nothing else: no length, no "
           "guarantee it points at anything. Creating one is fine; every "
           "*dereference* is an unsafe operation, so it has to happen inside a "
-          "function marked `@unsafe` or an `unsafe { }` block."),
+          "function marked `#unsafe` or an `unsafe { }` block."),
         S("""import std::io
 
-@unsafe
+#unsafe
 fn writeThrough(target: *var i64, value: i64) {
     *target = value
 }
 
-@unsafe
+#unsafe
 fn readThrough(source: *i64) -> i64 {
     *source
 }
@@ -7325,7 +7393,7 @@ fn main() -> i64 {
     0
 }""", mode="run", title="Reading and writing through a raw pointer"),
         S("""fn peek(p: *i64) -> i64 {
-    *p          // no @unsafe, no unsafe block
+    *p          // no #unsafe, no unsafe block
 }""", mode="diag", title="Dereferencing outside an unsafe context"),
         P("A raw pointer can also be indexed. `p[n]` is the nth element from "
           "it — the same arithmetic C does, on the pointee's size, with no "
@@ -7335,7 +7403,7 @@ fn main() -> i64 {
         S("""import std::io
 import std::mem
 
-@safe("the block holds four i64 and no index below goes past four")
+#safe("the block holds four i64 and no index below goes past four")
 fn main() -> i64 {
     let block = mem::allocator.allocate(4 as usize * mem::size_of<i64>())
     let cells = unsafe { block as *var i64 }
@@ -7363,18 +7431,18 @@ fn main() -> i64 {
           "`std::collections::vector`.",
           label="No counting", tone="warn"),
         P("A wrapper that has genuinely established the invariant says so with "
-          "`@safe(\"reason\")`. The reason is not decoration — it is the record "
+          "`#safe(\"reason\")`. The reason is not decoration — it is the record "
           "of *why* the unchecked operation inside is sound, and it appears in "
           "the diagnostic if someone later breaks the assumption."),
         S("""import std::io
 
-@unsafe
+#unsafe
 fn incrementThrough(cell: *var i64) {
     *cell += 1
 }
 
 /// The pointer below cannot dangle, so the unchecked write cannot be wrong.
-@safe("the pointer names a live local that outlives the call")
+#safe("the pointer names a live local that outlives the call")
 fn bumped(start: i64) -> i64 {
     var cell = start
     unsafe { incrementThrough(&var cell as *var i64) }
@@ -7433,12 +7501,11 @@ fn main() -> i64 {
 
         H("Integer overflow"),
         P("`+`, `-`, `*` and unary `-` on a fixed-width integer can produce a "
-          "result that does not fit. What happens then follows the build "
-          "rather than the safety level: a **debug build** (`-O0`, which is "
-          "what `rune build` produces) traps with a panic, the way a bounds "
-          "check does, and a **release build** (`-O1` and above, `rune build "
-          "--release`) wraps in two's complement. The mistake is caught while "
-          "the program is being written and costs nothing once it is "
+          "result that does not fit. A build with safety checks — any build, "
+          "at any optimisation level, `-O2` being the default — traps with a "
+          "panic, the way a bounds check does; a **release build** (`rune "
+          "build --release`) wraps in two's complement. The mistake is caught "
+          "while the program is being written and costs nothing once it is "
           "shipped. `--overflow-checks` and `--no-overflow-checks` pin it "
           "either way, `overflow-checks = true|false` under `[build]` does "
           "the same for a package, and `--safety none` never traps."),
@@ -7472,25 +7539,25 @@ fn main() -> i64 {
     0
 }""", mode="run", title="Wrapping, saturating and checked, by name"),
         T(["Form", "On overflow"],
-          [["`a + b`, `a - b`, `a * b`, `-a`", "traps at `-O0`, wraps at `-O1` and above"],
+          [["`a + b`, `a - b`, `a * b`, `-a`", "traps, or wraps in a release build"],
            ["`a.$wrappingAdd(b)` `$wrappingSub` `$wrappingMul`", "wraps"],
            ["`a.$saturatingAdd(b)` `$saturatingSub` `$saturatingMul`", "clamps to the type's limits"],
            ["`a.$checkedAdd(b)` `$checkedSub` `$checkedMul`", "`nil`; otherwise `Some(result)`"],
            ["`math::wrappingAdd(a, b)` and the rest", "the same three families as functions"]],
           caption="Both operands share one integer type."),
-        N("`@Config(overflow_checks == \"on\")` tells a declaration which "
+        N("`#Config(overflow_checks == \"on\")` tells a declaration which "
           "world it is in, for the rare case that wants to know.",
           label="Asking at compile time"),
 
-        H("`@unsafe` and `unsafe { }`"),
-        P("`@unsafe` on a function says its body may perform unchecked "
+        H("`#unsafe` and `unsafe { }`"),
+        P("`#unsafe` on a function says its body may perform unchecked "
           "operations and that calling it is itself unchecked. `unsafe { }` "
           "opens the same window for a single block. Both are visible at the "
           "call site, which is the point: unsafety is never inherited "
           "silently."),
         S("""import std::io
 
-@unsafe
+#unsafe
 fn reinterpret(bits: u64) -> f64 {
     // Only legal because the caller has been told this is unchecked.
     *(&bits as *u64 as *f64)
@@ -7501,20 +7568,20 @@ fn main() -> i64 {
     io::println(asFloat.$str())
     0
 }""", mode="run", title="An unsafe function and its window"),
-        S("""@unsafe
+        S("""#unsafe
 fn raw(p: *i64) -> i64 { *p }
 
 fn caller(p: *i64) -> i64 {
     raw(p)          // calling it is itself an unsafe operation
 }""", mode="diag", title="Unsafety does not leak into safe code"),
 
-        H("`@safe(\"reason\")`"),
+        H("`#safe(\"reason\")`"),
         S("""import std::io
 import std::mem
 
 // The pattern: an unchecked core, a checked edge, and a reason on the seam
 // saying why the edge is enough.
-@unsafe
+#unsafe
 fn sumUnchecked(cells: *var i64, count: i64) -> i64 {
     var total = 0
     var i = 0
@@ -7525,7 +7592,7 @@ fn sumUnchecked(cells: *var i64, count: i64) -> i64 {
     total
 }
 
-@safe("the block is sized for `count` cells and every one is written below")
+#safe("the block is sized for `count` cells and every one is written below")
 fn sumOfSquares(count: i64) -> i64 {
     if count <= 0 { return 0 }
     let block = mem::allocator.allocate(count as usize * mem::size_of<i64>())
@@ -7547,15 +7614,15 @@ fn main() -> i64 {
     0
 }""", mode="run", title="An unchecked core behind a checked edge"),
         P("Some functions are safe *because of an argument you can make*, not "
-          "because the compiler proved it. `@safe` records that argument. It "
+          "because the compiler proved it. `#safe` records that argument. It "
           "permits the function to expose a checked interface over an unchecked "
           "implementation, and the string is kept with the declaration."),
         S("""import std::io
 
-@unsafe
+#unsafe
 fn divideUnchecked(a: i64, b: i64) -> i64 { a / b }
 
-@safe("the divisor is compared against zero on the line above")
+#safe("the divisor is compared against zero on the line above")
 fn divide(a: i64, b: i64) -> i64? {
     if b == 0 { return nil }
     unsafe { divideUnchecked(a, b) }
@@ -7566,7 +7633,7 @@ fn main() -> i64 {
     io::println(divide(84, 0).hasValue().$str())
     0
 }""", mode="run", title="A checked wrapper over an unchecked core"),
-        N("`@safe` without a reason is accepted but warns. A justification "
+        N("`#safe` without a reason is accepted but warns. A justification "
           "nobody wrote down is a justification nobody can check.",
           label="Say why", tone="warn"),
 
@@ -7777,10 +7844,10 @@ fn main() -> i64 {
           "two values, and the second to go would close the same descriptor, "
           "or free the same block, a second time. Such a type says what a "
           "copy of it means by writing `clone` itself."),
-        S('''struct Descriptor { @resource fd: i32 = -1 }
+        S('''struct Descriptor { #resource fd: i32 = -1 }
 
 extend Descriptor {
-    @safe("the descriptor is ours, and the flag stops a second close")
+    #safe("the descriptor is ours, and the flag stops a second close")
     fn deinit(&var self) {
         if self.fd >= 0 { self.fd = -1 }
     }
@@ -8109,7 +8176,7 @@ fn main() -> i64 {
         P("A `weak` field cannot tell when its target has been freed without a "
           "count, so it is an error; keep a `mem::Arena<T>` handle or an ordinary "
           "borrow instead. A library can also mark a type reference-counting-only "
-          "with `@zombie_unavailable(\"…\")`, and reaching for it under `--memory "
+          "with `#zombie_unavailable(\"…\")`, and reaching for it under `--memory "
           "zombie` fails with the alternative spelled out."),
         S('''class Parent { name: String  fn init(self, n: String) { self.name = n } }
 class Child {
@@ -8119,8 +8186,8 @@ class Child {
 fn main() -> i64 { 0 }''', mode="diag", memory="zombie",
           title="`weak` needs a count"),
         N("Two escape hatches exist for the code the checker cannot vouch for. "
-          "`@zombie(\"reason\")` on a function tells the checker to trust its "
-          "body, the way `@safe` does for an unsafe call; its signature is still "
+          "`#zombie(\"reason\")` on a function tells the checker to trust its "
+          "body, the way `#safe` does for an unsafe call; its signature is still "
           "the contract callers are held to. And `unsafe { }` leaves raw "
           "pointers untracked, exactly as under reference counting.",
           label="When you know better"),
@@ -8149,7 +8216,7 @@ fn main() -> i64 { 0 }''', mode="diag", memory="zombie",
            ["E0290", "no write to a field through a shared `&self`"],
            ["E0292", "a reference-counting-only declaration is unavailable"],
            ["E0293", "a `from` place must name a parameter, `self`, or `global`"],
-           ["E0294", "`@zombie` needs a reason"],
+           ["E0294", "`#zombie` needs a reason"],
            ["E0296", "an internal reference must point into a heap-owned field"],
            ["E0297", "an internal reference must borrow from a field of its own value"],
            ["E0298", "a field that borrows another must be declared after it"],
@@ -8338,9 +8405,9 @@ version     u32      the container's own version; 3 today
 memory      u32      0 = reference counting, 1 = Zombie
 name        string   the library's module name
 
-flagCount   u32      `@Config` names set when this was built
+flagCount   u32      `#Config` names set when this was built
   flag      string
-valueCount  u32      `@Config` keys that had values
+valueCount  u32      `#Config` keys that had values
   key       string
   value     string
 
@@ -8357,8 +8424,14 @@ object      bytes    a native object file for one target"""),
             "they were written — including generic bodies, which "
             "monomorphisation needs, and `pub macro` definitions, which "
             "expansion needs. Everything not `pub` is stripped on the way in"],
+           ["Its **procedural macros** are units too",
+            "a `#type(Macros)` file is stored as one more unit, and a `#macro "
+            "fn` stays in the source it was written in. An importer finds "
+            "both and builds them into its own macro package, for the machine "
+            "doing the compiling — which is how a library exports its "
+            "macros"],
            ["The **conditions** travel with it",
-            "the interface is source, so its `@Config` conditions are "
+            "the interface is source, so its `#Config` conditions are "
             "answered again on import — and have to be answered the way they "
             "were when the object code was made, not the way the importer's "
             "own build would answer them"],
@@ -8390,49 +8463,81 @@ object      bytes    a native object file for one target"""),
 # ===========================================================================
 SECTIONS.append(Sec(
     "decorators", "annotation", "Decorators",
-    "A decorator is a compiler instruction attached to a declaration, written "
-    "`@name` or `@name(arguments)`. They never change what code means — only "
-    "how it is compiled, checked, or exposed.",
+    "A decorator is attached to a declaration. The compiler's own are written "
+    "`#name` or `#name(arguments)` and change how code is compiled, checked or "
+    "exposed; one the program declares is written `@name` and runs code of "
+    "the program's own. The sigil tells a reader which is which at a glance.",
     [
-        G("""decorator  ::= "@" identifier [ "(" argument { "," argument } ")" ]
-             // `@alias("...")` adds a name; `@intrinsic("...")` has no body
+        G("""decorator  ::= ( "#" | "@" ) identifier [ "(" argument { "," argument } ")" ]
+             // `#` for the compiler's own, `@` for one the program declares
+             // `#alias("...")` adds a name; `#intrinsic("...")` has no body
 argument   ::= expression | identifier ":" expression"""),
+        T(["Sigil", "Means", "If it is the other kind"],
+          [["`#name`", "a decorator the compiler provides — everything in "
+            "the table below", "`#route` names nothing the compiler knows: "
+            "refused (E0132), with the `@route` spelling suggested"],
+           ["`@name`", "a function the program declared, called before "
+            "`main`; see below", "`@inline` still works and warns (W0133), "
+            "saying to write `#inline`"]]),
         T(["Decorator", "Applies to", "Effect"],
-          [["`@unsafe`", "function", "the body may perform unchecked operations; "
+          [["`#unsafe`", "function", "the body may perform unchecked operations; "
             "calling it is unsafe"],
-           ["`@safe(\"reason\")`", "function", "a checked interface over an "
+           ["`#safe(\"reason\")`", "function", "a checked interface over an "
             "unchecked implementation; records why"],
-           ["`@inline`", "function", "asks the optimiser to inline it"],
-           ["`@noinline`", "function", "forbids inlining"],
-           ["`@export(\"name\")`", "function", "gives it that exact symbol "
+           ["`#inline`", "function", "asks the optimiser to inline it"],
+           ["`#noinline`", "function", "forbids inlining"],
+           ["`#export(\"name\")`", "function", "gives it that exact symbol "
             "name, for C to call"],
-           ["`@alias(\"name\")`", "any declaration", "another name for it; a "
+           ["`#alias(\"name\")`", "any declaration", "another name for it; a "
             "string, so it can hold what an identifier cannot"],
-           ["`@as(\"name\")`", "an `extern` declaration",
+           ["`#as(\"name\")`", "an `extern` declaration",
             "renames it for Rune's side only; the symbol stays what C exports"],
-           ["`@resource`", "a field",
+           ["`#resource`", "a field",
             "the type's `deinit` has to release it, or say so at `--safety full`"],
-           ["`@intrinsic(\"name\")`", "function", "the compiler answers it "
+           ["`#intrinsic(\"name\")`", "function", "the compiler answers it "
             "directly; how `std::mem` gets `size_of`"],
-           ["`@sync(\"reason\")`", "a class",
+           ["`#sync(\"reason\")`", "a class",
             "it synchronises its own access, so it may cross a thread"],
-           ["`@Doc(\"...\")`", "any declaration",
+           ["`#Doc(\"...\")`", "any declaration",
             "prose the compiler keeps; what `rune doc` reads"],
-           ["`@type(Executable | Library | …)`", "**a file**",
+           ["`#type(Executable | Library | …)`", "**a file**",
             "what that file produces"],
-           ["`@link(\"m\")`", "**a file**", "a native library this file needs"],
-           ["`@linkpath(\"/opt/lib\")`", "**a file**", "where to look for "
-            "them"]],
+           ["`#link(\"m\")`", "**a file**", "a native library this file needs"],
+           ["`#linkpath(\"/opt/lib\")`", "**a file**", "where to look for "
+            "them"],
+           ["`#macro`", "a `pub fn`", "a procedural macro, built and run "
+            "while compiling; see **Macros**"],
+           ["`#Config(condition)`", "any declaration or member",
+            "it exists only when the condition holds; see **Conditional "
+            "compilation**"],
+           ["`#Convention(\"C\")`", "a struct or enum",
+            "laid out the way C lays it out; see **Calling C**"],
+           ["`#auto` / `#never(Mark)`", "a mark / a type",
+            "the mark is decided by a type's parts; or this type never has "
+            "it; see **Automatic marks**"],
+           ["`#zombie_unavailable(\"use …\")`", "any declaration",
+            "it only makes sense with reference counting; under "
+            "`--memory zombie` a use is refused with that advice"],
+           ["`#weak`", "a function", "a definition another can replace at "
+            "link time; see **Bare metal**"],
+           ["`#runtime(none)` / `#entry(none)` / `#panicHandler` / "
+            "`#output` / `#allocator` / `#deallocator`", "a file / functions",
+            "a freestanding program and the hooks it supplies; see **Bare "
+            "metal**"],
+           ["`#lint(allow(…), warn(…), note(…))`", "a file, declaration or "
+            "statement", "sets lint rules for that item — or for the whole "
+            "file when it stands at the top; the compiler ignores it, "
+            "`rune lint` and the editor read it"]],
           caption="Unknown decorators are diagnosed, not ignored — a typo in a "
                   "decorator name is a mistake worth hearing about."),
 
         H("Safety decorators"),
         S("""import std::io
 
-@unsafe
+#unsafe
 fn trustMe(p: *i64) -> i64 { *p }
 
-@safe("the pointer comes from `&var` on a live local, so it cannot dangle")
+#safe("the pointer comes from `&var` on a live local, so it cannot dangle")
 fn readLocal() -> i64 {
     var value = 41
     unsafe { trustMe(&var value as *i64) + 1 }
@@ -8441,10 +8546,10 @@ fn readLocal() -> i64 {
 fn main() -> i64 {
     io::println(readLocal().$str())
     0
-}""", mode="run", title="@unsafe and @safe"),
+}""", mode="run", title="#unsafe and #safe"),
 
-        H("`@alias` and `@as`"),
-        P("`@alias` *adds* a name: the declaration answers to both. `@as` "
+        H("`#alias` and `#as`"),
+        P("`#alias` *adds* a name: the declaration answers to both. `#as` "
           "*replaces* one, and only inside an `extern` block — the C library "
           "goes on exporting the name that was written, and Rune sees the new "
           "one. That is what lets a program import C's `bind` and still "
@@ -8452,43 +8557,42 @@ fn main() -> i64 {
         S("""import std::io
 
 extern "C" {
-    @as("cAbs")
+    #as("cAbs")
     fn abs(v: i32) -> i32        // links against C's `abs`
 }
 
 /// A Rune function that keeps the name C also uses.
 fn abs(v: i64) -> i64 { if v < 0 { 0 - v } else { v } }
 
-@safe("abs touches no memory")
+#safe("abs touches no memory")
 fn main() -> i64 {
     io::println(abs(-7))         // this one
     io::println(cAbs(-9i32))     // C's
     0
 }""", mode="run", title="Two functions called `abs`"),
-        S("""@as("other")
+        S("""#as("other")
 fn ordinary() -> i64 { 1 }
 
 fn main() -> i64 { ordinary() }""",
-          mode="diag", title="`@as` outside an `extern` block"),
+          mode="diag", title="`#as` outside an `extern` block"),
 
         H("Code generation decorators"),
         S("""import std::io
 
-@inline
+#inline
 fn square(n: i64) -> i64 { n * n }
 
-@noinline
+#noinline
 fn shout(text: String) { io::println(text + "!") }
 
 fn main() -> i64 {
     shout("area is " + square(7).$str())
     0
-}""", mode="run", title="@inline and @noinline"),
+}""", mode="run", title="#inline and #noinline"),
 
         H("Decorators you write yourself"),
-        P("Any name that is not one of the built-ins above is a decorator the "
-          "program has to have declared: a function whose **last parameter is "
-          "a function**. The earlier parameters are the decorator's own "
+        P("A decorator written `@name` is one the program has to have "
+          "declared: a function whose **last parameter is a function**. The earlier parameters are the decorator's own "
           "arguments, and the decorated function fills the last one."),
         S("""import std::io
 
@@ -8519,7 +8623,7 @@ import std::collections::vector
 // globals are still being set, so the list cannot count on being there yet.
 global var table: vector::Vector<String>? = nil
 
-@safe("decorators run one at a time, before main, and nothing else holds the list")
+#safe("decorators run one at a time, before main, and nothing else holds the list")
 fn route(path: String, handler: @function() -> ()) {
     if table.isNil() { table = vector::Vector<String>() }
     unsafe { table.touch().push(path) }
@@ -8546,7 +8650,7 @@ fn main() -> i64 {
             "arguments from before `main`"],
            ["free functions only", "a method carries `self`, and no instance "
             "exists yet"],
-           ["a built-in name wins", "`@inline` and the rest are the "
+           ["a built-in name wins", "`#inline` and the rest are the "
             "compiler's, and cannot be redefined"]]),
         S("""@memoise
 fn slow(n: i64) -> i64 { n * 2 }
@@ -8566,8 +8670,8 @@ fn main() -> i64 { 0 }""", mode="diag",
           "result.",
           label="Reading a function type"),
 
-        H("`@alias`: a second name"),
-        P("`@alias(\"other\")` puts a declaration in scope under another name "
+        H("`#alias`: a second name"),
+        P("`#alias(\"other\")` puts a declaration in scope under another name "
           "as well as its own, and more than one is allowed. The name is a "
           "string, so it can hold characters an identifier cannot — which is "
           "what lets an operator answer to its punctuation."),
@@ -8576,12 +8680,12 @@ fn main() -> i64 { 0 }""", mode="diag",
 struct Bag { count: i64 }
 
 extend Bag {
-    @alias("size")
-    @alias("howMany")
+    #alias("size")
+    #alias("howMany")
     pub fn length(&self) -> i64 { self.count }
 }
 
-@alias("makeBag")
+#alias("makeBag")
 fn bag(n: i64) -> Bag { Bag { count: n } }
 
 fn main() -> i64 {
@@ -8595,24 +8699,24 @@ fn main() -> i64 {
           "Taking a name something else already holds is an error.",
           label="Same thing, other name"),
 
-        H("`@type`: what a file produces"),
-        P("A file can say what it is meant to become. `@type` comes before "
+        H("`#type`: what a file produces"),
+        P("A file can say what it is meant to become. `#type` comes before "
           "every other directive, because what a file produces is what decides "
-          "how the rest of them are used. A file with a `main` and no `@type` "
+          "how the rest of them are used. A file with a `main` and no `#type` "
           "is an executable, which is what the compiler already assumed."),
         T(["Written", "Produces"],
-          [["`@type(Executable)`", "a linked program"],
-           ["`@type(Library)`", "a `.rul` — object code plus the interface"],
-           ["`@type(Shared)`", "a native shared library — `.dylib`, `.so` "
+          [["`#type(Executable)`", "a linked program"],
+           ["`#type(Library)`", "a `.rul` — object code plus the interface"],
+           ["`#type(Shared)`", "a native shared library — `.dylib`, `.so` "
             "or `.dll`, for anything that can load one"],
-           ["`@type(Object)`", "a `.o` and nothing else"],
-           ["`@type(Assembly)`", "target assembly"],
-           ["`@type(LLVM)`", "textual LLVM IR"],
-           ["`@type(Macros)`", "nothing on its own — the file holds "
+           ["`#type(Object)`", "a `.o` and nothing else"],
+           ["`#type(Assembly)`", "target assembly"],
+           ["`#type(LLVM)`", "textual LLVM IR"],
+           ["`#type(Macros)`", "nothing on its own — the file holds "
             "procedural macros, built and run while the *program* compiles"]],
           caption="A flag on the command line still wins: a build script has "
                   "the last word over a file's preference."),
-        S("""@type(Object)
+        S("""#type(Object)
 
 // No entry point is emitted for an object, so nothing runs global
 // initialisers for it — anything constant has to be a function.
@@ -8621,18 +8725,18 @@ pub fn checksum(bytes: [u8]) -> u64 {
     for b in bytes { sum = sum * 31 + (b as u64) }
     sum
 }""", mode="frag", title="A file that compiles to an object"),
-        S("""@link("m")
-@type(Object)
+        S("""#link("m")
+#type(Object)
 
-fn f() -> i64 { 0 }""", mode="diag", title="`@type` comes first"),
+fn f() -> i64 { 0 }""", mode="diag", title="`#type` comes first"),
 
-        H("`@link` and `@linkpath`: what a file needs"),
+        H("`#link` and `#linkpath`: what a file needs"),
         P("These two belong to the *file*, not to any declaration in it, so "
           "they go at the very top — before the imports. A file that calls "
           "into a native library says so beside the `extern` block that "
           "declares it, instead of leaving the caller to pass `-l` and hope."),
-        S("""@link("m")
-@linkpath("/usr/lib")
+        S("""#link("m")
+#linkpath("/usr/lib")
 
 import std::io
 
@@ -8641,7 +8745,7 @@ extern "C" {
     fn hypot(a: f64, b: f64) -> f64
 }
 
-@safe("libm is linked by the directives at the top of this file")
+#safe("libm is linked by the directives at the top of this file")
 fn main() -> i64 {
     io::println(unsafe { cbrt(27.0) }.$str())
     io::println(unsafe { hypot(3.0, 4.0) }.$str())
@@ -8650,30 +8754,61 @@ fn main() -> i64 {
         P("Each takes one or more strings, and both may appear more than "
           "once. What they name is merged with anything `-l` and `-L` asked "
           "for, and repeated names are passed once."),
+        P("Left to itself, the linker picks: a shared library when there is "
+          "one, else the archive. `type:` decides instead, and insists — the "
+          "one file of that kind is found in the `#linkpath`s, the `-L` "
+          "directories and the usual places, named to the linker in full, and "
+          "its absence is an error (E0546) rather than a quiet substitute."),
+        T(["Written", "Links"],
+          [["`#link(\"raylib\")`", "whichever the linker finds first"],
+           ["`#link(\"Cocoa\", type: framework)`", "an Apple framework, "
+            "`-framework Cocoa`, with the `#linkpath`s as framework paths too"],
+           ["`#link(\"raylib\", type: static)`", "`libraylib.a` — the code "
+            "goes into the program, which then needs no library to run"],
+           ["`#link(\"raylib\", type: dynamic)`", "`libraylib.dylib`, `.so`, "
+            "or `.dll.a`/`.dll` — the program loads it when it starts"]],
+          caption="`-l static:raylib` and a manifest's `link = [\"static:raylib\"]` "
+                  "say the same."),
+        P("They have to be at the top — unless a `#Config(...)` stands straight "
+          "before them. Then they may be anywhere, and are the condition's: a "
+          "library one platform needs is linked on that platform alone."),
+        S("""#Config(os == "macos")
+#link("Cocoa", type: framework)
+
+#Config(os == "linux")
+#link("X11")
+
+fn main() -> i64 { 0 }""", mode="decls", title="Linked where the condition holds"),
         S("""import std::io
 
-@link("m")
+#link("m")
 
 fn main() -> i64 { 0 }""", mode="diag", title="Too late to be a file directive"),
 
         H("Exporting to C"),
-        P("`@export` fixes the symbol name so a C caller can find it. Without "
+        P("`#export` fixes the symbol name so a C caller can find it. Without "
           "it, a public function's symbol is qualified by its module."),
         S("""/// Callable from C as `rune_add`.
-@export("rune_add")
+#export("rune_add")
 pub fn add(a: i64, b: i64) -> i64 { a + b }""",
           mode="decls", title="A stable symbol name"),
         H("Spelling and placement"),
         S("""@notarealdecorator
 fn f() -> i64 { 0 }""", mode="diag", title="An unrecognised decorator"),
+        S("""fn route(handler: @function() -> ()) { }
+
+#route
+fn health() { }
+
+fn main() -> i64 { 0 }""", mode="diag", title="`#` is only for the compiler's own"),
         N("Decorators sit on their own line above the declaration, or inline "
           "before it — both parse. One per line reads better when there are "
           "several.", label="Placement"),
     ],
-    keywords=["decorator", "attribute", "@inline", "@export", "@unsafe",
-              "@safe", "annotation", "@alias", "alias", "@intrinsic",
-              "intrinsic", "second name", "@link", "@linkpath", "linking",
-              "native library", "@type", "output", "executable", "object",
+    keywords=["decorator", "attribute", "#inline", "#export", "#unsafe",
+              "#safe", "annotation", "#alias", "alias", "#intrinsic",
+              "intrinsic", "second name", "#link", "#linkpath", "linking",
+              "native library", "#type", "output", "executable", "object",
               "user decorator", "registry", "@route"]))
 
 
@@ -8687,7 +8822,7 @@ SECTIONS.append(Sec(
     "are C's scalar types.",
     [
         H("Declaring foreign functions"),
-        S("""@link("m")
+        S("""#link("m")
 
 import std::io
 
@@ -8697,7 +8832,7 @@ extern "C" {
     fn ldexp(value: f64, exponent: i32) -> f64
 }
 
-@safe("libm's contract for these is total over the values passed below")
+#safe("libm's contract for these is total over the values passed below")
 fn main() -> i64 {
     io::println(unsafe { fmod(10.0, 3.0) }.$str())
     io::println(unsafe { ldexp(1.5, 3) }.$str())
@@ -8770,31 +8905,31 @@ fn main() -> i64 {
           "Rune function handed to C as one takes its arguments that way "
           "too. A pointer is still the cheaper way to hand over anything "
           "large.", label="Structs by value"),
-        N("A Rune function `@export`ed to C takes its arguments the C way "
+        N("A Rune function `#export`ed to C takes its arguments the C way "
           "too: where C passes a signature differently from Rune — a struct "
           "by value — the exported symbol is an adapter that receives them "
           "as C sends them and makes the Rune call.",
           label="Being called with a struct"),
 
-        H("@Convention(\"C\")"),
-        P("`@Convention(\"C\")` on a struct or an enum promises C's layout, "
+        H("#Convention(\"C\")"),
+        P("`#Convention(\"C\")` on a struct or an enum promises C's layout, "
           "and the compiler holds it to that: fields in the order written, "
           "with C's padding and alignment; a payload-free enum is a C `int` "
           "holding its values; an enum with payloads is a tag (`int32_t`, "
           "the variant's index or value) followed by a union aligned for its "
           "widest member. Passed by value — to C, from C, through a "
-          "`@cfunction` or an `@export` — it travels as the platform's C "
+          "`@cfunction` or an `#export` — it travels as the platform's C "
           "compiler would pass the same declaration."),
         S('''import std::io
 import std::mem
 
-@Convention("C")
+#Convention("C")
 struct Packet { kind: u8, length: u32, checksum: u16, stamp: i64 }
 
-@Convention("C")
+#Convention("C")
 enum Level { Debug = 10, Info = 20, Warn = 30 }
 
-@Convention("C")
+#Convention("C")
 enum Reading { Celsius(f64), Raw(i64), Missing }
 
 fn main() -> i64 {
@@ -8806,7 +8941,7 @@ fn main() -> i64 {
 }''', mode="run", title="Layouts C shares"),
         P("Every part has to be something C has: numbers, `bool`, "
           "`Character` (a `uint32_t`), raw pointers, `CString`, "
-          "`@cfunction`s, arrays of those, and other `@Convention(\"C\")` "
+          "`@cfunction`s, arrays of those, and other `#Convention(\"C\")` "
           "types. A `String`, a class, an `Option`, a borrow or a `dyn` is "
           "Rune's and is refused (E0544), as is a class, a generic type or "
           "a convention other than `\"C\"` (E0543)."),
@@ -8825,7 +8960,7 @@ extern "C" {
     fn strtol(text: CString, end: *var u64, base: i32) -> i64
 }
 
-@safe("frexp is total over finite doubles")
+#safe("frexp is total over finite doubles")
 fn main() -> i64 {
     var exponent: i32 = 0
     let fraction = frexp(12.0, &var exponent as *var i32)
@@ -8901,7 +9036,7 @@ fn main() -> i64 {
 
         H("When C's name is one you want"),
         P("C has had the whole namespace for fifty years, so a good name is "
-          "often already taken — `bind`, `connect`, `open`, `write`. `@as` "
+          "often already taken — `bind`, `connect`, `open`, `write`. `#as` "
           "renames the foreign declaration for Rune's side only: the symbol "
           "the linker resolves is still the one that was written, and the "
           "name is yours again."),
@@ -8909,27 +9044,27 @@ fn main() -> i64 {
 
 extern "C" {
     // Links against `strlen`; this file calls it `cLength`.
-    @as("cLength")
+    #as("cLength")
     fn strlen(text: CString) -> u64
 }
 
 /// Which frees `strlen` up to mean something in Rune terms.
 fn strlen(text: String) -> i64 { text.$charCount() }
 
-@safe("strlen reads up to the NUL the String guarantees")
+#safe("strlen reads up to the NUL the String guarantees")
 fn main() -> i64 {
     io::println(strlen("héllo"))                  // characters
     io::println(unsafe { cLength("héllo".$cstr()) })  // bytes
     0
 }""", mode="run", title="Importing a name you also want to declare"),
-        N("`@as` applies to an `extern` declaration and nowhere else — on an "
+        N("`#as` applies to an `extern` declaration and nowhere else — on an "
           "ordinary function it would silently do nothing, which is worse "
-          "than being told, so it is refused. `@alias` is the one that adds a "
+          "than being told, so it is refused. `#alias` is the one that adds a "
           "second name to a declaration of your own."),
 
         H("Wrapping a descriptor"),
         P("A C API that hands out a descriptor hands out an obligation with "
-          "it. A struct with a `@resource` field and a `deinit` is how that "
+          "it. A struct with a `#resource` field and a `deinit` is how that "
           "obligation is written down: the value closes itself, and the "
           "compiler will not let a second owner of it exist. This is exactly "
           "what `std::net` is built out of."),
@@ -8943,11 +9078,11 @@ extern "C" {
 
 /// An open file descriptor, and the promise to close it.
 pub struct Descriptor {
-    @resource fd: i32 = -1
+    #resource fd: i32 = -1
 }
 
 extend Descriptor {
-    @safe("the descriptor is ours, and the flag stops a second close")
+    #safe("the descriptor is ours, and the flag stops a second close")
     fn deinit(&var self) {
         if self.fd >= 0 {
             close(self.fd)
@@ -8958,7 +9093,7 @@ extend Descriptor {
     pub fn isOpen(&self) -> bool { self.fd >= 0 }
 }
 
-@safe("open either returns a descriptor or -1, which is what is checked")
+#safe("open either returns a descriptor or -1, which is what is checked")
 pub fn openRead(path: String) -> Descriptor? {
     let fd = unsafe { open(path.$cstr(), 0i32) }
     if fd < 0 { return nil }
@@ -9010,11 +9145,34 @@ link = ["m"]                    # a system library, asked for by name''',
 $ rune test                       # host
 $ rune test --target mingw        # built for Windows, run under wine"""),
 
+        H("Bindings from a header: `rune ffi`"),
+        P("Writing an `extern \"C\"` block by hand is fine for three "
+          "functions and a chore for three hundred. `rune ffi` writes it: it "
+          "reads C headers with libclang — so they are preprocessed, parsed "
+          "and laid out exactly as the C compiler does — and writes Rune "
+          "bindings, as Rust's bindgen does."),
+        SH("""$ rune ffi /usr/include/zlib.h --link z -o src/zlib.rune
+$ rune ffi mylib.h -I include --allowlist-function 'mylib_*' -o src/mylib.rune"""),
+        T(["C", "What `rune ffi` writes"],
+          [["`struct s { ... }`", "a `#Convention(\"C\")` struct, every member "
+            "defaulted to zero, so `s {}` is a zeroed `s`"],
+           ["a union, bit-fields, a packed struct", "its bytes, with a getter "
+            "and setter per member"],
+           ["a struct only declared", "an empty struct, used behind pointers"],
+           ["`typedef`, `enum`, `#define N 42`", "`pub type`, a constant per "
+            "enumerator, `pub global N: i32 = 42`"],
+           ["functions and `extern` variables", "a `pub extern \"C\"` block; "
+            "`const char *` parameters are `CString`"]]),
+        N("libclang is not on every machine, so `rune ffi` is not built with "
+          "the toolchain: the first run builds it into `~/.rune/bin` against "
+          "the libclang it finds (`RUNE_LIBCLANG_DIR`, then `llvm-config`). "
+          "`rune doc ffi` is its book.", label="Built on first use"),
+
         H("Being called from C"),
-        P("Go the other way with `@export`, which fixes the symbol name. The "
+        P("Go the other way with `#export`, which fixes the symbol name. The "
           "signature has to stay inside the shared vocabulary above — no "
           "classes, no `String`."),
-        S("""@export("stats_mean")
+        S("""#export("stats_mean")
 pub fn mean(values: [f64]) -> f64 {
     if values.$isEmpty() { return 0.0 }
     var total = 0.0
@@ -9022,7 +9180,7 @@ pub fn mean(values: [f64]) -> f64 {
     total / (values.$length() as f64)
 }
 
-@export("stats_scale")
+#export("stats_scale")
 pub fn scale(value: f64, factor: f64) -> f64 { value * factor }""",
           mode="decls", title="C-callable entry points"),
         P("A C program that calls those links the Rune object **and** the "
@@ -9030,7 +9188,7 @@ pub fn scale(value: f64, factor: f64) -> f64 { value * factor }""",
           "allocate, retain or release like any other."),
         SH("""$ runec -c -o stats.o src/lib.rune
 $ cc host.c stats.o -lruneruntime -lm -o host"""),
-        N("`@export` gives a symbol strong linkage, so two of the same name "
+        N("`#export` gives a symbol strong linkage, so two of the same name "
           "collide rather than silently merging — which is what you want from "
           "something whose whole purpose is to answer to one exact name.",
           label="Exported names are unique"),
@@ -9041,11 +9199,11 @@ $ cc host.c stats.o -lruneruntime -lm -o host"""),
           "line of its own."),
         SH("""$ runec --shared -o libstats.dylib src/lib.rune
 $ python3 -c 'import ctypes; print(ctypes.CDLL("./libstats.dylib").stats_scale)'"""),
-        P("What the library answers to is exactly what `@export` named. "
+        P("What the library answers to is exactly what `#export` named. "
           "Everything else keeps its module-qualified symbol, which is the "
-          "point: a shared library's surface is the list of `@export`s, "
+          "point: a shared library's surface is the list of `#export`s, "
           "written down in one place."),
-        N("`@type(Shared)` says the same thing inside the file, for a source "
+        N("`#type(Shared)` says the same thing inside the file, for a source "
           "tree where the answer belongs with the code rather than in a build "
           "script. A flag on the command line still wins.",
           label="Or say it in the file"),
@@ -9177,7 +9335,7 @@ SECTIONS.append(Sec(
 }
 
 /// The borrows live for the call, which is all a reference needs.
-@safe("both borrows name locals that outlive the call")
+#safe("both borrows name locals that outlive the call")
 pub fn bumped(start: i64, by: i64) -> i64 {
     var x = start as c_int
     bump(&var x, by as c_int)
@@ -9195,14 +9353,14 @@ pub fn bumped(start: i64, by: i64) -> i64 {
            ["`fn name(&self) -> T`", "a `const` member function"],
            ["`fn name(&var self) -> T`", "a non-const member function"],
            ["`fn name(args) -> T`", "a `static` member function"],
-           ["`@operator(\"[]\") fn at(&self, ...)`", "`operator[]`"],
+           ["`#operator(\"[]\") fn at(&self, ...)`", "`operator[]`"],
            ["`class D : B`", "single, non-virtual inheritance"],
-           ["`@size(N)`", "`sizeof` on the C++ side; what `cxx::alloc` needs"]]),
+           ["`#size(N)`", "`sizeof` on the C++ side; what `cxx::alloc` needs"]]),
         S('''extern "C++" {
     namespace shim {
         struct Pair { a: c_int, b: c_int }
 
-        @size(8)
+        #size(8)
         class Counter {
             fn init(&var self, start: c_int)
             fn deinit(&var self)
@@ -9216,7 +9374,7 @@ pub fn bumped(start: i64, by: i64) -> i64 {
 
         /// `this` is one address for both halves, so the base's members are
         /// reached through a pointer to the derived class unchanged.
-        @size(8)
+        #size(8)
         class Stepper : Counter {
             fn init(&var self, start: c_int, step: c_int)
             fn twice(&var self) -> c_int
@@ -9233,9 +9391,9 @@ pub fn bumped(start: i64, by: i64) -> i64 {
           "destructor call are in C++."),
         S('''import std::cxx
 
-@safe("the storage is ours from `alloc` until `free`, and nothing else holds it")
+#safe("the storage is ours from `alloc` until `free`, and nothing else holds it")
 fn counting() -> i64 {
-    let c = cxx::alloc<Counter>()   // @size(8) bytes from `operator new`
+    let c = cxx::alloc<Counter>()   // #size(8) bytes from `operator new`
     c.init(10)                      // Counter::Counter(10), on that storage
     c.setStep(5)
     let first = c.next()
@@ -9268,7 +9426,7 @@ fn counting() -> i64 {
 }
 
 /// A slice's two halves are exactly what a span holds.
-@safe("the pointer and the count come from one slice, so the extent is right")
+#safe("the pointer and the count come from one slice, so the extent is right")
 pub fn totalOf(values: [c_long]) -> i64 {
     if values.$isEmpty() { return 0 }
     total(Span<c_long> { data: &values[0] as *c_long,
@@ -9286,29 +9444,29 @@ pub fn totalOf(values: [c_long]) -> i64 {
 }''', mode="decls", title="An enum and a variable"),
 
         H("Renaming, and operators"),
-        P("`@as` renames a declaration for Rune's side only, exactly as it "
+        P("`#as` renames a declaration for Rune's side only, exactly as it "
           "does in an `extern \"C\"` block — which is also how two overloads "
           "of one C++ name are told apart, since Rune has one name per "
-          "declaration. `@operator` says which C++ operator a member is."),
+          "declaration. `#operator` says which C++ operator a member is."),
         S('''extern "C++" {
     namespace llvm {
         class Type {}
         class FunctionType : Type {
             // One of the overloads of `FunctionType::get`, under a Rune name
             // of its own.
-            @as("functionType")
+            #as("functionType")
             fn get(result: *var Type, isVarArg: bool) -> *var FunctionType
         }
-        @size(8)
+        #size(8)
         class Counter {
-            @operator("[]")
+            #operator("[]")
             fn at(&self, i: c_int) -> c_int
-            @operator("new")
+            #operator("new")
             fn allocate(n: c_size_t, tag: c_int) -> *var c_void
         }
     }
-}''', mode="decls", title="`@as` and `@operator`"),
-        P("`@operator` takes the operator as C++ writes it after the "
+}''', mode="decls", title="`#as` and `#operator`"),
+        P("`#operator` takes the operator as C++ writes it after the "
           "keyword: `\"new\"`, `\"delete\"`, `\"[]\"`, `\"()\"`, `\"+\"`, "
           "`\"==\"`, `\"<=>\"` and the rest."),
 
@@ -9516,8 +9674,9 @@ SECTIONS.append(Sec(
            ["`nanoseconds` … `hours`", "`(count: i64) -> Time`",
             "build one by naming its unit"],
            ["`zero`", "`() -> Time`", "no time at all"],
-           ["`Time::asMilliseconds` and friends", "`(&self) -> i64`",
-            "the whole duration in that unit; also `asSecondsFloat`"],
+           ["`Time::asNanoseconds` / `asMicroseconds` / `asMilliseconds` / `asSeconds` …", "`(&self) -> i64`",
+            "the whole duration in that unit, truncated; also `asSecondsFloat`"],
+           ["`Time::isZero` / `isNegative`", "`(&self) -> bool`", ""],
            ["`Time::plus` / `minus` / `times`", "", "also `+` and `-`"],
            ["`Instant`", "`struct`", "a reading from a forward-only clock"],
            ["`now`", "`() -> Instant`", "the clock, now"],
@@ -9541,7 +9700,7 @@ SECTIONS.append(Sec(
            ["`Date::toDays`", "`(&self) -> i64`", "the inverse"],
            ["`Date::weekday`", "`(&self) -> Weekday`",
             "`Monday` … `Sunday`, an enum that prints as its name"],
-           ["`Date::plusDays` / `plusMonths` / `plusYears`", "`(&self, i64) -> Date`",
+           ["`Date::plusDays` / `minusDays` / `plusMonths` / `plusYears`", "`(&self, i64) -> Date`",
             "arithmetic; a month lands clamped to its last day"],
            ["`Date::daysUntil`", "`(&self, other: Date) -> i64`",
             "signed distance in days"],
@@ -9553,7 +9712,8 @@ SECTIONS.append(Sec(
            ["`isLeapYear` / `daysInMonth`", "`(year) -> bool` / `(year, month) -> i64`",
             "the calendar's two facts"],
            ["`TimeOfDay`", "`struct { hour, minute, second, nanosecond }`",
-            "a time of day; `timeOfDay(h, m, s)` checks one"],
+            "a time of day; `timeOfDay(h, m, s)` checks one, and "
+            "`secondsSinceMidnight()` counts it"],
            ["`DateTime`", "`struct { date, time, offset }`",
             "a moment: a date and time, `offset` seconds east of UTC"],
            ["`utcNow` / `localNow`", "`() -> DateTime`",
@@ -9565,6 +9725,9 @@ SECTIONS.append(Sec(
             "the inverse, whatever zone it is written in"],
            ["`DateTime::inUtc` / `inLocalZone` / `toOffset`", "`-> DateTime`",
             "the same moment, written in another zone"],
+           ["`DateTime::withOffset`", "`(&self, offset: i64) -> DateTime`",
+            "the same clock reading, labelled with another zone — a different "
+            "moment"],
            ["`DateTime::plus` / `minus` / `since`", "",
             "arithmetic with a `Time`; `<` and `==` compare moments"],
            ["`DateTime::iso`", "`(&self) -> String`",
@@ -9634,7 +9797,15 @@ fn main() -> i64 {
            ["`readLine`", "`() -> String`", "a line from stdin, newline "
             "removed"],
            ["`readLineOrEnd`", "`() -> String?`", "the same, and `nil` at the "
-            "end of the input — which is what a loop needs"]],
+            "end of the input — which is what a loop needs"],
+           ["`readExactly`", "`(count: i64) -> String?`", "exactly `count` bytes "
+            "of stdin, newlines and all, or `nil` if it ends first — for a "
+            "protocol that sends a length, then a message"],
+           ["`unbufferInput`", "`()`", "stop buffering stdin inside the "
+            "program; call before the first read"],
+           ["`inputWaiting`", "`(millis: i64) -> bool`", "whether stdin has "
+            "something (or has ended) within `millis`; `0` asks without "
+            "waiting. Sees only unbuffered input"]],
           caption="`Display` is the public mark in this module; anything that "
                   "binds it can be printed."),
         P("Every builtin binds `Display`, and so do the *shapes*: "
@@ -9655,6 +9826,10 @@ fn main() -> i64 {
           "both give an empty string. `readLineOrEnd` can, which is why it is "
           "the one to loop over — `while io::readLineOrEnd() is Some(line)` "
           "ends where the input does.", label="Reading until the end"),
+        N("`unbufferInput` and `inputWaiting` are what a program that answers "
+          "messages as they arrive and does slower work between them is built "
+          "on — `rune lsp` reads its editor this way, framing each message "
+          "with `readExactly`.", label="Reading as messages arrive"),
         P("`println!` and `print!` live here too. They take a format string, "
           "need no import, and are what most code reaches for; the functions "
           "above are what they call. See **Formatting**."),
@@ -9967,6 +10142,10 @@ fn main() -> i64 {
            ["`close`", "`(&var self)`", "now rather than later"],
            ["`release` / `adopt`", "`(&var self) -> i64` / `(i64) -> TcpStream`",
             "hand the descriptor over, and take one"],
+           ["`adoptFrom`", "`(descriptor: i64, peer: String, port: i32) -> TcpStream`",
+            "`adopt`, remembering who is at the other end"],
+           ["`descriptorValue`", "`(&self) -> i64`", "the raw descriptor, for a "
+            "call this module does not wrap; the stream still owns it"],
            ["`clone`", "`(&self) -> Self`", "a second descriptor for the "
             "same socket; what `$clone()` does"],
            ["`AsyncStream` / `AsyncListener`", "`class`",
@@ -9985,7 +10164,7 @@ fn main() -> i64 {
                   "`describe` puts it in words. See **Tasks and futures** "
                   "for the `Async` pair."),
         P("Both types own their descriptor the way [Structs](#structs) "
-          "describes: the field is `@resource`, the `deinit` closes it, and "
+          "describes: the field is `#resource`, the `deinit` closes it, and "
           "handing one on is a move. So a connection closes itself when the "
           "binding holding it goes, and there is never a second owner to "
           "close it twice."),
@@ -10310,6 +10489,9 @@ fn main() -> i64 {
             "`hyperbolicCosine`, `hyperbolicTangent`, `radians`, `degrees`"],
            ["rounding", "`roundDown`, `roundUp`, `roundNearest`, `wholePart`, "
             "`fractionPart`, `remainderOf`, `withSignOf`"],
+           ["rounding to decimal places", "`roundTo`, `truncateTo`, `floorTo`, "
+            "`ceilTo`, `roundWith` (a `Rounding` mode), `roundToStep`"],
+           ["exact decimal amounts", "`scaled`, `unscaled`, `splitDecimal`"],
            ["asking about a float", "`isNan`, `isInfinite`, `isFinite`, "
             "`nearlyEqual`, `infinity`, `nan`"],
            ["comparison, for anything ordered",
@@ -10319,7 +10501,10 @@ fn main() -> i64 {
            ["exact integer answers", "`powerInt`, `squareRootInt`, `gcd`, "
             "`lcm`, `divFloor`, `modFloor`"],
            ["fixed-width shorthands", "`minInt`, `maxInt`, `minFloat`, "
-            "`maxFloat`, `clampInt`"]],
+            "`maxFloat`, `clampInt`"],
+           ["overflow, for any integer type", "`wrappingAdd`/`Sub`/`Mul`, "
+            "`saturatingAdd`/`Sub`/`Mul`, `checkedAdd`/`Sub`/`Mul` (these "
+            "answer `T?`) — the `$` intrinsics of the same names as functions"]],
           caption="Everything takes and returns `f64` unless its name says "
                   "`Int`. Needs `-l m`, which `rune` adds for you."),
         S("""import std::io
@@ -10350,6 +10535,32 @@ fn main() -> i64 {
     io::println(math::nearlyEqual(0.1 + 0.2, 0.3, 1.0e-9).$str())
     0
 }""", mode="run", title="Numerics"),
+        P("Rounding to a number of decimal places rounds the decimal that was "
+          "*meant*. `2.675` has no exact binary form and is stored a hair "
+          "below itself, so scaling and rounding naively gives `2.67`; these "
+          "settle a scaled value that is within float error of a half as that "
+          "half. `roundWith` takes the mode: `Floor`, `Ceiling`, `TowardZero`, "
+          "`AwayFromZero`, `HalfAwayFromZero` (what `roundTo` does) and "
+          "`HalfEven`, banker's rounding. A negative `places` rounds to tens, "
+          "hundreds and so on."),
+        S("""import std::io
+import std::math
+import std::text
+
+fn main() -> i64 {
+    io::println(math::roundTo(2.675, 2))                            // 2.68
+    io::println(math::truncateTo(0.29, 2))                          // 0.29
+    io::println(math::roundTo(1234.0, -2))                          // 1200.0
+    io::println(math::roundWith(2.25, 1, math::Rounding::HalfEven)) // 2.2
+    io::println(math::roundToStep(1.23, 0.05))                      // 1.25
+
+    // Money: count whole hundredths, add exactly, and turn back only to show.
+    let cents = math::scaled(103.4, 2) + math::scaled(0.29, 2)
+    io::println(cents)                                              // 10369
+    let (whole, part) = math::splitDecimal(math::unscaled(cents, 2), 2)
+    println!("{}.{}", whole, text::padStart(part.$str(), 2, '0'))   // 103.69
+    0
+}""", mode="run", title="Decimal places"),
 
         H("std::process"),
         T(["Function", "Signature", "Does"],
@@ -10370,7 +10581,14 @@ fn main() -> i64 {
            ["`assert`", "`<M: io::Display>(condition: bool, message: M)`",
             "panics if false"],
            ["`liveObjectCount`", "`() -> i64`", "objects the runtime is still "
-            "counting"]]),
+            "counting"],
+           ["`Command`", "`class`", "`Command(program)` — a program to run; "
+            "`arg(value)` adds one argument, `inDirectory(path)` starts it "
+            "elsewhere, `run()` runs it to completion"],
+           ["`run`", "`(program: String, args: Vector<String>) -> Output?`",
+            "the same, in one call"],
+           ["`Output`", "`struct { status, stdout, stderr }`",
+            "what a finished program left; `succeeded()` is status zero"]]),
         N("`exit`, `succeed`, `fail` and `panic` are declared `-> Never`. A "
           "`Never` converts to any type, so a call to one can stand wherever "
           "a value was expected. See [`Never`: a function that does not "
@@ -10404,7 +10622,7 @@ fn main() -> i64 {
             "what it is being built as, and for"],
            ["`artifact`, `artifactName`", "while finishing: the executable "
             "just linked"],
-           ["`cfg`, `cfgValue`", "set `@Config` flags for the package"],
+           ["`cfg`, `cfgValue`", "set `#Config` flags for the package"],
            ["`linkArg`, `linkLibrary`, `linkPath`", "add to every link"],
            ["`runWith`", "while finishing: what `rune run` starts instead"],
            ["`warning`, `fail`", "say something; stop the build"],
@@ -10504,13 +10722,13 @@ fn main() -> i64 {
     0
 }""", mode="run", title="Asking about the target"),
         P("`triple()` is the one answer that is not a fixed list, so it is the "
-          "compiler's own rather than a `@Config` branch. It still costs "
+          "compiler's own rather than a `#Config` branch. It still costs "
           "nothing: the string is in the object file."),
-        N("These are the same answers `@Config` gives, in a form you can "
-          "compute with. Reach for `@Config` when a declaration should not "
+        N("These are the same answers `#Config` gives, in a form you can "
+          "compute with. Reach for `#Config` when a declaration should not "
           "**exist** on a target — a function that calls something only "
           "Windows has — and for `std::arch` when a value or a type "
-          "depends on it.", label="`@Config` or `std::arch`?"),
+          "depends on it.", label="`#Config` or `std::arch`?"),
 
         H("std::random"),
         P("A `Random` is a generator with its own state. Seeded from a number "
@@ -10605,16 +10823,20 @@ fn main() -> i64 {
           "instead, and reaching into what is not there gives `null`, so a "
           "chain of subscripts ends rather than aborting halfway."),
         T(["Name", "Signature", "Does"],
-          [["`parse`", "`(String) -> Result<Value, Error>`",
+          [["`parse` / `parseText`", "`(String) -> Result<Value, Error>`",
             "the whole text as one value; anything trailing is an error"],
-           ["`write` / `pretty`", "`(&Value) -> String`",
-            "compact, or laid out one member per line; the document is "
-            "borrowed, so it is still there afterwards"],
-           ["`load` / `save`", "`(&String) -> Result<Value, Error>` / `(&String, &Value) -> Error?`",
-            "the same, over a file"],
+           ["`parsePrefix`", "`(String, from: i64) -> Result<(Value, i64), Error>`",
+            "one value starting at `from`, and the offset it ended at — "
+            "for a stream of documents in one buffer"],
+           ["`write` / `compact` / `pretty` / `prettyLine`", "`(&Value) -> String`",
+            "compact, or laid out one member per line (`prettyLine` adds a "
+            "final newline); the document is borrowed, so it is still there "
+            "afterwards"],
+           ["`load` / `save` / `saveCompact`", "`(&String) -> Result<Value, Error>` / `(&String, &Value) -> Error?`",
+            "the same, over a file; `save` writes it pretty"],
            ["`Value`", "`enum`",
             "`Null`, `Bool`, `Int`, `Number`, `Text`, `Array`, `Object`"],
-           ["`Value::asBool` … `asObject`", "`(&self) -> T?`",
+           ["`Value::asBool` / `asInt` / `asFloat` / `asText` / `asArray` / `asObject`", "`(&self) -> T?`",
             "what is inside, if it is that; `asInt` does not round"],
            ["`Value::get` / `index`", "`(&self, String) -> Value?` / `(&self, i64) -> Value?`",
             "a member, or an element"],
@@ -10629,6 +10851,10 @@ fn main() -> i64 {
            ["`Array`", "`class`", "`at`, `push`, `length`"],
            ["`Error`", "`struct { kind, line, column, offset, detail }`",
             "what went wrong, and where; prints as a sentence"],
+           ["`errorAt` / `ofFile`", "`(Kind, &String, i64, String) -> Error` / `(io::FileError) -> Error`",
+            "make one: at a byte offset, with the line and column worked out; "
+            "or for a file that could not be read"],
+           ["`describeError`", "`(Error) -> String`", "the sentence it prints as"],
            ["`json!`", "`macro`",
             "a document written the way JSON is written"],
            ["`v into json::Value`", "",
@@ -10700,6 +10926,8 @@ fn main() -> i64 {
             "a declared positional"],
            ["`Arguments::rest`", "`(&self) -> Vector<String>`",
             "whatever followed the declared ones"],
+           ["`Arguments::allPositionals`", "`(&self) -> Vector<String>`",
+            "every positional, declared and rest alike"],
            ["`Error`", "`enum`",
             "`Help`, `Version`, `UnknownOption`, `MissingValue`, "
             "`FlagGivenValue`, `MissingPositional`, `TooManyPositionals`"]]),
@@ -10755,7 +10983,9 @@ fn main() -> i64 {
            ["`equals`", "`<T>(a: T, b: T) -> bool`", "structural equality, "
             "consistent with `hash`"],
            ["`Handle<T>`", "`class`", "one `T` on the heap, reference counted; "
-            "`*h` reads it, `*h = v` writes it, `look()`/`touch()` borrow it"],
+            "`*h` reads it, `*h = v` writes it, `look()`/`touch()` borrow it, "
+            "`sameAs(&other)` asks whether two are one handle rather than equal "
+            "values"],
            ["`of`", "`<T>(value: T) -> Handle<T>`", "a handle, type inferred"],
            ["`Box<T>`", "`class`", "one `T` on the heap with a single owner "
             "— the same reach-through, no sharing"],
@@ -10764,12 +10994,21 @@ fn main() -> i64 {
             "the same, or the value handed back when there is no memory"],
            ["`Rc<T>` / `Weak<T>`", "`class`", "a counted value and a "
             "reference that does not keep it alive; `w.get()` answers "
-            "`Rc<T>?`"],
+            "`Rc<T>?`. An `Rc` says `strongCount()`, `weakCount()`, "
+            "`isUnique()` and `sameAs(&other)`"],
            ["`shared`", "`<T>(value: T) -> Rc<T>`", "an `Rc`, type inferred"],
            ["`Cell<T>`", "`struct`", "a value changed through `&self`: "
             "`get` copies it out, `set` and `replace` change it; one "
             "thread's"],
            ["`cell`", "`<T>(value: T) -> Cell<T>`", "a cell, type inferred"],
+           ["`Cell::asPtr`", "`(&self) -> *var T`", "the address inside, for an "
+            "atomic instruction or a value a lock guards; what is done through "
+            "it is the caller's to justify"],
+           ["`Checked<T>`", "`class`", "a borrow checked at run time: "
+            "`borrow()` / `borrowVar()` hand out guards, `isFree()` says none "
+            "is out; see **Single ownership without a count**"],
+           ["`Arena<T>`", "`class`", "values addressed by `Slot`, never by "
+            "reference: `insert`, `get`, `holds`, `remove`, `length`"],
            ["`replace`", "`<T>(place: &var T, value: T) -> T`", "puts `value` "
             "there and hands back what was there"],
            ["`take`", "`<T>(place: &var T) -> T`", "the same, leaving the "
@@ -10780,6 +11019,12 @@ fn main() -> i64 {
            ["`allocator`", "`SystemAllocator`", "the process heap"],
            ["`noBlock`", "`() -> *var u8`", "a block pointer to nothing"],
            ["`isNull`", "`(block: *var u8) -> bool`", "tests one"],
+           ["`isZeroed`", "`(block: *u8, bytes: usize) -> bool`", "whether "
+            "`bytes` of a block are all zero — the test for never written"],
+           ["`zeroed`", "`<T>() -> T`", "**unsafe** — a `T` of all zero bytes, "
+            "for a value that will never be looked at"],
+           ["`drop_at`", "`<T>(slot: *var T)`", "**unsafe** — destroys the value "
+            "in a slot and leaves it empty"],
            ["`copy`", "`(dst: *var u8, src: *u8, bytes: usize)`", "moves bytes"],
            ["`retain` / `release`", "`<T>(value: T)`", "**unsafe** — counting "
             "by hand, for storage the compiler cannot see"],
@@ -10894,7 +11139,7 @@ fn main() -> i64 {
         S("""import std::io
 import std::mem
 
-@safe("the block is sized for four i64 and no index goes past four")
+#safe("the block is sized for four i64 and no index goes past four")
 fn main() -> i64 {
     let block = mem::allocator.allocate(4 as usize * mem::size_of<i64>())
     if mem::isNull(block) { return 1 }
@@ -10932,6 +11177,9 @@ fn main() -> i64 {
            ["`length`", "`(&self) -> i64`", "how many, fixed for its life"],
            ["`isEmpty`", "`(&self) -> bool`", ""],
            ["`holds`", "`(&self, index: i64) -> bool`", "is that a slot?"],
+           ["`occupied`", "`(&self, index: i64) -> bool`", "has something been "
+            "written there? Always true in range for a value type, where zero "
+            "is a value"],
            ["`at`", "`(&self, index: i64) -> T?`", "the value, or nothing — "
             "a slot of all zero bytes reads as nothing"],
            ["`read`", "`(&self, index: i64) -> T?`", "the value, whatever its "
@@ -11064,7 +11312,8 @@ fn main() -> i64 {
           "values)` build one from a slice."),
         P("A map is common enough to be worth writing short. `[K:V]` is the "
           "type and `[key: value, ...]` is the value, with `[:]` for the "
-          "empty one:"),
+          "empty one — `dictionary::emptyMap<K, V>()` written short, taking "
+          "its types from where it is going:"),
         S("""import std::io
 
 fn count(m: [String:i64]) -> i64 { m.length() }
@@ -11177,6 +11426,8 @@ fn main() -> i64 {
            ["`get`", "`(&self, index: i64) -> T`", "the element; **aborts** if "
             "absent"],
            ["`last`", "`(&self) -> T?`", "the final element"],
+           ["`peekFirst` / `peekLast`", "`(&self) -> (&T from self)?`",
+            "the first or last element borrowed rather than copied"],
            ["`push`", "`(&var self, value: T)`", "appends, growing if needed"],
            ["`pop`", "`(&var self) -> T?`", "removes and returns the last"],
            ["`set`", "`(&var self, index: i64, value: T) -> bool`", "replaces; "
@@ -11314,7 +11565,7 @@ bind mem::Allocator to Arena {
     /// `Allocator` hands out memory through `&self` — every container shares
     /// one — so the cursor lives in a `mem::Cell`, which can change through a
     /// shared borrow. An arena is one thread's, as a `Cell` is.
-    @safe("the cursor never passes the size checked on the line above")
+    #safe("the cursor never passes the size checked on the line above")
     fn allocate(&self, bytes: usize) -> *var u8 {
         // Keep every block 8-aligned, as the system allocator would.
         let need = (bytes + 7) / 8 * 8
@@ -11335,7 +11586,7 @@ bind mem::Allocator to Arena {
     }
 }
 
-@safe("every block below is sized and written through its own pointer")
+#safe("every block below is sized and written through its own pointer")
 fn main() -> i64 {
     let arena = Arena(1024 as usize)
 
@@ -11522,14 +11773,14 @@ SECTIONS.append(Sec(
     "`rune doc` writes one page out of two halves that do not know about each "
     "other: what the compiler saw, and what you wrote under `docs/`.",
     [
-        P("Prose attaches to a declaration in one of two ways. `@Doc(\"...\")` "
+        P("Prose attaches to a declaration in one of two ways. `#Doc(\"...\")` "
           "is the explicit form and takes a triple-quoted block for anything "
           "longer than a line; a `///` comment above the declaration does the "
           "same with less ceremony. Both are read at compile time and neither "
           "runs, so a library that is only ever linked against can still "
           "describe itself."),
-        S('import std::io\n\n/// Greets a person in whichever language you ask for.\npub class hello {\n    pub name: String\n    fn init(self, name: String) { self.name = name }\n\n    @Doc("""\n    Greets in Spanish.\n\n    `Hola` is the everyday greeting, used at any hour and with anyone.\n    """)\n    pub fn spanish(&self) -> String { "Hola, " + self.name }\n\n    /// Greets in French, described by a comment rather than a decorator.\n    pub fn french(&self) -> String { "Bonjour, " + self.name }\n\n    pub fn korean(&self) -> String { "Annyeong, " + self.name }\n}\n\nfn main() -> i64 {\n    io::println(hello("Ada").spanish())\n    0\n}', mode="run", title="Two ways to say the same thing"),
-        N("When a declaration has both, `@Doc` wins: the decorator was written "
+        S('import std::io\n\n/// Greets a person in whichever language you ask for.\npub class hello {\n    pub name: String\n    fn init(self, name: String) { self.name = name }\n\n    #Doc("""\n    Greets in Spanish.\n\n    `Hola` is the everyday greeting, used at any hour and with anyone.\n    """)\n    pub fn spanish(&self) -> String { "Hola, " + self.name }\n\n    /// Greets in French, described by a comment rather than a decorator.\n    pub fn french(&self) -> String { "Bonjour, " + self.name }\n\n    pub fn korean(&self) -> String { "Annyeong, " + self.name }\n}\n\nfn main() -> i64 {\n    io::println(hello("Ada").spanish())\n    0\n}', mode="run", title="Two ways to say the same thing"),
+        N("When a declaration has both, `#Doc` wins: the decorator was written "
           "for the reader, and the comment may only have been written for "
           "whoever is editing the code.", label="Which one is used"),
 
@@ -11640,7 +11891,7 @@ SECTIONS.append(Sec(
           "`key value` line per field, so a replacement generator needs a line "
           "loop and nothing else.", label="It is written in Rune"),
     ],
-    keywords=["doc", "docs", "documentation", "@Doc", "///", "rune doc",
+    keywords=["doc", "docs", "documentation", "#Doc", "///", "rune doc",
               "guide", "index.md", "generated", "sidebar", "search"]))
 
 # ===========================================================================
@@ -12045,20 +12296,20 @@ fn main() -> i64 {
           "to count what it was given, read a name and derive another from "
           "it, or build a table out of its own entries. A macro that has to "
           "do any of that is written as **code** — an ordinary Rune function "
-          "marked `@macro`, in a file that says it is a macro package."),
-        S("""@type(Macros)
+          "marked `#macro`, in a file that says it is a macro package."),
+        S("""#type(Macros)
 
 import std::Macro
 import std::collections::vector
 
-@macro
+#macro
 pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
     let it = input.text()
     Macro::parse("((" + it + ") + (" + it + "))")
 }""", mode="frag", title="macros.rune"),
         S("""fn main() -> i64 { twice!(3) }        // 6""",
           mode="frag", title="anywhere in the program"),
-        P("A `@type(Macros)` file is a package of its own. The compiler builds "
+        P("A `#type(Macros)` file is a package of its own. The compiler builds "
           "it **first** — for the machine doing the compiling, whatever the "
           "program is being built for — and then runs it to expand each "
           "invocation. Two things follow, and they are why it is done this "
@@ -12079,6 +12330,73 @@ pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
           "host and run there, and the program is built for the target.",
           label="Cross builds"),
 
+        H("Declaring a macro anywhere"),
+        P("A `#type(Macros)` file is the place for a family of macros and the "
+          "helpers they share, but it is not the only place. A `#macro pub fn` "
+          "may be written in **any** file, beside the code that uses it:"),
+        S("""import std::io
+import std::{Macro, text}
+
+#macro
+pub fn shout(input: Macro::Tokens) -> Macro::Tokens {
+    Macro::parse("\\"" + text::upper(input.text()) + "!\\"")
+}
+
+fn main() -> i64 {
+    io::println(shout!(hello))      // HELLO!
+    0
+}""", mode="frag", title="main.rune"),
+        P("It is gathered in the same pass that finds the `#type(Macros)` "
+          "files, lifted out of its file, and built into the same macro "
+          "package. The program never sees it. What it takes along is "
+          "exactly this:"),
+        T(["Lifted with it", "Left behind"],
+          [["the `#macro fn` itself", "every other declaration in the file"],
+           ["the file's `import std::...` lines", "its other imports — they "
+            "name the program's modules, which the package does not have"],
+           ["its line and column, for diagnostics", "file directives such as "
+            "`#runtime(none)`: the package is built for the host, with the "
+            "full runtime"]]),
+        N("A macro that needs helper functions of its own belongs in a "
+          "`#type(Macros)` file, where the helpers can live beside it.",
+          label="Helpers"),
+
+        H("Macros a library exports"),
+        P("A procedural macro is exported with the library it is written in, "
+          "like a `pub fn`. The `.rul` carries it as source — the library's "
+          "`#type(Macros)` files and every `#macro fn` written among its code "
+          "— and a package that imports the library builds those into its own "
+          "macro package, for the machine doing the compiling. Nothing else "
+          "is needed:"),
+        S("""import std::io
+import shapes                       // a library with `square!` and `greet!`
+
+fn main() -> i64 {
+    io::println(greet!(world))      // hello, world
+    io::println((square!(5)).$str()) // 25
+    0
+}""", mode="frag", title="using a library's macros"),
+        P("The library's own source is re-read by everyone who imports it, "
+          "and expands with the same macros, so a library is free to use the "
+          "macros it exports."),
+
+        H("When the package is built again"),
+        P("The built package is cached, and reused until one of the things "
+          "it is made from changes:"),
+        T(["Rebuilt when", "Not rebuilt when"],
+          [["a macro's code changes — any token of a `#macro fn`, a "
+            "`#type(Macros)` file, or a lifted file's `std` imports",
+            "the code *around* a lifted macro changes, a comment changes, or "
+            "a macro moves to another line"],
+           ["the standard library or the compiler changes", "the program is "
+            "built for another target"],
+           ["a macro is added, removed, or moved to another file", ""]]),
+        N("The cache lives in the system's temporary directory, under "
+          "`rune-macros/`. Building a new version of a package removes the "
+          "old one, a package nothing has used in a fortnight is cleared "
+          "away, and a build that fails halfway leaves nothing behind that a "
+          "later build could take for finished.", label="Where it lives"),
+
         H("What a macro is given"),
         P("Tokens, with their structure kept. A bracketed group is **one** "
           "token — `block` for `{ ... }`, `parens` for `( ... )`, "
@@ -12097,10 +12415,19 @@ pub fn twice(input: Macro::Tokens) -> Macro::Tokens {
            ["`split(sep)`", "the parts between a piece of punctuation. A "
             "group is one token, so a comma inside brackets does not split"],
            ["`add(more)`", "append"],
-           ["`flat()`", "every token, groups opened out"]],
+           ["`flat()`", "every token, groups opened out"],
+           ["`find(word)` / `findFrom(word, start)`", "where a piece of "
+            "punctuation or a name stands at the top level, or `-1`"],
+           ["`contains(word)`", "whether it is there at all"],
+           ["`before(word)` / `after(word)`", "the run on either side of its "
+            "first appearance"],
+           ["`capture(pattern)`", "the run taken apart by a pattern — see "
+            "below"]],
           caption="`Macro::parse`, `ident`, `number`, `string`, `punct` and "
-                  "`tokens` build them; `Macro::error` refuses."),
-        S("""@type(Macros)
+                  "`tokens` build them; `Macro::error` refuses, and "
+                  "`Macro::fail` refuses as something to `return`. On a "
+                  "single `Token`, `isGroup()` says whether it is bracketed."),
+        S("""#type(Macros)
 
 import std::Macro
 import std::collections::vector
@@ -12108,7 +12435,7 @@ import std::text
 
 /// One accessor per name given. A pattern could not: it has no way to make
 /// `getX` out of `x`.
-@macro
+#macro
 pub fn getters(input: Macro::Tokens) -> Macro::Tokens {
     var lines = vector::Vector<String>()
     for field in input.split(",") {
@@ -12123,7 +12450,7 @@ pub fn getters(input: Macro::Tokens) -> Macro::Tokens {
 
 /// Refuses what it cannot use. The message is reported against the
 /// invocation, with an arrow back at this line.
-@macro
+#macro
 pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
     if input.isEmpty() { Macro::error("firstWord! needs a word") }
     if !input.at(0).isA("name") {
@@ -12134,7 +12461,7 @@ pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
 }
 
 /// A block goes in as one token and comes back as written.
-@macro
+#macro
 pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
     let label = input.at(0).text()
     let body = input.at(input.length() - 1)
@@ -12150,22 +12477,68 @@ pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
           "answers about the program's types, not the package's.",
           label="Reflection, through an expansion"),
 
+        H("Taking input apart by a pattern"),
+        P("Most macros want their input in named pieces. `capture` takes a "
+          "pattern of words: `$name` takes one or more tokens, any other "
+          "word has to be there as written, and `[ ... ]` is a part that may "
+          "be missing. A capture takes as few tokens as it can, so `$value "
+          "for` stops at the first `for` — and since a group is one token, "
+          "never at a `for` inside brackets."),
+        P("`Macro::quote` is the other half: Rune source with `$name` holes, "
+          "filled from the captures. A `$` that is not a capture's name, as "
+          "in `.$length()`, is left alone, and `$$` is a `$` when one would "
+          "be read as a capture."),
+        S("""#type(Macros)
+
+import std::Macro
+
+/// `comprehend!(x * 2 for x in xs if x > 0)` — a list comprehension.
+#macro
+pub fn comprehend(input: Macro::Tokens) -> Macro::Tokens {
+    let c = input.capture("$value for $item in $source [if $condition]")
+    if !c.matched() { return Macro::fail("comprehend! " + c.why()) }
+    if c.has("condition") {
+        return Macro::quote("$source.values().filter(||($item) { $condition })" +
+                            ".map(||($item) { $value }).collect()", c)
+    }
+    Macro::quote("$source.values().map(||($item) { $value }).collect()", c)
+}
+
+/// `around!(a => b c)` gives `"a | b c"`.
+#macro
+pub fn around(input: Macro::Tokens) -> Macro::Tokens {
+    if !input.contains("=>") { return Macro::fail("around! needs `=>`") }
+    Macro::string(input.before("=>").text() + " | " + input.after("=>").text())
+}""", mode="frag", title="Patterns and templates"),
+        T(["On the `Captures` it answers", "Is"],
+          [["`matched()`", "whether the run had the pattern's shape"],
+           ["`why()`", "if not, why — words fit for `Macro::fail`"],
+           ["`has(name)`", "whether `$name` took anything; false for one in "
+            "a `[ ... ]` part that was not written"],
+           ["`get(name)` / `text(name)`", "what it took, as tokens or as "
+            "source"]]),
+
         H("What is reported, for these"),
         T(["Written", "Reported"],
-          [["`@macro` outside a macro package", "`a procedural macro belongs "
-            "in a macro package`, naming `@type(Macros)`"],
-           ["a `@macro fn` without `pub`", "a macro has to be `pub` — the "
+          [["`#macro` on something that is not a function", "`#macro` "
+            "belongs on a function"],
+           ["a `#macro fn` without `pub`", "a macro has to be `pub` — the "
             "dispatcher the compiler writes is another module"],
            ["`Macro::error(\"...\")`", "that message, against the "
             "invocation, with an arrow at the line that refused"],
            ["a macro that does not finish", "`macro 'x' did not finish`, with "
             "the status or signal and how to run it yourself"],
            ["an expansion that does not lex", "`macro 'x' produced text that "
-            "is not valid Rune`"]]),
+            "is not valid Rune`"],
+           ["`name!(` never closed — often a string left open inside it",
+            "`` `name!(` is never closed `` (E0127), rather than the rest of "
+            "the file read as its arguments"],
+           ["a pattern the input does not fit", "whatever the macro passes to "
+            "`Macro::fail` — `c.why()` names what was expected and what came"]]),
     ],
     keywords=["macro", "macro_rules", "expand", "stringify", "repetition",
-              "pattern", "assert", "vec", "token", "procedural", "@macro",
-              "@type(Macros)", "Macro::Tokens", "proc macro", "block"]))
+              "pattern", "assert", "vec", "token", "procedural", "#macro",
+              "#type(Macros)", "Macro::Tokens", "proc macro", "block"]))
 
 SECTIONS.append(Sec(
     "diagnostics", "feedback", "Reading a diagnostic",
@@ -12273,7 +12646,7 @@ SECTIONS.append(Sec(
            ["`--shared`", "emit a native shared library "
             "(`.dylib` / `.so` / `.dll`)"],
            ["`--check`", "type-check only, produce nothing"],
-           ["`-O0` … `-O3`", "optimisation level, default `-O0`"],
+           ["`-O0` … `-O3`", "optimisation level, default `-O2`"],
            ["`-g`", "emit debug information"],
            ["`--target <triple>`", "cross-compile; see **Cross compilation**"],
            ["`--cc <program>`", "the toolchain driver used to link"],
@@ -12293,7 +12666,7 @@ SECTIONS.append(Sec(
            ["`-I <dir>`", "add a module search path"],
            ["`-L <dir>` / `-l <name>`", "native library path / library"],
            ["`--module <name>`", "set the module name"],
-           ["`--cfg <name>`", "set *name* for `@Config(...)`"],
+           ["`--cfg <name>`", "set *name* for `#Config(...)`"],
            ["`--stdlib <dir>`", "where the standard library lives"],
            ["`--no-stdlib`", "do not import it implicitly"],
            ["`-Werror` / `-w`", "warnings as errors / silence warnings"],
@@ -12303,8 +12676,28 @@ SECTIONS.append(Sec(
            ["`--dump-ast`", "print the parse tree"],
            ["`--dump-symbols`", "print the symbol table"],
            ["`--dump-types`", "print the type of every expression"],
+           ["`--dump-zombie`", "print the borrow checker's view of every body"],
+           ["`--entry <kind>` / `--no-main`", "`main` (default) or `none`: "
+            "generate no `main`, an `#export`ed function is the entry"],
+           ["`--tiers`", "say which standard library functions work on bare "
+            "metal and what the rest need"],
+           ["`--emit-docs` / `--docs-stdlib`", "write the documentation "
+            "sidecar `rune doc` reads; with the second, for the standard "
+            "library's modules too"],
+           ["`--diagnostic-format <f>`", "`human` (default), `json` — one "
+            "object per line, for tools — or `short`, gcc-style "
+            "`file:line:col: error: message`"],
            ["`-v`", "report each pipeline stage"],
            ["`--time`", "report how long each stage took"]]),
+        T(["For editors", "Does"],
+          [["`--source <path>=<file>`", "compile *path* as the text in *file* "
+            "— an unsaved buffer — reporting it as *path*"],
+           ["`--query-members <file>:<start>:<end>`", "after checking, the "
+            "type and members of the expression at those byte offsets, as "
+            "JSON: what completion after a `.` shows"],
+           ["`--query-hints <file>`", "after checking, every unannotated "
+            "binding's type and every positional argument's parameter name, "
+            "as JSON: what inlay hints and `rune fmt` write in"]]),
         T(["Environment", "Does"],
           [["`RUNE_JOBS`", "threads to lex, parse and check with; "
             "default one per core"],
@@ -12398,8 +12791,21 @@ fn main() -> i64 {
            ["`rune check`", "type-check without producing output"],
            ["`rune doc [--open]`", "read `docs/` and the source; write `target/<profile>/docs`, and show it"],
            ["`rune doc std::io`", "the standard library's reference, from the cache, at that module"],
+           ["`rune lint [path…] [--fix]`", "look for likely mistakes and "
+            "style problems; `--fix` applies the safe fixes"],
+           ["`rune fmt [path…] [--check]`", "lay source out, writing in types "
+            "and argument labels; `--check` only reports"],
+           ["`rune lsp`", "the language server, for an editor, over stdin "
+            "and stdout"],
+           ["`rune doc lint` / `lsp` / `fmt` / `ffi`", "the book about that tool"],
+           ["`rune ffi <header>…`", "Rune bindings for C headers, read with libclang; "
+            "built the first time it runs — see **Calling C**"],
+           ["`rune tools`", "the toolchain's tools and where each one is; "
+            "`rune tools install [name…]` puts them in `~/.rune/bin`"],
            ["`rune targets`", "the cross targets this package configures"],
-           ["`rune clean`", "delete `target/`"]]),
+           ["`rune clean`", "delete `target/`"],
+           ["`rune ws …`", "the same commands over every member of a "
+            "workspace; see **Packages and registries**"]]),
         T(["Option", "Does"],
           [["`--release`", "`-O2`, no debug information"],
            ["`--target <name>`", "a `[target.<name>]` toolchain, or a triple"],
@@ -12410,7 +12816,10 @@ fn main() -> i64 {
            ["`-j, --jobs <n>`",
             "compile at most *n* things at once; default one per core"],
            ["`--cfg <name>`",
-            "set *name* for `@Config(...)`, on top of `[build] cfg`"],
+            "set *name* for `#Config(...)`, on top of `[build] cfg`"],
+           ["`--memory <mode>`", "`zombie` or `arc`, over the manifest's "
+            "`[build] memory`"],
+           ["`--cfg <key>=<value>`", "give a `[config]` key a value"],
            ["`-v, --verbose`", "print each command as it runs"],
            ["`--no-color`", "plain output"]]),
         SH("""$ rune new report && cd report
@@ -12419,6 +12828,56 @@ $ rune run -- 1 2 3 4 5
 $ rune test
 $ rune build --release
 $ rune build -j 4"""),
+
+        H("Editor support"),
+        P("Three tools ship with the toolchain, all written in Rune and all "
+          "asking the compiler rather than guessing: `rune lint`, `rune fmt` "
+          "and `rune lsp`. Built with the toolchain, they are copied to "
+          "`~/.rune/bin` (or `$RUNE_HOME/bin`), where `rune` and an editor "
+          "find them; `rune tools` lists them and says where each one is. Each has a book of its own — `rune doc lint`, "
+          "`rune doc fmt`, `rune doc lsp` — and what follows is the outline."),
+        T(["Tool", "What it does"],
+          [["`rune lint`", "twenty rules — unused bindings, parameters and "
+            "imports, dead and unreachable code, `x == true`, naming, empty "
+            "blocks, needless `return`, line length, missing docs, `TODO`s — "
+            "at `warn`, `note` or `allow`; `--fix` applies what is safe, and "
+            "`--list` shows every rule"],
+           ["`rune fmt`", "one layout: the linter's style fixes, then the "
+            "types of bindings and the labels of arguments written in from "
+            "`--query-hints`, then the top of the file in order and the "
+            "indentation. It re-checks with the compiler and leaves a file "
+            "alone rather than break it"],
+           ["`rune lsp`", "diagnostics as you type (unsaved buffers go to the "
+            "compiler through `--source`), completion, inlay hints, hover, go "
+            "to definition, references, outline, signature help, quick fixes "
+            "and Format Document"]]),
+        P("Lint rules are set in four places, each over the one before: the "
+          "package's `[lint]` table, the command line or the editor's "
+          "settings, an `#lint(...)` at the top of a file, and an `#lint(...)` "
+          "before one declaration or statement."),
+        SH("""# Rune.toml
+[lint]
+allow = ["line-too-long"]
+warn = ["missing-docs", "todo"]
+max-line-length = 100"""),
+        S("""#lint(allow(naming))           // just this function
+fn Parse_Header() -> i64 { 0 }
+
+fn main() -> i64 {
+    #lint(allow(unused-variable))
+    let spare = 1
+    Parse_Header()
+}""", mode="run", title="`#lint` on one item"),
+        T(["Editor", "Setup, in `editors/`"],
+          [["VS Code", "`editors/vscode`: grammar, the language server and "
+            "commands, packaged as a `.vsix`"],
+           ["Vim and Neovim", "`editors/vim`: syntax, indent, `:make` through "
+            "the compiler, an asynchronous checker for Vim, and `rune lsp` "
+            "started for Neovim (and ALE)"],
+           ["Helix", "`editors/helix`: a tree-sitter grammar, with `rune lsp` "
+            "as the language server"],
+           ["anything else", "start `rune lsp` for `.rune` files, with the "
+            "directory holding `Rune.toml` as the root"]]),
 
         H("How a build decides what to do"),
         P("`rune` resolves every package reachable from the root before it "
@@ -12479,7 +12938,7 @@ $ rune build --emit lib         # .rul, even for a package with a main"""),
           "the emitted file is the same code in another form, not a "
           "replacement for the artefact a dependent links against."),
         N("`[build] emit` in the manifest says the same thing when the "
-          "command line does not, and `@type(...)` on a single file says it "
+          "command line does not, and `#type(...)` on a single file says it "
           "for that file alone. The command line wins over both.",
           label="Three ways to ask"),
 
@@ -12511,7 +12970,7 @@ license = "MIT"
 safety = "full"                 # none | minimal | full
 memory = "zombie"               # zombie | arc (reference counting)
 emit = "exe"                    # exe | lib | obj | asm | llvm-ir
-optimize = 0                    # 0..3, or use --release
+optimize = 2                    # 0..3; 2 by default
 debug = true
 warnings-as-errors = false
 no-stdlib = false
@@ -12550,7 +13009,7 @@ src = "tests"                   # where `rune test` looks""",
            ["", "`description`, `authors`, `license`", "empty"],
            ["`[build]`", "`safety`", "`\"full\"`"],
            ["", "`emit`", "empty, meaning an executable"],
-           ["", "`optimize`", "`0`, or `2` with `--release`"],
+           ["", "`optimize`", "`2`; `--release` raises it to at least `2`"],
            ["", "`debug`", "`true`, `false` with `--release`"],
            ["", "`warnings-as-errors`", "`false`"],
            ["", "`no-stdlib`", "`false`"],
@@ -13210,7 +13669,7 @@ fn main() -> i64 {
         H("Shared mutable state"),
         P("`Mutex<T>` is the one type that is `Sync` while holding something "
           "that is not — because it is the one type that synchronises access "
-          "to what it holds. It says so with `@sync(\"reason\")`, which is "
+          "to what it holds. It says so with `#sync(\"reason\")`, which is "
           "the single place the compiler takes such a claim on trust."),
         S('''import std::io
 import std::thread
@@ -13353,6 +13812,7 @@ fn main() -> i64 {
             "empty"],
            ["`tryReceive()`", "a value if one is already there, never waits"],
            ["`close()`", "says no more will be sent, and wakes every waiter"],
+           ["`isClosed()`", "whether `close` has been called"],
            ["`pending()`", "how many are waiting to be taken"]]),
         N("Sending to a closed channel is a panic rather than a value that "
           "quietly vanishes. Closing twice is harmless: the second says "
@@ -13463,7 +13923,7 @@ fn main() -> i64 {
           "besides retain and release, it costs about twice what an ordinary "
           "add does."),
         P("So the compiler picks from the static type instead. `String`, "
-          "`Arc` and anything marked `@sync` — the types that can actually be "
+          "`Arc` and anything marked `#sync` — the types that can actually be "
           "reached from two threads — use an atomic pair; everything else "
           "uses a plain one. Nothing branches at run time, and a class that "
           "cannot be shared pays nothing for the fact that some other type "
@@ -13471,7 +13931,7 @@ fn main() -> i64 {
         T(["Counted with", "Which types"],
           [["an ordinary add", "classes, `Any`, `dyn Mark` — none of which "
             "is `Send`"],
-           ["an atomic add", "`String`, `Arc<T>`, `Mutex<T>`, any `@sync` "
+           ["an atomic add", "`String`, `Arc<T>`, `Mutex<T>`, any `#sync` "
             "type — and closures, because `task::offload` hands one to a "
             "worker thread while the thread that made it may still be "
             "letting go of its own reference"]]),
@@ -14055,7 +14515,7 @@ SECTIONS.append(Sec(
           "in the package's directory:"),
         T(["Phase", "Runs", "Can"],
           [["**prepare**", "before the package is compiled",
-            "set `@Config` flags; add link arguments, libraries and library "
+            "set `#Config` flags; add link arguments, libraries and library "
             "directories"],
            ["**finish**", "after each executable is linked, once per "
             "executable", "post-process the file \u2014 strip it, sign it, "
@@ -14099,8 +14559,8 @@ fn main() -> i64 {
           "writes them, and any program that prints them will do. Everything "
           "else it prints is shown when it fails, or under `-v`."),
         T(["`std::build`", "Line", "Does"],
-          [["`cfg(name)`", "`rune:cfg=name`", "sets `@Config(name)` for the package's sources"],
-           ["`cfgValue(key, value)`", "`rune:cfg=key=value`", "sets `@Config(key == \"value\")`"],
+          [["`cfg(name)`", "`rune:cfg=name`", "sets `#Config(name)` for the package's sources"],
+           ["`cfgValue(key, value)`", "`rune:cfg=key=value`", "sets `#Config(key == \"value\")`"],
            ["`linkArg(arg)`", "`rune:link-arg=arg`", "added to every link of the package's executables"],
            ["`linkLibrary(name)`", "`rune:link-lib=name`", "`-l<name>`"],
            ["`linkPath(dir)`", "`rune:link-path=dir`", "`-L<dir>`, relative to the package"],
@@ -14260,8 +14720,8 @@ $ wasmtime target/wasm/debug/hello.wasm"""),
           "of its own for that reason; wasmtime runs it with "
           "`-W threads=y -S threads=y`.",
           label="Why threads are a separate target"),
-        P("Code that has to differ asks `@Config(family == \"wasm\")` or "
-          "`@Config(os == \"wasi\")` — see **Conditional compilation** — and "
+        P("Code that has to differ asks `#Config(family == \"wasm\")` or "
+          "`#Config(os == \"wasi\")` — see **Conditional compilation** — and "
           "`std::arch` says `wasm32` with a 32-bit `usize`."),
 
         H("A target triple"),
@@ -14486,7 +14946,7 @@ cxx-flags = ["-Wall", "-Wextra"]''', mode="frag",
            ["Shared libraries on WebAssembly",
             "none — a library is a `.rul`, linked into the module"],
            ["Everything else in the FFI",
-            "portable: scalars, pointers, `CString`, `@cfunction`, `@export`"]]),
+            "portable: scalars, pointers, `CString`, `@cfunction`, `#export`"]]),
 
         H("32-bit targets"),
         P("`usize` and `isize` are the target's pointer width, so a 32-bit "
@@ -14533,22 +14993,22 @@ SECTIONS.append(Sec(
           "under `[build]`, or `--runtime none` and `--entry none` to "
           "`runec` — say what the program has around it."),
         T(["Directive", "Means", "Like Rust's"],
-          [["`@runtime(none)`", "no C library and no hosted runtime are "
+          [["`#runtime(none)`", "no C library and no hosted runtime are "
             "linked; `runetime/freestanding.rune` is compiled into the "
             "program instead", "`#![no_std]`"],
-           ["`@entry(none)`", "no `main` is generated; an `@export`ed "
+           ["`#entry(none)`", "no `main` is generated; an `#export`ed "
             "function is where execution starts", "`#![no_main]`"]]),
-        S("""@runtime(none)
-@entry(none)
+        S("""#runtime(none)
+#entry(none)
 import std::asm
 
-@panicHandler
+#panicHandler
 fn panicked(message: CString, location: CString) -> Never {
     // say it somewhere (a serial port, the screen), then stop
     loop { unsafe { asm::run("cli; hlt", "") } }
 }
 
-@export("kernel_main")
+#export("kernel_main")
 fn kernelMain(magic: u32, info: u32) -> Never {
     // ...
     loop {}
@@ -14557,10 +15017,10 @@ fn kernelMain(magic: u32, info: u32) -> Never {
           "where it is used, so `T?`, `Result`, `std::asm` and the rest of "
           "what is plain Rune work as ever. So do the containers — "
           "`Vector`, `Map` and `Set` — which allocate through `std::mem` "
-          "and so through the program's own `@allocator`; `String`, "
+          "and so through the program's own `#allocator`; `String`, "
           "`std::fmt`, `format!` and printing, which writes through "
-          "`@output`; and `process::panic`, whose message goes to the "
-          "`@panicHandler`. What needs an operating system — standard "
+          "`#output`; and `process::panic`, whose message goes to the "
+          "`#panicHandler`. What needs an operating system — standard "
           "input, files, threads, tasks, the network, `std::text`'s Unicode "
           "tables, reference counting — is refused at compile time, against "
           "the function of yours that reached it:"),
@@ -14572,7 +15032,7 @@ fn kernelMain(magic: u32, info: u32) -> Never {
           "standard library's reference carries a badge — **bare metal** or "
           "**hosted**, with what a hosted one needs — and `runec --tiers` "
           "prints the same list, worked out by building the whole library "
-          "as a `@runtime(none)` program would see it."),
+          "as a `#runtime(none)` program would see it."),
         SH("""$ runec --tiers | grep std::io::
 bare    std::io::print
 bare    std::io::println
@@ -14583,7 +15043,7 @@ hosted  std::io::readLine  (rune_read_line)
           "can be named, stored in a table and handed to a function without "
           "an annotation, and it costs nothing at run time. A `String` is "
           "there too — the freestanding runtime makes one over the program's "
-          "`@allocator` — so asking for one, adding a literal to one, "
+          "`#allocator` — so asking for one, adding a literal to one, "
           "`format!`, `$str()`, `std::fmt` and `Display` all work. A literal "
           "that becomes a `String` is built into the image rather than the "
           "heap, so it never takes memory from the allocator. The same holds "
@@ -14608,21 +15068,21 @@ fn greet(name: String) {
         H("The hooks"),
         P("Four functions the generated code relies on, supplied by the "
           "program. Each has a default in the freestanding runtime, marked "
-          "`@weak`, that the program's own replaces."),
+          "`#weak`, that the program's own replaces."),
         T(["Attribute", "Signature", "Called for", "Default"],
-          [["`@panicHandler`", "`fn(message: CString, location: CString) -> Never`",
+          [["`#panicHandler`", "`fn(message: CString, location: CString) -> Never`",
             "every failed check, `unwrap` of an empty `Option`, "
-            "`process::panic`", "writes the message to `@output`, then stops where it is"],
-           ["`@allocator`", "`fn(size: usize, align: usize) -> *var u8`",
+            "`process::panic`", "writes the message to `#output`, then stops where it is"],
+           ["`#allocator`", "`fn(size: usize, align: usize) -> *var u8`",
             "every object a class, a closure or a `Unique` makes, and every "
             "block `std::mem` hands a container",
-            "panics: *this program allocates, and declares no @allocator*"],
-           ["`@deallocator`", "`fn(block: *var u8, size: usize, align: usize)`",
+            "panics: *this program allocates, and declares no #allocator*"],
+           ["`#deallocator`", "`fn(block: *var u8, size: usize, align: usize)`",
             "every object whose one owner is done with it, and every block "
             "`std::mem` gives back — told the size and alignment it was "
             "allocated with, so it needs no header of its own",
             "nothing — without an allocator nothing was allocated"],
-           ["`@output`", "`fn(bytes: *u8, count: usize)`",
+           ["`#output`", "`fn(bytes: *u8, count: usize)`",
             "`print`, `println!` and the rest of `std::io`'s output, and the "
             "default panic handler's message",
             "discards it"]],
@@ -14631,14 +15091,14 @@ fn greet(name: String) {
         S("""global var region: [65536:u8] = [0; 65536]
 global var used: usize = 0
 
-@allocator
+#allocator
 fn allocate(size: usize, align: usize) -> *var u8 {
     let at = (used + align - 1) / align * align
     used = at + size
     unsafe { &var region[at as i64] as *var u8 }
 }
 
-@deallocator
+#deallocator
 fn release(block: *var u8, size: usize, align: usize) {}""", mode="frag",
           title="The smallest allocator: a bump pointer that never frees"),
 
@@ -14650,7 +15110,7 @@ fn release(block: *var u8, size: usize, align: usize) {}""", mode="frag",
           "borrow checker proves the same things at compile time. The only "
           "difference is where a failed check goes: the freestanding "
           "runtime formats it into a buffer of its own, not the heap, and "
-          "hands it to the `@panicHandler`."),
+          "hands it to the `#panicHandler`."),
         SH("""KERNEL PANIC: index 4 is out of bounds for a collection of length 4
   at main.rune:53:34"""),
 
@@ -14661,30 +15121,30 @@ fn release(block: *var u8, size: usize, align: usize) {}""", mode="frag",
         T(["", "Provides"],
           [["Panics", "`rune_panic_bounds`, `_overflow`, `_div_zero`, `_nil`, "
             "`_no_match`, `_any`, `_unwrap` and `rune_panic`, each turned "
-            "into a message for the `@panicHandler`"],
-           ["The heap", "`rune_alloc` and `rune_drop` over the `@allocator` "
-            "and `@deallocator`: an object's header, its `deinit`, and "
+            "into a message for the `#panicHandler`"],
+           ["The heap", "`rune_alloc` and `rune_drop` over the `#allocator` "
+            "and `#deallocator`: an object's header, its `deinit`, and "
             "`--safety full`'s check that a dropped object had one owner"],
            ["Memory", "`memcpy`, `memmove`, `memset`, `memcmp` — LLVM emits "
             "calls to them for large copies whatever the target"],
            ["Raw memory", "`rune_raw_alloc`, `_realloc`, `_free` and "
             "`_is_zero`, which `std::mem` is built on. Every caller says how "
             "big a block is when it gives it back, so no block carries a "
-            "header and `@deallocator` is told the size"],
+            "header and `#deallocator` is told the size"],
            ["32-bit targets", "`__divdi3`, `__udivdi3`, `__moddi3` and "
             "`__umoddi3`: 64-bit division, which a 32-bit processor does "
             "with a library call"],
            ["Classes", "`$clone()`, `is` and `Any` checks, hashing"],
            ["Text", "`String` and every `rune_string_*` operation, numbers "
-            "to text and back, and `rune_print` and the rest over `@output` "
+            "to text and back, and `rune_print` and the rest over `#output` "
             "— in `runetime/freestanding_text.rune`"]]),
         P("A library that wants to work either way asks "
-          "`@Config(runtime == \"none\")` — `std::process` does, for its "
+          "`#Config(runtime == \"none\")` — `std::process` does, for its "
           "`panic`."),
         N("A freestanding program is compiled with `no-builtins`, as C's "
           "`-ffreestanding` does, so LLVM never turns a loop that copies "
           "bytes into a call to `memcpy` — least of all inside `memcpy`. "
-          "Every one of these is `@weak`: a program with faster ones keeps "
+          "Every one of these is `#weak`: a program with faster ones keeps "
           "its own.", label="Why the loops stay loops"),
 
         H("A minimal runtime"),
@@ -14698,7 +15158,7 @@ fn release(block: *var u8, size: usize, align: usize) {}""", mode="frag",
           "`$substring`, `$repeat`, `$find` and walking characters, "
           "`$clone()` of a class object, `Any` and class tests, and "
           "hashing. The parts are marked "
-          "`@Config(!(freestanding_type == \"minimal\"))` in `runetime/`, "
+          "`#Config(!(freestanding_type == \"minimal\"))` in `runetime/`, "
           "so the line is drawn where it can be read."),
         SH("""[config]
 freestanding_type = "minimal"     # or "full", the default"""),
@@ -14716,25 +15176,25 @@ freestanding_type = "minimal"     # or "full", the default"""),
           label="What it saves"),
 
         H("Starting without main"),
-        P("Under `@entry(none)` nothing runs before the program's own entry "
+        P("Under `#entry(none)` nothing runs before the program's own entry "
           "— which is usually a few lines of assembly that make a stack and "
           "call it. A global whose value is a constant or all zeros is in "
           "the image already. Anything else is set by `rune_init`, which the "
           "compiler generates and the entry calls first:"),
         S("""extern "C" { fn rune_init() }
 
-@export("kernel_main")
+#export("kernel_main")
 fn kernelMain(magic: u32, info: u32) -> Never {
     unsafe { rune_init() }
     // ...
 }""", mode="frag"),
 
-        H("@weak"),
+        H("#weak"),
         P("A definition another may replace: the linker keeps a strong "
           "definition of the same symbol over it, and so does the compiler "
           "when both are in one program. It is how the freestanding "
           "runtime's defaults give way to a program's hooks, and it works "
-          "the same for any `@export`ed function of your own."),
+          "the same for any `#export`ed function of your own."),
 
         H("Bare-metal targets"),
         P("Four foreign targets are freestanding whatever the sources say. "
@@ -14766,7 +15226,7 @@ $ rune run                          # boots under QEMU, runs its checks, powers 
 $ rune run -- -append panic         # trips a bounds check on purpose; exits 3"""),
         P("[`examples/toyos`](examples/toyos/README.md) is the whole of it "
           "worked through: a multiboot kernel with a VGA console and a "
-          "serial one, a first-fit heap behind its `@allocator`, processes "
+          "serial one, a first-fit heap behind its `#allocator`, processes "
           "on a round-robin scheduler, each owned by the one before it, and "
           "64-bit arithmetic on a 32-bit processor — all of it under "
           "`--safety full`."),
@@ -14828,7 +15288,7 @@ $ rune run --target i686-elf"""),
           "initialiser, which is what `rune_init` runs."),
     ],
     keywords=["bare metal", "freestanding", "kernel", "os", "no_std",
-              "no_main", "runtime", "entry", "@runtime", "@entry",
+              "no_main", "runtime", "entry", "#runtime", "#entry",
               "panicHandler", "allocator", "deallocator", "weak", "rune_init",
               "multiboot", "qemu", "linker script", "linker-script",
               "bare-x86", "bare-arm64", "bare-riscv64", "E0542", "E0248",
@@ -14842,7 +15302,7 @@ $ rune run --target i686-elf"""),
 # ===========================================================================
 SECTIONS.append(Sec(
     "config", "tooling", "Conditional compilation",
-    "`@Config(...)` decides whether a declaration exists at all. It is "
+    "`#Config(...)` decides whether a declaration exists at all. It is "
     "answered before anything is checked, so what it rules out is not merely "
     "unused \u2014 it is gone, and may name types and foreign symbols that "
     "exist on no other target.",
@@ -14850,16 +15310,16 @@ SECTIONS.append(Sec(
               "os", "arch", "windows", "linux", "macos", "portability",
               "[config]", "backend", "value", "rune add --config"],
     items=[
-        H("`@Config`"),
+        H("`#Config`"),
         P("Write the condition on the declaration. Two definitions of one name "
           "under conditions that cannot both hold are the ordinary way to give "
           "a function a different body per platform."),
         S("""import std::io
 
-@Config(family == "unix")
+#Config(family == "unix")
 fn lineEnding() -> String { "\\n" }
 
-@Config(family == "windows")
+#Config(family == "windows")
 fn lineEnding() -> String { "\\r\\n" }
 
 fn main() -> i64 {
@@ -14885,7 +15345,7 @@ fn main() -> i64 {
            ["`safety`", "`none`, `minimal` or `full`"],
            ["`memory`", "`arc` or `zombie`"],
            ["`runtime`", "`hosted`, or `none` for a program built "
-            "`@runtime(none)`"],
+            "`#runtime(none)`"],
            ["`opt_level`", "`\"0\"` through `\"3\"`"],
            ["`overflow_checks`", "`on` or `off`"]]),
         P("Those are compared against a string. Everything else is a name that "
@@ -14899,16 +15359,16 @@ fn main() -> i64 {
           "is nothing else in the language: no arithmetic, no calls, no "
           "variables. It has to be answerable before the type checker has "
           "run."),
-        S("""@Config(arch == "aarch64" && os == "macos")
+        S("""#Config(arch == "aarch64" && os == "macos")
 fn tuned() -> i64 { 1 }
 
-@Config(!(arch == "aarch64" && os == "macos"))
+#Config(!(arch == "aarch64" && os == "macos"))
 fn tuned() -> i64 { 0 }
 
-@Config(debug)
+#Config(debug)
 fn checking() -> bool { true }
 
-@Config(!debug)
+#Config(!debug)
 fn checking() -> bool { false }""", title="Conditions compose"),
 
         H("Conditions on members"),
@@ -14920,17 +15380,17 @@ fn checking() -> bool { false }""", title="Conditions compose"),
 
 struct Handle {
     pub id: i64,
-    @Config(os == "windows")
+    #Config(os == "windows")
     pub winHandle: i64,
-    @Config(family == "unix")
+    #Config(family == "unix")
     pub fd: i64,
 }
 
 extend Handle {
-    @Config(family == "unix")
+    #Config(family == "unix")
     pub fn describe(&self) -> String { "fd " + self.fd.$str() }
 
-    @Config(os == "windows")
+    #Config(os == "windows")
     pub fn describe(&self) -> String { "handle " + self.winHandle.$str() }
 }
 
@@ -14954,28 +15414,28 @@ version = "0.1.0"
 backend = "software"
 api_level = 1
 tracing = false""", mode="frag", title="Rune.toml"),
-        S("""@Config(backend == "metal")
+        S("""#Config(backend == "metal")
 fn present() -> String { "metal" }
 
-@Config(backend == "vulkan")
+#Config(backend == "vulkan")
 fn present() -> String { "vulkan" }
 
-@Config(backend != "metal" && backend != "vulkan")
+#Config(backend != "metal" && backend != "vulkan")
 fn present() -> String { "software" }
 
 // `=` reads as the comparison: there is nothing else it could mean in a
 // condition, and `tracing = true` is how the key was written in the manifest.
-@Config(tracing = true)
+#Config(tracing = true)
 fn trace(what: String) { /* ... */ }
 
-@Config(tracing = false)
+#Config(tracing = false)
 fn trace(what: String) {}
 
-@Config(api_level == 3)
+#Config(api_level == 3)
 fn modern() -> bool { true }""", mode="frag", title="What a value key answers"),
         P("The value may be a string, a number, a boolean or a bare word, and "
           "either side of the comparison may be the key — "
-          "`@Config(\"metal\" == backend)` says the same thing. A key the "
+          "`#Config(\"metal\" == backend)` says the same thing. A key the "
           "package never declared is an error rather than a silently false "
           "condition, so a typo is caught where it is written."),
         SH("""$ runec --cfg backend=metal --cfg api_level=3 --cfg tracing=true app.rune
@@ -14991,7 +15451,7 @@ gfx = { path = "../gfx", config = { backend = "metal", tracing = true } }""",
         SH("""$ rune add gfx --config backend=vulkan"""),
         P("The values a dependency was built with travel with it. A compiled "
           "`.rul` records them, and its interface is re-read with the answers "
-          "*it* was built under — so a library's own `@Config` can never be "
+          "*it* was built under — so a library's own `#Config` can never be "
           "re-decided by whoever imports it."),
         T(["Situation", "What happens"],
           [["a key the package never declared", "an error naming the package "
@@ -15002,8 +15462,8 @@ gfx = { path = "../gfx", config = { backend = "metal", tracing = true } }""",
            ["a builtin key (`os`, `memory`, ...)",
             "refused: the target already answers those"]]),
         N("A value key and a bare name are the same mechanism. `--cfg "
-          "tracing` sets `tracing` with no value, which `@Config(tracing)` "
-          "answers true and `@Config(tracing = false)` answers false.",
+          "tracing` sets `tracing` with no value, which `#Config(tracing)` "
+          "answers true and `#Config(tracing = false)` answers false.",
           label="One mechanism, two spellings"),
 
         H("Features and dependencies"),
@@ -15020,19 +15480,19 @@ cfg = ["telemetry"]
 [dependencies]
 statistics = { path = "../statistics" }""",
           mode="frag", title="Rune.toml"),
-        S("""@Config(telemetry)
+        S("""#Config(telemetry)
 fn record(event: String) { /* ... */ }
 
-@Config(!telemetry)
+#Config(!telemetry)
 fn record(event: String) {}
 
 // True exactly when `statistics` is in [dependencies].
-@Config(statistics)
+#Config(statistics)
 fn summarise() -> String { "with statistics" }""",
           title="What that makes true"),
         SH("""$ rune build                     # telemetry, statistics
 $ rune build --cfg verbose       # telemetry, statistics, verbose"""),
-        N("`@Config` applies to declarations, not to statements. To make part "
+        N("`#Config` applies to declarations, not to statements. To make part "
           "of a body conditional, put it in a function of its own and give "
           "every branch a definition \u2014 which also means a missing case is "
           "a name that cannot be found, rather than silence.",
@@ -15058,24 +15518,24 @@ SECTIONS.append(Sec(
            ["`asm::value<R>(text, constraints, ...) -> R`",
             "Runs them and takes the result as `R`. Treated as a pure "
             "function of its inputs."]]),
-        P("Both are `@unsafe`, so a call needs `unsafe { ... }` or a caller "
-          "that is itself `@unsafe`. The instructions and the constraints have "
+        P("Both are `#unsafe`, so a call needs `unsafe { ... }` or a caller "
+          "that is itself `#unsafe`. The instructions and the constraints have "
           "to be written out at the call: they are assembled with the program, "
           "so they cannot be computed while it runs."),
         S("""import std::io
 import std::asm
 
-@Config(arch == "aarch64")
+#Config(arch == "aarch64")
 fn addUp(a: i64, b: i64) -> i64 {
     unsafe { asm::value<i64>("add $0, $1, $2", "=r,r,r", a, b) }
 }
 
-@Config(arch == "x86_64")
+#Config(arch == "x86_64")
 fn addUp(a: i64, b: i64) -> i64 {
     unsafe { asm::value<i64>("addq $2, $0", "=r,0,r", a, b) }
 }
 
-@Config(arch != "aarch64" && arch != "x86_64")
+#Config(arch != "aarch64" && arch != "x86_64")
 fn addUp(a: i64, b: i64) -> i64 { a + b }
 
 fn main() -> i64 {
@@ -15126,17 +15586,17 @@ fn broken() -> i64 {
           "for those, and for barriers, fences and syscalls."),
         S("""import std::asm
 
-@Config(arch == "aarch64")
+#Config(arch == "aarch64")
 fn barrier() { unsafe { asm::run("dmb ish", "") } }
 
-@Config(arch == "x86_64")
+#Config(arch == "x86_64")
 fn barrier() { unsafe { asm::run("mfence", "") } }""",
           title="Written for its effects"),
         N("Assembly is text for one machine. Anything using it wants a "
-          "`@Config(arch == \"...\")` around it and a definition for the "
+          "`#Config(arch == \"...\")` around it and a definition for the "
           "architectures you do not handle \u2014 otherwise the build fails on "
           "the first machine nobody thought about.",
-          label="Always paired with `@Config`", tone="warn"),
+          label="Always paired with `#Config`", tone="warn"),
     ]))
 
 
@@ -15278,31 +15738,33 @@ unsafeBlock   ::= "unsafe" block"""),
         H("Keywords"),
         T(["Group", "Words"],
           [["declaration", "`fn` `struct` `class` `enum` `mark` `bind` `to` "
-            "`extend` `type` `global` `extern` `import` `pub` `where`"],
-           ["binding", "`let` `var` `mut` `weak`"],
+            "`extend` `type` `global` `extern` `import` `pub` `where` `macro`"],
+           ["binding", "`let` `var` `mut` `weak` `uniq`"],
            ["control", "`if` `elif` `else` `while` `loop` `for` `in` `match` "
-            "`return` `break` `continue` `defer`"],
+            "`return` `break` `continue` `defer` `async` `await`"],
            ["value", "`self` `Self` `super` `true` `false` `nil`"],
-           ["operator-like", "`as` `into` `is` `operator` `dyn` `unsafe`"],
+           ["operator-like", "`as` `into` `is` `operator` `dyn` `unsafe` `move`"],
+           ["contextual", "`take` in a pattern, `some` and `typeof` in a type, "
+            "`from` after a borrowed type — names everywhere else"],
            ["sigil", "`$` before a member name: the compiler's own"]]),
 
         H("Not implemented yet"),
         P("Stated plainly, because a reference that hides its edges wastes your "
           "time."),
         T(["Area", "Where it stops"],
-          [["packages", "`{ path = ... }` only — no registry, no version "
-            "resolution"],
-           ["collections", "arrays, slices, `Vector`, `Map` and `Set`; no "
+          [["collections", "arrays, slices, `Vector`, `Map` and `Set`; no "
             "ordered map, and no persistent collections"],
            ["concurrency", "threads, channels, atomics, `Send`, `Sync`, "
             "`Arc` and `Mutex` on pthreads platforms; tasks with `async fn` "
-            "and `.await` on one thread; no `select`, no cancellation, a "
-            "thread entry is a `fn` rather than a closure, and the Windows "
+            "and `.await`, cancellation, timeouts and `task::first` to race "
+            "them, on one executor thread with blocking work handed to "
+            "others; a thread entry is a `@cfunction` rather than a closure, "
+            "and the Windows "
             "thread backing still faults when a handle is destroyed and "
             "another thread spawned"],
-           ["generics", "monomorphised; no higher-kinded parameters, and no "
-            "specialisation — a more specific implementation cannot displace "
-            "a general one"],
+           ["generics", "monomorphised, and a narrower `bind` displaces a "
+            "general one (see **Specialisation**); no higher-kinded "
+            "parameters and no constant generics"],
            ["marks", "associated types, their bounds and `where` clauses are "
             "all checked; a mark still cannot require an operator on an "
             "associated type of another mark"],

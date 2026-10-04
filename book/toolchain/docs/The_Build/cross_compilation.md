@@ -74,7 +74,7 @@ flags and libraries the runtime needs there:
 | `Clang` | `clang` and `ld.lld` on `PATH`, told the triple |
 
 `Clang` (host clang and ld.lld, told the target) is the bare-metal targets'
-default, and they are also `Freestanding`: built `@runtime(none)` whatever
+default, and they are also `Freestanding`: built `#runtime(none)` whatever
 the sources say. See *Bare metal*.
 
 ### Flags belong to tools
@@ -178,12 +178,12 @@ internal adapter with the C signature that unpacks its arguments and makes
 the Rune call. A signature of nothing but scalars gets none of this and is
 unchanged.
 
-What is left for `abiRejectsByValue` is a Rune function `@export`ed to C,
+What is left for `abiRejectsByValue` is a Rune function `#export`ed to C,
 whose definition still takes its arguments as LLVM lowers them: on Win64 a
 struct that is not 1, 2, 4 or 8 bytes wide is refused there rather than
 misread.
 
-**Macros run here.** A package's `@type(Macros)` files are compiled into a
+**Macros run here.** A package's `#type(Macros)` files are compiled into a
 program that runs during the build, so it is always built for the host — with
 the host's runtime, not the `--runtime-dir` a cross build passes.
 

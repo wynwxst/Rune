@@ -47,6 +47,7 @@ fn main() -> i64 {
 | `receive()` | the next value, waiting; `nil` once closed and empty |
 | `tryReceive()` | a value if one is already there, never waits |
 | `close()` | says no more will be sent, and wakes every waiter |
+| `isClosed()` | whether `close` has been called |
 | `pending()` | how many are waiting to be taken |
 
 > [!NOTE]

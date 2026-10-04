@@ -36,6 +36,18 @@ void note(const std::string &text) {
 void plain(const std::string &text) { writeSerialized(text + "\n"); }
 
 std::string quote(const std::string &s) {
+#if defined(_WIN32)
+  // cmd.exe knows only double quotes. Inside them a `"` is written `\"`,
+  // as the C runtime reads it back.
+  std::string out = "\"";
+  for (char ch : s) {
+    if (ch == '"')
+      out += "\\\"";
+    else
+      out += ch;
+  }
+  return out + "\"";
+#else
   std::string out = "'";
   for (char ch : s) {
     if (ch == '\'')
@@ -44,12 +56,16 @@ std::string quote(const std::string &s) {
       out += ch;
   }
   return out + "'";
+#endif
 }
 
 std::filesystem::path runeHome() {
   if (const char *h = std::getenv("RUNE_HOME"))
     return std::filesystem::path(h);
   if (const char *h = std::getenv("HOME"))
+    return std::filesystem::path(h) / ".rune";
+  // Windows names the home directory differently.
+  if (const char *h = std::getenv("USERPROFILE"))
     return std::filesystem::path(h) / ".rune";
   return std::filesystem::path(".rune");
 }

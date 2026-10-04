@@ -14,7 +14,7 @@ class Pair {
 
 fn total(p: &Pair) -> i64 { p.left.value + p.right.value }
 
-@export("_start")
+#export("_start")
 fn start() -> Never {
     {
         let p = Pair()

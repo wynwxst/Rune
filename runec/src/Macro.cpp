@@ -1152,10 +1152,11 @@ void collectMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
         continue;
       }
     }
-    // `@macro` is the *attribute* that marks a procedural macro, not the
+    // `#macro` is the *attribute* that marks a procedural macro, not the
     // start of a declarative one. It is taken out by `collectProcMacros`.
     if (toks[i].Kind == Tok::KwMacro &&
-        !(i > 0 && toks[i - 1].Kind == Tok::At)) {
+        !(i > 0 && (toks[i - 1].Kind == Tok::At ||
+                    toks[i - 1].Kind == Tok::Hash))) {
       i = readDefinition(toks, i, diags, into, record, module,
                          /*isPublic=*/false);
       continue;
@@ -1242,7 +1243,7 @@ bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
         continue;
       }
 
-      // A procedural macro — a `@macro fn` — is run rather than matched. It
+      // A procedural macro — a `#macro fn` — is run rather than matched. It
       // is looked for first, so a name is one kind of macro or the other and
       // never quietly both.
       if (procs) {
@@ -1307,7 +1308,7 @@ bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
         if (!names.empty())
           d.note(("in scope here: " + names).c_str());
         d.note("a macro is declared with `macro name { (pattern) => { ... } }`, "
-               "or written as code with `@macro fn name(...)`");
+               "or written as code with `#macro fn name(...)`");
         d.code(123);
         ok = false;
         i = skipGroup(toks, i + 2);

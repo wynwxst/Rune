@@ -47,22 +47,22 @@ fn largest(values: [i64]) -> i64? {
 //===--------------------------------------------------------------------===//
 //
 // Raw pointers are not checked, so every use of one is an unsafe operation.
-// A function that performs them is marked `@unsafe`; a wrapper that has
-// actually established the invariant says so with `@safe("reason")`.
+// A function that performs them is marked `#unsafe`; a wrapper that has
+// actually established the invariant says so with `#safe("reason")`.
 
-@unsafe
+#unsafe
 fn writeThrough(target: *var i64, value: i64) {
     *target = value
 }
 
-@unsafe
+#unsafe
 fn readThrough(source: *i64) -> i64 {
     *source
 }
 
 /// The pointer is taken from a local that is alive for the whole call, so the
-/// dereference inside cannot dangle. That is exactly what `@safe` records.
-@safe("the pointer comes from a local that outlives the call below")
+/// dereference inside cannot dangle. That is exactly what `#safe` records.
+#safe("the pointer comes from a local that outlives the call below")
 fn roundTrip(start: i64) -> i64 {
     var slot = start
     writeThrough(&var slot as *var i64, start * 2)

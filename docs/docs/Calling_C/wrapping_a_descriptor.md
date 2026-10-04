@@ -1,6 +1,6 @@
 # Wrapping a descriptor
 
-A C API that hands out a descriptor hands out an obligation with it. A struct with a `@resource` field and a `deinit` is how that obligation is written down: the value closes itself, and the compiler will not let a second owner of it exist. This is exactly what `std::net` is built out of.
+A C API that hands out a descriptor hands out an obligation with it. A struct with a `#resource` field and a `deinit` is how that obligation is written down: the value closes itself, and the compiler will not let a second owner of it exist. This is exactly what `std::net` is built out of.
 
 **A descriptor that closes itself**
 
@@ -15,11 +15,11 @@ extern "C" {
 
 /// An open file descriptor, and the promise to close it.
 pub struct Descriptor {
-    @resource fd: i32 = -1
+    #resource fd: i32 = -1
 }
 
 extend Descriptor {
-    @safe("the descriptor is ours, and the flag stops a second close")
+    #safe("the descriptor is ours, and the flag stops a second close")
     fn deinit(&var self) {
         if self.fd >= 0 {
             close(self.fd)
@@ -30,7 +30,7 @@ extend Descriptor {
     pub fn isOpen(&self) -> bool { self.fd >= 0 }
 }
 
-@safe("open either returns a descriptor or -1, which is what is checked")
+#safe("open either returns a descriptor or -1, which is what is checked")
 pub fn openRead(path: String) -> Descriptor? {
     let fd = unsafe { open(path.$cstr(), 0i32) }
     if fd < 0 { return nil }

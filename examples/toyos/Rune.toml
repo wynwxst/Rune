@@ -5,7 +5,7 @@ edition = "2026"
 description = "A toy operating system in Rune: a multiboot kernel for 32-bit x86, booted by QEMU."
 
 [build]
-# `@runtime(none)` in src/main.rune says this too; the manifest says it for
+# `#runtime(none)` in src/main.rune says this too; the manifest says it for
 # anyone reading it first. The whole checking dial stays up: bounds,
 # overflow, division by zero, nil and the Zombie borrow checker all apply
 # to kernel code as to any other.
@@ -21,6 +21,7 @@ linker-script = "kernel.ld"
 # The foreign target `bare-x86`, run with QEMU's debug-exit device so a
 # panic ends the run with a status of its own.
 [target.bare-x86]
+linker="ld.lld"
 runner = "qemu-system-i386 -display none -serial stdio -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -kernel"
 
 # The same, built with a GNU cross toolchain instead of clang and lld — the

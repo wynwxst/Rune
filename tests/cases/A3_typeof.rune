@@ -32,7 +32,7 @@ fn boom() -> i64 { io::println("SHOULD NOT PRINT"); 0 }
 /// `typeof` is contextual: a function of that name goes on meaning what it did.
 fn typeof(n: i64) -> i64 { n + 1 }
 
-@unsafe fn main() -> i64 {
+#unsafe fn main() -> i64 {
     let a = 7
     let b: typeof(a) = 9
     println!("b {}", b.$str())

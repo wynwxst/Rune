@@ -50,14 +50,14 @@ Where to read it depends on what it affects:
 ## 3. Reject it where it does not apply
 
 An attribute silently ignored in the wrong place is worse than one that errors.
-`@as` is the model:
+`#as` is the model:
 
 ```cpp
 if (a.Name == "as" && !fn->IsExtern) {
-  Diags.error(a.Range, "`@as` only applies inside an `extern` block")
+  Diags.error(a.Range, "`#as` only applies inside an `extern` block")
       .note("it renames a foreign declaration for Rune's side, leaving the "
             "symbol the C library exports alone")
-      .note("to give a Rune declaration a second name, use `@alias`")
+      .note("to give a Rune declaration a second name, use `#alias`")
       .code(234);
   continue;
 }
@@ -68,7 +68,7 @@ a diagnostic that only says no is half-written.
 
 ## File-level directives are different
 
-`@link`, `@linkpath` and `@type` are not attributes on declarations; they sit
+`#link`, `#linkpath` and `#type` are not attributes on declarations; they sit
 at the top of a file and are handled by `Parser::parseFileDirectives`, which
 recognises exactly those three names. Adding a fourth means editing that
-function — including its ordering rule, since `@type` must precede the others.
+function — including its ordering rule, since `#type` must precede the others.

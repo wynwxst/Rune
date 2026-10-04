@@ -1,6 +1,6 @@
 # Automatic marks
 
-Some marks are not promises a type makes but facts about it: it holds nothing that has to be destroyed, everything in it can be copied, nothing in it stops it crossing to another thread. `@auto` says so, and the compiler answers for every type: a type has an automatic mark when **every part of it** has it.
+Some marks are not promises a type makes but facts about it: it holds nothing that has to be destroyed, everything in it can be copied, nothing in it stops it crossing to another thread. `#auto` says so, and the compiler answers for every type: a type has an automatic mark when **every part of it** has it.
 
 **A mark the compiler answers for**
 
@@ -8,7 +8,7 @@ Some marks are not promises a type makes but facts about it: it holds nothing th
 import std::io
 
 /// A claim about a type, not a promise it makes: it holds plain values.
-@auto
+#auto
 mark Plain {}
 
 struct Point { x: i64, y: i64 }        // has it: two integers
@@ -27,17 +27,17 @@ An automatic mark carries no requirements — there is nobody to implement them,
 
 | Written | Means |
 | --- | --- |
-| `@auto mark M {}` | M is automatic: every part decides |
+| `#auto mark M {}` | M is automatic: every part decides |
 | `bind M to T {}` | T has it, whatever its parts say |
-| `@never(M)` on `T` | T does not have it, whatever its parts say |
+| `#never(M)` on `T` | T does not have it, whatever its parts say |
 | `reflect::conforms<T, M>()` | the answer, at compile time |
 
-Three things never have one on their own. A type that runs a `deinit` — a destructor is a promise the compiler cannot read. Anything it cannot look into: a closure and its captures, an `Any`, a `dyn Mark`, a raw or `weak` pointer. And a type that refuses it with `@never`, along with everything holding one.
+Three things never have one on their own. A type that runs a `deinit` — a destructor is a promise the compiler cannot read. Anything it cannot look into: a closure and its captures, an `Any`, a `dyn Mark`, a raw or `weak` pointer. And a type that refuses it with `#never`, along with everything holding one.
 
 **What a `deinit` costs**
 
 ```rune
-@auto
+#auto
 mark Plain {}
 
 struct Descriptor { fd: i32 }

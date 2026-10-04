@@ -29,7 +29,7 @@ import std::collections::vector
 /// What a worker is handed: the queue of descriptors, and the tally every
 /// worker adds to.
 ///
-/// A struct of `@sync` classes, so it is `Send`: both the channel and the
+/// A struct of `#sync` classes, so it is `Send`: both the channel and the
 /// counter synchronise their own access, which is what lets them be shared
 /// rather than copied.
 pub struct Worker {

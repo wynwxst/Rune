@@ -1,5 +1,5 @@
 // The kernel's heap: a first-fit allocator over a region of its own, handed to
-// Rune as the program's `@allocator` and `@deallocator`. Every class the
+// Rune as the program's `#allocator` and `#deallocator`. Every class the
 // kernel makes comes from here, and — under single ownership — goes back
 // here the moment its one owner is done with it.
 //
@@ -28,21 +28,21 @@ pub global var frees: i64 = 0
 pub global var bytesInUse: i64 = 0
 
 /// The region's first 16-byte boundary: a byte array is aligned to one.
-@safe("computes an address inside the region; nothing is read")
+#safe("computes an address inside the region; nothing is read")
 fn regionStart() -> usize {
     let raw = unsafe { &var region[0] as *var u8 as usize }
     (raw + 15) / 16 * 16
 }
 
-@safe("every offset handed in is one this file carved")
+#safe("every offset handed in is one this file carved")
 fn headerAt(offset: usize) -> *var Header {
     unsafe { (regionStart() + offset) as *var Header }
 }
 
 fn roundUp(size: usize) -> usize { (size + 15) / 16 * 16 }
 
-@allocator
-@safe("hands out payloads inside the region, each behind its own header")
+#allocator
+#safe("hands out payloads inside the region, each behind its own header")
 fn allocate(size: usize, align: usize) -> *var u8 {
     let want = roundUp(if size == 0 { 1 as usize } else { size })
     // First fit among the blocks already carved.
@@ -77,7 +77,7 @@ fn allocate(size: usize, align: usize) -> *var u8 {
     handOut(fresh)
 }
 
-@safe("the block at `at` was carved by this file")
+#safe("the block at `at` was carved by this file")
 fn handOut(at: usize) -> *var u8 {
     let h = headerAt(at)
     unsafe { h[0].used = 1 }
@@ -93,8 +93,8 @@ fn handOut(at: usize) -> *var u8 {
 /// splitting.
 pub global var sizeMismatches: i64 = 0
 
-@deallocator
-@safe("checks that the block is one of ours before touching it")
+#deallocator
+#safe("checks that the block is one of ours before touching it")
 fn release(block: *var u8, size: usize, align: usize) {
     let address = unsafe { block as usize }
     let start = regionStart()

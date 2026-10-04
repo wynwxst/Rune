@@ -393,7 +393,7 @@ private:
   llvm::Constant *constantValueOf(Expr *e, Type *t);
   std::map<GlobalVarDecl *, llvm::Constant *> FoldedGlobals;
   void resolveWeakDefinitions();
-  /// `@weak` definitions another in this module replaces; never emitted.
+  /// `#weak` definitions another in this module replaces; never emitted.
   std::set<FunctionDecl *> ReplacedDefinitions;
   /// Drops every definition nothing in the module reaches. What "reaches"
   /// means is decided by linkage: see `setDiscardableLinkage`.
@@ -467,7 +467,7 @@ private:
   /// `cxx::alloc<T>()` / `cxx::free<T>(p)`: C++'s own heap.
   llvm::Value *emitCxxAlloc(CallExpr *c, Type *arg);
   void emitCxxFree(CallExpr *c);
-  /// A C++ class with `@size` lowers to that many bytes; without, to one.
+  /// A C++ class with `#size` lowers to that many bytes; without, to one.
   llvm::Type *lowerCxxClass(NominalDecl *nd);
   bool isSharedRefType(Type *t);
   const char *retainFnFor(Type *t);
@@ -520,6 +520,7 @@ private:
   llvm::Value *emitRValue(Expr *e);
   /// Address of an assignable expression.
   llvm::Value *emitLValue(Expr *e);
+  llvm::Value *emitIndexCall(IndexExpr *i);
   /// Evaluates `e` and stores it into `slot`, retaining as needed.
   void emitInto(Expr *e, llvm::Value *slot, Type *slotType, bool raw = false);
 

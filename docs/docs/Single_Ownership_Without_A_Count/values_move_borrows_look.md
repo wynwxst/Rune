@@ -89,10 +89,10 @@ What the compiler will **not** do is copy a value that owns something: a copy ma
 **What the compiler will not copy**
 
 ```rune
-struct Descriptor { @resource fd: i32 = -1 }
+struct Descriptor { #resource fd: i32 = -1 }
 
 extend Descriptor {
-    @safe("the descriptor is ours, and the flag stops a second close")
+    #safe("the descriptor is ours, and the flag stops a second close")
     fn deinit(&var self) {
         if self.fd >= 0 { self.fd = -1 }
     }

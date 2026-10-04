@@ -1,0 +1,34 @@
+// CXX: cxx/cfunction_cast.cpp
+// EXPECT: a 7 8 3
+// EXPECT: b 9 10 4
+// EXPECT: data 1234
+// EXPECT: answered 42
+//
+// A Rune function cast to a `@cfunction` is called the C way. Handed over
+// without a cast it always went through the adapter that takes struct
+// arguments as C passes them; `f as @cfunction(...)` gave C the Rune
+// function itself, which read big structs — and everything after them —
+// from the wrong place. libclang's visitor callback is exactly this shape.
+import std::io
+
+#Convention("C")
+struct Cur { kind: i32 = 0, x: i32 = 0, d: [3:*u8] = [0 as *u8, 0 as *u8, 0 as *u8] }
+
+extern "C" {
+    fn rune_cfc_drive(v: @cfunction(Cur, Cur, *var u8) -> i32, data: *var u8) -> i32
+}
+
+#unsafe
+fn visit(a: Cur, b: Cur, data: *var u8) -> i32 {
+    io::println("a " + a.kind.$str() + " " + a.x.$str() + " " + (a.d[2] as usize).$str())
+    io::println("b " + b.kind.$str() + " " + b.x.$str() + " " + (b.d[0] as usize).$str())
+    io::println("data " + (data as usize).$str())
+    42
+}
+
+#unsafe
+fn main() -> i64 {
+    let answer = rune_cfc_drive(visit as @cfunction(Cur, Cur, *var u8) -> i32, 1234 as *var u8)
+    io::println("answered " + answer.$str())
+    0
+}

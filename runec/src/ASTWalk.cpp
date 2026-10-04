@@ -2,7 +2,7 @@
 //
 // `forEachChild` visits the sub-nodes of one node and nothing deeper, so a
 // caller writes the recursion it actually wants. Every pass that has to look
-// at a whole body — the `@resource` check, the ownership pass — uses this
+// at a whole body — the `#resource` check, the ownership pass — uses this
 // rather than repeating a switch over every node kind, which is the kind of
 // list that goes stale the first time a node gains a field.
 //

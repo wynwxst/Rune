@@ -101,7 +101,7 @@ fn main() -> i64 {
 
 `Set<T>` is a `Map<T, bool>` whose values are all true, which is what a set is — so there is one probing implementation rather than two. `dictionary::setOf(values)` and `dictionary::mapOf(keys, values)` build one from a slice.
 
-A map is common enough to be worth writing short. `[K:V]` is the type and `[key: value, ...]` is the value, with `[:]` for the empty one:
+A map is common enough to be worth writing short. `[K:V]` is the type and `[key: value, ...]` is the value, with `[:]` for the empty one — `dictionary::emptyMap<K, V>()` written short, taking its types from where it is going:
 
 **Written short**
 

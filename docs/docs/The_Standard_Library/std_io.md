@@ -10,6 +10,9 @@
 | `newline` | `()` | a bare newline |
 | `readLine` | `() -> String` | a line from stdin, newline removed |
 | `readLineOrEnd` | `() -> String?` | the same, and `nil` at the end of the input — which is what a loop needs |
+| `readExactly` | `(count: i64) -> String?` | exactly `count` bytes of stdin, newlines and all, or `nil` if it ends first — for a protocol that sends a length, then a message |
+| `unbufferInput` | `()` | stop buffering stdin inside the program; call before the first read |
+| `inputWaiting` | `(millis: i64) -> bool` | whether stdin has something (or has ended) within `millis`; `0` asks without waiting. Sees only unbuffered input |
 
 *`Display` is the public mark in this module; anything that binds it can be printed.*
 
@@ -32,6 +35,11 @@ fn main() -> i64 {
 > **Reading until the end**
 >
 > `readLine` cannot tell a blank line from the end of the input: both give an empty string. `readLineOrEnd` can, which is why it is the one to loop over — `while io::readLineOrEnd() is Some(line)` ends where the input does.
+
+> [!NOTE]
+> **Reading as messages arrive**
+>
+> `unbufferInput` and `inputWaiting` are what a program that answers messages as they arrive and does slower work between them is built on — `rune lsp` reads its editor this way, framing each message with `readExactly`.
 
 `println!` and `print!` live here too. They take a format string, need no import, and are what most code reaches for; the functions above are what they call. See **Formatting**.
 

@@ -50,7 +50,7 @@ Problems**.
 ## Vim and Neovim
 
 `editors/vim` is a runtime directory for both: filetype detection, syntax
-highlighting (`@lint(...)` included), indentation, comment settings, a `:make`
+highlighting (`#lint(...)` included), indentation, comment settings, a `:make`
 that fills the quickfix list, and checking as you type. Add it to the
 `runtimepath` — with a plugin manager, point it at the directory:
 

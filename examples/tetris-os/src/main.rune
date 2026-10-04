@@ -1,5 +1,5 @@
-@runtime(none)
-@entry(none)
+#runtime(none)
+#entry(none)
 // TETRIS-OS, in Rune: an operating system that only plays Tetris.
 //
 // A port of https://github.com/jdah/tetris-os (MIT; see LICENSE), from C to
@@ -145,7 +145,7 @@ fn freshState() -> State {
     State {
         board: [[0; 10]; 20], frames: 0, steps: 0, framesSinceStep: 0,
         score: 0, lines: 0, level: 0, linesLeft: 0, menu: false,
-        stopped: false, destroy: false, gameOver: false, music: false,
+        stopped: false, destroy: false, gameOver: false, music: true,
         next: -1,
         curr: Piece { kind: 0, r: 0, x: 0, y: 0, done: false },
         controls: [Control { down: false, last: false, pressed: false, pressedFrames: 0 }; 7],
@@ -456,7 +456,7 @@ fn generateSprites() {
     }
 }
 
-@safe("each row read is inside the tile's own sprite")
+#safe("each row read is inside the tile's own sprite")
 fn renderTile(tile: u8, x: i64, y: i64) {
     for j in 0..tileSize {
         let row = unsafe { &var tileSprites[tile as i64][j * tileSize] as *var u8 }
@@ -493,7 +493,7 @@ global var digits: [24:u8] = [0; 24]
 
 /// `value` in decimal, as a CString in a buffer of its own — which the next
 /// call overwrites, so it is drawn straight away.
-@safe("the buffer is NUL-terminated and outlives every use")
+#safe("the buffer is NUL-terminated and outlives every use")
 fn numberText(value: i64) -> CString {
     var scratch: [20:u8] = [0; 20]
     var n = if value < 0 { 0 - value } else { value }
@@ -577,7 +577,7 @@ fn updateMenu() {
     }
 }
 
-@safe("reads each logo row up to its length")
+#safe("reads each logo row up to its length")
 fn renderMenu() {
     screen::clear(screen::colour(0, 0, 0))
     let logoWidth = screen::length(logo[0])
@@ -610,7 +610,7 @@ fn renderMenu() {
 // The kernel
 //===----------------------------------------------------------------------===//
 
-@export("_main")
+#export("_main")
 fn kernelMain(magic: u32, stack: u32) -> Never {
     unsafe { rune_init() }
     serial::init()
@@ -676,7 +676,7 @@ fn kernelMain(magic: u32, stack: u32) -> Never {
 /// Every failed check ends here: an index off the board, an overflow, a
 /// division by zero. As the original's `panic` does, the screen goes red
 /// with the message on it; the log says where.
-@panicHandler
+#panicHandler
 fn panicked(message: CString, location: CString) -> Never {
     port::cli()
     serial::print("tetris: panic: ")

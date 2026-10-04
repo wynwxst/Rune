@@ -10,7 +10,7 @@
 // The two halves of an object's life are written out, the way placement new
 // and an explicit destructor call are in C++:
 //
-//     let ctx = cxx::alloc<LLVMContext>()   // storage: `@size` bytes
+//     let ctx = cxx::alloc<LLVMContext>()   // storage: `#size` bytes
 //     ctx.init()                            // the constructor, on it
 //     ...
 //     ctx.deinit()                          // the destructor
@@ -20,24 +20,24 @@
 // use of it is unsafe in the ordinary way.
 
 /// Storage for one `T` from C++'s `operator new`, uninitialised. For a C++
-/// `class` the amount is its `@size`; a `struct` is measured from its fields.
+/// `class` the amount is its `#size`; a `struct` is measured from its fields.
 ///
 /// The object does not exist until its `init` has run on the pointer, and
 /// stops existing once `deinit` has; `free` returns the storage afterwards.
-@unsafe
-@intrinsic("cxx_alloc")
+#unsafe
+#intrinsic("cxx_alloc")
 pub fn alloc<T>() -> *var T
 
 /// Returns storage from `alloc` to C++'s `operator delete`. Whatever was in
 /// it must already have been destroyed — Rune runs no destructor here.
-@unsafe
-@intrinsic("cxx_free")
+#unsafe
+#intrinsic("cxx_free")
 pub fn free<T>(object: *var T)
 
 /// A pointer to no object, for a C++ parameter that accepts `nullptr`.
-@safe("an address of zero is never read through; C++ tests it the same way")
+#safe("an address of zero is never read through; C++ tests it the same way")
 pub fn null<T>() -> *var T { unsafe { 0 as *var T } }
 
 /// True when `object` is C++'s `nullptr`.
-@safe("comparing an address to zero reads no memory")
+#safe("comparing an address to zero reads no memory")
 pub fn isNull<T>(object: *var T) -> bool { unsafe { object as u64 == 0 } }

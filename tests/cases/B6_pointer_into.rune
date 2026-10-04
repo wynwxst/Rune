@@ -1,0 +1,57 @@
+// LIB: libptrs lib/libptrs.rune
+// EXPECT: same true
+// EXPECT: grown 4 3
+// EXPECT: freed
+//
+// A bind on a pointer shape is a conversion like any other:
+// `bind<T> *var T into *var u8`, imported from a library, lets a typed
+// pointer go wherever C asks for bytes — an argument, a binding — with no
+// cast written. Its `self` is the pointer, not the place holding it.
+import std::io
+import std::mem
+import libptrs
+
+type c_ptr = *var u8
+
+extern "C" {
+    fn realloc(ptr: c_ptr, size: usize) -> c_ptr
+    fn free(ptr: c_ptr)
+}
+
+struct Array<T> {
+    items: *var T = 0 as *var T
+    count: usize = 0
+    capacity: usize = 0
+}
+
+extend Array {
+    #unsafe fn push(&var self, item: T) {
+        if self.count == self.capacity {
+            self.capacity = if self.capacity == 0 { 2 } else { self.capacity * 2 }
+            self.items = realloc(self.items, mem::size_of<T>() * self.capacity) as *var T
+        }
+        self.items[self.count] = item
+        self.count += 1
+    }
+    #unsafe fn release(&var self) {
+        free(self.items)
+        self.items = 0 as *var T
+    }
+}
+
+#unsafe
+fn main() -> i64 {
+    var x: i64 = 7
+    let p: *var i64 = &var x as *var i64
+    let bytes: *var u8 = p
+    io::println("same " + ((bytes as usize) == (p as usize)).$str())
+
+    var a = Array<i64> {}
+    a.push(1)
+    a.push(2)
+    a.push(3)
+    io::println("grown " + a.capacity.$str() + " " + a.items[2].$str())
+    a.release()
+    io::println("freed")
+    0
+}

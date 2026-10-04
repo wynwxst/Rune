@@ -34,7 +34,7 @@ pub enum Kind {
 ///
 ///     reflect::typeName<i64>()          // "i64"
 ///     reflect::typeName<Point>()        // "app::Point"
-@intrinsic("type_name")
+#intrinsic("type_name")
 pub fn typeName<T>() -> String
 
 /// A number standing for `T`, equal for the same type and different for
@@ -45,7 +45,7 @@ pub fn typeName<T>() -> String
 /// nothing about layout.
 ///
 ///     if reflect::typeId<T>() == reflect::typeId<String>() { ... }
-@intrinsic("type_id")
+#intrinsic("type_id")
 pub fn typeId<T>() -> u64
 
 /// Which of the shapes in `Kind` the type `T` is.
@@ -57,7 +57,7 @@ pub fn typeId<T>() -> u64
 ///         Kind::Class => ...,   // only this arm survives for a class
 ///         _ => ...,
 ///     }
-@intrinsic("kind_of")
+#intrinsic("kind_of")
 pub fn kindOf<T>() -> Kind
 
 //===--------------------------------------------------------------------===//
@@ -66,11 +66,11 @@ pub fn kindOf<T>() -> Kind
 
 /// Bytes a value of `T` occupies. The same answer as `mem::size_of`, which is
 /// where code that is managing storage rather than reflecting should ask.
-@intrinsic("size_of")
+#intrinsic("size_of")
 pub fn sizeOf<T>() -> usize
 
 /// The alignment `T` requires, in bytes.
-@intrinsic("align_of")
+#intrinsic("align_of")
 pub fn alignOf<T>() -> usize
 
 /// The distance between neighbouring elements of an array of `T` — the size
@@ -79,7 +79,7 @@ pub fn alignOf<T>() -> usize
 /// For every type Rune lays out this equals `sizeOf`, because the size
 /// already includes tail padding. It is here because the two are different
 /// questions, and code that means the stride should say so.
-@intrinsic("stride_of")
+#intrinsic("stride_of")
 pub fn strideOf<T>() -> usize
 
 /// Where `field` begins inside `T`, in bytes.
@@ -88,7 +88,7 @@ pub fn strideOf<T>() -> usize
 ///
 /// The field has to exist and be reachable from where you ask; a name that is
 /// not a field of `T` is an error at the `offset_of!`.
-@intrinsic("offset_of")
+#intrinsic("offset_of")
 pub fn offsetOf<T>(field: String) -> usize
 
 /// `offset_of!(Type, field)` — the offset of a named field.
@@ -104,7 +104,7 @@ pub macro offset_of {
 
 /// How many fields `T` has: struct fields, tuple elements, array elements,
 /// enum variants. Zero for everything else.
-@intrinsic("field_count")
+#intrinsic("field_count")
 pub fn fieldCount<T>() -> usize
 
 /// The name of field `index` of `T`, or `""` when there is no such field.
@@ -112,13 +112,13 @@ pub fn fieldCount<T>() -> usize
 /// `index` has to be a literal, because the answer is chosen while compiling.
 ///
 ///     reflect::fieldName<Point>(0)      // "x"
-@intrinsic("field_name")
+#intrinsic("field_name")
 pub fn fieldName<T>(index: usize) -> String
 
 /// The name of the type of field `index` of `T`, or `""`.
 ///
 ///     reflect::fieldType<Point>(1)      // "f64"
-@intrinsic("field_type")
+#intrinsic("field_type")
 pub fn fieldType<T>(index: usize) -> String
 
 //===--------------------------------------------------------------------===//
@@ -134,7 +134,7 @@ pub fn fieldType<T>(index: usize) -> String
 ///         if reflect::conforms<T, io::Display>() { ... }
 ///         reflect::describe(value)
 ///     }
-@intrinsic("conforms")
+#intrinsic("conforms")
 pub fn conforms<T, M>() -> bool
 
 /// True when a value of `T` may move to another thread — `std::thread::Send`,
@@ -144,12 +144,12 @@ pub fn conforms<T, M>() -> bool
 /// it fails. This is for code that takes a different path instead of refusing:
 ///
 ///     if reflect::isSend<T>() { ... } else { ... }
-@intrinsic("is_send")
+#intrinsic("is_send")
 pub fn isSend<T>() -> bool
 
 /// True when a value of `T` may be reached from several threads at once —
 /// `std::thread::Sync`, asked the same way.
-@intrinsic("is_sync")
+#intrinsic("is_sync")
 pub fn isSync<T>() -> bool
 
 //===--------------------------------------------------------------------===//
@@ -171,5 +171,5 @@ pub fn isSync<T>() -> bool
 /// It is for looking at values: logs, tests, a debugger's `dump`. A type that
 /// wants to control how it prints binds `io::Display`, and `describe` will
 /// use it wherever it finds it.
-@intrinsic("describe")
+#intrinsic("describe")
 pub fn describe<T>(value: T) -> String

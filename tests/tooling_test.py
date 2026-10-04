@@ -45,7 +45,7 @@ fn helper_fn() -> i64 { 1 }
 fn main() -> i64 {
     let unused = 3
     var never = 4
-    @lint(allow(unused-variable))
+    #lint(allow(unused-variable))
     let quiet = 5
     if never > 1 == true { io::println("yes") }
     while true {
@@ -69,7 +69,7 @@ def lint_tests(tmp):
     for rule in ["unused-import", "dead-code", "unused-variable", "never-reassigned",
                  "bool-comparison", "while-true", "needless-return", "naming"]:
         check(f"lint reports {rule}", f"[{rule}]" in out, out)
-    check("an @lint directive silences its statement", "`quiet`" not in out, out)
+    check("an #lint directive silences its statement", "`quiet`" not in out, out)
     check("human output points at the line", "7 ║     let unused = 3" in out, out)
 
     r = subprocess.run([LINT, "--stdlib", STDLIB, "--format", "json", src], capture_output=True, text=True)
@@ -100,7 +100,7 @@ def lint_tests(tmp):
     check("[lint] allow turns a rule off", "[unused-variable]" not in r.stdout, r.stdout)
     check("[lint] warn turns a rule on", "[missing-docs]" in r.stdout, r.stdout)
 
-    # `@lint` directives: file-wide only at the very top with nothing but
+    # `#lint` directives: file-wide only at the very top with nothing but
     # directives and imports after them; otherwise they cover the next item.
     def lint_text(name, text, *flags):
         f = os.path.join(d, name)
@@ -109,30 +109,30 @@ def lint_tests(tmp):
 
     out = lint_text("filewide.rune", "// header\n@lint(allow(unused-variable))\n\nimport std::io\n\n"
                     "fn a() -> i64 {\n    let x = 1\n    0\n}\n\nfn main() -> i64 {\n    let y = 2\n    io::println(a())\n    0\n}\n")
-    check("@lint at the top, before the imports, covers the whole file", "[unused-variable]" not in out, out)
+    check("#lint at the top, before the imports, covers the whole file", "[unused-variable]" not in out, out)
 
-    out = lint_text("item.rune", "@lint(allow(unused-variable))\nfn a() -> i64 {\n    let x = 1\n    0\n}\n\n"
+    out = lint_text("item.rune", "#lint(allow(unused-variable))\nfn a() -> i64 {\n    let x = 1\n    0\n}\n\n"
                     "fn main() -> i64 {\n    let y = 2\n    a()\n}\n")
-    check("@lint at the top, straight before a declaration, covers only it",
+    check("#lint at the top, straight before a declaration, covers only it",
           "`x`" not in out and "`y`" in out, out)
 
-    out = lint_text("stmt.rune", "fn main() -> i64 {\n    @lint(allow(unused-variable))\n    let x = 1\n    let y = 2\n    0\n}\n")
-    check("@lint before a statement covers only that statement", "`x`" not in out and "`y`" in out, out)
+    out = lint_text("stmt.rune", "fn main() -> i64 {\n    #lint(allow(unused-variable))\n    let x = 1\n    let y = 2\n    0\n}\n")
+    check("#lint before a statement covers only that statement", "`x`" not in out and "`y`" in out, out)
 
-    out = lint_text("nested.rune", "@lint(allow(all))\nfn main() -> i64 {\n    @lint(warn(unused-variable))\n"
+    out = lint_text("nested.rune", "#lint(allow(all))\nfn main() -> i64 {\n    #lint(warn(unused-variable))\n"
                     "    let x = 1\n    var y = 2\n    y\n}\n")
-    check("an inner @lint overrides an outer one", "`x`" in out and "[never-reassigned]" not in out, out)
+    check("an inner #lint overrides an outer one", "`x`" in out and "[never-reassigned]" not in out, out)
 
-    out = lint_text("invalid.rune", "@lint(allow(unused-varaible))\nfn main() -> i64 {\n    0\n}\n")
-    check("an unknown rule in @lint is reported", "[invalid-lint]" in out and "unused-varaible" in out, out)
+    out = lint_text("invalid.rune", "#lint(allow(unused-varaible))\nfn main() -> i64 {\n    0\n}\n")
+    check("an unknown rule in #lint is reported", "[invalid-lint]" in out and "unused-varaible" in out, out)
 
-    out = lint_text("dangling.rune", "fn main() -> i64 {\n    0\n    @lint(allow(todo))\n}\n")
-    check("an @lint with nothing after it is reported", "[invalid-lint]" in out, out)
+    out = lint_text("dangling.rune", "fn main() -> i64 {\n    0\n    #lint(allow(todo))\n}\n")
+    check("an #lint with nothing after it is reported", "[invalid-lint]" in out, out)
 
     for name in ["filewide.rune", "item.rune", "stmt.rune", "nested.rune"]:
         rc = subprocess.run([os.path.join(BIN, "runec"), "--stdlib", STDLIB, "--check", os.path.join(d, name)],
                             capture_output=True, text=True)
-        check(f"the compiler accepts @lint in {name}", rc.returncode == 0, rc.stderr)
+        check(f"the compiler accepts #lint in {name}", rc.returncode == 0, rc.stderr)
 
     clean = os.path.join(d, "clean.rune")
     write(clean, "import std::io\n\nfn main() -> i64 {\n    io::println(\"hi\")\n    0\n}\n")
@@ -237,11 +237,11 @@ def fmt_tests(tmp):
     # A header comment and the directives stay first; a signature that wraps
     # opens its body one level in.
     header = os.path.join(d, "header.rune")
-    write(header, "@type(Executable)\n// What this is.\n\nimport std::io\n\n"
+    write(header, "#type(Executable)\n// What this is.\n\nimport std::io\n\n"
                   "fn add(a: i64,\n        b: i64) -> i64 {\n            a + b\n}\n\n"
                   "fn main() -> i64 {\n    io::println(value: add(a: 1, b: 2))\n    0\n}\n")
     r = subprocess.run(base + ["--stdout", header], capture_output=True, text=True)
-    check("directives, then the preamble, then imports", r.stdout.startswith("@type(Executable)\n\n// What this is.\n\nimport std::io\n"), r.stdout)
+    check("directives, then the preamble, then imports", r.stdout.startswith("#type(Executable)\n\n// What this is.\n\nimport std::io\n"), r.stdout)
     check("a wrapped signature's body is one level in", "    b: i64) -> i64 {\n    a + b\n}" in r.stdout, r.stdout)
 
     # `rune fmt` runs it with the toolchain's own paths.
@@ -539,6 +539,10 @@ def lsp_tests(tmp):
     pkg = os.path.join(tmp, "lsppkg")
     write(os.path.join(pkg, "Rune.toml"), '[package]\nname = "lsppkg"\nversion = "0.1.0"\nedition = "2025"\n')
     write(os.path.join(pkg, "src", "shapes.rune"), "pub fn area(w: i64, h: i64) -> i64 { w * h }\n")
+    # Bindings as `rune ffi` writes them: the block is `pub`, its members not.
+    write(os.path.join(pkg, "src", "clib.rune"),
+          'pub extern "C" {\n    fn c_area(w: i64) -> i64\n    MAX_LEN: i32\n}\n\n'
+          'extern "C" {\n    fn hidden_helper() -> i64\n}\n')
     main_src = "import std::io\nimport lsppkg::shapes\n\nfn main() -> i64 {\n    io::println(shapes::area(2, \"three\"))\n    0\n}\n"
     write(os.path.join(pkg, "src", "main.rune"), main_src)
     puri = uri_of(os.path.join(pkg, "src", "main.rune"))
@@ -549,6 +553,13 @@ def lsp_tests(tmp):
     r = c.request("textDocument/completion", {"textDocument": {"uri": puri}, "position": pos(main_src, "shapes::area", 8)})
     labels = [i["label"] for i in r["result"]["items"]]
     check("completion reaches the package's own modules", "area" in labels, labels)
+    ext_src = "import lsppkg::clib\n\nfn main() -> i64 {\n    clib::\n    0\n}\n"
+    c.notify("textDocument/didChange", {"textDocument": {"uri": puri, "version": 2}, "contentChanges": [{"text": ext_src}]})
+    r = c.request("textDocument/completion", {"textDocument": {"uri": puri}, "position": pos(ext_src, "    clib::", 10)})
+    labels = [i["label"] for i in r["result"]["items"]]
+    check("completion offers what a `pub extern \"C\"` block declares", "c_area" in labels and "MAX_LEN" in labels, labels)
+    check("but not a private extern block's", "hidden_helper" not in labels, labels)
+    c.notify("textDocument/didChange", {"textDocument": {"uri": puri, "version": 3}, "contentChanges": [{"text": main_src}]})
     r = c.request("textDocument/definition", {"textDocument": {"uri": puri}, "position": pos(main_src, "area(", 1)})
     loc = r.get("result") or {}
     check("definition reaches the package's own modules", loc.get("uri", "").endswith("src/shapes.rune"), loc)
@@ -560,7 +571,7 @@ def lsp_tests(tmp):
           "pub fn area(w: i64, h: i64) -> i64 { w * h }\n\n"
           "pub fn square(n: i64) -> Rect { Rect { width: n, height: n } }\n")
     rect_src = "import std::io\nimport lsppkg::shapes\n\nfn main() -> i64 {\n    let r = shapes::square(3)\n    r.\n    0\n}\n"
-    c.notify("textDocument/didChange", {"textDocument": {"uri": puri, "version": 2}, "contentChanges": [{"text": rect_src}]})
+    c.notify("textDocument/didChange", {"textDocument": {"uri": puri, "version": 4}, "contentChanges": [{"text": rect_src}]})
     r = c.request("textDocument/completion", {"textDocument": {"uri": puri}, "position": pos(rect_src, "    r.", 6)})
     labels = {i["label"]: i.get("detail", "") for i in r["result"]["items"]}
     check("member completion in a package knows the package's own types",
@@ -686,10 +697,34 @@ def book_tests(tmp):
         ok = r.returncode == 0 and os.path.exists(page) and heading in open(page).read()
         check(f"`rune doc {name}` builds its book", ok, r.stdout + r.stderr)
 
+def overlay_tests(tmp):
+    """`rune check --source`: an unsaved buffer for any module of a package
+    is checked, not only the binary's root — the language server's live
+    checking depends on it."""
+    pkg = os.path.join(tmp, "overlaypkg")
+    write(os.path.join(pkg, "Rune.toml"), '[package]\nname = "overlaypkg"\nversion = "0.1.0"\n')
+    write(os.path.join(pkg, "src", "lib.rune"), "pub fn one() -> i64 { 1 }\n")
+    write(os.path.join(pkg, "src", "helper.rune"), "pub fn two() -> i64 { 2 }\n")
+    write(os.path.join(pkg, "src", "main.rune"), "import overlaypkg\nfn main() -> i64 { overlaypkg::one() - 1 }\n")
+    rune = [os.path.join(BIN, "rune")]
+    r = subprocess.run(rune + ["check"], cwd=pkg, capture_output=True, text=True)
+    check("check: the package is clean on disk", r.returncode == 0, r.stdout + r.stderr)
+    buffer = os.path.join(tmp, "helper-buffer.rune")
+    write(buffer, "pub fn two() -> i64 { std::doesntexist() }\n")
+    helper = os.path.join(pkg, "src", "helper.rune")
+    r = subprocess.run(rune + ["check", "--diagnostic-format", "json", "--source", helper + "=" + buffer],
+                       cwd=pkg, capture_output=True, text=True)
+    out = r.stdout + r.stderr
+    check("check --source: an unsaved library module is checked", r.returncode != 0 and "cannot find 'std'" in out, out)
+    check("check --source: the error names the module's own file", "helper.rune" in out, out)
+    r = subprocess.run(rune + ["check"], cwd=pkg, capture_output=True, text=True)
+    check("check: the buffer never reached the build", r.returncode == 0, r.stdout + r.stderr)
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         lint_tests(tmp)
         fmt_tests(tmp)
+        overlay_tests(tmp)
         lsp_tests(tmp)
         book_tests(tmp)
     if failures:

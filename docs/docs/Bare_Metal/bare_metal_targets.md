@@ -32,6 +32,6 @@ $ rune run                          # boots under QEMU, runs its checks, powers 
 $ rune run -- -append panic         # trips a bounds check on purpose; exits 3
 ```
 
-[`examples/toyos`](examples/toyos/README.md) is the whole of it worked through: a multiboot kernel with a VGA console and a serial one, a first-fit heap behind its `@allocator`, processes on a round-robin scheduler, each owned by the one before it, and 64-bit arithmetic on a 32-bit processor — all of it under `--safety full`.
+[`examples/toyos`](examples/toyos/README.md) is the whole of it worked through: a multiboot kernel with a VGA console and a serial one, a first-fit heap behind its `#allocator`, processes on a round-robin scheduler, each owned by the one before it, and 64-bit arithmetic on a 32-bit processor — all of it under `--safety full`.
 
 [`examples/tetris-os`](examples/tetris-os/README.md) is a larger one: jdah's TETRIS-OS, ported from C. It boots from its own boot sector, sets up the IDT and the PICs, drives the timer, the keyboard, VGA mode 13h and a SoundBlaster 16 by DMA, and plays Tetris to the theme — Rune throughout but for the boot sector and the interrupt stubs. Porting it under `--safety full` turned up an out-of-bounds write and a missing table entry the C had carried silently. Its [build script](#buildscripts) lays the linked kernel out as a disk image, which is what `rune run` then boots.

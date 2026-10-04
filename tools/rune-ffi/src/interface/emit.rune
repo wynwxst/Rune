@@ -1,0 +1,860 @@
+// Writing the bindings: Rune source for what a header declares.
+//
+// The shape follows Rust's bindgen, in Rune's spelling:
+//
+// * a C struct is a `#Convention("C")` struct with the same members, each
+//   given a zero default, so `S {}` is a zeroed `S`;
+// * a union, a struct with bit-fields and a packed struct cannot be said
+//   member by member, so each is its bytes — the right size and alignment —
+//   with a getter and a setter per member;
+// * a struct only ever declared is an empty struct, used behind pointers;
+// * an enum is a type alias and a constant per enumerator, since C's enums
+//   are integers that hold whatever they are given;
+// * a `#define` of a number or a string is a constant;
+// * functions and variables go in one `pub extern "C"` block.
+//
+// What is written is decided by the headers asked for: everything they
+// declare themselves, and every type that reaches, wherever it was declared
+// — but not the rest of the system headers they happened to include.
+
+import std::collections::vector
+import std::dictionary
+import interface::model::*
+
+/// What to write, and how.
+pub struct Options {
+    /// Functions to bind, as `*` patterns. Empty: those the headers declare.
+    pub allowFunctions: vector::Vector<String> = vector::Vector<String>()
+    pub allowTypes: vector::Vector<String> = vector::Vector<String>()
+    pub allowVars: vector::Vector<String> = vector::Vector<String>()
+    /// Header files whose declarations are all wanted, as `*` patterns
+    /// matched against the path. The headers asked for always are.
+    pub allowFiles: vector::Vector<String> = vector::Vector<String>()
+    /// Names never to write.
+    pub block: vector::Vector<String> = vector::Vector<String>()
+    /// Types to write as empty structs even when their members are known.
+    pub opaque: vector::Vector<String> = vector::Vector<String>()
+    /// Libraries the bindings link with: `#link("z")`.
+    pub links: vector::Vector<String> = vector::Vector<String>()
+    /// `const char *` parameters and results as `CString`.
+    pub cstrings: bool = true
+    /// A function that checks every struct's size and member offsets.
+    pub layoutTests: bool = true
+    /// Constants for `#define`s.
+    pub constants: bool = true
+    /// `consts` (a type alias and a constant per enumerator) or `rune` (a
+    /// `#Convention("C")` enum).
+    pub enumStyle: String = "consts"
+    /// Functions and variables that are `static` or start with `__` are
+    /// left out unless asked for by name; this writes them too.
+    pub reserved: bool = false
+}
+
+/// Whether `name` matches `pattern`, where `*` is any run of characters
+/// and `?` any one, and `a|b` is either.
+pub fn globMatch(pattern: &String, name: &String) -> bool {
+    let bar = pattern.$find("|")
+    if bar >= 0 {
+        let a = pattern.$substring(0, bar)
+        let b = pattern.$substring(bar + 1, pattern.$length())
+        return globMatch(&a, name) || globMatch(&b, name)
+    }
+    globFrom(pattern, 0, name, 0)
+}
+
+fn globFrom(p: &String, pi: i64, s: &String, si: i64) -> bool {
+    if pi == p.$length() { return si == s.$length() }
+    let c = p.$byteAt(pi)
+    if c == 42 {
+        var k = si
+        while k <= s.$length() {
+            if globFrom(p, pi + 1, s, k) { return true }
+            k += 1
+        }
+        return false
+    }
+    if si == s.$length() { return false }
+    if c == 63 || c == s.$byteAt(si) { return globFrom(p, pi + 1, s, si + 1) }
+    false
+}
+
+fn anyMatch(patterns: &vector::Vector<String>, name: &String) -> bool {
+    for p in patterns { if globMatch(p, name) { return true } }
+    false
+}
+
+/// Rune's words, which C may use as names.
+fn isRuneKeyword(w: &String) -> bool {
+    w == "fn" || w == "var" || w == "let" || w == "mut" || w == "global" || w == "class" ||
+    w == "struct" || w == "enum" || w == "mark" || w == "bind" || w == "to" || w == "extend" ||
+    w == "super" || w == "self" || w == "Self" || w == "import" || w == "pub" || w == "as" ||
+    w == "into" || w == "is" || w == "if" || w == "elif" || w == "else" || w == "while" ||
+    w == "loop" || w == "for" || w == "in" || w == "match" || w == "return" || w == "break" ||
+    w == "continue" || w == "extern" || w == "where" || w == "defer" || w == "unsafe" ||
+    w == "operator" || w == "dyn" || w == "type" || w == "weak" || w == "uniq" || w == "move" ||
+    w == "macro" || w == "async" || w == "await" || w == "true" || w == "false" || w == "nil"
+}
+
+/// Names Rune already gives a type, which a C type may not take over.
+fn isRuneTypeName(w: &String) -> bool {
+    w == "i8" || w == "i16" || w == "i32" || w == "i64" || w == "u8" || w == "u16" || w == "u32" ||
+    w == "u64" || w == "isize" || w == "usize" || w == "f32" || w == "f64" || w == "bool" ||
+    w == "String" || w == "CString" || w == "Character" || w == "Option" || w == "Result" ||
+    w == "Any" || w == "Never" || w == "Vector" || w == "Map" || w == "Set"
+}
+
+/// A C name as a Rune one.
+pub fn runeName(w: &String) -> String {
+    if isRuneKeyword(w) { return w + "_" }
+    w.$clone()
+}
+
+pub fn runeTypeName(w: &String) -> String {
+    if isRuneKeyword(w) || isRuneTypeName(w) { return w + "_" }
+    w.$clone()
+}
+
+/// The C typedefs that are Rune's own types already.
+fn wellKnown(name: &String) -> String {
+    if name == "size_t" || name == "uintptr_t" || name == "__darwin_size_t" { return "usize" }
+    if name == "ssize_t" || name == "intptr_t" || name == "ptrdiff_t" || name == "__darwin_ssize_t" { return "isize" }
+    if name == "int8_t" { return "i8" }
+    if name == "int16_t" { return "i16" }
+    if name == "int32_t" { return "i32" }
+    if name == "int64_t" { return "i64" }
+    if name == "uint8_t" { return "u8" }
+    if name == "uint16_t" { return "u16" }
+    if name == "uint32_t" { return "u32" }
+    if name == "uint64_t" { return "u64" }
+    if name == "va_list" || name == "__builtin_va_list" || name == "__darwin_va_list" ||
+            name == "__gnuc_va_list" { return "*var u8" }
+    ""
+}
+
+pub class Emitter {
+    m: Model
+    opts: Options
+    /// The files whose declarations are wanted, by index.
+    mainFiles: dictionary::Map<i64, bool>
+    wantRecord: dictionary::Map<i64, bool>
+    wantEnum: dictionary::Map<i64, bool>
+    wantTypedef: dictionary::Map<String, bool>
+    /// Records whose members cannot be said one by one.
+    blobRecords: dictionary::Map<i64, bool>
+    out: String
+    notes: vector::Vector<String>
+    tests: vector::Vector<String>
+
+    fn init(self, model: Model, opts: Options) {
+        self.m = model
+        self.opts = opts
+        self.mainFiles = dictionary::Map<i64, bool>()
+        self.wantRecord = dictionary::Map<i64, bool>()
+        self.wantEnum = dictionary::Map<i64, bool>()
+        self.wantTypedef = dictionary::Map<String, bool>()
+        self.blobRecords = dictionary::Map<i64, bool>()
+        self.out = ""
+        self.notes = vector::Vector<String>()
+        self.tests = vector::Vector<String>()
+    }
+
+    pub fn markMainFile(&var self, file: i64) { self.mainFiles.put(file, true) }
+
+    fn isMain(&self, file: i64) -> bool {
+        if self.mainFiles.holds(&file) { return true }
+        if file < 0 || file >= self.m.files.length() { return false }
+        anyMatch(&self.opts.allowFiles, self.m.files.look(file))
+    }
+
+    fn blocked(&self, name: &String) -> bool { anyMatch(&self.opts.block, name) }
+
+    fn line(&var self, text: String) { self.out = self.out + text + "\n" }
+
+    //=== Choosing ========================================================//
+
+    fn wantFunction(&self, f: &CFunc) -> bool {
+        if self.blocked(&f.name) { return false }
+        if self.opts.allowFunctions.length() > 0 { return anyMatch(&self.opts.allowFunctions, &f.name) }
+        if !self.opts.reserved && f.name.$find("__") == 0 { return false }
+        self.isMain(f.file)
+    }
+
+    fn wantVar(&self, v: &CVar) -> bool {
+        if self.blocked(&v.name) { return false }
+        if self.opts.allowVars.length() > 0 { return anyMatch(&self.opts.allowVars, &v.name) }
+        if !self.opts.reserved && v.name.$find("__") == 0 { return false }
+        self.isMain(v.file)
+    }
+
+    fn wantTypeNamed(&self, name: &String, file: i64) -> bool {
+        if name.$isEmpty() || self.blocked(name) { return false }
+        if self.opts.allowTypes.length() > 0 { return anyMatch(&self.opts.allowTypes, name) }
+        self.isMain(file)
+    }
+
+    /// Marks `t` and everything it reaches as needed.
+    fn reach(&var self, t: i64) {
+        var work = vector::Vector<i64>()
+        work.push(t)
+        var guard = 0
+        while work.length() > 0 && guard < 200000 {
+            guard += 1
+            let cur = work.pop().unwrap()
+            if cur < 0 || cur >= self.m.types.length() { continue }
+            let ty = self.m.types.look(cur).$clone()
+            if ty.kind == TK::Typedef {
+                if !wellKnown(&ty.name).$isEmpty() { continue }
+                if self.wantTypedef.holds(&ty.name) { continue }
+                self.wantTypedef.put(ty.name.$clone(), true)
+                work.push(ty.inner)
+            } elif ty.kind == TK::Pointer || ty.kind == TK::Array {
+                work.push(ty.inner)
+            } elif ty.kind == TK::Function {
+                work.push(ty.inner)
+                for p in ty.params { work.push(*p) }
+            } elif ty.kind == TK::Record {
+                let r = ty.inner
+                if self.wantRecord.holds(&r) { continue }
+                self.wantRecord.put(r, true)
+                if self.isOpaque(r) { continue }
+                for f in self.m.records.look(r).fields.clone() { work.push(f.ty) }
+            } elif ty.kind == TK::Enum {
+                self.wantEnum.put(ty.inner, true)
+            }
+        }
+    }
+
+    fn isOpaque(&self, r: i64) -> bool {
+        let rec = self.m.records.look(r)
+        if !rec.complete { return true }
+        let name = self.recordName(r)
+        anyMatch(&self.opts.opaque, &name)
+    }
+
+    fn choose(&var self) {
+        var i = 0
+        while i < self.m.funcs.length() {
+            let f = self.m.funcs.look(i).$clone()
+            if self.wantFunction(&f) { self.reach(f.ty) }
+            i += 1
+        }
+        i = 0
+        while i < self.m.vars.length() {
+            let v = self.m.vars.look(i).$clone()
+            if self.wantVar(&v) { self.reach(v.ty) }
+            i += 1
+        }
+        i = 0
+        while i < self.m.typedefs.length() {
+            let td = self.m.typedefs.look(i).$clone()
+            if self.wantTypeNamed(&td.name, td.file) && wellKnown(&td.name).$isEmpty() { self.reach(td.ty) }
+            i += 1
+        }
+        i = 0
+        while i < self.m.records.length() {
+            let name = self.recordName(i)
+            let file = self.m.records.look(i).file
+            if self.m.records.look(i).parent < 0 && self.wantTypeNamed(&name, file) {
+                let t = self.m.add(CType { kind: TK::Record, inner: i })
+                self.reach(t)
+            }
+            i += 1
+        }
+        i = 0
+        while i < self.m.enums.length() {
+            let e = self.m.enums.look(i).$clone()
+            let named = if e.tag.$isEmpty() { e.alias.$clone() } else { e.tag.$clone() }
+            if named.$isEmpty() && self.isMain(e.file) && self.opts.allowTypes.length() == 0 {
+                self.wantEnum.put(i, true)
+            } elif self.wantTypeNamed(&named, e.file) {
+                self.wantEnum.put(i, true)
+            }
+            i += 1
+        }
+        // Which records have to be bytes.
+        i = 0
+        while i < self.m.records.length() {
+            if self.wantRecord.holds(&i) && !self.isOpaque(i) && self.needsBlob(i) { self.blobRecords.put(i, true) }
+            i += 1
+        }
+    }
+
+    /// Where a record's members are, as clang laid them out.
+    fn layoutOf(&self, r: i64) -> Layout {
+        let rec = self.m.records.look(r)
+        var out = Layout { size: rec.size, align: rec.align, offsets: vector::Vector<i64>(),
+                           bitOffsets: vector::Vector<i64>() }
+        for f in rec.fields {
+            out.offsets.push(f.offsetBits / 8)
+            out.bitOffsets.push(f.offsetBits)
+        }
+        out
+    }
+
+    /// Whether a record cannot be said member by member.
+    fn needsBlob(&self, r: i64) -> bool {
+        let rec = self.m.records.look(r)
+        if rec.isUnion || rec.packed { return true }
+        let layout = self.layoutOf(r)
+        var k = 0
+        for f in rec.fields {
+            if f.bits >= 0 { return true }
+            if !self.valueSupported(f.ty) { return true }
+            // Packing that moves a member off its natural alignment.
+            let natural = self.m.alignOf(f.ty)
+            if natural > 0 && layout.offsets.get(k) % natural != 0 { return true }
+            k += 1
+        }
+        if layout.align > 8 { return true }
+        false
+    }
+
+    /// Whether a value of `t` can be written in Rune.
+    fn valueSupported(&self, t: i64) -> bool {
+        let r = self.m.resolve(t)
+        let k = self.m.kindOf(r)
+        if k == TK::Int128 || k == TK::UInt128 || k == TK::Float128 || k == TK::Unknown { return false }
+        if k == TK::LongDouble { return self.m.dm.longDouble == 8 }
+        if k == TK::Array {
+            let ty = self.m.types.look(r)
+            if ty.count < 0 { return false }
+            return self.valueSupported(ty.inner)
+        }
+        if k == TK::Record {
+            let rec = self.m.records.look(self.m.types.look(r).inner)
+            return rec.complete
+        }
+        true
+    }
+
+    //=== Names ===========================================================//
+
+    pub fn recordName(&self, r: i64) -> String {
+        let rec = self.m.records.look(r)
+        if !rec.tag.$isEmpty() { return runeTypeName(&rec.tag) }
+        if !rec.alias.$isEmpty() { return runeTypeName(&rec.alias) }
+        if rec.parent >= 0 {
+            return self.recordName(rec.parent) + "_anon" + rec.anonIndex.$str()
+        }
+        "anon_record_" + r.$str()
+    }
+
+    fn enumName(&self, e: i64) -> String {
+        let en = self.m.enums.look(e)
+        if !en.tag.$isEmpty() { return runeTypeName(&en.tag) }
+        if !en.alias.$isEmpty() { return runeTypeName(&en.alias) }
+        ""
+    }
+
+    /// The integer type an enum is stored in.
+    fn enumRepr(&self, e: i64) -> String {
+        let under = self.m.enums.look(e).underlying
+        if under < 0 { return "i32" }
+        self.rtype(under, 0)
+    }
+
+    //=== Types ===========================================================//
+
+    fn primName(&self, k: TK) -> String {
+        let dm = self.m.dm
+        match k {
+            TK::Void => "()",
+            TK::Bool => "bool",
+            TK::Char => if dm.charSigned { "i8" } else { "u8" },
+            TK::SChar => "i8",
+            TK::UChar => "u8",
+            TK::Short => "i16",
+            TK::UShort => "u16",
+            TK::Int => "i32",
+            TK::UInt => "u32",
+            TK::Long => if dm.long == 8 { "i64" } else { "i32" },
+            TK::ULong => if dm.long == 8 { "u64" } else { "u32" },
+            TK::LongLong => "i64",
+            TK::ULongLong => "u64",
+            TK::Float => "f32",
+            TK::Double => "f64",
+            TK::LongDouble => "f64",
+            TK::Block => "*var u8",
+            _ => "u8",
+        }
+    }
+
+    /// `t` as Rune writes it. `where` is 0 for a member or an alias, 1 for
+    /// a parameter, 2 for a result.
+    pub fn rtype(&self, t: i64, place: i64) -> String {
+        if t < 0 || t >= self.m.types.length() { return "u8" }
+        let ty = self.m.types.look(t)
+        if ty.kind == TK::Typedef {
+            let known = wellKnown(&ty.name)
+            if !known.$isEmpty() { return known }
+            // A typedef for a record the typedef itself names is the record.
+            let r = self.m.resolve(t)
+            let rt = self.m.types.look(r)
+            if rt.kind == TK::Record && self.recordName(rt.inner) == runeTypeName(&ty.name) {
+                return self.recordName(rt.inner)
+            }
+            if rt.kind == TK::Enum && self.enumName(rt.inner) == runeTypeName(&ty.name) {
+                return self.enumName(rt.inner)
+            }
+            return runeTypeName(&ty.name)
+        }
+        if ty.kind == TK::Pointer { return self.pointerType(t, place) }
+        if ty.kind == TK::Array {
+            if place != 0 { return "*var " + self.rtype(ty.inner, 0) }
+            return "[" + ty.count.$str() + ":" + self.rtype(ty.inner, 0) + "]"
+        }
+        if ty.kind == TK::Record { return self.recordName(ty.inner) }
+        if ty.kind == TK::Enum {
+            let n = self.enumName(ty.inner)
+            if n.$isEmpty() { return self.enumRepr(ty.inner) }
+            return n
+        }
+        if ty.kind == TK::Function { return self.cfunction(t) }
+        if ty.kind == TK::Unknown { return "u8" }
+        self.primName(ty.kind)
+    }
+
+    fn pointerType(&self, t: i64, place: i64) -> String {
+        let inner = self.m.types.look(t).inner
+        let target = self.m.resolve(inner)
+        let tk = self.m.kindOf(target)
+        let isConst = self.m.isConst(inner)
+        if tk == TK::Function {
+            // A typedef of the function type names it already.
+            if self.m.kindOf(inner) == TK::Typedef && wellKnown(&self.m.types.look(inner).name).$isEmpty() {
+                return runeTypeName(&self.m.types.look(inner).name)
+            }
+            return self.cfunction(target)
+        }
+        if tk == TK::Void || tk == TK::Unknown {
+            return if isConst { "*u8" } else { "*var u8" }
+        }
+        if tk == TK::Char && isConst && place != 0 && self.opts.cstrings { return "CString" }
+        let pointee = self.rtype(inner, 0)
+        if isConst { "*" + pointee } else { "*var " + pointee }
+    }
+
+    /// A function type as a `@cfunction`.
+    fn cfunction(&self, f: i64) -> String {
+        let ty = self.m.types.look(f)
+        var s = "@cfunction("
+        var first = true
+        for p in ty.params {
+            if !first { s = s + ", " }
+            first = false
+            s = s + self.rtype(*p, 1)
+        }
+        if ty.variadic { s = s + (if first { "..." } else { ", ..." }) }
+        s = s + ")"
+        if self.m.kindOf(self.m.resolve(ty.inner)) != TK::Void { s = s + " -> " + self.rtype(ty.inner, 2) }
+        s
+    }
+
+    /// A zeroed value of `t`, for a member's default.
+    fn zero(&self, t: i64) -> String {
+        let r = self.m.resolve(t)
+        let ty = self.m.types.look(r)
+        let k = ty.kind
+        if k == TK::Float || k == TK::Double || k == TK::LongDouble { return "0.0" }
+        if k == TK::Bool { return "false" }
+        if k == TK::Pointer || k == TK::Block { return "0 as " + self.rtype(t, 0) }
+        if k == TK::Function { return "0 as " + self.rtype(t, 0) }
+        if k == TK::Record { return self.recordName(ty.inner) + " {}" }
+        if k == TK::Array {
+            let z = self.zero(ty.inner)
+            var s = "["
+            var i = 0
+            while i < ty.count {
+                if i > 0 { s = s + ", " }
+                s = s + z
+                i += 1
+            }
+            return s + "]"
+        }
+        "0"
+    }
+
+    //=== Writing =========================================================//
+
+    /// The bindings, as one Rune source file.
+    pub fn generate(&var self, headers: &String) -> String {
+        self.choose()
+        self.line("// Rune bindings for " + headers + ".")
+        self.line("// Written by `rune ffi` — regenerate rather than edit.")
+        var links = ""
+        for l in self.opts.links { links = links + "#link(\"" + l + "\")\n" }
+        self.out = links + self.out
+        if self.opts.layoutTests { self.line("\nimport std::mem\n") } else { self.line("") }
+
+        self.writeTypedefs()
+        self.writeRecords()
+        self.writeEnums()
+        if self.opts.constants { self.writeConstants() }
+        self.writeExtern()
+        if self.opts.layoutTests { self.writeLayoutTests() }
+        for n in self.notes.clone() { self.m.warnings.push(n.$clone()) }
+        self.out.$clone()
+    }
+
+    fn writeTypedefs(&var self) {
+        var any = false
+        var i = 0
+        while i < self.m.typedefs.length() {
+            let td = self.m.typedefs.look(i).$clone()
+            i += 1
+            if !self.wantTypedef.holds(&td.name) { continue }
+            let target = self.m.types.look(td.ty).inner
+            let r = self.m.resolve(target)
+            let rt = self.m.types.look(r).$clone()
+            let name = runeTypeName(&td.name)
+            // `typedef struct x x;` and `typedef struct { } x;` say nothing
+            // the record's own name does not.
+            if rt.kind == TK::Record && self.recordName(rt.inner) == name { continue }
+            if rt.kind == TK::Enum && self.enumName(rt.inner) == name { continue }
+            if !any { self.line("//=== Types ===\n"); any = true }
+            var spelled = self.rtype(target, 0)
+            if rt.kind == TK::Function { spelled = self.cfunction(r) }
+            self.line("pub type " + name + " = " + spelled)
+        }
+        if any { self.line("") }
+    }
+
+    fn writeRecords(&var self) {
+        var i = 0
+        var any = false
+        while i < self.m.records.length() {
+            if self.wantRecord.holds(&i) {
+                if !any { self.line("//=== Structs and unions ===\n"); any = true }
+                self.writeRecord(i)
+            }
+            i += 1
+        }
+    }
+
+    fn writeRecord(&var self, r: i64) {
+        let rec = self.m.records.look(r).$clone()
+        let name = self.recordName(r)
+        let kw = if rec.isUnion { "union" } else { "struct" }
+        let cname = if rec.tag.$isEmpty() { "an anonymous " + kw } else { "`" + kw + " " + rec.tag + "`" }
+        if self.isOpaque(r) {
+            self.line("/// " + cname + ", whose members are not known here: reach it through a pointer.")
+            self.line("pub struct " + name + " {}\n")
+            return
+        }
+        let layout = self.layoutOf(r)
+        self.line("/// " + cname + ": " + layout.size.$str() + " bytes, aligned to " + layout.align.$str() + ".")
+        if self.blobRecords.holds(&r) {
+            self.writeBlob(r, &name, &layout)
+            return
+        }
+        self.line("#Convention(\"C\")")
+        self.line("pub struct " + name + " {")
+        var k = 0
+        for f in rec.fields {
+            let fname = if f.name.$isEmpty() { "anon" + k.$str() } else { runeName(&f.name) }
+            self.line("    pub " + fname + ": " + self.rtype(f.ty, 0) + " = " + self.zero(f.ty))
+            self.tests.push("    if offset_of!(" + name + ", " + fname + ") != " + layout.offsets.get(k).$str() +
+                            " { bad += 1 }")
+            k += 1
+        }
+        self.line("}\n")
+        self.writeAnonymousForwards(r, &name)
+        self.tests.push("    if mem::size_of<" + name + ">() != " + layout.size.$str() + " { bad += 1 }")
+        self.tests.push("    if mem::align_of<" + name + ">() != " + layout.align.$str() + " { bad += 1 }")
+    }
+
+    /// The members of an anonymous struct or union, reachable from the
+    /// record that holds it: `t.asInt()` rather than `t.anon0.asInt()`, as
+    /// C writes `t.as_int`.
+    fn writeAnonymousForwards(&var self, r: i64, name: &String) {
+        let rec = self.m.records.look(r).$clone()
+        var lines = vector::Vector<String>()
+        for f in rec.fields {
+            let rt = self.m.resolve(f.ty)
+            if self.m.kindOf(rt) != TK::Record { continue }
+            let inner = self.m.types.look(rt).inner
+            if self.m.records.look(inner).parent != r { continue }
+            let holder = runeName(&f.name)
+            let blob = self.blobRecords.holds(&inner)
+            for g in self.m.records.look(inner).fields.clone() {
+                if g.name.$isEmpty() || g.bits == 0 || !self.valueSupported(g.ty) { continue }
+                let gt = self.rtype(g.ty, 0)
+                let getter = runeName(&g.name)
+                let setter = "set" + capitalised(&g.name)
+                if blob {
+                    lines.push("    pub fn " + getter + "(&self) -> " + gt + " { self." + holder + "." + getter + "() }")
+                    lines.push("    pub fn " + setter + "(&var self, value: " + gt + ") { self." + holder + "." +
+                               setter + "(value) }")
+                } else {
+                    lines.push("    pub fn " + getter + "(&self) -> " + gt + " { self." + holder + "." + getter + " }")
+                    lines.push("    pub fn " + setter + "(&var self, value: " + gt + ") { self." + holder + "." +
+                               getter + " = value }")
+                }
+            }
+        }
+        if lines.length() == 0 { return }
+        self.line("extend " + name + " {")
+        for l in lines { self.line(l.$clone()) }
+        self.line("}\n")
+    }
+
+    /// A record kept as its bytes, with a getter and setter per member.
+    fn writeBlob(&var self, r: i64, name: &String, layout: &Layout) {
+        let rec = self.m.records.look(r).$clone()
+        var unit = layout.align
+        if unit > 8 { unit = 8 }
+        if unit < 1 { unit = 1 }
+        let utype = if unit == 8 { "u64" } elif unit == 4 { "u32" } elif unit == 2 { "u16" } else { "u8" }
+        var count = layout.size / unit
+        if count * unit < layout.size { count += 1 }
+        var zeros = "["
+        var i = 0
+        while i < count { if i > 0 { zeros = zeros + ", " }; zeros = zeros + "0"; i += 1 }
+        zeros = zeros + "]"
+        self.line("#Convention(\"C\")")
+        self.line("pub struct " + name + " {")
+        self.line("    pub _bytes: [" + count.$str() + ":" + utype + "] = " + zeros)
+        self.line("}\n")
+        self.line("extend " + name + " {")
+        var k = 0
+        for f in rec.fields {
+            let off = layout.offsets.get(k)
+            let bitOff = layout.bitOffsets.get(k)
+            let fname = if f.name.$isEmpty() { "anon" + k.$str() } else { f.name.$clone() }
+            k += 1
+            if f.bits == 0 { continue }
+            let getter = runeName(&fname)
+            let setter = "set" + capitalised(&fname)
+            if f.bits > 0 {
+                // A bit-field: read the bytes it spans, shift, and mask.
+                let ft = self.rtype(f.ty, 0)
+                let signed = !self.m.isUnsignedInt(f.ty)
+                let firstByte = bitOff / 8
+                let shift = bitOff % 8
+                let mask = if f.bits >= 64 { "0xFFFFFFFFFFFFFFFF" } else { ((1 << f.bits) - 1).$str() }
+                self.line("    /// Bits " + bitOff.$str() + ".." + (bitOff + f.bits).$str() + ".")
+                self.line("    pub fn " + getter + "(&self) -> " + ft + " {")
+                self.line("        unsafe {")
+                self.line("            let at = ((&self._bytes as *u8) as usize + " + firstByte.$str() + ") as *u8")
+                self.line("            var raw: u64 = 0")
+                self.line("            var i = 0")
+                self.line("            while i < " + ((shift + f.bits + 7) / 8).$str() + " { raw = raw | ((at[i] as u64) << (8 * i as u64)); i += 1 }")
+                self.line("            let v = (raw >> " + shift.$str() + ") & " + mask)
+                if signed && f.bits < 64 {
+                    self.line("            let sign: u64 = 1 << " + (f.bits - 1).$str())
+                    self.line("            ((v ^ sign) as i64 - sign as i64) as " + ft)
+                } else {
+                    self.line("            v as " + ft)
+                }
+                self.line("        }")
+                self.line("    }")
+                self.line("    pub fn " + setter + "(&var self, value: " + ft + ") {")
+                self.line("        unsafe {")
+                self.line("            let at = ((&var self._bytes as *var u8) as usize + " + firstByte.$str() + ") as *var u8")
+                self.line("            let span = " + ((shift + f.bits + 7) / 8).$str())
+                self.line("            var raw: u64 = 0")
+                self.line("            var i = 0")
+                self.line("            while i < span { raw = raw | ((at[i] as u64) << (8 * i as u64)); i += 1 }")
+                self.line("            let mask: u64 = " + mask + " << " + shift.$str())
+                self.line("            raw = (raw & ~mask) | (((value as u64) << " + shift.$str() + ") & mask)")
+                self.line("            i = 0")
+                self.line("            while i < span { at[i] = ((raw >> (8 * i as u64)) & 255) as u8; i += 1 }")
+                self.line("        }")
+                self.line("    }")
+                continue
+            }
+            if !self.valueSupported(f.ty) {
+                self.line("    // `" + fname + "`: a type Rune cannot hold, at byte " + off.$str() + ".")
+                continue
+            }
+            let ft = self.rtype(f.ty, 0)
+            self.line("    /// At byte " + off.$str() + ".")
+            self.line("    pub fn " + getter + "(&self) -> " + ft + " {")
+            self.line("        unsafe { (((&self._bytes as *u8) as usize + " + off.$str() + ") as *" + ft + ")[0] }")
+            self.line("    }")
+            self.line("    pub fn " + setter + "(&var self, value: " + ft + ") {")
+            self.line("        unsafe { (((&var self._bytes as *var u8) as usize + " + off.$str() + ") as *var " + ft + ")[0] = value }")
+            self.line("    }")
+        }
+        self.line("}\n")
+        self.tests.push("    if mem::size_of<" + name + ">() != " + layout.size.$str() + " { bad += 1 }")
+    }
+
+    fn writeEnums(&var self) {
+        var i = 0
+        var any = false
+        while i < self.m.enums.length() {
+            if !self.wantEnum.holds(&i) || !self.m.enums.look(i).complete { i += 1; continue }
+            if !any { self.line("//=== Enums ===\n"); any = true }
+            let en = self.m.enums.look(i).$clone()
+            let name = self.enumName(i)
+            let repr = self.enumRepr(i)
+            if self.opts.enumStyle == "rune" && !name.$isEmpty() {
+                self.line("/// `enum " + en.tag + "`.")
+                self.line("#Convention(\"C\")")
+                self.line("pub enum " + name + " {")
+                var seen = dictionary::Map<i64, bool>()
+                for it in en.items {
+                    if seen.holds(&it.value) { continue }
+                    seen.put(it.value, true)
+                    self.line("    " + runeName(&it.name) + " = " + it.value.$str() + ",")
+                }
+                self.line("}\n")
+                i += 1
+                continue
+            }
+            var itemType = repr.$clone()
+            if !name.$isEmpty() {
+                self.line("/// `enum " + (if en.tag.$isEmpty() { en.alias.$clone() } else { en.tag.$clone() }) + "`.")
+                self.line("pub type " + name + " = " + repr)
+                itemType = name.$clone()
+            }
+            for it in en.items {
+                if self.blocked(&it.name) { continue }
+                self.line("pub global " + runeName(&it.name) + ": " + itemType + " = " + it.value.$str())
+            }
+            self.line("")
+            i += 1
+        }
+    }
+
+    fn writeConstants(&var self) {
+        var any = false
+        for c in self.m.consts.clone() {
+            if !self.isMain(c.file) || self.blocked(&c.name) || c.name.$find("__") == 0 { continue }
+            // A constant that is also an enumerator or a function is that.
+            if self.m.enumConsts.holds(&c.name) || self.m.funcIndex.holds(&c.name) { continue }
+            if !any { self.line("//=== Constants ===\n"); any = true }
+            let rn = runeName(&c.name)
+            if c.kind == 3 {
+                self.line("pub global " + rn + ": CString = \"" + c.text + "\"")
+            } elif c.kind == 2 {
+                var lit = c.float.$str()
+                if lit.$find(".") < 0 && lit.$find("e") < 0 && lit.$find("n") < 0 { lit = lit + ".0" }
+                self.line("pub global " + rn + ": " + (if c.wide { "f64" } else { "f32" }) + " = " + lit)
+            } else {
+                var ty = "i32"
+                if c.unsigned { ty = if c.int >= 0 && c.int <= 4294967295 { "u32" } else { "u64" } }
+                elif c.int < -2147483648 || c.int > 2147483647 { ty = "i64" }
+                self.line("pub global " + rn + ": " + ty + " = " + c.int.$str())
+            }
+        }
+        if any { self.line("") }
+    }
+
+    pub fn warningsOf(&self) -> vector::Vector<String> { self.m.warnings.clone() }
+
+    fn writeExtern(&var self) {
+        var body = vector::Vector<String>()
+        var i = 0
+        while i < self.m.funcs.length() {
+            let f = self.m.funcs.look(i).$clone()
+            i += 1
+            if !self.wantFunction(&f) { continue }
+            let ty = self.m.types.look(f.ty).$clone()
+            // A function that passes a value Rune cannot hold is left out.
+            var ok = self.valueSupported(ty.inner) || self.m.kindOf(self.m.resolve(ty.inner)) == TK::Void
+            for p in ty.params { if !self.valueSupported(*p) { ok = false } }
+            if !ok {
+                self.notes.push("left out `" + f.name + "`: it passes a value Rune cannot hold")
+                continue
+            }
+            var s = ""
+            let symbol = self.symbolOf(&f.symbol, &f.name)
+            let rn = runeName(&f.name)
+            if !symbol.$isEmpty() {
+                s = "    #as(\"" + rn + "\") fn " + symbol + "("
+            } else {
+                s = "    fn " + rn + "("
+            }
+            var k = 0
+            var used = dictionary::Map<String, bool>()
+            for p in ty.params {
+                if k > 0 { s = s + ", " }
+                var pname = if k < ty.paramNames.length() { ty.paramNames.look(k).$clone() } else { "" }
+                if pname.$isEmpty() || used.holds(&pname) { pname = "arg" + k.$str() }
+                used.put(pname.$clone(), true)
+                s = s + runeName(&pname) + ": " + self.rtype(*p, 1)
+                k += 1
+            }
+            if ty.variadic { s = s + (if k > 0 { ", ..." } else { "..." }) }
+            s = s + ")"
+            if self.m.kindOf(self.m.resolve(ty.inner)) != TK::Void { s = s + " -> " + self.rtype(ty.inner, 2) }
+            body.push(s)
+        }
+        i = 0
+        while i < self.m.vars.length() {
+            let v = self.m.vars.look(i).$clone()
+            i += 1
+            if !self.wantVar(&v) || !self.valueSupported(v.ty) { continue }
+            let kw = if self.m.isConst(v.ty) { "    " } else { "    var " }
+            let symbol = self.symbolOf(&v.symbol, &v.name)
+            if !symbol.$isEmpty() {
+                body.push("    #as(\"" + runeName(&v.name) + "\")")
+                body.push(kw + symbol + ": " + self.rtype(v.ty, 0))
+            } else {
+                body.push(kw + runeName(&v.name) + ": " + self.rtype(v.ty, 0))
+            }
+        }
+        if body.length() == 0 { return }
+        self.line("//=== Functions and variables ===\n")
+        self.line("pub extern \"C\" {")
+        for s in body { self.line(s.$clone()) }
+        self.line("}\n")
+    }
+
+    /// The symbol an `__asm__` label names, when it is not the C name and
+    /// Rune can spell it.
+    fn symbolOf(&var self, label: &String, name: &String) -> String {
+        if label.$isEmpty() { return "" }
+        var sym = label.$clone()
+        if self.m.dm.underscore && sym.$length() > 0 && sym.$byteAt(0) == 95 { sym = sym.$substring(1, sym.$length()) }
+        if sym == name { return "" }
+        var k = 0
+        while k < sym.$length() {
+            let c = sym.$byteAt(k) as i64
+            let ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+            if !ok {
+                self.notes.push("`" + name + "` links to `" + sym + "`, which Rune cannot name; bound as `" + name + "`")
+                return ""
+            }
+            k += 1
+        }
+        sym
+    }
+
+    fn writeLayoutTests(&var self) {
+        self.line("//=== Layout ===\n")
+        self.line("/// How many of these structs differ in size, alignment or member offsets")
+        self.line("/// from what the C compiler gives them. Zero, on the target they were")
+        self.line("/// written for.")
+        self.line("pub fn layoutMismatches() -> i64 {")
+        self.line("    var bad = 0")
+        for t in self.tests.clone() { self.line(t.$clone()) }
+        self.line("    bad")
+        self.line("}")
+    }
+}
+
+/// Where a record's members are.
+pub struct Layout {
+    pub size: i64
+    pub align: i64
+    /// Each member's offset in bytes.
+    pub offsets: vector::Vector<i64>
+    /// Each member's offset in bits — what a bit-field needs.
+    pub bitOffsets: vector::Vector<i64>
+}
+
+fn capitalised(s: &String) -> String {
+    if s.$isEmpty() { return "" }
+    let c = s.$byteAt(0) as i64
+    let first = if c >= 97 && c <= 122 { s.$substring(0, 1).$clone() } else { s.$substring(0, 1) }
+    let up = if c >= 97 && c <= 122 { upperByte(c) } else { first }
+    up + s.$substring(1, s.$length())
+}
+
+fn upperByte(c: i64) -> String {
+    let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    letters.$substring(c - 97, c - 96)
+}

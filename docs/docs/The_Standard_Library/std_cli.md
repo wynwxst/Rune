@@ -20,6 +20,7 @@ The command line, read the way the user wrote it. Say what the program takes; as
 | `Arguments::values` | `(&self, name) -> Vector<String>` | everything a repeatable option was given |
 | `Arguments::positional` | `(&self, index) -> String?` | a declared positional |
 | `Arguments::rest` | `(&self) -> Vector<String>` | whatever followed the declared ones |
+| `Arguments::allPositionals` | `(&self) -> Vector<String>` | every positional, declared and rest alike |
 | `Error` | `enum` | `Help`, `Version`, `UnknownOption`, `MissingValue`, `FlagGivenValue`, `MissingPositional`, `TooManyPositionals` |
 
 **Declaring, parsing, and the help page**

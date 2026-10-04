@@ -12,13 +12,17 @@ Tokens, with their structure kept. A bracketed group is **one** token — `block
 | `split(sep)` | the parts between a piece of punctuation. A group is one token, so a comma inside brackets does not split |
 | `add(more)` | append |
 | `flat()` | every token, groups opened out |
+| `find(word)` / `findFrom(word, start)` | where a piece of punctuation or a name stands at the top level, or `-1` |
+| `contains(word)` | whether it is there at all |
+| `before(word)` / `after(word)` | the run on either side of its first appearance |
+| `capture(pattern)` | the run taken apart by a pattern — see below |
 
-*`Macro::parse`, `ident`, `number`, `string`, `punct` and `tokens` build them; `Macro::error` refuses.*
+*`Macro::parse`, `ident`, `number`, `string`, `punct` and `tokens` build them; `Macro::error` refuses, and `Macro::fail` refuses as something to `return`. On a single `Token`, `isGroup()` says whether it is bracketed.*
 
 **Three macros**
 
 ```text
-@type(Macros)
+#type(Macros)
 
 import std::Macro
 import std::collections::vector
@@ -26,7 +30,7 @@ import std::text
 
 /// One accessor per name given. A pattern could not: it has no way to make
 /// `getX` out of `x`.
-@macro
+#macro
 pub fn getters(input: Macro::Tokens) -> Macro::Tokens {
     var lines = vector::Vector<String>()
     for field in input.split(",") {
@@ -41,7 +45,7 @@ pub fn getters(input: Macro::Tokens) -> Macro::Tokens {
 
 /// Refuses what it cannot use. The message is reported against the
 /// invocation, with an arrow back at this line.
-@macro
+#macro
 pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
     if input.isEmpty() { Macro::error("firstWord! needs a word") }
     if !input.at(0).isA("name") {
@@ -52,7 +56,7 @@ pub fn firstWord(input: Macro::Tokens) -> Macro::Tokens {
 }
 
 /// A block goes in as one token and comes back as written.
-@macro
+#macro
 pub fn traced(input: Macro::Tokens) -> Macro::Tokens {
     let label = input.at(0).text()
     let body = input.at(input.length() - 1)

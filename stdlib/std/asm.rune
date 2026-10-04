@@ -21,11 +21,11 @@
 // This is the least portable thing in the language and the compiler cannot
 // check any of it: the instructions are handed to the assembler as written,
 // and the constraints are handed to the register allocator as written. Both
-// calls are `@unsafe` for that reason, and a `@Config(arch == "...")` around
+// calls are `#unsafe` for that reason, and a `#Config(arch == "...")` around
 // anything using them is not optional — the same text is meaningless on
 // another machine.
 //
-//     @Config(arch == "aarch64")
+//     #Config(arch == "aarch64")
 //     fn cycles() -> i64 {
 //         unsafe { asm::value<i64>("mrs $0, cntvct_el0", "=r") }
 //     }
@@ -38,8 +38,8 @@
 /// somewhere Rune has no name for.
 ///
 ///     unsafe { asm::run("dmb ish", "") }
-@unsafe
-@intrinsic("asm")
+#unsafe
+#intrinsic("asm")
 pub fn run(template: String, constraints: String, ...)
 
 /// Runs `template` and takes its result as `R`.
@@ -51,6 +51,6 @@ pub fn run(template: String, constraints: String, ...)
 /// time — use `run` and write the result somewhere yourself.
 ///
 ///     let sum: i64 = unsafe { asm::value<i64>("add $0, $1, $2", "=r,r,r", a, b) }
-@unsafe
-@intrinsic("asm_value")
+#unsafe
+#intrinsic("asm_value")
 pub fn value<R>(template: String, constraints: String, ...) -> R

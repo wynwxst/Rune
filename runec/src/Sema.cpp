@@ -121,7 +121,7 @@ std::string Sema::canonicalOperatorName(const std::string &raw) {
   auto it = kAliases.find(raw);
   if (it != kAliases.end())
     return it->second;
-  // A name registered with `@alias("...")` somewhere in the program.
+  // A name registered with `#alias("...")` somewhere in the program.
   auto user = OperatorAliases.find(raw);
   return user == OperatorAliases.end() ? raw : user->second;
 }
@@ -311,7 +311,7 @@ void Sema::resolveCxxType(NominalDecl *nd) {
   }
   if (!info.IsClass && info.Size) {
     Diags.error(static_cast<Decl *>(nd)->NameRange,
-                "`@size` belongs on a `class`, whose layout Rune does not "
+                "`#size` belongs on a `class`, whose layout Rune does not "
                 "know")
         .note("a `struct` is laid out from its fields; its size follows")
         .code(523);
@@ -350,7 +350,7 @@ void Sema::resolveCxxType(NominalDecl *nd) {
             .code(524);
     }
     if (!m->CxxOperator.empty() && !cxxOwnerOf(m.get())) {
-      Diags.error(m->NameRange, "`@operator` names a member of a C++ class")
+      Diags.error(m->NameRange, "`#operator` names a member of a C++ class")
           .code(524);
     }
   }
@@ -432,7 +432,7 @@ void Sema::rejectMarkByValue(Type *t, SourceRange where, const char *role) {
 
 std::string Sema::mangleFunction(const FunctionDecl *fn,
                                  const std::vector<Type *> &typeArgs) {
-  // A foreign function links against the name C exports. `@as` changed the
+  // A foreign function links against the name C exports. `#as` changed the
   // name Rune uses; the symbol is still what was written. C++ exports the
   // name with its scope and parameter types folded in, so that is computed.
   if (isCxxExtern(fn))
@@ -1387,7 +1387,7 @@ namespace {
 /// Every `x.name` written anywhere inside `n`, by name.
 ///
 /// This is deliberately blunt: it answers "does the `deinit` look at this
-/// field at all", not "does it release it correctly". A `@resource` is a
+/// field at all", not "does it release it correctly". A `#resource` is a
 /// promise the author made about a field, and the compiler's part is to
 /// notice when the promise was forgotten.
 void collectMemberNames(const Node *n, std::set<std::string> &out) {
@@ -1401,7 +1401,7 @@ void collectMemberNames(const Node *n, std::set<std::string> &out) {
 
 void Sema::checkResourceFields(NominalDecl *nd) {
   // Which field names the `deinit` body mentions through `self`. A field
-  // marked `@resource` holds something reference counting cannot release, so
+  // marked `#resource` holds something reference counting cannot release, so
   // a `deinit` that never looks at it is almost certainly a leak.
   std::set<std::string> mentioned;
   if (nd->Deinit && nd->Deinit->Body)
@@ -1423,7 +1423,7 @@ void Sema::checkResourceFields(NominalDecl *nd) {
     if (!a)
       continue;
     const std::string &owner = static_cast<Decl *>(nd)->Name;
-    // A `@resource` is a promise about a field. `--safety full` holds the
+    // A `#resource` is a promise about a field. `--safety full` holds the
     // program to it; below that the promise is still worth reporting, but it
     // does not stop the build.
     auto report = [&](SourceRange at, const std::string &text) {
@@ -1432,9 +1432,9 @@ void Sema::checkResourceFields(NominalDecl *nd) {
     };
     if (!nd->Deinit) {
       auto d = report(a->Range,
-                      fmt("'{}' is a `@resource`, so '{}' needs a `deinit`",
+                      fmt("'{}' is a `#resource`, so '{}' needs a `deinit`",
                           f->Name, owner));
-      d.note("a `@resource` field holds something reference counting cannot "
+      d.note("a `#resource` field holds something reference counting cannot "
              "release — a descriptor, a handle, a lock");
       d.note(fmt("write `extend {} {{ fn deinit(&var self) {{ ... }} }}`",
                  owner).c_str());
@@ -1444,9 +1444,9 @@ void Sema::checkResourceFields(NominalDecl *nd) {
     if (mentioned.count(f->Name))
       continue;
     auto d = report(a->Range,
-                    fmt("'{}' is a `@resource` that '{}::deinit' never "
+                    fmt("'{}' is a `#resource` that '{}::deinit' never "
                         "mentions", f->Name, owner));
-    d.note("release it there, or drop the `@resource` if nothing has to be "
+    d.note("release it there, or drop the `#resource` if nothing has to be "
            "handed back");
     d.related(nd->Deinit->NameRange.isValid() ? nd->Deinit->NameRange
                                               : nd->Deinit->Range,
@@ -1515,7 +1515,7 @@ void Sema::resolveDeinitialisers() {
     if (nd->DeclaredType && nd->Generics.empty() &&
         ResourcesChecked.insert(nd).second)
       checkResourceFields(nd);
-  // `@never(M)` is read the first time somebody asks whether this type has
+  // `#never(M)` is read the first time somebody asks whether this type has
   // `M`, and a program may never ask — so it is read here as well, to report
   // one that names something which is not an automatic mark.
   for (NominalDecl *nd : types)
@@ -1619,7 +1619,7 @@ bool Sema::markOwnedMove(Expr *e, Type *from, Type *to) {
 // Pass 1: collect
 //===----------------------------------------------------------------------===//
 
-/// Every name an `@alias("...")` decorator gives a declaration.
+/// Every name an `#alias("...")` decorator gives a declaration.
 std::vector<std::pair<std::string, SourceRange>> Sema::aliasesOf(Decl *d) {
   std::vector<std::pair<std::string, SourceRange>> out;
   if (!d)
@@ -1628,16 +1628,16 @@ std::vector<std::pair<std::string, SourceRange>> Sema::aliasesOf(Decl *d) {
     if (a.Name != "alias")
       continue;
     if (a.Args.empty()) {
-      Diags.error(a.Range, "`@alias` needs the name to add")
-          .note("write `@alias(\"other\")`")
+      Diags.error(a.Range, "`#alias` needs the name to add")
+          .note("write `#alias(\"other\")`")
           .code(233);
       continue;
     }
     const auto *lit = dyn_cast<StringLitExpr>(a.Args[0].get());
     if (!lit || lit->Value.empty()) {
-      Diags.error(a.Args[0]->Range, "`@alias` takes a non-empty string")
+      Diags.error(a.Args[0]->Range, "`#alias` takes a non-empty string")
           .note("the point of a string is to allow names an identifier "
-                "cannot hold, e.g. `@alias(\"*\")`")
+                "cannot hold, e.g. `#alias(\"*\")`")
           .code(233);
       continue;
     }
@@ -1658,7 +1658,7 @@ void Sema::collectDecl(Decl *d, Scope *scope) {
                        "rename one of them, or move it into another module");
     }
   };
-  // `@alias("other")` puts the same declaration in scope under another name.
+  // `#alias("other")` puts the same declaration in scope under another name.
   auto declareWithAliases = [&](Symbol sym) {
     declare(sym);
     for (const auto &alias : aliasesOf(d)) {
@@ -3968,7 +3968,7 @@ void Sema::prepareBind(Module *m, BindDecl *b) {
   if (b->IsOperatorBinding) {
     std::string op = canonicalOperatorName(b->OperatorName);
     b->OperatorName = op;
-    // `@alias("*")` on the block registers that spelling globally, so
+    // `#alias("*")` on the block registers that spelling globally, so
     // `bind operator::"*"` elsewhere means the same operator.
     for (const auto &alias : aliasesOf(b))
       OperatorAliases[alias.first] = op;
@@ -4067,14 +4067,14 @@ void Sema::prepareBind(Module *m, BindDecl *b) {
   // `Send` and `Sync` are answers, not promises. Letting one be bound by
   // hand would put the whole guarantee behind a line of code nobody has
   // to justify — and the honest way to say "this one is safe" is
-  // `@sync`, which at least asks for a reason.
+  // `#sync`, which at least asks for a reason.
   if (mark == SendDecl || mark == SyncDecl) {
     auto d = Diags.error(b->MarkRange, "'{}' cannot be bound by hand",
                          static_cast<Decl *>(mark)->Name);
     d.note("the compiler reads it off the type, so that it stays true as "
            "the type changes");
     d.note("a type that synchronises its own access says so with "
-           "`@sync(\"reason\")`, which is what `thread::Mutex` does");
+           "`#sync(\"reason\")`, which is what `thread::Mutex` does");
     d.code(219);
     return;
   }
@@ -4973,7 +4973,7 @@ void Sema::checkFunction(FunctionDecl *fn, Type *selfType, ClassDecl *selfClass)
   ctx.ReturnType = fn->Ty ? fn->Ty->result() : Types.voidType();
   ctx.SelfType = selfType;
   ctx.SelfClass = selfClass;
-  // @unsafe and @safe("...") both silence unsafe-operation reports inside.
+  // #unsafe and #safe("...") both silence unsafe-operation reports inside.
   ctx.InUnsafeContext = fn->IsUnsafe || fn->IsSafeJustified ||
                         Safety == SafetyLevel::None;
   FnStack.push_back(ctx);
@@ -5295,6 +5295,12 @@ bool Sema::isLValue(const Expr *e) const {
     // A character read out of a String is a value: there is no slot.
     if (cast<IndexExpr>(e)->StringChar)
       return false;
+    // Nor is what an overloaded `[]` hands back by value — `Buffer`'s copy
+    // of an element. Borrowing it borrowed the copy, and a write through
+    // `&var b[0] as *var T` went nowhere. (`b[i] = v` is a call to
+    // `index_set`, and does not come through here.)
+    if (cast<IndexExpr>(e)->OverloadResolved && !cast<IndexExpr>(e)->ReadsThrough)
+      return false;
     return isLValue(cast<IndexExpr>(e)->Base.get()) ||
            (cast<IndexExpr>(e)->Base->Ty &&
             cast<IndexExpr>(e)->Base->Ty->isPointerLike());
@@ -5482,8 +5488,8 @@ void Sema::reportUnsafe(SourceRange range, const std::string &what,
   if (f && f->Fn && f->Fn->NameRange.isValid())
     d.related(f->Fn->NameRange,
               fmt("'{}' is not marked unsafe", f->Fn->Name),
-              "annotate it with @unsafe, or justify the use with "
-              "@safe(\"reason\")");
+              "annotate it with #unsafe, or justify the use with "
+              "#safe(\"reason\")");
 }
 
 Type *Sema::unifyBranches(Type *a, Type *b, Expr *second, const char *context) {
@@ -5592,7 +5598,7 @@ bool Sema::checkGenericBound(Type *arg, TypeRepr *bound, SourceRange at,
       for (MarkDecl *m : refusedMarks(arg->nominal()))
         refused = refused || m == mk;
     if (refused)
-      d.note("drop the `@never({})` if it should have it after all",
+      d.note("drop the `#never({})` if it should have it after all",
              markName(mk));
     else
       d.note("`bind {} to {}` claims it where the structure cannot say — "
@@ -5833,7 +5839,7 @@ bool Sema::findCycle(ClassDecl *start, ClassDecl *at,
 // called once before `main`.
 //===----------------------------------------------------------------------===//
 
-/// `@zombie_unavailable("alternative")`: the declaration exists so that using
+/// `#zombie_unavailable("alternative")`: the declaration exists so that using
 /// it under `--memory zombie` says what to reach for instead.
 void Sema::checkAvailableUnderZombie(Decl *d, SourceRange at) {
   if (Memory != MemoryMode::Zombie || !d)
@@ -5853,7 +5859,7 @@ void Sema::checkAvailableUnderZombie(Decl *d, SourceRange at) {
 
 /// True when a field of type `t` means the same thing to C: a number, a
 /// `bool`, a `Character` (a `uint32_t`), a raw pointer, a `CString`, a C
-/// function pointer, an array of those, or a type that is `@Convention("C")`
+/// function pointer, an array of those, or a type that is `#Convention("C")`
 /// itself. `why` names what is not.
 static bool representableInC(Type *t, std::string &why) {
   if (!t)
@@ -5881,7 +5887,7 @@ static bool representableInC(Type *t, std::string &why) {
       if (static_cast<Decl *>(nd)->findAttr("Convention"))
         return true;
     why = "'" + t->toString() + "' is laid out the way Rune likes; give it "
-          "`@Convention(\"C\")` too";
+          "`#Convention(\"C\")` too";
     return false;
   default:
     why = "a '" + t->toString() + "' is a Rune value C cannot read";
@@ -5889,7 +5895,7 @@ static bool representableInC(Type *t, std::string &why) {
   }
 }
 
-/// `@Convention("C")` on a struct or an enum: laid out, and passed by value,
+/// `#Convention("C")` on a struct or an enum: laid out, and passed by value,
 /// exactly as C would — fields in the order written with C's padding and
 /// alignment, a payload-free enum as a C `int`, an enum with payloads as a
 /// tag followed by a union aligned for its widest member. What is promised
@@ -5907,21 +5913,21 @@ void Sema::checkConventions() {
       auto *lit = a->Args.size() == 1 ? dyn_cast<StringLitExpr>(a->Args[0].get())
                                       : nullptr;
       if (!lit || lit->Value != "C") {
-        Diags.error(a->Range, "`@Convention` takes one convention, and the one "
+        Diags.error(a->Range, "`#Convention` takes one convention, and the one "
                               "there is is \"C\"")
-            .note("write `@Convention(\"C\")`")
+            .note("write `#Convention(\"C\")`")
             .code(543);
         continue;
       }
       if (isa<ClassDecl>(decl) || isa<MarkDecl>(decl)) {
-        Diags.error(a->Range, "`@Convention(\"C\")` is for a struct or an enum")
+        Diags.error(a->Range, "`#Convention(\"C\")` is for a struct or an enum")
             .note("a class is an object Rune allocates and frees; C reaches it "
                   "only through a pointer")
             .code(543);
         continue;
       }
       if (!nd->Generics.empty()) {
-        Diags.error(a->Range, "a `@Convention(\"C\")` type cannot be generic")
+        Diags.error(a->Range, "a `#Convention(\"C\")` type cannot be generic")
             .note("C sees one layout per type, so its fields need one type each")
             .code(543);
         continue;
@@ -5932,7 +5938,7 @@ void Sema::checkConventions() {
           return;
         Diags.error(where, "{} cannot be laid out the way C would", what)
             .note("{}", why)
-            .note("'{}' is `@Convention(\"C\")`", decl->Name)
+            .note("'{}' is `#Convention(\"C\")`", decl->Name)
             .code(544);
       };
       for (auto &f : nd->Fields)
@@ -5953,9 +5959,13 @@ void Sema::checkConventions() {
 }
 
 bool Sema::isBuiltinDecorator(const std::string &name) {
+  return isBuiltinDecoratorName(name);
+}
+
+bool isBuiltinDecoratorName(const std::string &name) {
   static const std::set<std::string> kBuiltin = {
       "unsafe", "safe",  "inline", "noinline", "export",
-      // `@macro` marks a procedural macro inside a macro package. By the
+      // `#macro` marks a procedural macro inside a macro package. By the
       // time anything is checked the compiler has already read it; here it
       // only has to be a name the checker knows.
       "macro",
@@ -5964,38 +5974,41 @@ bool Sema::isBuiltinDecorator(const std::string &name) {
       // `extern "C++"`: the size and alignment of an opaque class, and the
       // C++ operator a member stands for.
       "size",   "align", "operator",
-      // Automatic marks: `@auto` on the mark, `@never` on a type that must
+      // Automatic marks: `#auto` on the mark, `#never` on a type that must
       // not have one.
       "auto",   "never",
-      // The Zombie borrow checker's own: `@zombie("reason")` trusts a body,
-      // `@zombie_unavailable("alternative")` marks a declaration that only
+      // The Zombie borrow checker's own: `#zombie("reason")` trusts a body,
+      // `#zombie_unavailable("alternative")` marks a declaration that only
       // exists under reference counting.
       "zombie", "zombie_unavailable",
-      // Tasks: `@suspend` marks a function a cancelled task may leave from;
-      // `@sendable` asks that a closure handed to it capture only `Send`
+      // Tasks: `#suspend` marks a function a cancelled task may leave from;
+      // `#sendable` asks that a closure handed to it capture only `Send`
       // values, because it will run on another thread.
       "suspend", "sendable",
       // Answered before checking, by `applyConfig`. A declaration still
       // carrying one here is one this build kept, so there is nothing left to
       // do but recognise the name.
       "Config", "config",
-      // `@Convention("C")` on a struct or enum: checked by `checkConventions`.
+      // `#Convention("C")` on a struct or enum: checked by `checkConventions`.
       "Convention",
-      // `@interior` on `mem::Cell`: changed through a shared borrow, so not
+      // `#interior` on `mem::Cell`: changed through a shared borrow, so not
       // `Sync` whatever it holds (`typeIsThreadSafe`).
       "interior",
-      // The linter's: `@lint(allow(unused-variable))`. The compiler reads
+      // The linter's: `#lint(allow(unused-variable))`. The compiler reads
       // nothing in it — the arguments are rule names, not expressions to
       // check — and only has to know the name.
       "lint",
       // Bare metal: the hooks a freestanding program gives the runtime it is
       // compiled with, and a definition another may replace.
       "panicHandler", "allocator", "deallocator", "output", "weak",
+      // File directives the parser reads before anything else: what the
+      // program is linked with, and where it starts.
+      "runtime", "entry",
   };
   return kBuiltin.count(name) != 0;
 }
 
-/// `@Doc("...")` — prose the compiler keeps rather than runs.
+/// `#Doc("...")` — prose the compiler keeps rather than runs.
 ///
 /// It is a builtin rather than a user-written decorator because documentation
 /// has to be readable without executing the program: a library that is only
@@ -6008,19 +6021,19 @@ void Sema::collectDoc(Decl *d) {
     if (a.Name != "Doc" && a.Name != "doc")
       continue;
     if (a.Args.size() != 1) {
-      Diags.error(a.Range, "`@{}` takes one string — the text", a.Name)
-          .note("write `@Doc(\"...\")`, or a `\"\"\"` block for several lines")
+      Diags.error(a.Range, "`#{}` takes one string — the text", a.Name)
+          .note("write `#Doc(\"...\")`, or a `\"\"\"` block for several lines")
           .code(240);
       continue;
     }
     const auto *lit = dyn_cast<StringLitExpr>(a.Args[0].get());
     if (!lit) {
-      Diags.error(a.Args[0]->Range, "`@{}` takes a string literal", a.Name)
+      Diags.error(a.Args[0]->Range, "`#{}` takes a string literal", a.Name)
           .note("the text is read at compile time, so it cannot be computed")
           .code(240);
       continue;
     }
-    // `@Doc` replaces whatever a `///` comment left, and several `@Doc`
+    // `#Doc` replaces whatever a `///` comment left, and several `#Doc`
     // decorators on one declaration join with a blank line between them.
     if (!sawDoc) {
       d->Doc.clear();
@@ -6032,7 +6045,7 @@ void Sema::collectDoc(Decl *d) {
   }
 }
 
-/// `@panicHandler`, `@allocator` and `@deallocator` are called by the
+/// `#panicHandler`, `#allocator` and `#deallocator` are called by the
 /// generated code and by the freestanding runtime, through a C signature
 /// fixed in advance; a function that does not match it would be called with
 /// the wrong arguments rather than refused, so it is refused here.
@@ -6070,7 +6083,7 @@ void Sema::checkRuntimeHook(FunctionDecl *fn, const Attribute &a) {
   if (ok)
     ok = result && result->canonical() == wantResult->canonical();
   if (!ok) {
-    Diags.error(fn->NameRange, "`@{}` needs the signature `{}`", a.Name,
+    Diags.error(fn->NameRange, "`#{}` needs the signature `{}`", a.Name,
                 spelled)
         .note("the generated code calls it through that C signature, and "
               "nothing else would be passed what it expects")
@@ -6080,7 +6093,7 @@ void Sema::checkRuntimeHook(FunctionDecl *fn, const Attribute &a) {
   // One of each per program: the linker would take whichever it met first.
   auto [it, inserted] = RuntimeHooks.insert({a.Name, fn});
   if (!inserted && it->second != fn) {
-    auto d = Diags.error(fn->NameRange, "a second `@{}`", a.Name);
+    auto d = Diags.error(fn->NameRange, "a second `#{}`", a.Name);
     d.note("a program has one; the freestanding runtime would call only one "
            "of them")
         .code(249);
@@ -6093,14 +6106,14 @@ void Sema::checkDecorators(FunctionDecl *fn) {
     return;
   collectDoc(fn);
   for (Attribute &a : fn->Attrs) {
-    // `@as` renames a foreign declaration. Anywhere else it would silently do
+    // `#as` renames a foreign declaration. Anywhere else it would silently do
     // nothing, which is worse than saying so: a Rune function's name is
     // already whatever it was written as.
     if (a.Name == "as" && !fn->IsExtern) {
-      Diags.error(a.Range, "`@as` only applies inside an `extern` block")
+      Diags.error(a.Range, "`#as` only applies inside an `extern` block")
           .note("it renames a foreign declaration for Rune's side, leaving the "
                 "symbol the C library exports alone")
-          .note("to give a Rune declaration a second name, use `@alias`")
+          .note("to give a Rune declaration a second name, use `#alias`")
           .code(234);
       continue;
     }
@@ -6114,8 +6127,8 @@ void Sema::checkDecorators(FunctionDecl *fn) {
     auto *dec = sym && sym->D ? dyn_cast<FunctionDecl>(sym->D) : nullptr;
     if (!dec) {
       auto d = Diags.error(a.Range, "no decorator named '{}'", a.Name);
-      d.note("a decorator is either one the compiler provides — `@inline`, "
-             "`@export`, `@safe` and the rest — or a function you declared "
+      d.note("a decorator is either one the compiler provides — `#inline`, "
+             "`#export`, `#safe` and the rest — or a function you declared "
              "whose last parameter is a function")
           .code(237);
       if (sym)
@@ -6204,7 +6217,7 @@ void Sema::checkDecorators(FunctionDecl *fn) {
 void Sema::rejectMethodDecorators(FunctionDecl *fn) {
   if (!fn)
     return;
-  // `@Doc` is prose, not behaviour: it applies to a method as readily as to a
+  // `#Doc` is prose, not behaviour: it applies to a method as readily as to a
   // free function, so it is collected before the rest are turned away.
   collectDoc(fn);
   for (const Attribute &a : fn->Attrs) {
@@ -6300,7 +6313,7 @@ void Sema::checkStrongCycles() {
 ///    unless it says it synchronises itself.
 ///  * A closure carries an environment, and a raw pointer carries no promise
 ///    at all; neither is either.
-///  * `@sync("reason")` says a type synchronises access itself. It is how
+///  * `#sync("reason")` says a type synchronises access itself. It is how
 ///    `Mutex` becomes `Sync` while holding something that is not, and it is
 ///    the one place the compiler takes a claim on trust.
 bool typeIsThreadSafe(Type *t, bool wantSync,
@@ -6351,7 +6364,7 @@ bool typeIsThreadSafe(Type *t, bool wantSync,
     // object: any holder of one can write to its fields. So passing a class
     // to a thread does not hand it over, it hands out a second way to reach
     // the same mutable object — which is exactly what must not happen by
-    // accident. `@sync` above is the only way a class gets through, and
+    // accident. `#sync` above is the only way a class gets through, and
     // `Mutex` is what wears it.
     if (t->is(TypeKind::Class))
       return false;
@@ -6437,43 +6450,43 @@ std::string Sema::whyNotThreadSafe(Type *t) {
   }
 }
 
-/// `@auto mark Plain { }` — a mark the compiler answers for.
+/// `#auto mark Plain { }` — a mark the compiler answers for.
 ///
 /// An automatic mark says something *about* a type rather than asking
 /// anything of it, so it carries no requirements: there would be nobody to
 /// implement them. What it does carry is a rule — a type has the mark when
 /// every part of it has the mark — and two ways to override that rule where
 /// the structure cannot say: `bind Plain to Handle<T> {}` grants it, and
-/// `@never(Plain)` refuses it.
+/// `#never(Plain)` refuses it.
 void Sema::checkAutoMark(MarkDecl *mk) {
   const Attribute *a = static_cast<Decl *>(mk)->findAttr("auto");
   if (!a)
     return;
   mk->IsAuto = true;
   if (!a->Args.empty())
-    Diags.error(a->Range, "`@auto` takes no arguments").code(243);
+    Diags.error(a->Range, "`#auto` takes no arguments").code(243);
   if (!mk->Methods.empty()) {
     auto d = Diags.error(mk->Methods.front()->NameRange.isValid()
                              ? mk->Methods.front()->NameRange
                              : a->Range,
-                         "an `@auto` mark has no requirements");
+                         "an `#auto` mark has no requirements");
     d.note("the compiler decides which types have it, and nobody writes an "
            "implementation — so there is nowhere for '{}' to be written",
            mk->Methods.front()->Name);
-    d.note("drop `@auto` to make this an ordinary mark that types bind");
+    d.note("drop `#auto` to make this an ordinary mark that types bind");
     d.code(243);
   }
   if (!mk->AssociatedTypes.empty())
-    Diags.error(a->Range, "an `@auto` mark has no associated types")
+    Diags.error(a->Range, "an `#auto` mark has no associated types")
         .note("nothing implements it, so there is nobody to choose them")
         .code(243);
   if (!mk->Generics.empty())
-    Diags.error(a->Range, "an `@auto` mark takes no generic parameters")
+    Diags.error(a->Range, "an `#auto` mark takes no generic parameters")
         .note("it is a question asked of one type at a time")
         .code(243);
 }
 
-/// The marks `@never(...)` on `d` refuses, resolved once.
+/// The marks `#never(...)` on `d` refuses, resolved once.
 const std::vector<MarkDecl *> &Sema::refusedMarks(NominalDecl *nd) {
   auto it = RefusedMarks.find(nd);
   if (it != RefusedMarks.end())
@@ -6483,7 +6496,7 @@ const std::vector<MarkDecl *> &Sema::refusedMarks(NominalDecl *nd) {
     if (a.Name != "never")
       continue;
     if (a.Args.size() != 1) {
-      Diags.error(a.Range, "`@never` names one mark — `@never(mem::Clone)`")
+      Diags.error(a.Range, "`#never` names one mark — `#never(mem::Clone)`")
           .code(244);
       continue;
     }
@@ -6506,14 +6519,14 @@ const std::vector<MarkDecl *> &Sema::refusedMarks(NominalDecl *nd) {
       CurModule = savedModule;
     }
     if (!mark) {
-      Diags.error(a.Range, "`@never` names a mark")
-          .note("write `@never(mem::Clone)` above the type, with a mark that "
+      Diags.error(a.Range, "`#never` names a mark")
+          .note("write `#never(mem::Clone)` above the type, with a mark that "
                 "is in scope where the type is declared")
           .code(244);
       continue;
     }
     if (!mark->IsAuto) {
-      auto d = Diags.error(a.Range, "'{}' is not an `@auto` mark",
+      auto d = Diags.error(a.Range, "'{}' is not an `#auto` mark",
                            static_cast<Decl *>(mark)->Name);
       d.note("only an automatic mark has to be refused; an ordinary one is "
              "had by binding it, and not had by not binding it");
@@ -6699,7 +6712,7 @@ std::string Sema::whyNotAutoMark(Type *t, MarkDecl *mark) {
     NominalDecl *nd = t->nominal();
     for (MarkDecl *refused : refusedMarks(nd))
       if (refused == mark)
-        return "'" + t->toString() + "' refuses it: `@never(" +
+        return "'" + t->toString() + "' refuses it: `#never(" +
                static_cast<Decl *>(mark)->Name + ")` is written on the type";
     if (nd->Deinit)
       return "'" + t->toString() +
@@ -7650,7 +7663,7 @@ void Sema::checkInstantiatedBodies(NominalDecl *inst) {
     selfName.IsPublic = static_cast<Decl *>(tmpl)->IsPublic;
     CurScope->overwrite(selfName);
   }
-  // One entry per method, not per name: an `@alias` puts the same declaration
+  // One entry per method, not per name: an `#alias` puts the same declaration
   // in the table twice, and checking a body twice leaves it resolved against
   // the wrong locals.
   std::set<FunctionDecl *> checked;

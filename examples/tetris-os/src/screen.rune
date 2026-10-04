@@ -49,7 +49,7 @@ pub fn fill(c: u8, x: i64, y: i64, w: i64, h: i64) {
 }
 
 /// `count` bytes from `source`, as one row of pixels at `x`, `y`.
-@safe("reads exactly `count` bytes of the caller's sprite")
+#safe("reads exactly `count` bytes of the caller's sprite")
 pub fn blit(source: *u8, count: i64, x: i64, y: i64) {
     let row = y * width + x
     for i in 0..count {
@@ -62,7 +62,7 @@ pub fn clear(c: u8) {
 }
 
 /// Shows the frame that was drawn, and starts drawing the other.
-@safe("copies one screen's worth of bytes to the VGA memory at 0xA0000")
+#safe("copies one screen's worth of bytes to the VGA memory at 0xA0000")
 pub fn swap() {
     let vga = unsafe { 655360 as *var u8 }       // 0xA0000
     let frame = unsafe { &var buffers[back][0] as *var u8 }
@@ -87,7 +87,7 @@ pub fn init() {
 }
 
 /// How many bytes before `text`'s NUL: strlen.
-@safe("a CString ends at its NUL, and nothing past it is read")
+#safe("a CString ends at its NUL, and nothing past it is read")
 pub fn length(text: CString) -> i64 {
     let bytes = unsafe { text as *u8 }
     var n: i64 = 0

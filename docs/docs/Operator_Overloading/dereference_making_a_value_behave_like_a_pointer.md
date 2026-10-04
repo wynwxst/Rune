@@ -46,7 +46,7 @@ fn main() -> i64 {
 }
 ```
 
-`@alias` on the block registers a further spelling for the same operator, everywhere. That is the one case where an alias is not local to the declaration it decorates.
+`#alias` on the block registers a further spelling for the same operator, everywhere. That is the one case where an alias is not local to the declaration it decorates.
 
 **An operator spelling of your own**
 
@@ -55,7 +55,7 @@ import std::io
 
 struct Celsius { deg: f64 }
 
-@alias("degrees")
+#alias("degrees")
 bind operator::"*" to Celsius {
     fn deref(&self) -> f64 { self.deg }
 }

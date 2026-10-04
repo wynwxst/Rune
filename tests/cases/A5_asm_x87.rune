@@ -6,14 +6,14 @@
 import std::asm
 import std::io
 
-@Config(arch == "x86_64" || arch == "x86")
+#Config(arch == "x86_64" || arch == "x86")
 fn sine(x: f64) -> f64 { unsafe { asm::value<f64>("fsin", "=t,0", x) } }
-@Config(arch == "x86_64" || arch == "x86")
+#Config(arch == "x86_64" || arch == "x86")
 fn root(x: f64) -> f64 { unsafe { asm::value<f64>("fsqrt", "=t,0", x) } }
 
-@Config(!(arch == "x86_64" || arch == "x86"))
+#Config(!(arch == "x86_64" || arch == "x86"))
 fn sine(x: f64) -> f64 { 0.0 }
-@Config(!(arch == "x86_64" || arch == "x86"))
+#Config(!(arch == "x86_64" || arch == "x86"))
 fn root(x: f64) -> f64 { 1.5 }
 
 fn main() -> i64 {

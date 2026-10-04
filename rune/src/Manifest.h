@@ -136,7 +136,7 @@ struct Manifest {
   /// [build] emit = "llvm-ir" — what `rune build` produces for this package
   /// when the command line does not say. Empty means an executable.
   std::string Emit;
-  unsigned OptLevel = 0;
+  unsigned OptLevel = 2;
   bool Debug = true;
   /// `overflow-checks`: 1 forces integer overflow to trap, 0 forces it to
   /// wrap, and -1 (unset) leaves it to the profile — trap in a debug build,
@@ -144,11 +144,11 @@ struct Manifest {
   int OverflowChecks = -1;
   bool WarningsAsErrors = false;
   bool NoStdlib = false;
-  /// `[build] runtime = "none"`, or `@runtime(none)` atop a source file: a
+  /// `[build] runtime = "none"`, or `#runtime(none)` atop a source file: a
   /// freestanding program — no C library, no hosted runtime. Like `memory`,
   /// the root package decides for the whole build.
   bool Freestanding = false;
-  /// `[build] entry = "none"`, or `@entry(none)`: no generated `main`.
+  /// `[build] entry = "none"`, or `#entry(none)`: no generated `main`.
   bool NoEntry = false;
   std::vector<std::string> LinkLibraries; ///< [build] link = ["m", "z"]
   std::vector<std::string> LinkPaths;
@@ -163,11 +163,11 @@ struct Manifest {
   std::vector<std::string> CxxFlags;     ///< [build] cxx-flags
   /// [build] cxx-standard = "c++17" — what `-std=` the C++ half is built to.
   std::string CxxStandard;
-  /// `[build] cfg = ["fast-math"]` — names `@Config(...)` should treat as set.
+  /// `[build] cfg = ["fast-math"]` — names `#Config(...)` should treat as set.
   /// A dependency's name is set too, so a package can ask whether it has one.
   std::vector<std::string> ConfigFlags;
   /// `[config] backend = "metal"` — keys of this package's own, compared in
-  /// `@Config(backend == metal)`. A package that depends on this one may
+  /// `#Config(backend == metal)`. A package that depends on this one may
   /// choose them instead; see `Dependency::Config`.
   std::map<std::string, std::string> Config;
   std::vector<std::string> LinkArgs;     ///< [build] link-args

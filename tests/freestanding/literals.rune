@@ -3,7 +3,7 @@ import fs::sys
 // `CString`, so it can be named, stored and handed on without an annotation.
 let greeting = "a literal is a CString here\n"
 struct Line { text: CString }
-@export("_start")
+#export("_start")
 fn start() -> Never {
     let s = "no annotation needed\n"
     sys::say(s)

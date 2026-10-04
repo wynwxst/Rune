@@ -9,6 +9,7 @@
 - [What ends up in the artefact](what_ends_up_in_the_artefact.md)
 - [Debug builds](debug_builds.md)
 - [rune](rune.md)
+- [Editor support](editor_support.md)
 - [How a build decides what to do](how_a_build_decides_what_to_do.md)
 - [Producing something other than a program](producing_something_other_than_a_program.md)
 - [Package layout](package_layout.md)

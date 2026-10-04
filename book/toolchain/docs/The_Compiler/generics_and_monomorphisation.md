@@ -56,8 +56,8 @@ Three exceptions bypass mangling entirely:
 
 | Case | Symbol |
 | --- | --- |
-| `extern` | The name C exports, or `@as("...")` if given |
-| `@export("name")` | Exactly `name` |
+| `extern` | The name C exports, or `#as("...")` if given |
+| `#export("name")` | Exactly `name` |
 | `main` | `main` |
 
 A per-type symbol **must** name the instantiation, not the template. If it

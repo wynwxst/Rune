@@ -21,6 +21,7 @@ linker-script = "link.ld"
 # a SoundBlaster 16 and no audio output (change `-audiodev none` to `pa` or
 # `coreaudio` to hear it). `{}` is where the image goes.
 [target.bare-x86]
+linker="ld.lld"
 runner = "qemu-system-i386 -drive format=raw,file={} -audiodev none,id=snd -device sb16,audiodev=snd"
 
 # The same, built with a GNU cross toolchain instead of clang and lld — the

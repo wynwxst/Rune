@@ -9,12 +9,18 @@ Layout questions, an allocator, and a smart pointer. Most programs need only the
 | `is_counted` | `<T>() -> bool` | whether `T` is reference counted — decided at compile time |
 | `hash` | `<T>(value: T) -> u64` | a structural hash, worked out from the layout; no bound on `T` |
 | `equals` | `<T>(a: T, b: T) -> bool` | structural equality, consistent with `hash` |
-| `Handle<T>` | `class` | one `T` on the heap, reference counted; `*h` reads it, `*h = v` writes it, `look()`/`touch()` borrow it |
+| `Handle<T>` | `class` | one `T` on the heap, reference counted; `*h` reads it, `*h = v` writes it, `look()`/`touch()` borrow it, `sameAs(&other)` asks whether two are one handle rather than equal values |
 | `of` | `<T>(value: T) -> Handle<T>` | a handle, type inferred |
 | `Box<T>` | `class` | one `T` on the heap with a single owner — the same reach-through, no sharing |
 | `boxed` | `<T>(value: T) -> Box<T>` | a box, type inferred |
-| `Rc<T>` / `Weak<T>` | `class` | a counted value and a reference that does not keep it alive; `w.get()` answers `Rc<T>?` |
+| `tryBoxed` | `<T>(value: T) -> Result<Box<T>, T>` | the same, or the value handed back when there is no memory |
+| `Rc<T>` / `Weak<T>` | `class` | a counted value and a reference that does not keep it alive; `w.get()` answers `Rc<T>?`. An `Rc` says `strongCount()`, `weakCount()`, `isUnique()` and `sameAs(&other)` |
 | `shared` | `<T>(value: T) -> Rc<T>` | an `Rc`, type inferred |
+| `Cell<T>` | `struct` | a value changed through `&self`: `get` copies it out, `set` and `replace` change it; one thread's |
+| `cell` | `<T>(value: T) -> Cell<T>` | a cell, type inferred |
+| `Cell::asPtr` | `(&self) -> *var T` | the address inside, for an atomic instruction or a value a lock guards; what is done through it is the caller's to justify |
+| `Checked<T>` | `class` | a borrow checked at run time: `borrow()` / `borrowVar()` hand out guards, `isFree()` says none is out; see **Single ownership without a count** |
+| `Arena<T>` | `class` | values addressed by `Slot`, never by reference: `insert`, `get`, `holds`, `remove`, `length` |
 | `replace` | `<T>(place: &var T, value: T) -> T` | puts `value` there and hands back what was there |
 | `take` | `<T>(place: &var T) -> T` | the same, leaving the type's default behind |
 | `store` | `<T>(place: &var T, value: T)` | writes, destroying what was there |
@@ -22,6 +28,9 @@ Layout questions, an allocator, and a smart pointer. Most programs need only the
 | `allocator` | `SystemAllocator` | the process heap |
 | `noBlock` | `() -> *var u8` | a block pointer to nothing |
 | `isNull` | `(block: *var u8) -> bool` | tests one |
+| `isZeroed` | `(block: *u8, bytes: usize) -> bool` | whether `bytes` of a block are all zero — the test for never written |
+| `zeroed` | `<T>() -> T` | **unsafe** — a `T` of all zero bytes, for a value that will never be looked at |
+| `drop_at` | `<T>(slot: *var T)` | **unsafe** — destroys the value in a slot and leaves it empty |
 | `copy` | `(dst: *var u8, src: *u8, bytes: usize)` | moves bytes |
 | `retain` / `release` | `<T>(value: T)` | **unsafe** — counting by hand, for storage the compiler cannot see |
 | `slice_of` | `<T>(block: *var T, count: usize) -> [T]` | **unsafe** — `count` elements at `block` as a slice; no copy, and the block's extent is the caller's promise |
@@ -144,7 +153,7 @@ The allocator underneath is a mark, so a program can supply its own. Blocks come
 import std::io
 import std::mem
 
-@safe("the block is sized for four i64 and no index goes past four")
+#safe("the block is sized for four i64 and no index goes past four")
 fn main() -> i64 {
     let block = mem::allocator.allocate(4 as usize * mem::size_of<i64>())
     if mem::isNull(block) { return 1 }
@@ -163,7 +172,7 @@ fn main() -> i64 {
     }
     io::println(total.$str())
 
-    mem::allocator.deallocate(block)
+    mem::allocator.deallocate(block, 4 as usize * mem::size_of<i64>())
     0
 }
 ```

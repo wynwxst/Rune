@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <map>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -67,9 +68,9 @@ enum class DumpKind {
 
 struct CompilerOptions {
   std::vector<std::string> Inputs;
-  /// `--cfg <name>`: names `@Config` should treat as set.
+  /// `--cfg <name>`: names `#Config` should treat as set.
   std::vector<std::string> ConfigFlags;
-  /// `--cfg <key>=<value>`: keys `@Config` compares against, the way `os` and
+  /// `--cfg <key>=<value>`: keys `#Config` compares against, the way `os` and
   /// `arch` are compared. A package's `[config]` table arrives this way.
   std::vector<std::pair<std::string, std::string>> ConfigValues;
   std::vector<std::string> ImportPaths;  ///< -I: where to find .rul libraries
@@ -83,7 +84,7 @@ struct CompilerOptions {
   std::string LinkDriver;
   /// `--sysroot` handed to the link driver; empty leaves it alone.
   std::string Sysroot;
-  /// Set while building a `@type(Macros)` package, which is an ordinary
+  /// Set while building a `#type(Macros)` package, which is an ordinary
   /// compilation of those very files: without it they would be skipped again
   /// and the package would be empty.
   bool MacroPackage = false;
@@ -119,11 +120,11 @@ struct CompilerOptions {
   /// bodies are still read for their summaries either way).
   bool ZombieStdlib = true;
 
-  unsigned OptLevel = 0;
+  unsigned OptLevel = 2;
   unsigned ErrorLimit = 20;
   bool DebugInfo = false;
   /// True when `-c`, `--emit-lib` and friends set `Output`; a file's own
-  /// `@type` then leaves it alone.
+  /// `#type` then leaves it alone.
   bool OutputKindFromFlag = false;
   bool ForceColor = false;
   bool NoColor = false;
@@ -157,14 +158,14 @@ struct CompilerOptions {
   /// build. `TierOut`, when set, receives the answers instead of stdout.
   bool TierReport = false;
   std::map<std::string, std::string> *TierOut = nullptr;
-  /// `--runtime none` (or `@runtime(none)` at the top of a file): build a
+  /// `--runtime none` (or `#runtime(none)` at the top of a file): build a
   /// freestanding program. Nothing hosted is linked — no C library, no
   /// `libruneruntime.a` — and what the generated code needs of a runtime
   /// comes from `runetime/freestanding.rune`, compiled in, and from the
-  /// program's own `@panicHandler`, `@allocator` and `@deallocator`.
+  /// program's own `#panicHandler`, `#allocator` and `#deallocator`.
   bool Freestanding = false;
-  /// `--entry none` (or `@entry(none)`): generate no `main`. The program's
-  /// own `@export`ed function is where execution starts.
+  /// `--entry none` (or `#entry(none)`): generate no `main`. The program's
+  /// own `#export`ed function is where execution starts.
   bool NoEntry = false;
   /// Where `runetime/` is: the freestanding runtime's source.
   std::string RunetimeDir;
@@ -185,7 +186,10 @@ struct CompilerOptions {
     case OverflowChecks::Off: return false;
     case OverflowChecks::Default: break;
     }
-    return OptLevel == 0 && Safety != SafetyLevel::None;
+    // On wherever safety checks are, whatever the optimisation level:
+    // `-O2` is the default, and an overflow should not stop trapping just
+    // because nobody asked for `-O0`. A release build turns it off.
+    return Safety != SafetyLevel::None;
   }
 
   bool zombie() const { return Memory == MemoryMode::Zombie; }
@@ -193,6 +197,13 @@ struct CompilerOptions {
 
 /// The spelling `--memory` and `[build] memory` use.
 const char *memoryModeName(MemoryMode mode);
+
+/// The directory the running compiler is in.
+std::filesystem::path hostExecutableDir();
+
+/// The runtime built for the machine doing the compiling: installed beside
+/// the compiler, or the build tree's.
+std::string hostRuntimeLibDir();
 
 /// Runs the whole pipeline for `opts`. Returns a process exit code.
 int compileWithOptions(const CompilerOptions &opts);

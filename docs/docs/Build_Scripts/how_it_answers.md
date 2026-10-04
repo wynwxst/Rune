@@ -4,8 +4,8 @@ Each answer is a line on its output, `rune:key=value`; `std::build` writes them,
 
 | `std::build` | Line | Does |
 | --- | --- | --- |
-| `cfg(name)` | `rune:cfg=name` | sets `@Config(name)` for the package's sources |
-| `cfgValue(key, value)` | `rune:cfg=key=value` | sets `@Config(key == "value")` |
+| `cfg(name)` | `rune:cfg=name` | sets `#Config(name)` for the package's sources |
+| `cfgValue(key, value)` | `rune:cfg=key=value` | sets `#Config(key == "value")` |
 | `linkArg(arg)` | `rune:link-arg=arg` | added to every link of the package's executables |
 | `linkLibrary(name)` | `rune:link-lib=name` | `-l<name>` |
 | `linkPath(dir)` | `rune:link-path=dir` | `-L<dir>`, relative to the package |

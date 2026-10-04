@@ -62,7 +62,7 @@ pub class Vector<T> {
     /// `$clone()` does to a `Vector`: the compiler's memberwise copy would
     /// hand two vectors one block of storage, and the second to go would
     /// free it again. Only a vector of clonable elements can be cloned.
-    @safe("every index below the count holds a live element, read once each")
+    #safe("every index below the count holds a live element, read once each")
     pub fn clone(&self) -> Self where T: mem::Clone {
         var out = Vector<T>()
         out.reserve(self.count as i64)
@@ -83,7 +83,7 @@ pub class Vector<T> {
     ///
     /// The borrow is of the vector: while it is held the vector cannot grow
     /// or shrink, which is what keeps it pointing at a live element.
-    @safe("the index is compared against the count before the borrow")
+    #safe("the index is compared against the count before the borrow")
     pub fn look(&self, index: i64) -> &T from self {
         if index < 0 || index >= self.count as i64 {
             process::panic("Vector index out of range")
@@ -96,7 +96,7 @@ pub class Vector<T> {
     /// none there.
     ///
     ///     v.touch(0).push(4)              // a `Vector<Vector<i64>>`, changed in place
-    @safe("the index is compared against the count before the borrow")
+    #safe("the index is compared against the count before the borrow")
     pub fn touch(&var self, index: i64) -> &var T from self {
         if index < 0 || index >= self.count as i64 {
             process::panic("Vector index out of range")
@@ -108,7 +108,7 @@ pub class Vector<T> {
     /// The element at `index`, borrowed, or nothing if there is none there.
     ///
     ///     if v.peek(i) is Some(item) { io::println(item) }
-    @safe("the index is compared against the count before the borrow")
+    #safe("the index is compared against the count before the borrow")
     pub fn peek(&self, index: i64) -> (&T from self)? {
         if index < 0 || index >= self.count as i64 { return nil }
         let slot = unsafe { self.block as *var T }
@@ -129,7 +129,7 @@ pub class Vector<T> {
     /// can read the vector as it is. The slice borrows the vector, so it
     /// cannot be held across a `push`, `reserve` or `clear` — growing may
     /// move the storage.
-    @safe("the slice covers exactly the elements below the count, which every write keeps live")
+    #safe("the slice covers exactly the elements below the count, which every write keeps live")
     pub fn asSlice(&self) -> [T] from self {
         unsafe { mem::slice_of<T>(self.block as *var T, self.count) }
     }
@@ -159,7 +159,7 @@ pub class Vector<T> {
     //=== Writing ========================================================//
 
     /// Appends `value`, growing if there is no room.
-    @safe("the slot written is below the count, which reserve() has covered")
+    #safe("the slot written is below the count, which reserve() has covered")
     pub fn push(&var self, value: T) {
         self.reserve(self.count as i64 + 1)
         let slot = unsafe { self.block as *var T }
@@ -170,7 +170,7 @@ pub class Vector<T> {
     }
 
     /// Removes and returns the last element, or nothing when empty.
-    @safe("the slot read is the last live one, and the count drops past it")
+    #safe("the slot read is the last live one, and the count drops past it")
     pub fn pop(&var self) -> T? {
         if self.count == 0 { return nil }
         self.count -= 1
@@ -181,7 +181,7 @@ pub class Vector<T> {
     }
 
     /// Replaces the element at `index`. Returns false if there is none there.
-    @safe("the index is compared against the count before the write")
+    #safe("the index is compared against the count before the write")
     pub fn set(&var self, index: i64, value: T) -> bool {
         if index < 0 || index >= self.count as i64 { return false }
         let slot = unsafe { self.block as *var T }
@@ -195,7 +195,7 @@ pub class Vector<T> {
 
     /// Takes the element at `index` out, closing the gap: everything after it
     /// moves down one. Nothing if there is none there.
-    @safe("the index is compared against the count, and each slot is emptied as its value moves down")
+    #safe("the index is compared against the count, and each slot is emptied as its value moves down")
     pub fn remove(&var self, index: i64) -> T? {
         if index < 0 || index >= self.count as i64 { return nil }
         let slot = unsafe { self.block as *var T }
@@ -215,7 +215,7 @@ pub class Vector<T> {
     /// Puts `value` in at `index`, moving everything from there up one.
     /// `index` may be the length, which appends. Returns false, keeping
     /// nothing, when it is past that.
-    @safe("the index is compared against the count, and room is reserved before anything moves")
+    #safe("the index is compared against the count, and room is reserved before anything moves")
     pub fn insert(&var self, index: i64, value: T) -> bool {
         if index < 0 || index > self.count as i64 { return false }
         self.reserve(self.count as i64 + 1)
@@ -235,7 +235,7 @@ pub class Vector<T> {
 
     /// Puts `value` at `index` and hands back what was there. Aborts if
     /// there is nothing at `index`.
-    @safe("the index is compared against the count before the swap")
+    #safe("the index is compared against the count before the swap")
     pub fn replace(&var self, index: i64, value: T) -> T {
         if index < 0 || index >= self.count as i64 {
             process::panic("Vector index out of range")
@@ -249,7 +249,7 @@ pub class Vector<T> {
     }
 
     /// Exchanges the elements at `a` and `b`. Aborts if either is missing.
-    @safe("both indices are compared against the count before either moves")
+    #safe("both indices are compared against the count before either moves")
     pub fn swap(&var self, a: i64, b: i64) {
         if a < 0 || a >= self.count as i64 || b < 0 || b >= self.count as i64 {
             process::panic("Vector index out of range")
@@ -265,7 +265,7 @@ pub class Vector<T> {
     }
 
     /// Drops every element, keeping the storage for reuse.
-    @safe("every index below the count holds a live element")
+    #safe("every index below the count holds a live element")
     pub fn clear(&var self) {
         let slot = unsafe { self.block as *var T }
         var i = 0
@@ -289,7 +289,7 @@ pub class Vector<T> {
     /// where running out of memory is something to handle, not to die of.
     ///
     ///     if !frames.tryReserve(n) { return Err(Error::NoMemory) }
-    @safe("the new block is sized for `wanted` elements before the count moves")
+    #safe("the new block is sized for `wanted` elements before the count moves")
     pub fn tryReserve(&var self, wanted: i64) -> bool {
         if wanted <= self.capacity as i64 { return true }
         var grown = self.capacity as i64 * 2
@@ -318,7 +318,7 @@ pub class Vector<T> {
     ///         Ok(_) => {},
     ///         Err(p) => drop(p),            // still ours to deal with
     ///     }
-    @safe("the slot written is below the count, which tryReserve() has covered")
+    #safe("the slot written is below the count, which tryReserve() has covered")
     pub fn tryPush(&var self, value: T) -> Result<(), T> {
         if self.tryReserve(self.count as i64 + 1) {
             let slot = unsafe { self.block as *var T }
@@ -381,7 +381,7 @@ pub macro vec {
 /// written on the spot to carry values over. What is left behind is zero
 /// bytes, so whatever the slice was a view of must be one whose destruction
 /// tolerates that — everything in this library is.
-@safe("every slot is emptied as it is read, so nothing is owned twice")
+#safe("every slot is emptied as it is read, so nothing is owned twice")
 pub fn drain<T>(values: [T]) -> Vector<T> {
     var v = Vector<T>()
     let n = values.$length()
@@ -516,7 +516,7 @@ extend<T> Vector<T> {
     /// The element at `index`, taken out and its slot left as zero bytes —
     /// which clearing the vector later ignores. For `drain`, which never
     /// reads a slot twice.
-    @safe("the index is compared against the count, and the slot is emptied as its value moves out")
+    #safe("the index is compared against the count, and the slot is emptied as its value moves out")
     fn takeSlot(&var self, index: i64) -> T? {
         if index < 0 || index >= self.count as i64 { return nil }
         let slot = unsafe { self.block as *var T }

@@ -1,17 +1,17 @@
 // The freestanding runtime: everything the code generator relies on, for a
-// program built with `@runtime(none)` — a kernel, a boot loader, firmware.
+// program built with `#runtime(none)` — a kernel, a boot loader, firmware.
 //
 // It is Rune, compiled into the program for the program's own target, and it
 // depends on nothing: no C library, no operating system. What only the
 // program can know it asks the program for, through four hooks:
 //
-//     @panicHandler  fn(message: CString, location: CString) -> Never
-//     @allocator     fn(size: usize, align: usize) -> *var u8
-//     @deallocator   fn(block: *var u8, size: usize, align: usize)
-//     @output        fn(bytes: *u8, count: usize)
+//     #panicHandler  fn(message: CString, location: CString) -> Never
+//     #allocator     fn(size: usize, align: usize) -> *var u8
+//     #deallocator   fn(block: *var u8, size: usize, align: usize)
+//     #output        fn(bytes: *u8, count: usize)
 //
-// Each has a `@weak` default here that a program's own replaces. The default
-// panic handler says what happened through `@output` and stops the processor
+// Each has a `#weak` default here that a program's own replaces. The default
+// panic handler says what happened through `#output` and stops the processor
 // where it is; the default allocator panics, so a program that never
 // allocates never needs one; the default output discards.
 //
@@ -22,7 +22,7 @@
 // `freestanding_type = "minimal"` (in `[config]`, or `--cfg`) keeps only
 // what a program cannot run without: the hooks, the memory functions, the
 // panics, objects and raw blocks. Whatever is marked
-// `@Config(!(freestanding_type == "minimal"))` — copying class objects, `Any`
+// `#Config(!(freestanding_type == "minimal"))` — copying class objects, `Any`
 // and class tests, hashing, and in freestanding_text.rune floats as text,
 // text as numbers and the string searching and slicing — is left out, and a
 // program that needs one of them is told which at compile time (E0542).
@@ -31,12 +31,12 @@
 // The hooks, and their defaults
 //===--------------------------------------------------------------------===//
 
-/// Says what happened through `@output`, if the program has one, then stops
+/// Says what happened through `#output`, if the program has one, then stops
 /// here for ever: carrying on after a failed check is the one thing a panic
 /// exists to prevent.
-@lint(allow(empty-block))
-@export("rune_panic_handler")
-@weak
+#lint(allow(empty-block))
+#export("rune_panic_handler")
+#weak
 fn defaultPanicHandler(message: CString, location: CString) -> Never {
     say("panic: ")
     say(message)
@@ -47,17 +47,17 @@ fn defaultPanicHandler(message: CString, location: CString) -> Never {
 }
 
 /// Where printing goes — `io::println`, the default panic handler — when the
-/// program names nowhere with `@output`: nowhere.
-@export("rune_output")
-@weak
+/// program names nowhere with `#output`: nowhere.
+#export("rune_output")
+#weak
 fn defaultOutput(bytes: *u8, count: usize) {}
 
-/// `@output`, for the text runtime: a strong name of its own, so calling the
+/// `#output`, for the text runtime: a strong name of its own, so calling the
 /// hook from another file never has to name the weak one.
-@export("rune_write_output")
+#export("rune_write_output")
 pub fn writeOutput(bytes: *u8, count: usize) { defaultOutput(bytes, count) }
 
-@safe("reads up to the NUL a CString ends with")
+#safe("reads up to the NUL a CString ends with")
 fn say(text: CString) {
     let bytes = unsafe { text as *u8 }
     var n: i64 = 0
@@ -65,16 +65,16 @@ fn say(text: CString) {
     if n > 0 { defaultOutput(bytes, n as usize) }
 }
 
-@export("rune_heap_allocate")
-@weak
+#export("rune_heap_allocate")
+#weak
 fn defaultAllocate(size: usize, align: usize) -> *var u8 {
-    defaultPanicHandler("this program allocates, and declares no @allocator",
+    defaultPanicHandler("this program allocates, and declares no #allocator",
                         "runetime/freestanding.rune")
 }
 
 /// Without an allocator nothing was allocated, so there is nothing to free.
-@export("rune_heap_free")
-@weak
+#export("rune_heap_free")
+#weak
 fn defaultFree(block: *var u8, size: usize, align: usize) {}
 
 //===--------------------------------------------------------------------===//
@@ -83,12 +83,12 @@ fn defaultFree(block: *var u8, size: usize, align: usize) {}
 // LLVM lowers a large copy to a call to `memcpy`, freestanding or not, so
 // these have to exist. The compiler builds a freestanding program with
 // `no-builtins`, which keeps these loops from being turned back into calls to
-// themselves. `@weak`, so a program with faster ones keeps its own.
+// themselves. `#weak`, so a program with faster ones keeps its own.
 //===--------------------------------------------------------------------===//
 
-@export("memcpy")
-@weak
-@safe("the caller sizes both blocks, as C's memcpy requires")
+#export("memcpy")
+#weak
+#safe("the caller sizes both blocks, as C's memcpy requires")
 pub fn memcpy(dst: *var u8, src: *u8, size: usize) -> *var u8 {
     var i: usize = 0
     while i < size {
@@ -98,9 +98,9 @@ pub fn memcpy(dst: *var u8, src: *u8, size: usize) -> *var u8 {
     dst
 }
 
-@export("memmove")
-@weak
-@safe("the caller sizes both blocks, as C's memmove requires")
+#export("memmove")
+#weak
+#safe("the caller sizes both blocks, as C's memmove requires")
 pub fn memmove(dst: *var u8, src: *u8, size: usize) -> *var u8 {
     if unsafe { dst as usize } <= unsafe { src as usize } {
         return memcpy(dst, src, size)
@@ -114,9 +114,9 @@ pub fn memmove(dst: *var u8, src: *u8, size: usize) -> *var u8 {
     dst
 }
 
-@export("memset")
-@weak
-@safe("the caller sizes the block, as C's memset requires")
+#export("memset")
+#weak
+#safe("the caller sizes the block, as C's memset requires")
 pub fn memset(block: *var u8, value: i32, size: usize) -> *var u8 {
     let byte = (value & 255) as u8
     var i: usize = 0
@@ -127,9 +127,9 @@ pub fn memset(block: *var u8, value: i32, size: usize) -> *var u8 {
     block
 }
 
-@export("memcmp")
-@weak
-@safe("the caller sizes both blocks, as C's memcmp requires")
+#export("memcmp")
+#weak
+#safe("the caller sizes both blocks, as C's memcmp requires")
 pub fn memcmp(a: *u8, b: *u8, size: usize) -> i32 {
     var i: usize = 0
     while i < size {
@@ -152,7 +152,7 @@ pub fn memcmp(a: *u8, b: *u8, size: usize) -> i32 {
 global var panicText: [128:u8] = [0; 128]
 global var panicLength: i64 = 0
 
-@safe("writes inside the buffer and nowhere else")
+#safe("writes inside the buffer and nowhere else")
 fn panicAppend(text: CString) {
     let bytes = unsafe { text as *u8 }
     var i: i64 = 0
@@ -163,7 +163,7 @@ fn panicAppend(text: CString) {
     }
 }
 
-@safe("writes inside the buffer and nowhere else")
+#safe("writes inside the buffer and nowhere else")
 fn panicAppendNumber(n: i64) {
     if n < 0 {
         panicAppend("-")
@@ -197,7 +197,7 @@ fn panicAppendNumber(n: i64) {
 fn unsigned10Quotient(n: u64) -> u64 { unsignedDivide(n, 10, false) }
 fn unsigned10Remainder(n: u64) -> u64 { unsignedDivide(n, 10, true) }
 
-@safe("the buffer is NUL-terminated before it is handed on")
+#safe("the buffer is NUL-terminated before it is handed on")
 fn panicWith(location: CString) -> Never {
     panicText[panicLength] = 0
     panicLength = 0
@@ -210,7 +210,7 @@ fn panicStart(text: CString) {
     panicAppend(text)
 }
 
-@export("rune_panic_bounds")
+#export("rune_panic_bounds")
 pub fn panicBounds(index: i64, length: i64, location: CString) {
     panicStart("index ")
     panicAppendNumber(index)
@@ -219,7 +219,7 @@ pub fn panicBounds(index: i64, length: i64, location: CString) {
     panicWith(location)
 }
 
-@export("rune_panic_overflow")
+#export("rune_panic_overflow")
 pub fn panicOverflow(operation: CString, location: CString) {
     panicStart("integer overflow in `")
     panicAppend(operation)
@@ -227,36 +227,36 @@ pub fn panicOverflow(operation: CString, location: CString) {
     panicWith(location)
 }
 
-@export("rune_panic_div_zero")
+#export("rune_panic_div_zero")
 pub fn panicDivZero(location: CString) {
     defaultPanicHandler("division by zero", location)
 }
 
-@export("rune_panic_nil")
+#export("rune_panic_nil")
 pub fn panicNil(location: CString) {
     defaultPanicHandler("dereferenced a nil reference", location)
 }
 
-@export("rune_panic_no_match")
+#export("rune_panic_no_match")
 pub fn panicNoMatch(location: CString) {
     defaultPanicHandler("no arm of the `match` matched", location)
 }
 
 /// `process::panic`, and anything else that stops the program on purpose.
-@export("rune_panic")
+#export("rune_panic")
 pub fn panicExplicit(message: CString, location: CString) {
     defaultPanicHandler(message, location)
 }
 
 /// `Option::unwrap` and `expect` on an empty one.
-@export("rune_panic_unwrap")
+#export("rune_panic_unwrap")
 pub fn panicUnwrap(what: CString, location: CString) {
     panicStart("unwrapped an empty ")
     panicAppend(what)
     panicWith(location)
 }
 
-@export("rune_panic_any")
+#export("rune_panic_any")
 pub fn panicAny(expected: CString, value: *var u8, location: CString) {
     panicStart("this `Any` does not hold ")
     panicAppend(expected)
@@ -286,15 +286,15 @@ struct TypeInfo {
     clone: *var u8          // @cfunction(*var u8) -> *var u8, or null
 }
 
-@safe("a null pointer compares equal to zero without being read")
+#safe("a null pointer compares equal to zero without being read")
 fn isNull(p: *var u8) -> bool { unsafe { p as usize == 0 } }
 
 /// A string literal's object, and anything else made to outlive every owner,
 /// carries this bit in its count and is never destroyed.
 fn immortalMark() -> i64 { 4611686018427387904 }   // 1 << 62
 
-@export("rune_alloc")
-@safe("the allocator hands back at least `size` bytes, or null")
+#export("rune_alloc")
+#safe("the allocator hands back at least `size` bytes, or null")
 pub fn alloc(size: u64, info: *var u8) -> *var u8 {
     let want = objectBytes(size)
     let block = defaultAllocate(want, 16 as usize)
@@ -314,8 +314,8 @@ pub fn alloc(size: u64, info: *var u8) -> *var u8 {
 /// An object's one owner is done with it: its `deinit`, then its memory.
 /// `checked` is `--safety full` asking that the object really had one owner,
 /// which a count that moved behind the borrow checker's back would betray.
-@export("rune_drop")
-@safe("the borrow checker proved the caller is the object's one owner")
+#export("rune_drop")
+#safe("the borrow checker proved the caller is the object's one owner")
 pub fn drop(obj: *var u8, checked: bool) {
     if isNull(obj) { return }
     let o = unsafe { obj as *var Object }
@@ -328,7 +328,7 @@ pub fn drop(obj: *var u8, checked: bool) {
     unsafe { o[0].refcount = 0 }
     let info = unsafe { o[0].typeinfo }
     // What `alloc` asked for: the descriptor says how big an object of its
-    // type is, which is what the `@deallocator` is told.
+    // type is, which is what the `#deallocator` is told.
     var size: u64 = 0
     if !isNull(info) {
         let ti = unsafe { info as *var TypeInfo }
@@ -347,8 +347,8 @@ fn objectBytes(size: u64) -> usize {
     if size < 16 { 16 as usize } else { size as usize }
 }
 
-@export("rune_make_immortal")
-@safe("only sets a bit in the header")
+#export("rune_make_immortal")
+#safe("only sets a bit in the header")
 pub fn makeImmortal(obj: *var u8) {
     if isNull(obj) { return }
     let o = unsafe { obj as *var Object }
@@ -357,9 +357,9 @@ pub fn makeImmortal(obj: *var u8) {
 
 /// A copy of an object of exactly its own type, made by the class's `clone`
 /// — which is what `$clone()` means under single ownership.
-@Config(!(freestanding_type == "minimal"))
-@export("rune_clone_object")
-@safe("calls the clone the compiler generated for the object's own type")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_clone_object")
+#safe("calls the clone the compiler generated for the object's own type")
 pub fn cloneObject(obj: *var u8) -> *var u8 {
     if isNull(obj) { return obj }
     let o = unsafe { obj as *var Object }
@@ -378,9 +378,9 @@ pub fn cloneObject(obj: *var u8) -> *var u8 {
 
 /// Whether `obj` is an instance of the class `info` describes, or of one
 /// derived from it: the walk up the chain of base classes.
-@Config(!(freestanding_type == "minimal"))
-@export("rune_is_kind_of")
-@safe("follows the type descriptors the compiler emitted")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_is_kind_of")
+#safe("follows the type descriptors the compiler emitted")
 pub fn isKindOf(obj: *var u8, info: *var u8) -> i32 {
     if isNull(obj) || isNull(info) { return 0 }
     let o = unsafe { obj as *var Object }
@@ -395,18 +395,18 @@ pub fn isKindOf(obj: *var u8, info: *var u8) -> i32 {
 
 /// `Any`'s question. A descriptor is one symbol for the whole program, so
 /// comparing addresses is the answer.
-@Config(!(freestanding_type == "minimal"))
-@export("rune_any_is")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_any_is")
 pub fn anyIs(obj: *var u8, info: *var u8) -> i32 { isKindOf(obj, info) }
 
 /// Raw memory, for code that manages its own: `mem::allocator`, and so
 /// `Vector`, `Map` and the rest of `std::collections`. Every caller says how
-/// big a block is when it gives it back, so the program's `@deallocator` is
+/// big a block is when it gives it back, so the program's `#deallocator` is
 /// told the size and alignment and nothing keeps a header.
-@export("rune_raw_alloc")
+#export("rune_raw_alloc")
 pub fn rawAlloc(size: u64) -> *var u8 { defaultAllocate(size as usize, 16 as usize) }
 
-@export("rune_raw_free")
+#export("rune_raw_free")
 pub fn rawFree(block: *var u8, size: u64) {
     if !isNull(block) { defaultFree(block, size as usize, 16 as usize) }
 }
@@ -414,8 +414,8 @@ pub fn rawFree(block: *var u8, size: u64) {
 /// A block of `size` holding what `block` (of `oldSize`) did, up to the
 /// smaller of the two; `block` is gone afterwards. A null `block` is a fresh
 /// allocation, as C's `realloc` has it.
-@export("rune_raw_realloc")
-@safe("copies no more than either block holds")
+#export("rune_raw_realloc")
+#safe("copies no more than either block holds")
 pub fn rawRealloc(block: *var u8, oldSize: u64, size: u64) -> *var u8 {
     if isNull(block) { return rawAlloc(size) }
     let fresh = rawAlloc(size)
@@ -428,8 +428,8 @@ pub fn rawRealloc(block: *var u8, oldSize: u64, size: u64) -> *var u8 {
 
 /// True when `size` bytes from `block` are all zero: `std::mem`'s test for
 /// a slot that was never written.
-@export("rune_raw_is_zero")
-@safe("reads exactly the bytes the caller sized, and only to compare them")
+#export("rune_raw_is_zero")
+#safe("reads exactly the bytes the caller sized, and only to compare them")
 pub fn rawIsZero(block: *u8, size: u64) -> bool {
     if size == 0 || isNull(unsafe { block as *var u8 }) { return true }
     var i: u64 = 0
@@ -440,12 +440,12 @@ pub fn rawIsZero(block: *u8, size: u64) -> bool {
     true
 }
 
-@export("rune_raw_copy")
+#export("rune_raw_copy")
 pub fn rawCopy(dst: *var u8, src: *u8, size: u64) {
     if size != 0 { memcpy(dst, src, size as usize) }
 }
 
-@export("rune_raw_zero")
+#export("rune_raw_zero")
 pub fn rawZero(block: *var u8, size: u64) {
     if size != 0 && !isNull(block) { memset(block, 0, size as usize) }
 }
@@ -456,8 +456,8 @@ pub fn rawZero(block: *var u8, size: u64) {
 
 /// Mixes one value into a running hash, as the hosted runtime does
 /// (splitmix64's finaliser), so a hash is the same number on either.
-@Config(!(freestanding_type == "minimal"))
-@export("rune_hash_mix")
+#Config(!(freestanding_type == "minimal"))
+#export("rune_hash_mix")
 pub fn hashMix(accIn: u64, v: u64) -> u64 {
     var acc = accIn
     acc = acc ^ v.$wrappingAdd(11400714819323198485)
@@ -511,27 +511,27 @@ fn negated(m: u64) -> i64 {
     (0 - ((m - 1) as i64)) - 1
 }
 
-@Config(pointer_width == "32")
-@export("__udivdi3")
-@weak
+#Config(pointer_width == "32")
+#export("__udivdi3")
+#weak
 pub fn udivdi3(n: u64, d: u64) -> u64 { unsignedDivide(n, d, false) }
 
-@Config(pointer_width == "32")
-@export("__umoddi3")
-@weak
+#Config(pointer_width == "32")
+#export("__umoddi3")
+#weak
 pub fn umoddi3(n: u64, d: u64) -> u64 { unsignedDivide(n, d, true) }
 
-@Config(pointer_width == "32")
-@export("__divdi3")
-@weak
+#Config(pointer_width == "32")
+#export("__divdi3")
+#weak
 pub fn divdi3(n: i64, d: i64) -> i64 {
     let q = unsignedDivide(magnitude(n), magnitude(d), false)
     if (n < 0) != (d < 0) { negated(q) } else { q as i64 }
 }
 
-@Config(pointer_width == "32")
-@export("__moddi3")
-@weak
+#Config(pointer_width == "32")
+#export("__moddi3")
+#weak
 pub fn moddi3(n: i64, d: i64) -> i64 {
     // The remainder takes the sign of the dividend, as C's `%` does.
     let r = unsignedDivide(magnitude(n), magnitude(d), true)

@@ -35,4 +35,4 @@ The differences are the platform's, not the compiler's. WASI preview 1 can use a
 >
 > A threaded module imports its memory rather than defining it — every thread is an instance of its own, and they share that memory — and fewer runtimes accept one. `wasm-threads` is a target of its own for that reason; wasmtime runs it with `-W threads=y -S threads=y`.
 
-Code that has to differ asks `@Config(family == "wasm")` or `@Config(os == "wasi")` — see **Conditional compilation** — and `std::arch` says `wasm32` with a 32-bit `usize`.
+Code that has to differ asks `#Config(family == "wasm")` or `#Config(os == "wasi")` — see **Conditional compilation** — and `std::arch` says `wasm32` with a 32-bit `usize`.

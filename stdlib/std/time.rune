@@ -135,7 +135,7 @@ pub struct Instant {
 }
 
 /// The clock, now.
-@safe("reads a monotonic counter the operating system maintains")
+#safe("reads a monotonic counter the operating system maintains")
 pub fn now() -> Instant { Instant { at: rune_monotonic_ns() } }
 
 extend Instant {
@@ -384,11 +384,11 @@ pub fn fromUnixNanos(nanos: i64) -> DateTime {
 }
 
 /// The wall clock, now, in UTC.
-@safe("reads the system clock")
+#safe("reads the system clock")
 pub fn utcNow() -> DateTime { fromUnixNanos(rune_wall_clock_ns()) }
 
 /// The wall clock, now, in this machine's zone.
-@safe("reads the system clock and the zone the platform reports")
+#safe("reads the system clock and the zone the platform reports")
 pub fn localNow() -> DateTime {
     let nanos = rune_wall_clock_ns()
     let offset = rune_local_utc_offset(nanos / 1000000000)
@@ -400,7 +400,7 @@ pub fn today() -> Date { localNow().date }
 
 /// What the platform calls the local zone right now — `BST`, `PDT` — or
 /// an empty string if it will not say.
-@safe("reads a name the platform keeps")
+#safe("reads a name the platform keeps")
 pub fn localZoneName() -> String { rune_local_zone_name() }
 
 extend DateTime {
@@ -417,7 +417,7 @@ extend DateTime {
     pub fn inUtc(&self) -> DateTime { fromUnixNanos(self.toUnixNanos()) }
 
     /// The same moment, written in this machine's zone as it was then.
-    @safe("asks the platform for the zone's offset at that instant")
+    #safe("asks the platform for the zone's offset at that instant")
     pub fn inLocalZone(&self) -> DateTime {
         let unix = self.toUnix()
         let offset = rune_local_utc_offset(unix)

@@ -12,8 +12,8 @@
 // EXPECT: reflect Point i64
 // EXPECT: lookup 1 -1
 //
-// A procedural macro is a Rune function marked `@macro`, in a file that says
-// `@type(Macros)`. The compiler builds that file into a program of its own —
+// A procedural macro is a Rune function marked `#macro`, in a file that says
+// `#type(Macros)`. The compiler builds that file into a program of its own —
 // for the machine doing the compiling — and runs it to expand each
 // invocation.
 //
@@ -30,7 +30,6 @@ lookup!(red, green, blue)
 fn main() -> i64 {
     println!("twice {}", twice!(3).$str())
     println!("twice {}", twice!(4 * 5).$str())
-
     let p = Point { x: 3, y: 4 }
     println!("getters {} {}", p.getx().$str(), p.gety().$str())
 

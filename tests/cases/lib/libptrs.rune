@@ -1,0 +1,7 @@
+// A conversion out of a pointer shape, for `B6_pointer_into` to import.
+// Importing the library brings the bind with it.
+pub bind<T> *var T into *var u8 {
+    fn convert(&self) -> *var u8 {
+        unsafe { self as *var u8 }
+    }
+}

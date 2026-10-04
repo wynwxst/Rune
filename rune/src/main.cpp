@@ -26,6 +26,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Console.h"
+#include "rune/Install.h"
 #include "Fingerprint.h"
 #include "Jobs.h"
 #include "Manifest.h"
@@ -80,6 +81,17 @@ bool gVerboseBuild = false;
 /// with no browser to show it in, or a script that only wants it built.
 bool gNoBrowser = false;
 
+/// Where the tools' sources, books and `runetime/` are: `share/rune` beside
+/// an installed `rune`, else the source tree it was built from.
+fs::path toolchainRoot() {
+  return fs::path(rune::toolchainRootFor(gExecutableDir, RUNE_TOOLCHAIN_ROOT));
+}
+
+/// The standard library: installed beside `rune`, else the build's.
+fs::path stdlibDir() {
+  return fs::path(rune::stdlibDirFor(gExecutableDir, RUNE_DEFAULT_STDLIB_DIR));
+}
+
 std::string findCompiler() {
   if (const char *env = getenv("RUNEC"))
     return env;
@@ -123,11 +135,21 @@ std::string executableDirOf(const char *argv0) {
 int runCommand(const std::string &cmd, bool verbose) {
   if (verbose)
     std::cerr << c("\x1b[2m") << "  " << cmd << c("\x1b[0m") << "\n";
+#if defined(_WIN32)
+  // `cmd /c` drops the first and last quote of a line that starts with
+  // one; a pair around the whole line is what it drops.
+  int rc = std::system(("\"" + cmd + "\"").c_str());
+#else
   int rc = std::system(cmd.c_str());
+#endif
   // std::system encodes the exit status; recover the process's own code.
   if (rc == -1)
     return 127;
+#if defined(_WIN32)
+  return rc;          // the exit status itself, not a wait status
+#else
   return (rc & 0x7F) ? 128 + (rc & 0x7F) : ((rc >> 8) & 0xFF);
+#endif
 }
 
 //===----------------------------------------------------------------------===//
@@ -141,7 +163,7 @@ struct Options {
   /// every package in the build: a program is one memory model throughout.
   std::string Memory = "zombie";
   /// A freestanding build: the root manifest says `runtime = "none"` (or a
-  /// source says `@runtime(none)`), or the target is bare metal. Everything
+  /// source says `#runtime(none)`), or the target is bare metal. Everything
   /// in the build is compiled without the hosted runtime.
   bool Freestanding = false;
   bool CheckOnly = false;
@@ -258,11 +280,11 @@ void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o,
   cmd += " -O" + std::to_string(opt);
   if (m.Debug && !o.Release)
     cmd += " -g";
-  // Integer overflow traps in a debug build and wraps in a release one; the
-  // compiler reads that off `-O`. The manifest may pin it either way.
+  // Integer overflow traps in a debug build and wraps in a release one. The
+  // manifest may pin it either way.
   if (m.OverflowChecks == 1)
     cmd += " --overflow-checks";
-  else if (m.OverflowChecks == 0)
+  else if (m.OverflowChecks == 0 || (o.Release && m.OverflowChecks < 0))
     cmd += " --no-overflow-checks";
   if (m.WarningsAsErrors)
     cmd += " -Werror";
@@ -286,11 +308,11 @@ void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o,
     for (const std::string &a : o.Target.LinkArgs)
       cmd += " --link-arg " + quote(a);
   }
-  // `@Config` decides which declarations exist, so these change what is
+  // `#Config` decides which declarations exist, so these change what is
   // produced and belong here — unlike `-v` and `--color` below.
   //
   // A dependency's name is set too, so a package can ask whether it has one:
-  // `@Config(json)` is true exactly when `json` is in `[dependencies]`.
+  // `#Config(json)` is true exactly when `json` is in `[dependencies]`.
   {
     std::vector<std::string> names = m.ConfigFlags;
     for (const Dependency &d : m.Dependencies)
@@ -334,7 +356,7 @@ pm::Fingerprint stepFingerprint(const std::string &cmd,
                                 const std::vector<std::string> &inputs) {
   pm::Fingerprint fp;
   fp.add(cmd);
-  fp.add(pm::toolchainFingerprint(findCompiler(), RUNE_DEFAULT_STDLIB_DIR).hex());
+  fp.add(pm::toolchainFingerprint(findCompiler(), stdlibDir().string()).hex());
   for (const std::string &in : inputs)
     fp.addFile(in);
   return fp;
@@ -356,6 +378,21 @@ static bool gShortDiagnostics = false;
 /// `--source <path>=<file>` pairs, handed to every compile: an editor's
 /// unsaved buffers, checked in place of what is on disk.
 static std::vector<std::string> gSourceOverrides;
+
+/// True when a `--source` override stands in for one of `files`.
+static bool overridesAny(const std::vector<std::string> &files) {
+  std::error_code ec;
+  for (const std::string &o : gSourceOverrides) {
+    std::size_t eq = o.find('=');
+    if (eq == std::string::npos)
+      continue;
+    fs::path named = fs::weakly_canonical(fs::path(o.substr(0, eq)), ec);
+    for (const std::string &f : files)
+      if (fs::weakly_canonical(fs::path(f), ec) == named)
+        return true;
+  }
+  return false;
+}
 
 bool runStep(const std::string &verb, const std::string &what,
              const std::string &cmd, const Options &opts) {
@@ -431,7 +468,15 @@ struct DependencyInputs {
     append(LinkLibs, other.LinkLibs);
     append(LinkPaths, other.LinkPaths);
     append(Objects, other.Objects);
-    append(LinkArgs, other.LinkArgs);
+    // Link arguments mean something only in order and together —
+    // `-framework Cocoa -framework IOKit` is two pairs, and dropping the
+    // second `-framework` as a repeat orphans `IOKit`. A dependency's run is
+    // left out only when that whole run is already there, as it is when two
+    // packages depend on a third.
+    if (!other.LinkArgs.empty() &&
+        std::search(LinkArgs.begin(), LinkArgs.end(), other.LinkArgs.begin(),
+                    other.LinkArgs.end()) == LinkArgs.end())
+      LinkArgs.insert(LinkArgs.end(), other.LinkArgs.begin(), other.LinkArgs.end());
     NeedsCxx = NeedsCxx || other.NeedsCxx;
   }
 };
@@ -560,7 +605,7 @@ struct ScriptAnswers {
   std::string RunWith;                 ///< finish only; absolute
 };
 
-/// Adds a script's `@Config` answers to a `runec` command line.
+/// Adds a script's `#Config` answers to a `runec` command line.
 void appendScriptConfig(std::string &cmd, const ScriptAnswers &a) {
   for (const std::string &c : a.Cfgs)
     cmd += " --cfg " + quote(c);
@@ -1090,6 +1135,25 @@ bool buildPackageLibrary(PackageNode &node, std::vector<PackageNode> &nodes,
       stamps.record(libOut, fp);
     }
     node.Result.LibraryPath = libOut.string();
+
+    // `rune check --source`: an editor's unsaved buffer for one of the
+    // library's files. The `.rul` above is built from what is on disk — it
+    // must be, a build's output is never made from unsaved text — so the
+    // library is checked again, with the buffers standing in for their
+    // files. Without this only the binary's root saw a buffer, and an error
+    // typed into any other module waited for a save to be reported.
+    if (opts.CheckOnly && overridesAny(sources)) {
+      std::string check = quote(findCompiler()) + " --check --module " +
+                          quote(m.Name);
+      appendBuildFlags(check, m, opts, node.Config);
+      appendScriptConfig(check, node.Script);
+      check += " -I " + quote(depsDir.string());
+      for (const std::string &s : sources)
+        check += " " + quote(s);
+      if (!runStep("Checking", m.Name + " v" + m.Version + " (library)", check,
+                   opts))
+        return false;
+    }
   }
   return true;
 }
@@ -1149,8 +1213,8 @@ std::vector<TargetStep> targetsOf(const Manifest &m, const Options &opts) {
   for (const BinaryTarget &b : binaries)
     add({b.Name, b.Path, OutputKind::Executable, false});
 
-  // `@type(Library)` on a file other than lib.rune, `@type(Object)`,
-  // `@type(Assembly)`, `@type(LLVM)`: each is compiled on its own, with the
+  // `#type(Library)` on a file other than lib.rune, `#type(Object)`,
+  // `#type(Assembly)`, `#type(LLVM)`: each is compiled on its own, with the
   // package's components, into an output named after the file.
   for (const OutputRoot &r : m.Roots) {
     if (r.Kind == OutputKind::Executable)
@@ -1287,7 +1351,7 @@ bool buildTarget(const TargetStep &step, const PackageNode &node,
     if (opts.Freestanding)
       for (const char *part : {"freestanding.rune", "freestanding_text.rune"})
         deps.push_back(
-            (fs::path(RUNE_TOOLCHAIN_ROOT) / "runetime" / part).string());
+            (toolchainRoot() / "runetime" / part).string());
     pm::Fingerprint fp = stepFingerprint(cmd, deps);
     const bool linked = step.Kind == OutputKind::Executable && !emitting;
     // After the link, the build script's finish phase — every build, since
@@ -1536,7 +1600,7 @@ int commandRun(const Options &opts) {
   if (r.Executables.empty()) {
     failLine("this package has nothing to run");
     note("add src/main.rune, give a file a `main`, or mark one "
-         "`@type(Executable)`");
+         "`#type(Executable)`");
     return 1;
   }
 
@@ -1776,7 +1840,7 @@ bool refresh(const fs::path &from, const fs::path &to, bool directory) {
 /// not there yet. Called before anything that needs those files.
 void primeToolchainCache(const Options &opts) {
   fs::path home = runeHome();
-  fs::path src(RUNE_TOOLCHAIN_ROOT);
+  fs::path src = toolchainRoot();
   std::error_code ec;
   fs::create_directories(home / "bin", ec);
 
@@ -1784,7 +1848,7 @@ void primeToolchainCache(const Options &opts) {
   // the generator so a package built from anywhere gets the same pages.
   refresh(src / "tools" / "docui" / "style.css", home / "share" / "style.css", false);
   refresh(src / "tools" / "docui" / "app.js", home / "share" / "app.js", false);
-  refresh(fs::path(RUNE_DEFAULT_STDLIB_DIR), home / "stdlib", true);
+  refresh(stdlibDir(), home / "stdlib", true);
 
   // The generator is a Rune program, so it is compiled once and kept.
   fs::path gen = home / "bin" / "rune-doc";
@@ -1830,7 +1894,7 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts,
   fs::path dir = own ? projectRoot / "target" / t.Name / "runtime"
                      : runeHome() / "runtime" / t.Triple;
   fs::path archive = dir / "libruneruntime.a";
-  fs::path root(RUNE_TOOLCHAIN_ROOT);
+  fs::path root = toolchainRoot();
   fs::path cRoot = root / "runtime";
   fs::path coreSrc = root / "runetime" / "core.rune";
 
@@ -1876,7 +1940,7 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts,
     ownFp.addFile((cRoot / "include" / "rune_runtime.h").string());
     ownFp.addFile((cRoot / "src" / "rune_single_threaded.h").string());
     ownFp.addFile(coreSrc.string());
-    ownFp.add(pm::toolchainFingerprint(findCompiler(), RUNE_DEFAULT_STDLIB_DIR).hex());
+    ownFp.add(pm::toolchainFingerprint(findCompiler(), stdlibDir().string()).hex());
     if (stamps.isFresh(archive, ownFp))
       return dir.string();
   }
@@ -1960,6 +2024,345 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts,
   return dir.string();
 }
 
+//===----------------------------------------------------------------------===//
+// The toolchain's own tools
+//===----------------------------------------------------------------------===//
+
+/// One of the tools `rune` runs: the program, the command that runs it,
+/// and whether it is built only when asked for.
+struct ToolInfo {
+  const char *Name;
+  const char *Command;
+  const char *Summary;
+  bool Optional;
+};
+
+const ToolInfo kTools[] = {
+    {"rune-lint", "lint", "looks for likely mistakes and style problems", false},
+    {"rune-fmt", "fmt", "lays source out, writing in types and argument labels", false},
+    {"rune-lsp", "lsp", "the language server, for editors", false},
+    {"rune-doc", "doc", "the documentation generator", false},
+    // libclang is not something every machine has, so this one is built the
+    // first time it is wanted rather than with the toolchain.
+    {"rune-ffi", "ffi", "Rune bindings for C headers, read with libclang", true},
+};
+
+const ToolInfo *toolNamed(const std::string &name) {
+  for (const ToolInfo &t : kTools)
+    if (name == t.Name || name == t.Command)
+      return &t;
+  return nullptr;
+}
+
+/// A program's file name on this platform.
+std::string exeName(const std::string &name) {
+#if defined(_WIN32)
+  return name + ".exe";
+#else
+  return name;
+#endif
+}
+
+/// Where the tools live once they are this user's: `~/.rune/bin`.
+fs::path toolHome(const std::string &name) {
+  return runeHome() / "bin" / exeName(name);
+}
+
+/// A tool built beside the compiler — by CMake, or in a distribution —
+/// copied to `~/.rune/bin`, where `rune` and an editor can always find it,
+/// whenever that copy is missing or older. Returns the copy, or "" when
+/// there is nothing beside the compiler to copy.
+std::string adoptBuiltTool(const std::string &name) {
+  std::error_code ec;
+  fs::path here = fs::path(findCompiler()).parent_path() / exeName(name);
+  if (!fs::is_regular_file(here, ec))
+    return "";
+  fs::path home = toolHome(name);
+  bool copy = !fs::exists(home, ec);
+  if (!copy) {
+    std::error_code a, b;
+    copy = fs::last_write_time(here, a) > fs::last_write_time(home, b);
+  }
+  if (copy) {
+    fs::create_directories(home.parent_path(), ec);
+    fs::copy_file(here, home, fs::copy_options::overwrite_existing, ec);
+    if (ec)
+      return here.string();     // could not copy: use it where it is
+  }
+  return home.string();
+}
+
+/// Whether `bin` is older than any of `sources`.
+bool olderThanAny(const fs::path &bin, const std::vector<fs::path> &sources) {
+  std::error_code ec;
+  if (!fs::exists(bin, ec))
+    return true;
+  auto built = fs::last_write_time(bin, ec);
+  for (const fs::path &p : sources) {
+    std::error_code pec;
+    if (fs::last_write_time(p, pec) > built)
+      return true;
+  }
+  std::error_code cec;
+  return fs::last_write_time(findCompiler(), cec) > built;
+}
+
+/// Every `.rune` file directly in `dir`, sorted.
+std::vector<fs::path> runeFilesIn(const fs::path &dir) {
+  std::vector<fs::path> out;
+  std::error_code ec;
+  for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+    if (it->path().extension() == ".rune")
+      out.push_back(it->path());
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+/// The output of a short command, first line only, or "".
+std::string firstLineOf(const std::string &cmd) {
+#if defined(_WIN32)
+  FILE *pipe = _popen((cmd + " 2>NUL").c_str(), "r");
+#else
+  FILE *pipe = popen((cmd + " 2>/dev/null").c_str(), "r");
+#endif
+  if (!pipe)
+    return "";
+  char buf[4096];
+  std::string out;
+  if (fgets(buf, sizeof buf, pipe))
+    out = buf;
+#if defined(_WIN32)
+  _pclose(pipe);
+#else
+  pclose(pipe);
+#endif
+  while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
+    out.pop_back();
+  return out;
+}
+
+/// Whether `dir` holds a libclang to link against.
+bool holdsLibclang(const fs::path &dir) {
+  std::error_code ec;
+  for (const char *f : {"libclang.dylib", "libclang.so", "libclang.dll", "libclang.dll.a",
+                        "libclang.lib", "libclang.a"})
+    if (fs::exists(dir / f, ec))
+      return true;
+  return false;
+}
+
+/// Where libclang is: `RUNE_LIBCLANG_DIR`, else what an `llvm-config` says,
+/// else the places LLVM is usually installed. "" when there is none.
+std::string findLibclangDir() {
+  if (const char *env = getenv("RUNE_LIBCLANG_DIR"))
+    if (*env)
+      return env;
+  std::vector<std::string> configs = {"llvm-config"};
+  for (int v = 22; v >= 15; --v)
+    configs.push_back("llvm-config-" + std::to_string(v));
+  for (const char *p : {"/opt/homebrew/opt/llvm/bin/llvm-config",
+                        "/usr/local/opt/llvm/bin/llvm-config"})
+    configs.push_back(p);
+  for (const std::string &cfg : configs) {
+    std::string dir = firstLineOf(quote(cfg) + " --libdir");
+    if (!dir.empty() && holdsLibclang(dir))
+      return dir;
+  }
+  std::vector<std::string> guesses = {"/opt/homebrew/opt/llvm/lib", "/usr/local/opt/llvm/lib",
+                                      "/usr/lib", "/usr/lib64", "/usr/local/lib",
+                                      "C:/Program Files/LLVM/bin", "C:/Program Files/LLVM/lib"};
+  for (int v = 22; v >= 15; --v)
+    guesses.push_back("/usr/lib/llvm-" + std::to_string(v) + "/lib");
+  for (const std::string &g : guesses)
+    if (holdsLibclang(g))
+      return g;
+  return "";
+}
+
+/// clang's resource directory beside the libclang in `libdir`:
+/// `<libdir>/clang/<version>`, the newest that has its headers.
+std::string clangResourceDirBeside(const fs::path &libdir) {
+  std::error_code ec;
+  std::string best;
+  int bestVersion = -1;
+  for (const fs::path &base : {libdir / "clang", libdir / ".." / "lib" / "clang"}) {
+    for (fs::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
+      int v = atoi(it->path().filename().string().c_str());
+      if (v > bestVersion && fs::exists(it->path() / "include" / "stdarg.h", ec)) {
+        best = fs::absolute(it->path(), ec).lexically_normal().string();
+        bestVersion = v;
+      }
+    }
+    if (!best.empty())
+      return best;
+  }
+  return "";
+}
+
+/// `rune-ffi`, built from `tools/rune-ffi` into `~/.rune/bin` the first time
+/// it is wanted and again whenever its sources change. Its `interface` unit
+/// is compiled to a library first, as `rune build` would; the program links
+/// it and libclang.
+std::string ensureFfiTool(const Options &opts) {
+  std::string adopted = adoptBuiltTool("rune-ffi");
+  if (!adopted.empty())
+    return adopted;
+  std::error_code ec;
+  fs::path pkg = toolchainRoot() / "tools" / "rune-ffi" / "src";
+  fs::path main = pkg / "main.rune";
+  if (!fs::exists(main, ec)) {
+    failLine("the rune-ffi sources are not at " + pkg.string());
+    return "";
+  }
+  std::vector<fs::path> unit = runeFilesIn(pkg / "interface");
+  std::vector<fs::path> sources = unit;
+  sources.push_back(main);
+  fs::path bin = toolHome("rune-ffi");
+  fs::path dirFile = runeHome() / "bin" / "rune-ffi.libclang";
+  if (!olderThanAny(bin, sources))
+    return bin.string();
+
+  std::string libdir = findLibclangDir();
+  if (libdir.empty()) {
+    failLine("rune ffi needs libclang, and none was found");
+    note("install LLVM — `brew install llvm`, `apt install libclang-dev`, or the LLVM "
+         "installer on Windows — or set RUNE_LIBCLANG_DIR to the directory holding libclang");
+    return "";
+  }
+  status("Preparing", "rune-ffi (libclang in " + libdir + ")");
+  fs::path work = runeHome() / "build" / "rune-ffi";
+  fs::create_directories(work, ec);
+  fs::create_directories(bin.parent_path(), ec);
+  std::string common = quote(findCompiler()) + " --memory zombie -O2 --stdlib " +
+                       quote(stdlibDir().string());
+  std::string lib = common + " --emit-lib --module interface -o " +
+                    quote((work / "interface.rul").string());
+  for (const fs::path &p : unit)
+    lib += " " + quote(p.string());
+  if (runCommand(lib, opts.Verbose) != 0) {
+    failLine("could not build rune-ffi's interface unit");
+    return "";
+  }
+  std::string prog = common + " -I " + quote(work.string()) + " -L " + quote(libdir) +
+                     " -o " + quote(bin.string()) + " " + quote(main.string());
+#if !defined(_WIN32)
+  // So the program finds libclang where it was found to build it.
+  prog += " --link-arg " + quote("-Wl,-rpath," + libdir);
+#endif
+  if (runCommand(prog, opts.Verbose) != 0) {
+    failLine("could not build rune-ffi");
+    return "";
+  }
+  std::ofstream(dirFile) << libdir << "\n";
+  return bin.string();
+}
+
+void setEnvironment(const std::string &name, const std::string &value) {
+#if defined(_WIN32)
+  _putenv_s(name.c_str(), value.c_str());
+#else
+  setenv(name.c_str(), value.c_str(), 1);
+#endif
+}
+
+/// `rune ffi [args]`: bindings for C headers. Built the first time.
+int commandFfi(const std::vector<std::string> &rest, const Options &opts) {
+  std::string tool = ensureFfiTool(opts);
+  if (tool.empty())
+    return 2;
+  // libclang looks for its own headers beside itself, and cannot always
+  // tell where that is; the tool is told.
+  if (!getenv("RUNE_CLANG_RESOURCE_DIR")) {
+    std::ifstream in(runeHome() / "bin" / "rune-ffi.libclang");
+    std::string libdir;
+    std::getline(in, libdir);
+    if (libdir.empty())
+      libdir = findLibclangDir();
+    std::string res = libdir.empty() ? "" : clangResourceDirBeside(libdir);
+    if (!res.empty())
+      setEnvironment("RUNE_CLANG_RESOURCE_DIR", res);
+  }
+  std::string cmd = quote(tool);
+  for (const std::string &a : rest)
+    cmd += " " + quote(a);
+  if (!opts.PackageDir.empty() && opts.PackageDir != ".")
+    cmd = "cd " + quote(opts.PackageDir) + " && " + cmd;
+  return runCommand(cmd, false);
+}
+
+std::string ensureEditorTool(const std::string &name, const Options &opts);
+std::string ensureDocGenerator(const Options &opts);
+
+/// Builds or copies one tool into `~/.rune/bin`. Returns where it is.
+std::string ensureTool(const ToolInfo &t, const Options &opts) {
+  std::string name = t.Name;
+  if (name == "rune-ffi")
+    return ensureFfiTool(opts);
+  if (name == "rune-doc")
+    return ensureDocGenerator(opts);
+  return ensureEditorTool(name, opts);
+}
+
+/// `rune tools`: the tools, and where each one is. `rune tools install
+/// [name...]` builds or copies them into `~/.rune/bin` — every tool the
+/// toolchain builds by default, or the ones named (`ffi` among them).
+int commandTools(const std::vector<std::string> &rest, const Options &opts) {
+  std::error_code ec;
+  if (rest.empty() || rest[0] == "list") {
+    std::cout << "Tools (" << (runeHome() / "bin").string() << "):\n";
+    for (const ToolInfo &t : kTools) {
+      fs::path home = toolHome(t.Name);
+      fs::path beside = fs::path(findCompiler()).parent_path() / exeName(t.Name);
+      std::string where;
+      if (fs::exists(home, ec))
+        where = "installed";
+      else if (fs::is_regular_file(beside, ec))
+        where = "built, copied in on first use";
+      else
+        where = t.Optional ? "not built — built the first time `rune " + std::string(t.Command) +
+                                 "` runs"
+                           : "not built — built the first time it is used";
+      char line[256];
+      std::snprintf(line, sizeof line, "  %-10s rune %-5s  %s", t.Name, t.Command, t.Summary);
+      std::cout << line << "\n" << "  " << std::string(18, ' ') << "  " << c("\x1b[2m") << where
+                << c("\x1b[0m") << "\n";
+    }
+    std::cout << "\n`rune tools install` builds or copies the default tools into "
+                 "~/.rune/bin; `rune tools install ffi` adds rune-ffi.\n";
+    return 0;
+  }
+  if (rest[0] == "install") {
+    std::vector<const ToolInfo *> wanted;
+    if (rest.size() == 1 || (rest.size() == 2 && rest[1] == "all")) {
+      for (const ToolInfo &t : kTools)
+        if (!t.Optional || rest.size() == 2)
+          wanted.push_back(&t);
+    } else {
+      for (size_t i = 1; i < rest.size(); ++i) {
+        const ToolInfo *t = toolNamed(rest[i]);
+        if (!t) {
+          failLine("no tool named '" + rest[i] + "'");
+          note("`rune tools` lists them");
+          return 2;
+        }
+        wanted.push_back(t);
+      }
+    }
+    int failed = 0;
+    for (const ToolInfo *t : wanted) {
+      std::string at = ensureTool(*t, opts);
+      if (at.empty())
+        ++failed;
+      else
+        okLine(std::string(t->Name) + " at " + at);
+    }
+    return failed ? 1 : 0;
+  }
+  failLine("unknown `rune tools` command '" + rest[0] + "'");
+  note("`rune tools` lists the tools; `rune tools install [name...]` installs them");
+  return 2;
+}
+
 /// `rune-lint`, `rune-fmt` or `rune-lsp`: the editor tools, which are Rune
 /// programs.
 ///
@@ -1970,14 +2373,11 @@ std::string ensureRuntimeFor(const ResolvedTarget &t, const Options &opts,
 /// the documentation generator. Returns "" when neither can be had.
 std::string ensureEditorTool(const std::string &name, const Options &opts) {
   std::error_code ec;
-  fs::path here = fs::path(findCompiler()).parent_path();
-  for (const std::string &file : {name, name + ".exe"}) {
-    fs::path p = here / file;
-    if (fs::is_regular_file(p, ec))
-      return p.string();
-  }
+  std::string adopted = adoptBuiltTool(name);
+  if (!adopted.empty())
+    return adopted;
 
-  fs::path src(RUNE_TOOLCHAIN_ROOT);
+  fs::path src = toolchainRoot();
   fs::path root = src / "tools" / (name + ".rune");
   if (!fs::exists(root, ec))
     return "";
@@ -1989,7 +2389,7 @@ std::string ensureEditorTool(const std::string &name, const Options &opts) {
   }
   std::sort(sources.begin() + 1, sources.end());
 
-  fs::path bin = runeHome() / "bin" / name;
+  fs::path bin = toolHome(name);
   bool stale = !fs::exists(bin, ec);
   if (!stale) {
     auto built = fs::last_write_time(bin, ec);
@@ -2003,7 +2403,7 @@ std::string ensureEditorTool(const std::string &name, const Options &opts) {
     // Every file after the first is a module under `runetools`, which is
     // what the tools import: `runetools::syntax`, `runetools::lint`.
     std::string cmd = quote(findCompiler()) + " --memory arc --stdlib " +
-                      quote(RUNE_DEFAULT_STDLIB_DIR) +
+                      quote(stdlibDir().string()) +
                       " --module runetools -O2 -o " + quote(bin.string());
     for (const fs::path &p : sources)
       cmd += " " + quote(p.string());
@@ -2028,7 +2428,7 @@ int commandEditorTool(const std::string &command, const std::vector<std::string>
     return 2;
   }
   std::error_code ec;
-  std::string cmd = quote(tool) + " --stdlib " + quote(RUNE_DEFAULT_STDLIB_DIR);
+  std::string cmd = quote(tool) + " --stdlib " + quote(stdlibDir().string());
   if (command == "fmt")
     cmd += " --runec " + quote(findCompiler());   // it asks the compiler for types
   if (command == "lsp") {
@@ -2047,19 +2447,35 @@ int commandEditorTool(const std::string &command, const std::vector<std::string>
   return runCommand(cmd, false);
 }
 
-/// The cached generator, falling back to one sitting beside the compiler.
+/// The generator: the one beside the compiler, copied to `~/.rune/bin`,
+/// or the cached one.
 std::string findDocGenerator() {
+  std::string adopted = adoptBuiltTool("rune-doc");
+  if (!adopted.empty())
+    return adopted;
   std::error_code ec;
-  fs::path cached = runeHome() / "bin" / "rune-doc";
+  fs::path cached = toolHome("rune-doc");
   if (fs::exists(cached, ec))
     return cached.string();
-  fs::path here = fs::path(findCompiler()).parent_path();
-  for (const char *name : {"rune-doc", "rune-doc.exe"}) {
-    fs::path p = here / name;
-    if (fs::exists(p, ec))
-      return p.string();
-  }
   return "";
+}
+
+/// The generator, built from `tools/rune-doc.rune` when there is none.
+std::string ensureDocGenerator(const Options &opts) {
+  std::string found = findDocGenerator();
+  fs::path src = toolchainRoot() / "tools" / "rune-doc.rune";
+  fs::path bin = toolHome("rune-doc");
+  if (!found.empty() && !olderThanAny(found, {src}))
+    return found;
+  std::error_code ec;
+  fs::create_directories(bin.parent_path(), ec);
+  status("Preparing", "rune-doc");
+  std::string cmd = quote(findCompiler()) + " --memory arc --stdlib " +
+                    quote(stdlibDir().string()) + " -O2 -o " + quote(bin.string()) + " " +
+                    quote(src.string());
+  if (runCommand(cmd, opts.Verbose) != 0)
+    return found;
+  return bin.string();
 }
 
 /// Shows `url` in whatever the desktop opens pages with. Nothing waits on
@@ -2259,6 +2675,7 @@ const char *toolBookDir(const std::string &name) {
   if (name == "lint") return "rune-lint";
   if (name == "lsp") return "rune-lsp";
   if (name == "fmt") return "rune-fmt";
+  if (name == "ffi") return "rune-ffi";
   return nullptr;
 }
 
@@ -2270,7 +2687,7 @@ int commandDocBook(const Options &opts, const std::string &dirName) {
   primeToolchainCache(opts);
   fs::path home = runeHome();
   fs::path books = home / "share" / "books";
-  refresh(fs::path(RUNE_TOOLCHAIN_ROOT) / "tools" / "books", books, true);
+  refresh(toolchainRoot() / "tools" / "books", books, true);
   fs::path src = books / dirName;
   fs::path out = home / "docs" / dirName;
   fs::path page = out / "index.html";
@@ -2591,7 +3008,7 @@ COMMANDS
     test                 Build and run every program under tests/
     doc [--open]         Read docs/ and the source; write target/<profile>/docs
     doc std::<module>    Open the standard library's reference at a module
-    doc lint | doc lsp | doc fmt
+    doc lint | doc lsp | doc fmt | doc ffi
                          Open the book about the linter, the language server
                          or the formatter
     doc <package>        Open a package's documentation; <registry>::<package>
@@ -2602,6 +3019,10 @@ COMMANDS
     fmt [path...]        Lay source out and write in types and argument labels;
                          --check only reports
     lsp                  Run the language server, for an editor, over stdin and stdout
+    ffi <header>...      Write Rune bindings for C headers, read with libclang;
+                         built the first time it is used (`rune ffi --help`)
+    tools                List the toolchain's tools and where each one is;
+                         `tools install [name...]` puts them in ~/.rune/bin
     clean                Delete the target/ directory
     targets              List what this machine can build for: the foreign
                          targets (wasm, windows, linux-arm64, ...) and the
@@ -2648,7 +3069,7 @@ OPTIONS
                          borrow checker, or reference counting (default: the
                          manifest's [build] memory, else zombie)
     -j, --jobs <n>       Compile at most <n> things at once (default: cores)
-    --cfg <name>         Set <name> for `@Config(...)`, on top of [build] cfg
+    --cfg <name>         Set <name> for `#Config(...)`, on top of [build] cfg
     --cfg <key>=<value>  Give <key> a value, over what [config] says
     --target <name>      Build for another machine: a foreign target
                          (`--target wasm`), a [target.<name>] table, or a triple
@@ -2689,9 +3110,10 @@ int main(int argc, char **argv) {
   bool afterSeparator = false;
   bool memoryFromFlag = false;
 
-  // The editor tools take flags of their own, which they are handed as
-  // written; only `-C` is `rune`'s.
-  if (command == "lint" || command == "lsp" || command == "fmt") {
+  // The editor tools, and `rune ffi`, take flags of their own, which they
+  // are handed as written; only `-C` is `rune`'s.
+  if (command == "lint" || command == "lsp" || command == "fmt" || command == "ffi" ||
+      command == "tools") {
     std::vector<std::string> rest;
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
@@ -2700,6 +3122,10 @@ int main(int argc, char **argv) {
       if (a == "-v" || a == "--verbose") { opts.Verbose = true; continue; }
       rest.push_back(a);
     }
+    if (command == "ffi")
+      return commandFfi(rest, opts);
+    if (command == "tools")
+      return commandTools(rest, opts);
     return commandEditorTool(command, rest, opts);
   }
 

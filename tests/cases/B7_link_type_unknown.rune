@@ -1,0 +1,4 @@
+// EXPECT-ERROR: `#link`'s `type` is `static` or `dynamic`
+#link("m", type: shared)
+
+fn main() -> i64 { 0 }

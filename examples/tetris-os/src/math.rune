@@ -13,7 +13,7 @@ pub fn fmod(x: f64, m: f64) -> f64 {
     x - m * (whole as f64)
 }
 
-@safe("fsin reads and writes the top of the FPU stack and nothing else")
+#safe("fsin reads and writes the top of the FPU stack and nothing else")
 pub fn sin(x: f64) -> f64 {
     unsafe { asm::value<f64>("fsin", "={st},{st}", x) }
 }

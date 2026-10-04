@@ -152,7 +152,7 @@ pub fn char(c: u8, x: i64, y: i64, colour: u8) {
 }
 
 /// A string, left to right, eight pixels a character.
-@safe("a CString ends at its NUL, and nothing past it is read")
+#safe("a CString ends at its NUL, and nothing past it is read")
 pub fn str(text: CString, x: i64, y: i64, colour: u8) {
     let bytes = unsafe { text as *u8 }
     var i: i64 = 0

@@ -10,14 +10,14 @@
 //
 // An automatic mark — one the compiler answers for, rather than one a type
 // binds. A type has it when every part of it has it; a `bind` claims it
-// where the structure cannot say so, and `@never` refuses it outright.
+// where the structure cannot say so, and `#never` refuses it outright.
 import std::io
 import std::mem
 import std::reflect
 import std::collections::vector
 
 /// Holds nothing but plain values.
-@auto
+#auto
 pub mark Plain {}
 
 /// Claimed where the structure has nothing to look at.
@@ -30,10 +30,10 @@ struct NotPlain { n: i64 }
 extend NotPlain { fn deinit(&var self) { } }
 
 /// Refused, whatever its parts say.
-@never(Plain)
+#never(Plain)
 struct Special { n: i64 }
 
-@never(Plain)
+#never(Plain)
 struct AlsoSpecial { n: i64 }
 struct Holder { inner: AlsoSpecial }
 
@@ -49,7 +49,7 @@ fn main() -> i64 {
     io::println("conforms Point: " + reflect::conforms<Point, Plain>().$str())
     io::println("conforms Named: " + reflect::conforms<Named, Plain>().$str())
     io::println("conforms String: " + reflect::conforms<String, Plain>().$str())
-    // Refused by `@never`, and anything holding one is refused with it.
+    // Refused by `#never`, and anything holding one is refused with it.
     io::println("never: " + reflect::conforms<Special, Plain>().$str())
     io::println("holder: " + reflect::conforms<Holder, Plain>().$str())
 

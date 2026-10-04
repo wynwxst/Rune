@@ -462,9 +462,14 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
     // borrow of something that outlives everything — as safe as it reads.
     bool literal = isa<StringLitExpr>(b->Operand.get()) && !b->IsMutable;
     if (!isLValue(b->Operand.get()) && !literal) {
-      Diags.error(b->Operand->Range, "cannot borrow a temporary value")
-          .note("bind it to a name first, then borrow that")
-          .code(304);
+      auto d = Diags.error(b->Operand->Range, "cannot borrow a temporary value");
+      auto *ix = dyn_cast<IndexExpr>(b->Operand.get());
+      if (ix && ix->OverloadResolved && ix->Base && ix->Base->Ty)
+        d.note(fmt("`[]` on '{}' hands back a copy of the element, not the "
+                   "element itself",
+                   ix->Base->Ty->toString())
+                   .c_str());
+      d.note("bind it to a name first, then borrow that").code(304);
     } else if (b->IsMutable) {
       requireMutable(b->Operand.get(), "mutably borrow");
     }
@@ -497,7 +502,7 @@ Type *Sema::checkExpr(Expr *e, Type *expected) {
       if (inner->isRawPointer())
         reportUnsafe(e->Range, "dereference of a raw pointer",
                      "wrap it in `unsafe { ... }`, or mark the function "
-                     "@unsafe, or justify it with @safe(\"reason\")");
+                     "#unsafe, or justify it with #safe(\"reason\")");
       result = inner->pointee();
       e->Category = ValueCategory::LValue;
     } else if (FunctionDecl *impl = lookupOperator(inner, "deref")) {
@@ -1783,7 +1788,7 @@ Type *Sema::checkMember(MemberExpr *m, Type *expected, bool forCall) {
       break;
     if (recv->isRawPointer())
       reportUnsafe(m->Range, "field access through a raw pointer",
-                   "wrap it in `unsafe { ... }`, or mark the function @unsafe");
+                   "wrap it in `unsafe { ... }`, or mark the function #unsafe");
     recv = recv->pointee();
     ++m->AutoDerefs;
   }
@@ -1998,7 +2003,7 @@ Type *Sema::checkIndex(IndexExpr *i, Type *expected) {
   if (base->is(TypeKind::Pointer) && base->isRawPointer() &&
       !isa<RangeExpr>(i->Index.get())) {
     reportUnsafe(i->Range, "indexing through a raw pointer",
-                 "wrap it in `unsafe { ... }`, or mark the function @unsafe");
+                 "wrap it in `unsafe { ... }`, or mark the function #unsafe");
     Type *idx = checkExpr(i->Index.get(), Types.i64());
     if (!idx->isInt() && !idx->isError())
       Diags.error(i->Index->Range, "expected an integer index — got '{}'",
@@ -2013,7 +2018,7 @@ Type *Sema::checkIndex(IndexExpr *i, Type *expected) {
   while (recv->is(TypeKind::Pointer)) {
     if (recv->isRawPointer())
       reportUnsafe(i->Range, "indexing through a raw pointer",
-                   "wrap it in `unsafe { ... }`, or mark the function @unsafe");
+                   "wrap it in `unsafe { ... }`, or mark the function #unsafe");
     recv = recv->pointee();
   }
 
@@ -2132,7 +2137,7 @@ Type *Sema::checkIndex(IndexExpr *i, Type *expected) {
 // Calls
 //===----------------------------------------------------------------------===//
 
-/// A closure handed to a `@sendable` function runs on another thread, so
+/// A closure handed to a `#sendable` function runs on another thread, so
 /// what it captured crosses with it. A closure's *type* says nothing about
 /// its captures — two closures of one type may capture different things —
 /// so the check is made here, on the closure as written, and only a closure
@@ -2598,8 +2603,8 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
                           method->IsExtern ? "foreign function" : "unsafe "
                                                                   "function",
                           method->Name),
-                   "wrap it in `unsafe { ... }`, mark the caller @unsafe, or "
-                   "justify it with @safe(\"reason\")");
+                   "wrap it in `unsafe { ... }`, mark the caller #unsafe, or "
+                   "justify it with #safe(\"reason\")");
     matchCallArguments(c, method->Params, method->Ty->params(),
                        method->IsVariadic, method->Name, c->Range, method);
     return method->Ty->result();
@@ -2965,8 +2970,8 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
                      fmt("call to {} '{}'",
                             f->IsExtern ? "foreign function" : "unsafe function",
                             f->Name),
-                     "wrap it in `unsafe { ... }`, mark the caller @unsafe, or "
-                     "justify it with @safe(\"reason\")");
+                     "wrap it in `unsafe { ... }`, mark the caller #unsafe, or "
+                     "justify it with #safe(\"reason\")");
       matchCallArguments(c, f->Params, f->Ty->params(), f->IsVariadic, f->Name,
                          c->Range, f);
       if (f->hasAttr("intrinsic"))
@@ -2997,8 +3002,8 @@ Type *Sema::checkCall(CallExpr *c, Type *expected) {
     // A bare pointer: the compiler cannot know it points at anything, so
     // calling one is an unsafe operation.
     reportUnsafe(c->Range, "call through a function pointer",
-                 "wrap it in `unsafe { ... }`, mark the caller @unsafe, or "
-                 "justify it with @safe(\"reason\")");
+                 "wrap it in `unsafe { ... }`, mark the caller #unsafe, or "
+                 "justify it with #safe(\"reason\")");
     std::vector<Param> noParams;
     matchCallArguments(c, noParams, ft->params(), ft->isVariadicFunction(),
                        "this function pointer", c->Range, nullptr);
@@ -4090,10 +4095,7 @@ bool Sema::insertImplicitConversion(ExprPtr &slot, Type *from, Type *to) {
   // give that type away.
   if (from->isOpaque() || to->isOpaque())
     return false;
-  NominalDecl *wanted = instantiateNominal(AsDecl, {to}, slot->Range);
-  auto *mark =
-      wanted ? dyn_cast<MarkDecl>(static_cast<Decl *>(wanted)) : nullptr;
-  FunctionDecl *impl = mark ? lookupMarkMethod(from, mark, "convert") : nullptr;
+  FunctionDecl *impl = lookupConversion(from, to, slot->Range);
   if (!impl)
     return false;
   ensureTemplateSignature(impl);
@@ -4115,8 +4117,7 @@ Type *Sema::checkInto(IntoExpr *e) {
   if (from->isError() || to->isError())
     return to;
 
-  MarkDecl *as = AsDecl;
-  if (!as) {
+  if (!AsDecl) {
     Diags.error(e->Range, "`into` needs the `As` mark")
         .note("it lives in `std::convert`, which the prelude imports; a build "
               "with `--no-stdlib` has no conversions")
@@ -4126,11 +4127,7 @@ Type *Sema::checkInto(IntoExpr *e) {
 
   // `x into Fahrenheit` looks for `bind As<Fahrenheit> to <type of x>`,
   // which is also how `bind <type of x> into Fahrenheit` is stored.
-  NominalDecl *wanted = instantiateNominal(as, {to}, e->Range);
-  auto *wantedMark = wanted ? dyn_cast<MarkDecl>(static_cast<Decl *>(wanted))
-                            : nullptr;
-  FunctionDecl *impl =
-      wantedMark ? lookupMarkMethod(from, wantedMark, "convert") : nullptr;
+  FunctionDecl *impl = lookupConversion(from, to, e->Range);
   if (!impl) {
     auto d = Diags.error(e->Range, "'{}' does not convert into '{}'",
                          from->toString(), to->toString());
@@ -4201,6 +4198,7 @@ Type *Sema::checkCast(CastExpr *c) {
   if (from->isError() || to->isError())
     return to;
 
+
   // Naming a function yields a closure value, but a *declared* function has no
   // environment, so its address alone is meaningful: that is what a C callback
   // slot or a vtable entry wants.
@@ -4213,8 +4211,8 @@ Type *Sema::checkCast(CastExpr *c) {
       reportUnsafe(c->Range,
                    fmt("taking the address of '{}'",
                           cast<FunctionDecl>(ref->Resolved)->Name),
-                   "wrap it in `unsafe { ... }`, mark the function @unsafe, or "
-                   "justify it with @safe(\"reason\")");
+                   "wrap it in `unsafe { ... }`, mark the function #unsafe, or "
+                   "justify it with #safe(\"reason\")");
       return to;
     }
     auto d = Diags.error(c->Range, "only a declared function has an address");
@@ -4240,11 +4238,7 @@ Type *Sema::checkCast(CastExpr *c) {
         .code(395);
     // If the program supplied this conversion itself, name the spelling that
     // reaches it.
-    bool haveInto = false;
-    if (AsDecl)
-      if (NominalDecl *inst = instantiateNominal(AsDecl, {to}, c->Range))
-        if (auto *mk = dyn_cast<MarkDecl>(static_cast<Decl *>(inst)))
-          haveInto = lookupMarkMethod(from, mk, "convert") != nullptr;
+    bool haveInto = lookupConversion(from, to, c->Range) != nullptr;
     if (haveInto)
       d.note(fmt("`{} into {}` is the conversion this program defines",
                     from->toString(), to->toString())
@@ -4259,14 +4253,22 @@ Type *Sema::checkCast(CastExpr *c) {
 
   bool fromPtr = from->is(TypeKind::Pointer) || from->is(TypeKind::CString);
   bool toPtr = to->is(TypeKind::Pointer) || to->is(TypeKind::CString);
+  // `0 as *var T` is the null pointer. Making one is not unsafe — reading
+  // through it would be, and that is checked where it happens — so the
+  // default of a pointer field, `p: *var u8 = 0 as *var u8`, needs no
+  // `unsafe` around it.
+  if (auto *lit = dyn_cast<IntLitExpr>(c->Operand.get()))
+    if (lit->Value == 0 &&
+        (toPtr || to->is(TypeKind::CFunction)))
+      return to;
   if ((fromPtr && to->isInt()) || (from->isInt() && toPtr) ||
       (to->is(TypeKind::Pointer) && to->isRawPointer() && !from->isError()) ||
       (fromPtr && toPtr && from->pointee() != to->pointee()))
     reportUnsafe(c->Range,
                  fmt("cast from '{}' to '{}'", from->toString(),
                         to->toString()),
-                 "wrap it in `unsafe { ... }`, mark the function @unsafe, or "
-                 "justify it with @safe(\"reason\")");
+                 "wrap it in `unsafe { ... }`, mark the function #unsafe, or "
+                 "justify it with #safe(\"reason\")");
   return to;
 }
 
@@ -4347,17 +4349,35 @@ Type *Sema::checkTry(TryExpr *t) {
 /// such binding. Quiet: the caller decides what a missing one means.
 FunctionDecl *Sema::lookupErrorConversion(Type *from, Type *to,
                                           SourceRange at) {
-  if (!AsDecl)
-    return nullptr;
-  NominalDecl *wanted = instantiateNominal(AsDecl, {to}, at);
-  auto *wantedMark = wanted ? dyn_cast<MarkDecl>(static_cast<Decl *>(wanted))
-                            : nullptr;
-  FunctionDecl *impl =
-      wantedMark ? lookupMarkMethod(from, wantedMark, "convert") : nullptr;
+  FunctionDecl *impl = lookupConversion(from, to, at);
   if (!impl)
     return nullptr;
   ensureTemplateSignature(impl);
   return impl;
+}
+
+FunctionDecl *Sema::lookupConversion(Type *from, Type *to, SourceRange at) {
+  if (!AsDecl || !from || !to)
+    return nullptr;
+  NominalDecl *wanted = instantiateNominal(AsDecl, {to}, at);
+  auto *mark =
+      wanted ? dyn_cast<MarkDecl>(static_cast<Decl *>(wanted)) : nullptr;
+  if (!mark)
+    return nullptr;
+  // A pointer can be the source of a conversion in its own right:
+  // `bind<T> *var T into *var u8`. Asked first, because the usual lookup
+  // reads through every pointer to the type behind it, which is right for
+  // `&Celsius into Fahrenheit` and would never find a bind on the pointer.
+  if (from->is(TypeKind::Pointer)) {
+    ensureStructuralBinds(from);
+    auto it = MarkImpls.find({from, mark});
+    if (it != MarkImpls.end()) {
+      auto mit = it->second.find("convert");
+      if (mit != it->second.end())
+        return mit->second;
+    }
+  }
+  return lookupMarkMethod(from, mark, "convert");
 }
 
 } // namespace rune

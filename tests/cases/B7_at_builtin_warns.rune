@@ -1,0 +1,8 @@
+// FLAGS: -Werror
+// EXPECT-ERROR: the compiler's decorators are written with `#`
+// The older spelling of a built-in decorator, `@inline`, still compiles, and
+// says what to write instead (W0133). Under -Werror that is a failure.
+@inline
+fn square(n: i64) -> i64 { n * n }
+
+fn main() -> i64 { square(3) - 9 }

@@ -4,11 +4,12 @@ Reading and writing JSON. A document is a `json::Value` — one of seven shapes:
 
 | Name | Signature | Does |
 | --- | --- | --- |
-| `parse` | `(String) -> Result<Value, Error>` | the whole text as one value; anything trailing is an error |
-| `write` / `pretty` | `(&Value) -> String` | compact, or laid out one member per line; the document is borrowed, so it is still there afterwards |
-| `load` / `save` | `(&String) -> Result<Value, Error>` / `(&String, &Value) -> Error?` | the same, over a file |
+| `parse` / `parseText` | `(String) -> Result<Value, Error>` | the whole text as one value; anything trailing is an error |
+| `parsePrefix` | `(String, from: i64) -> Result<(Value, i64), Error>` | one value starting at `from`, and the offset it ended at — for a stream of documents in one buffer |
+| `write` / `compact` / `pretty` / `prettyLine` | `(&Value) -> String` | compact, or laid out one member per line (`prettyLine` adds a final newline); the document is borrowed, so it is still there afterwards |
+| `load` / `save` / `saveCompact` | `(&String) -> Result<Value, Error>` / `(&String, &Value) -> Error?` | the same, over a file; `save` writes it pretty |
 | `Value` | `enum` | `Null`, `Bool`, `Int`, `Number`, `Text`, `Array`, `Object` |
-| `Value::asBool` … `asObject` | `(&self) -> T?` | what is inside, if it is that; `asInt` does not round |
+| `Value::asBool` / `asInt` / `asFloat` / `asText` / `asArray` / `asObject` | `(&self) -> T?` | what is inside, if it is that; `asInt` does not round |
 | `Value::get` / `index` | `(&self, String) -> Value?` / `(&self, i64) -> Value?` | a member, or an element |
 | `value["name"]` / `value[0]` | `-> Value` | the same, with `Null` for what is not there |
 | `Value::kind` / `length` / `isNull` |  | asking about the shape |
@@ -17,6 +18,8 @@ Reading and writing JSON. A document is a `json::Value` — one of seven shapes:
 | `Object` | `class` | members in insertion order: `at`, `put`, `remove`, `keys`, `holds` |
 | `Array` | `class` | `at`, `push`, `length` |
 | `Error` | `struct { kind, line, column, offset, detail }` | what went wrong, and where; prints as a sentence |
+| `errorAt` / `ofFile` | `(Kind, &String, i64, String) -> Error` / `(io::FileError) -> Error` | make one: at a byte offset, with the line and column worked out; or for a file that could not be read |
+| `describeError` | `(Error) -> String` | the sentence it prints as |
 | `json!` | `macro` | a document written the way JSON is written |
 | `v into json::Value` |  | `i64`, `i32`, `f64`, `bool` and `String` convert |
 

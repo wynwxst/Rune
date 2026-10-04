@@ -1,7 +1,7 @@
-// `@type` says what a file produces. This one has a `main`, so it would be an
+// `#type` says what a file produces. This one has a `main`, so it would be an
 // executable anyway; saying so explicitly is the point.
 // EXPECT: explicit is fine
-@type(Executable)
+#type(Executable)
 
 import std::io
 import std::collections::vector

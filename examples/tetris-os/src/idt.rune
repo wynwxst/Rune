@@ -30,7 +30,7 @@ pub fn set(index: i64, handler: usize, selector: u16, flags: u8) {
     }
 }
 
-@safe("hands the processor the address of a table that lives for ever")
+#safe("hands the processor the address of a table that lives for ever")
 pub fn init() {
     let limit = (256 * 8 - 1) as u16
     let base = unsafe { &var entries[0] as *var u8 as usize }

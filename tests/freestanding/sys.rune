@@ -1,8 +1,8 @@
 // A freestanding program for Linux x86_64 with no C library: two system
 // calls by inline assembly, a bump allocator, and a panic handler that
 // prints and exits 101. Every case in this directory is compiled with it.
-@runtime(none)
-@entry(none)
+#runtime(none)
+#entry(none)
 
 import std::asm
 
@@ -33,12 +33,12 @@ pub fn exit(code: i64) -> Never {
 }
 
 /// Where `io::println` and the rest go: standard output, by system call.
-@output
+#output
 fn writeOut(bytes: *u8, count: usize) {
     let written: i64 = unsafe { asm::value<i64>("syscall", "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}", 1, 1, bytes, count as i64) }
 }
 
-@panicHandler
+#panicHandler
 fn panicked(message: CString, location: CString) -> Never {
     say("panic: ")
     say(message)
@@ -50,7 +50,7 @@ global var arena: [65536:u8] = [0; 65536]
 global var used: usize = 0
 pub global var live: i64 = 0
 
-@allocator
+#allocator
 fn allocate(size: usize, align: usize) -> *var u8 {
     let at = (used + align - 1) / align * align
     used = at + size
@@ -58,5 +58,5 @@ fn allocate(size: usize, align: usize) -> *var u8 {
     unsafe { &var arena[at as i64] as *var u8 }
 }
 
-@deallocator
+#deallocator
 fn release(block: *var u8, size: usize, align: usize) { live -= 1 }

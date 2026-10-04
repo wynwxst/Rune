@@ -1,0 +1,8 @@
+#type(Macros)
+// The macro package half of `libmacros`.
+import std::Macro
+
+#macro
+pub fn greet(input: Macro::Tokens) -> Macro::Tokens {
+    Macro::parse("\"hello, " + input.text() + "\"")
+}

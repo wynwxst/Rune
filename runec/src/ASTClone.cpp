@@ -97,6 +97,7 @@ std::unique_ptr<EnumVariantDecl> cloneEnumVariant(const EnumVariantDecl *v) {
 Attribute cloneAttribute(const Attribute &a) {
   Attribute c;
   c.Name = a.Name;
+  c.Builtin = a.Builtin;
   c.Range = a.Range;
   for (const auto &arg : a.Args)
     c.Args.push_back(cloneExpr(arg.get()));

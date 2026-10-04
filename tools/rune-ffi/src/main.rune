@@ -1,0 +1,88 @@
+// rune ffi: write Rune bindings for C headers.
+//
+//     rune ffi /usr/include/zlib.h --link z -o src/zlib.rune
+//
+// The same options as Rust's bindgen where the idea is the same: allowlists
+// and blocklists by pattern, opaque types, include paths and defines, and
+// any other argument for clang after `--clang-arg`.
+
+import std::io
+import std::cli
+import std::process
+import interface
+
+fn main() -> i64 {
+    var p = cli::Parser("rune ffi", "Rune bindings for C headers, read with libclang")
+    p.rest("headers", "the headers to bind; several are read as one translation unit")
+    p.option("output", "o", "write the bindings here instead of to standard output", "")
+    p.optionMany("include", "I", "another directory to search for #include")
+    p.optionMany("define", "D", "NAME or NAME=VALUE, as a C compiler takes it")
+    p.optionMany("undefine", "U", "a predefined macro to remove")
+    p.optionMany("link", "l", "a library the bindings link with: #link(\"name\")")
+    p.option("target", "", "the target triple; the host's by default", "")
+    p.option("sysroot", "", "where the target's headers are", "")
+    p.optionMany("allowlist-function", "", "bind only functions matching this * pattern")
+    p.optionMany("allowlist-type", "", "write only types matching this * pattern")
+    p.optionMany("allowlist-var", "", "bind only variables matching this * pattern")
+    p.optionMany("allowlist-file", "", "everything declared in headers matching this * pattern")
+    p.optionMany("blocklist-item", "", "never write anything matching this * pattern")
+    p.optionMany("opaque-type", "", "write these types as empty structs, behind pointers")
+    p.optionMany("clang-arg", "", "any other argument for clang")
+    p.option("enum-style", "", "consts (an alias and a constant each) or rune (a C enum)", "consts")
+    p.flag("no-layout-tests", "", "leave out layoutMismatches()")
+    p.flag("no-cstring", "", "keep const char * as *i8 rather than CString")
+    p.flag("no-constants", "", "write no constants for #defines")
+    p.flag("reserved", "", "also bind names that begin with __")
+    let args = p.parseOrExit()
+
+    let headers = args.rest()
+    if headers.length() == 0 {
+        io::eprintln(p.usage())
+        return 2
+    }
+    var b = interface::Builder()
+    for h in headers { b.header(h.$clone()) }
+    for d in args.values("include") { b.includeDir(d.$clone()) }
+    for d in args.values("define") {
+        let eq = d.$find("=")
+        if eq < 0 { b.define(d.$clone(), "") } else { b.define(d.$substring(0, eq), d.$substring(eq + 1, d.$length())) }
+    }
+    for u in args.values("undefine") { b.undefine(u.$clone()) }
+    for l in args.values("link") { b.link(l.$clone()) }
+    for a in args.values("clang-arg") { b.clangArg(a.$clone()) }
+    for f in args.values("allowlist-function") { b.allowFunction(f.$clone()) }
+    for t in args.values("allowlist-type") { b.allowType(t.$clone()) }
+    for v in args.values("allowlist-var") { b.allowVar(v.$clone()) }
+    for f in args.values("allowlist-file") { b.allowFile(f.$clone()) }
+    for x in args.values("blocklist-item") { b.block(x.$clone()) }
+    for o in args.values("opaque-type") { b.opaque(o.$clone()) }
+    let triple = args.value("target") ?? ""
+    if !triple.$isEmpty() { b.target(triple) }
+    let sysroot = args.value("sysroot") ?? ""
+    if !sysroot.$isEmpty() { b.sysroot(sysroot) }
+    b.options.enumStyle = args.value("enum-style") ?? "consts"
+    b.options.layoutTests = !args.has(&"no-layout-tests")
+    b.options.cstrings = !args.has(&"no-cstring")
+    b.options.constants = !args.has(&"no-constants")
+    b.options.reserved = args.has(&"reserved")
+
+    match b.generate() {
+        Ok(bindings) => {
+            for w in bindings.warnings { io::eprintln("rune ffi: " + w) }
+            let out = args.value("output") ?? ""
+            if out.$isEmpty() {
+                io::print(bindings.source)
+            } else {
+                match bindings.writeTo(&out) {
+                    Some(e) => { io::eprintln("rune ffi: cannot write " + out + ": " + io::describe(e)); return 1 },
+                    None => io::eprintln("rune ffi: wrote " + out),
+                }
+            }
+            0
+        },
+        Err(why) => {
+            io::eprintln("rune ffi: " + why)
+            1
+        },
+    }
+}

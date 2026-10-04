@@ -1,4 +1,4 @@
-@type(Executable)
+#type(Executable)
 
 fn Partition<T: operator::cmp>(var s: [T]) -> i64 {
     var i: i64 = -1

@@ -18,9 +18,9 @@
 //   memory      u32      0 = reference counting, 1 = Zombie
 //   name        string   the library's module name
 //
-//   flagCount   u32      `@Config` names that were set when this was built
+//   flagCount   u32      `#Config` names that were set when this was built
 //     flag      string
-//   valueCount  u32      `@Config` keys that had values
+//   valueCount  u32      `#Config` keys that had values
 //     key       string
 //     value     string
 //
@@ -40,7 +40,7 @@
 // the way in, so a library never carries its internals.
 //
 // **The conditions travel with it.** The interface is source, so its
-// `@Config` conditions have to be answered again on import — and answered the
+// `#Config` conditions have to be answered again on import — and answered the
 // way they were when the object code was made, not the way the importer's own
 // build would answer them. That is what `flagCount` and `valueCount` are for.
 //
@@ -76,7 +76,7 @@ struct LibraryContents {
   /// One entry per module compiled into the library: its dotted module path
   /// and the Rune source that declares it.
   std::vector<std::pair<std::string, std::string>> Interfaces;
-  /// The `@Config` answers this library was built with: the names that were
+  /// The `#Config` answers this library was built with: the names that were
   /// set, and the keys that had values. An importer reads the interface as
   /// source, so its conditions have to be answered the way they were when
   /// the object code was produced — not the way the importer's own build

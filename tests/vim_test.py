@@ -45,7 +45,7 @@ fn main() -> i64 {
 """
 CLEAN = MOVED.replace("    b + a.v\n", "    b\n")
 
-SYNTAX = """@lint(allow(unused-variable), warn(todo))
+SYNTAX = """#lint(allow(unused-variable), warn(todo))
 fn main() -> i64 {
     let f: @function(i64) -> bool = ||(n: i64) -> bool { n > 0 }
     let s = "total: {count}\\n"
@@ -87,7 +87,7 @@ function! Group(line, text) abort
   let col = stridx(getline(a:line), a:text) + 1
   return synIDattr(synID(a:line, col, 1), 'name')
 endfunction
-call add(out, 'lint=' . Group(1, '@lint'))
+call add(out, 'lint=' . Group(1, '#lint'))
 call add(out, 'allow=' . Group(1, 'allow'))
 call add(out, 'rule=' . Group(1, 'unused-variable'))
 call add(out, 'fn=' . Group(2, 'fn'))
@@ -108,7 +108,7 @@ qa!
     got = dict(l.split("=", 1) for l in (lines or []) if "=" in l)
     check("vim: .rune files are the rune filetype", got.get("ft") == "rune", lines)
     check("vim: the syntax loads", got.get("syntax") == "rune", lines)
-    check("vim: @lint, its levels and its rules", got.get("lint") == "runeDecorator" and got.get("allow") == "runeLintKeyword"
+    check("vim: #lint, its levels and its rules", got.get("lint") == "runeDecorator" and got.get("allow") == "runeLintKeyword"
           and got.get("rule") == "runeLintRule", lines)
     check("vim: keywords and function names", got.get("fn") == "runeKeyword" and got.get("main") == "runeFuncName", lines)
     check("vim: @function is a type", got.get("fntype") == "runeFnType", lines)

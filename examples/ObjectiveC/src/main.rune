@@ -25,7 +25,7 @@ pub mark ObjC_Object {
     pub fn as_ptr(&self) -> objc_object
 }
 
-@safe("a null pointer is never read through; it only stands for `nil`")
+#safe("a null pointer is never read through; it only stands for `nil`")
 pub fn null_ptr() -> objc_object { unsafe { 0 as *var u8 } }
 
 /// An object reference — `id` in Objective-C.
@@ -61,10 +61,10 @@ bind ObjC_Object to Class {
 // A C string is already the address of NUL-terminated bytes, which is exactly
 // what `stringWithUTF8String:` is asking for.
 bind ObjC_Object to CString {
-    @safe("a CString is already the address of NUL-terminated bytes")
+    #safe("a CString is already the address of NUL-terminated bytes")
     pub fn from_ptr(ptr: objc_object) -> Self { unsafe { ptr as CString } }
 
-    @safe("the same address, read back as the pointer it is")
+    #safe("the same address, read back as the pointer it is")
     pub fn as_ptr(&self) -> objc_object { unsafe { self as *var u8 } }
 }
 
@@ -114,26 +114,26 @@ pub macro SendMsgAs {
 
 // Every one of these sends a message named by a string. Nothing checks that
 // the receiver understands it, or that the arguments match what it expects,
-// so the whole surface is `@unsafe` and says so once, here.
+// so the whole surface is `#unsafe` and says so once, here.
 extend Selector {
-    @unsafe pub fn new(str: CString) -> Self {
+    #unsafe pub fn new(str: CString) -> Self {
         Selector { object: sel_registerName(str) }
     }
 }
 
 extend Class {
-    @unsafe pub fn new(str: CString) -> Self { Class { id: objc_getClass(str) } }
+    #unsafe pub fn new(str: CString) -> Self { Class { id: objc_getClass(str) } }
     pub fn from_id(ID: id) -> Self { Class { id: ID.as_ptr() } }
 
     /// A message with no arguments.
-    @unsafe pub fn select(&self, method: CString) -> id {
+    #unsafe pub fn select(&self, method: CString) -> id {
         id::from_ptr(SendMsg!(self, Selector::new(method)))
     }
 
     /// A message with one object argument. It takes a `dyn ObjC_Object`, so
     /// an `id`, a `Class`, a `CString` or a bare pointer all go in without
     /// the call site converting anything.
-    @unsafe pub fn call(&self, method: CString, arg: dyn ObjC_Object) -> id {
+    #unsafe pub fn call(&self, method: CString, arg: dyn ObjC_Object) -> id {
         id::from_ptr(SendMsg!(self, Selector::new(method), arg.as_ptr()))
     }
 
@@ -142,11 +142,11 @@ extend Class {
 
 extend id {
     /// The same two, for an instance rather than a class.
-    @unsafe pub fn select(&self, method: CString) -> id {
+    #unsafe pub fn select(&self, method: CString) -> id {
         id::from_ptr(SendMsg!(self, Selector::new(method)))
     }
 
-    @unsafe pub fn call(&self, method: CString, arg: dyn ObjC_Object) -> id {
+    #unsafe pub fn call(&self, method: CString, arg: dyn ObjC_Object) -> id {
         id::from_ptr(SendMsg!(self, Selector::new(method), arg.as_ptr()))
     }
 }
@@ -185,11 +185,11 @@ enum Style {
 }
 
 /// A `String` is what one writes; `stringWithUTF8String:` wants bytes.
-@unsafe pub fn nsstring(text: String) -> id {
+#unsafe pub fn nsstring(text: String) -> id {
     Class::new("NSString").call("stringWithUTF8String:", text.$cstr())
 }
 
-@unsafe pub fn main() -> i64 {
+#unsafe pub fn main() -> i64 {
     let app = Class::from_id(
         Class::new("NSApplication").select("sharedApplication"))
 

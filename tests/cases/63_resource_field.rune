@@ -1,10 +1,10 @@
-// `@resource` says a field holds something the compiler cannot release on
+// `#resource` says a field holds something the compiler cannot release on
 // its own, so `deinit` has to mention it. This one does not.
-// EXPECT-ERROR: is a `@resource` that 'Socket::deinit' never mentions
+// EXPECT-ERROR: is a `#resource` that 'Socket::deinit' never mentions
 import std::io
 
 struct Socket {
-    @resource fd: i32,
+    #resource fd: i32,
     port: i32
 }
 

@@ -2,14 +2,14 @@
 // `--shared`, so the system's loader can open it and a program can look its
 // functions up by name.
 //
-// `@export` is what makes that possible: it gives a function the symbol the
+// `#export` is what makes that possible: it gives a function the symbol the
 // outside world knows it by, with no mangling, so `dlsym` finds it.
 import std::io
 
-@export("greeter_add")
+#export("greeter_add")
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 
-@export("greeter_shout")
+#export("greeter_shout")
 pub fn shout(times: i64) -> i64 {
     var i = 0
     while i < times {
@@ -22,7 +22,7 @@ pub fn shout(times: i64) -> i64 {
 /// State lives in the library, and stays there between calls.
 global var counter: i64 = 0
 
-@export("greeter_next")
+#export("greeter_next")
 pub fn next() -> i64 {
     counter += 1
     counter

@@ -123,7 +123,7 @@ pub mark Holder: Named {
 
 /// An automatic mark: nobody implements it, and a type has it when every
 /// part of it does.
-@auto
+#auto
 pub mark Plain {}
 
 //===--------------------------------------------------------------------===//
@@ -229,7 +229,7 @@ extern "C" {
 }
 
 /// A wrapper, so the consumer need not repeat the declaration.
-@safe("the argument is a Rune string's own NUL-terminated bytes")
+#safe("the argument is a Rune string's own NUL-terminated bytes")
 pub fn lengthOf(text: String) -> i64 {
     unsafe { strlen(text.$cstr()) as i64 }
 }

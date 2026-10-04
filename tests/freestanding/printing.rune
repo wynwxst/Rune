@@ -4,8 +4,8 @@ import std::fmt
 
 // `String`, `format!`, `println!` and numbers as text on a program with no C
 // library: the freestanding runtime makes them, and `io` writes through the
-// program's `@output` (in sys.rune).
-@export("_start")
+// program's `#output` (in sys.rune).
+#export("_start")
 fn start() -> Never {
     let name: String = "freestanding"
     println!("hello from {name}: {} {}", 6 * 7, 0.1 + 0.2)

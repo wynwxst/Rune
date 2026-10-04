@@ -15,7 +15,7 @@ looks, never what it does:
 | `duplicate-import` | a second `import` of the same thing is removed |
 | `trailing-whitespace`, `tab-indentation` | as step 4 would anyway |
 
-An `@lint(allow(...))` directive that turns one of these off keeps it off here
+An `#lint(allow(...))` directive that turns one of these off keeps it off here
 too: `rune doc lint` has the details.
 
 ## 2. What the compiler knows, written in
@@ -58,8 +58,8 @@ blank line:
 
 1. the header — a comment at the very top, apart from what follows by a blank
    line;
-2. the file's directives: `@type(...)`, `@link(...)`, `@linkpath(...)`, and an
-   `@lint(...)` that applies to the whole file;
+2. the file's directives: `#type(...)`, `#link(...)`, `#linkpath(...)`, and an
+   `#lint(...)` that applies to the whole file;
 3. imports, the standard library's first, then the rest, each group sorted;
 4. type aliases, `type Name = ...`;
 5. globals, `global var` and `global let`;

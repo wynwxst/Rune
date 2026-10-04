@@ -1,4 +1,4 @@
-// FFI is unsafe; @safe records why a wrapper is nevertheless sound.
+// FFI is unsafe; #safe records why a wrapper is nevertheless sound.
 // EXPECT: abs=7
 // EXPECT: formatted once
 import std::io
@@ -8,12 +8,12 @@ extern "C" {
     printf(format: CString, ...) -> i32
 }
 
-@safe("abs is total: every i32 input has a defined result")
+#safe("abs is total: every i32 input has a defined result")
 fn absolute(value: i32) -> i32 {
     abs(value)
 }
 
-@unsafe
+#unsafe
 fn writeRaw(text: CString) {
     printf("%s\n", text)
 }

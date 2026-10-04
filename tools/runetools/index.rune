@@ -173,7 +173,7 @@ pub class Index {
     /// True when the file has `extend` or `bind` blocks, which reach
     /// whoever imports it without its name being written anywhere.
     pub hasBindings: bool
-    /// `@type(...)`, when the file says what it produces.
+    /// `#type(...)`, when the file says what it produces.
     pub fileType: String
 
     fn init(self, path: String, lexed: syntax::Lexed) {
@@ -547,7 +547,7 @@ fn scanItems(ix: &var Index, docs: &dictionary::Map<i64, String>,
         let itemStart = i
         var decorators = vector::Vector<String>()
         var docDecorator = ""
-        while lx.isText(i, "@") {
+        while lx.isSigil(i) {
             let name = lx.text(i + 1)
             decorators.push(name.$clone())
             i += 2
@@ -735,11 +735,43 @@ fn scanItems(ix: &var Index, docs: &dictionary::Map<i64, String>,
             while !lx.isEnd(j) && !lx.isText(j, "{") && !lx.isNewline(j) { j += 1 }
             if lx.isText(j, "{") {
                 let close = lx.closing(j)
+                let before = ix.symbols.length()
                 scanItems(ix, docs, trailing, j + 1, close - 1, container.$clone(), containerKind.$clone(), true)
+                // `pub extern "C" { ... }` makes everything in it public —
+                // generated bindings write it that way — though no `pub`
+                // stands before each declaration.
+                if isPublic {
+                    var m = before
+                    while m < ix.symbols.length() {
+                        ix.symbols.touch(m).isPublic = true
+                        m += 1
+                    }
+                }
                 i = close + 1
             } else {
                 i = j
             }
+            continue
+        }
+
+        // `name: T` in an extern block: a variable C defines, read-only.
+        if inExtern && lx.isIdent(i) && lx.isText(i + 1, ":") {
+            var s = Symbol()
+            s.kind = "global"
+            s.name = lx.text(i)
+            s.nameTok = i
+            s.startTok = itemStart
+            s.isPublic = isPublic
+            s.isExtern = true
+            s.doc = doc
+            s.decorators = decorators
+            s.container = container.$clone()
+            let end = statementEnd(lx, i)
+            s.endTok = end
+            s.typeText = textOf(lx, i + 2, end)
+            s.detail = textOf(lx, i, end)
+            ix.symbols.push(s)
+            i = end + 1
             continue
         }
 

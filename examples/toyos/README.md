@@ -63,10 +63,10 @@ KERNEL PANIC: index 4 is out of bounds for a collection of length 4
 | `Rune.toml` | `runtime = "none"`, `entry = "none"`, the `bare-x86` target, and QEMU as its runner |
 | `kernel.ld` | where each section goes: the image at 1 MB, the multiboot header first |
 | `boot/boot.s` | the multiboot header, a 64 KB stack, and the call to `kernel_main` — the one part that cannot be Rune, because until it runs there is no stack |
-| `src/main.rune` | `@runtime(none)`, `@entry(none)`, `kernel_main`, the checks, and the `@panicHandler` |
+| `src/main.rune` | `#runtime(none)`, `#entry(none)`, `kernel_main`, the checks, and the `#panicHandler` |
 | `src/console.rune` | the VGA text screen and the COM1 serial port |
 | `src/cpu.rune` | I/O ports through `std::asm`, halting, switching off |
-| `src/heap.rune` | a first-fit allocator, the kernel's `@allocator` and `@deallocator` |
+| `src/heap.rune` | a first-fit allocator, the kernel's `#allocator` and `#deallocator` |
 | `src/process.rune` | processes and a round-robin scheduler, as classes |
 | `src/multiboot.rune` | what the boot loader left in EBX |
 
@@ -76,7 +76,7 @@ KERNEL PANIC: index 4 is out of bounds for a collection of length 4
   `safety = "full"`: every index is bounds-checked, every `+` is
   overflow-checked, and the Zombie borrow checker proves every borrow. A
   failed check goes to `panicked` in `main.rune`, which is the kernel's
-  `@panicHandler`.
+  `#panicHandler`.
 - **A heap of its own.** Every class the kernel makes comes from
   `heap.rune`'s allocator. Under single ownership nothing is counted: a
   process is owned by the one before it, the scheduler owns the first, and

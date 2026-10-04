@@ -10,7 +10,7 @@
 | `target` | the full triple being built for |
 | `safety` | `none`, `minimal` or `full` |
 | `memory` | `arc` or `zombie` |
-| `runtime` | `hosted`, or `none` for a program built `@runtime(none)` |
+| `runtime` | `hosted`, or `none` for a program built `#runtime(none)` |
 | `opt_level` | `"0"` through `"3"` |
 | `overflow_checks` | `on` or `off` |
 
@@ -28,15 +28,15 @@ A condition joins those with `&&`, `||`, `!` and parentheses. There is nothing e
 **Conditions compose**
 
 ```rune
-@Config(arch == "aarch64" && os == "macos")
+#Config(arch == "aarch64" && os == "macos")
 fn tuned() -> i64 { 1 }
 
-@Config(!(arch == "aarch64" && os == "macos"))
+#Config(!(arch == "aarch64" && os == "macos"))
 fn tuned() -> i64 { 0 }
 
-@Config(debug)
+#Config(debug)
 fn checking() -> bool { true }
 
-@Config(!debug)
+#Config(!debug)
 fn checking() -> bool { false }
 ```

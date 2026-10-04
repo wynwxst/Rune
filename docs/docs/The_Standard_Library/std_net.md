@@ -16,6 +16,8 @@ TCP, as streams. `listen` and `connect` are the two ways in, and what comes back
 | `shutdown` | `(&var self, how: Shutdown) -> NetError?` | `Read`, `Write` or `Both` |
 | `close` | `(&var self)` | now rather than later |
 | `release` / `adopt` | `(&var self) -> i64` / `(i64) -> TcpStream` | hand the descriptor over, and take one |
+| `adoptFrom` | `(descriptor: i64, peer: String, port: i32) -> TcpStream` | `adopt`, remembering who is at the other end |
+| `descriptorValue` | `(&self) -> i64` | the raw descriptor, for a call this module does not wrap; the stream still owns it |
 | `clone` | `(&self) -> Self` | a second descriptor for the same socket; what `$clone()` does |
 | `AsyncStream` / `AsyncListener` | `class` | the same sockets for tasks: `read`, `write`, `writeText`, `readAll` and `accept` are `async fn`s that park the task on the socket |
 | `listenAsync` | `(address: String, port: i32) -> Result<AsyncListener, NetError>` | listen, for tasks |
@@ -24,7 +26,7 @@ TCP, as streams. `listen` and `connect` are the two ways in, and what comes back
 
 *`NetError` is `Refused`, `AddressInUse`, `Unreachable`, `WouldBlock`, `Interrupted`, `TimedOut`, `Reset`, `PermissionDenied`, `NotFound`, `Closed` or `Failed`; `describe` puts it in words. See **Tasks and futures** for the `Async` pair.*
 
-Both types own their descriptor the way [Structs](#structs) describes: the field is `@resource`, the `deinit` closes it, and handing one on is a move. So a connection closes itself when the binding holding it goes, and there is never a second owner to close it twice.
+Both types own their descriptor the way [Structs](#structs) describes: the field is `#resource`, the `deinit` closes it, and handing one on is a move. So a connection closes itself when the binding holding it goes, and there is never a second owner to close it twice.
 
 **A connection over the loopback**
 

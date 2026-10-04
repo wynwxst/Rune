@@ -2,7 +2,7 @@
 // From fpu.c.
 import std::asm
 
-@safe("sets the control registers' FPU bits; touches no memory")
+#safe("sets the control registers' FPU bits; touches no memory")
 pub fn init() {
     unsafe { asm::run("clts", "") }
     var cr0 = unsafe { asm::value<u32>("mov %cr0, $0", "=r") }

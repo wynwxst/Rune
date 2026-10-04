@@ -35,19 +35,19 @@ pub class CodePoints {
     pub fn length(&self) -> i64 { self.count }
     pub fn isEmpty(&self) -> bool { self.count == 0 }
 
-    @safe("every index below the count was written by `push`")
+    #safe("every index below the count was written by `push`")
     pub fn get(&self, index: i64) -> i64 {
         if index < 0 || index >= self.count { return 0 }
         unsafe { (self.block as *var i64)[index] }
     }
 
-    @safe("the index is compared against the count before the write")
+    #safe("the index is compared against the count before the write")
     pub fn set(&var self, index: i64, value: i64) {
         if index < 0 || index >= self.count { return }
         unsafe { (self.block as *var i64)[index] = value }
     }
 
-    @safe("the slot written is below the count that `reserve` has covered")
+    #safe("the slot written is below the count that `reserve` has covered")
     pub fn push(&var self, value: i64) {
         if self.count == self.capacity {
             var grown = self.capacity * 2
@@ -108,7 +108,7 @@ pub fn foldCase(c: Character) -> Character {
 //===--------------------------------------------------------------------===//
 
 /// Appends the full canonical decomposition of `cp` to `out`.
-@safe("both out-parameters are locals of this function")
+#safe("both out-parameters are locals of this function")
 fn decomposeInto(out: &var CodePoints, cp: i64) {
     if isHangulSyllable(cp) {
         let index = cp - hangulBase()

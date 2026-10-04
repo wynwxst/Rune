@@ -6,6 +6,7 @@
 
 - [Every kind of pattern](every_kind_of_pattern.md)
 - [Slice and array patterns](slice_and_array_patterns.md)
+- [Bindings borrow; `take` moves](bindings_borrow_take_moves.md)
 - [Bindings in alternatives](bindings_in_alternatives.md)
 - [Exhaustiveness](exhaustiveness.md)
 - [Matching through a borrow](matching_through_a_borrow.md)

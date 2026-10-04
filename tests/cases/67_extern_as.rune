@@ -1,17 +1,17 @@
-// `@as` renames a foreign declaration for Rune's side, so a program may
+// `#as` renames a foreign declaration for Rune's side, so a program may
 // declare a function with the name C already uses.
 // EXPECT: 7
 // EXPECT: 9
 import std::io
 
 extern "C" {
-    @as("cAbs")
+    #as("cAbs")
     fn abs(v: i32) -> i32
 }
 
 fn abs(v: i64) -> i64 { if v < 0 { 0 - v } else { v } }
 
-@safe("abs touches no memory")
+#safe("abs touches no memory")
 fn main() -> i64 {
     io::println(abs(-7).$str())
     io::println(cAbs(-9i32).$str())

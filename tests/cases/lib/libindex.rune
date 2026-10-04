@@ -1,6 +1,6 @@
 // A library whose bindings overload, so an importer picks between versions
 // that arrived through a `.rul` rather than from its own source.
-@type(Library)
+#type(Library)
 import std::io
 
 pub struct Grid { pub w: i64, pub h: i64 }
