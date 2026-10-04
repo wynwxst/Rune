@@ -724,8 +724,10 @@ bool linkExecutable(const std::string &objPath,
     own("-lws2_32");
   // The runtime's threads and locks use pthreads; glibc before 2.34 (the
   // manylinux_2_28 build) keeps them in a separate library.
-  if (triple.isOSLinux() && !opts.Freestanding)
+  if (triple.isOSLinux() && !opts.Freestanding) {
     own("-lpthread");
+    own("-ldl"); // dlopen and friends, likewise in libc only from 2.34
+  }
 
   if (opts.Verbose)
     diags.status("link: " + spellCommand(argv));

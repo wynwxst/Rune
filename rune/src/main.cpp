@@ -423,7 +423,12 @@ bool runStep(const std::string &verb, const std::string &what,
   // several compilers are running here. Left alone they would each ask for
   // the whole machine and spend the difference fighting over it, so the
   // machine is divided between them instead.
+#if defined(_WIN32)
+  // cmd.exe has no `NAME=value command` prefix.
+  full = "set \"RUNE_JOBS=" + std::to_string(pm::sharePerJob()) + "\" && " + full;
+#else
   full = "RUNE_JOBS=" + std::to_string(pm::sharePerJob()) + " " + full;
+#endif
 
   std::string output;
   int rc = pm::runCaptured(full, output);
