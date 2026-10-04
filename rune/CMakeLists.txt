@@ -19,4 +19,6 @@ if(WIN32)
   target_link_libraries(rune PRIVATE ws2_32)
 endif()
 
+target_link_libraries(rune PRIVATE Threads::Threads)
+
 add_dependencies(rune runec runeruntime)
