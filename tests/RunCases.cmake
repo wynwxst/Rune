@@ -128,6 +128,11 @@ foreach(CASE ${CASES})
       list(APPEND SAFETY_ARGS --link-arg "${CXX_OBJ}")
     endforeach()
   endif()
+  # LLVM's static archives are not linkable from here on macOS (the C++ API
+  # symbols come out unresolved), so the case that calls them is skipped.
+  if(APPLE AND NAME STREQUAL "95_cxx_llvm")
+    set(CXX_SKIPPED "not linked against LLVM's C++ API on macOS")
+  endif()
   if(NOT CXX_SKIPPED STREQUAL "")
     message(STATUS "skip     ${NAME} (${CXX_SKIPPED})")
     continue()

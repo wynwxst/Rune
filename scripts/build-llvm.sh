@@ -21,7 +21,9 @@ archive="llvm-project-${version}.src.tar.xz"
 if [ ! -d "llvm-project-${version}.src" ]; then
   curl -fsSL -o "$archive" \
     "https://github.com/llvm/llvm-project/releases/download/llvmorg-${version}/${archive}"
-  tar -xf "$archive"
+  # Only the sources are needed: skip the test inputs, which hold symlinks
+  # MSYS2's tar cannot create.
+  tar -xf "$archive" --exclude='*/test/*' --exclude='*/utils/mlgo-utils/*'
 fi
 
 extra=()
