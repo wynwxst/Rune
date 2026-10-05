@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "rune",
+      "camelcase": "Rune",
+      "scope": "source.rune",
+      "path": ".",
+      "file-types": ["rune"],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^rune$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Rune grammar for tree-sitter"
+  }
+}

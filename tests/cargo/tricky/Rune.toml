@@ -1,0 +1,6 @@
+[package]
+name = "tricky"
+version = "0.1.0"
+
+[dependencies]
+odd = { cargo = "rust", features = ["extra"] }

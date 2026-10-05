@@ -1,0 +1,4 @@
+// Margrave's library half: every module under src/ is part of it, so the
+// tests reach the TOML reader, the key decoder and the buffer directly.
+
+pub fn version() -> String { "0.1.0" }

@@ -1,0 +1,53 @@
+import std::{io, text}
+
+/// What we learn about a text.
+struct Stats {
+    lines: i64
+    words: i64
+    characters: i64
+    longest: String
+}
+
+/// Reads standard input to the end and returns it as one string.
+fn readAll() -> String {
+    var all = ""
+    while io::readLineOrEnd() is Some(line) {
+        all += line + "\n"
+    }
+    all
+}
+
+/// Looks at `input` without taking it. The `Stats` it returns owns
+/// everything it holds, so it can outlive `input`.
+fn analyse(input: &String) -> Stats {
+    var stats = Stats {
+        lines: 0,
+        words: 0,
+        characters: input.$charCount(),
+        longest: "",
+    }
+    for line in text::splitLines(input) {
+        stats.lines += 1
+        for word in text::split(line, " ") {
+            if word.$isEmpty() { continue }
+            stats.words += 1
+            if word.$length() > stats.longest.$length() {
+                stats.longest = word.$clone()
+            }
+        }
+    }
+    stats
+}
+
+fn report(stats: &Stats) {
+    println!("lines:      {}", stats.lines)
+    println!("words:      {}", stats.words)
+    println!("characters: {}", stats.characters)
+    println!("longest:    {}", stats.longest)
+}
+
+fn main() {
+    let input = readAll()
+    let stats = analyse(&input)
+    report(&stats)
+}

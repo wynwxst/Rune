@@ -1,0 +1,18 @@
+// Closures on both sides of a library boundary: in plain functions, whose
+// code is in the library's object, and in generic ones, which every
+// importer instantiates for itself. See B8_library_closure_names.
+import std::io
+
+pub fn adder(n: i64) -> @function(i64) -> i64 { ||(x: i64) -> i64 { x + n } }
+
+pub fn scaler(n: i64) -> @function(i64) -> i64 { ||(x: i64) -> i64 { x * n } }
+
+pub fn applyTwice<T>(v: T, f: @function(T) -> T) -> T {
+    let g = ||(y: T) -> T { f(y) }
+    g(g(v))
+}
+
+pub fn label<T: io::Display>(v: T) -> String {
+    let wrap = ||(s: String) -> String { "<" + s + ">" }
+    wrap(v.display())
+}

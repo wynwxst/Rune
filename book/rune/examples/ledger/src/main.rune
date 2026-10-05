@@ -1,0 +1,61 @@
+import std::{io, process}
+import std::dictionary::{Map}
+import std::collections::{slice, vector}
+import ledger::entry::{Entry, money}
+import ledger::parse::{LedgerError}
+import ledger::parse
+
+fn report(entries: &vector::Vector<Entry>) {
+    var income = 0
+    var spending = 0
+    var months = Map<String, i64>()
+    var biggest = -1
+
+    var i = 0
+    while i < entries.length() {
+        let e = entries.look(i)
+        if e.cents >= 0 { income += e.cents } else { spending += e.cents }
+        let month = e.date.iso().$substring(0, 7)
+        months.put(month.$clone(), months.atOr(&month, 0) + e.cents)
+        if e.cents < 0 && (biggest < 0 || e.cents < entries.look(biggest).cents) {
+            biggest = i
+        }
+        i += 1
+    }
+
+    println!("{} entries", entries.length())
+    println!("income:   {:>10}", money(income))
+    println!("spending: {:>10}", money(spending))
+    println!("balance:  {:>10}", money(income + spending))
+    if biggest >= 0 {
+        let b = entries.look(biggest)
+        println!("largest expense: {} ({})", b.description, money(b.cents))
+    }
+
+    println!("by month:")
+    let names = slice::sortedBy(months.keysOf().asSlice(), ||(a: String, b: String) -> bool { a < b })
+    for name in names {
+        println!("  {}  {:>10}", name, money(months.atOr(name, 0)))
+    }
+}
+
+fn main() -> i64 {
+    let args = process::arguments()
+    if args.isEmpty() {
+        io::eprintln("usage: ledger FILE")
+        return 2
+    }
+    match parse::load(args.look(0)) {
+        Ok(entries) => {
+            report(&entries)
+            0
+        }
+        Err(error) => {
+            io::eprintln("ledger: " + error.display())
+            match error {
+                .Io(_) => 3,
+                .Parse(_) => 4,
+            }
+        }
+    }
+}

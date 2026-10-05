@@ -1,0 +1,1229 @@
+// Drawing. Every frame is drawn whole into the screen's grid and only the
+// difference reaches the terminal. Nothing paints a background except the
+// selection and the current search hit: panes are divided by thin lines,
+// popups by thin boxes, and focus is shown by colour alone.
+
+import std::collections::vector
+import grve::app
+import grve::buffer
+import grve::config
+import grve::glue
+import grve::highlight
+import grve::layout
+import grve::pane
+import grve::shell
+import grve::sys
+import grve::term
+import grve::utf
+
+extend app::App {
+    pub fn draw(&self) {
+        let (rows, cols) = sys::windowSize()
+        let s = self.screen
+        s.resize(rows, cols)
+        s.clear()
+        if rows < 3 || cols < 10 { s.flush(); return }
+
+        // The bottom line is the status line; the output, when there is
+        // some, takes its share of what is above.
+        let area = rows - 1
+        var top = area
+        if self.outputVisible || self.peekVisible {
+            var out = ((area as f64) * self.cfg.shellSplit + 0.5) as i64
+            if out < 3 { out = 3 }
+            if out > area - 3 { out = area - 3 }
+            top = area - out
+            self.outputRect = layout::Rect { row: top, col: 0, height: out, width: cols }
+        } else {
+            self.outputRect = layout::Rect {}
+        }
+        self.layout.arrange(layout::Rect { row: 0, col: 0, height: top, width: cols })
+
+        var grid = makeLines(rows, cols)
+        for line in self.layout.lines {
+            if line.vertical {
+                for r in 0..line.length { grid.mark(line.row + r, line.col) }
+            } else {
+                for c in 0..line.length { grid.mark(line.row, line.col + c) }
+            }
+        }
+        for placed in self.layout.placed {
+            match self.paneById(placed.pane) {
+                Some(p) => {
+                    p.rect = layout::Rect { row: placed.rect.row, col: placed.rect.col, height: placed.rect.height, width: placed.rect.width }
+                    if p.mode == pane::EXPLORER { self.drawExplorer(p) } else { self.drawEditor(p) }
+                },
+                None => {},
+            }
+        }
+        self.drawLines(&grid)
+        if self.peekVisible { self.drawPeek() }
+        elif self.outputVisible { self.drawOutput() }
+        self.drawStatus(rows - 1, cols)
+        self.drawPopups()
+        s.flush()
+    }
+
+    fn focusedPaneId(&self) -> i64 { if self.focus == app::OUTPUT { -2 } else { self.focus } }
+
+    //=== Split lines ======================================================//
+
+    fn drawLines(&self, grid: &Lines) {
+        let style = term::fg(self.cfg.theme.border)
+        for r in 0..grid.rows {
+            for c in 0..grid.cols {
+                if !grid.at(r, c) { continue }
+                let up = grid.at(r - 1, c)
+                let down = grid.at(r + 1, c)
+                let left = grid.at(r, c - 1)
+                let right = grid.at(r, c + 1)
+                // Where a line meets the output's top edge, it joins it.
+                let belowEdge = self.outputVisible && r + 1 == self.outputRect.row
+                let ch = junction(up, down || belowEdge, left, right)
+                self.screen.put(r, c, ch, &style)
+            }
+        }
+    }
+
+    //=== Panes ===========================================================//
+
+    fn header(&self, p: pane::Pane, left: &String, detail: &String, right: &String) {
+        let t = self.cfg.theme
+        let focused = p.id == self.focusedPaneId()
+        let r = p.rect
+        let nameStyle = if focused { term::fg(t.accent).with(term::BOLD) } else { term::fg(t.muted) }
+        var c = r.col + 1
+        c = self.screen.print(r.row, c, left, &nameStyle, r.col + r.width)
+        if p.hasDoc && p.mode == pane::EDITOR && p.doc.dirty() {
+            c = self.screen.print(r.row, c, " ●", term::fg(t.gold), r.col + r.width)
+        }
+        let rightWidth = utf::displayWidth(right)
+        let room = r.col + r.width - 1 - rightWidth - 2
+        if !detail.$isEmpty() && room - c > 4 {
+            self.screen.print(r.row, c + 2, utf::ellipsizeStart(detail, room - c - 2), term::fg(t.subtle), room)
+        }
+        if rightWidth > 0 && rightWidth < r.width - 4 {
+            self.screen.print(r.row, r.col + r.width - 1 - rightWidth, right, term::fg(t.subtle), r.col + r.width)
+        }
+    }
+
+    fn drawExplorer(&self, p: pane::Pane) {
+        let t = self.cfg.theme
+        let r = p.rect
+        if r.height < 1 || r.width < 2 { return }
+        let focused = p.id == self.focusedPaneId()
+        let count = p.entries.length() - (if p.dir != "/" { 1 } else { 0 })
+        let name = if p.dir == "/" { "/" } else { utf::baseName(p.dir) }
+        let parent = if p.dir == "/" { "" } else { self.shownDir(utf::dirName(p.dir)) }
+        self.header(p, "▸ " + name, parent, count.$str() + (if count == 1 { " item" } else { " items" }))
+        let rows = r.height - 1
+        p.textRows = rows
+        p.textCols = r.width
+        p.showSelection(rows)
+        if !p.listError.$isEmpty() {
+            self.screen.print(r.row + 1, r.col + 2, p.listError, term::fg(t.error), r.col + r.width)
+            return
+        }
+        if p.entries.length() <= 1 && p.dir != "/" {
+            self.screen.print(r.row + 2, r.col + 3, "empty", term::fg(t.subtle).with(term::ITALIC), r.col + r.width)
+        }
+        let searching = self.search.showing && self.search.pane == p.id
+        let openPath = if p.hasDoc { p.doc.path.$clone() } else { "" }
+        for i in 0..rows {
+            let index = p.listTop + i
+            if index >= p.entries.length() { break }
+            let e = p.entries.get(index)
+            let row = r.row + 1 + i
+            let selected = index == p.selected
+            let full = utf::join(p.dir, e.name)
+            var style = term::plain()
+            var name = e.name.$clone()
+            if e.name == ".." { style = term::fg(t.subtle) }
+            elif e.isDir { style = term::fg(t.directory); name += "/" }
+            elif e.isExec { style = term::fg(t.executable) }
+            elif utf::startsWith(e.name, ".") { style = term::fg(t.muted) }
+            if full == openPath { style = term::fg(t.accent).with(term::ITALIC) }
+            if selected { style = style.with(term::BOLD) }
+            if selected {
+                let marker = if focused { term::fg(t.accent).with(term::BOLD) } else { term::fg(t.subtle) }
+                self.screen.print(row, r.col + 1, "›", &marker, r.col + r.width)
+            }
+            // The right-hand column: the size, or what Enter will run.
+            var right = ""
+            var rightStyle = term::fg(t.subtle)
+            if !e.isDir && e.name != ".." {
+                if selected && focused {
+                    match self.cfg.actionFor(full) {
+                        Some(a) => { right = "↵ " + a.run; rightStyle = term::fg(t.gold) },
+                        None => right = if e.size >= 0 { utf::humanSize(e.size) } else { "" },
+                    }
+                } else {
+                    right = if e.size >= 0 { utf::humanSize(e.size) } else { "" }
+                }
+            }
+            let nameStart = r.col + 3
+            let rightWidth = utf::displayWidth(right)
+            var nameLimit = r.col + r.width - 1
+            if rightWidth > 0 && r.width > 24 {
+                let maxRight = r.width / 2
+                let shownRight = utf::ellipsize(right, maxRight)
+                let w = utf::displayWidth(shownRight)
+                self.screen.print(row, r.col + r.width - 1 - w, shownRight, &rightStyle, r.col + r.width)
+                nameLimit = r.col + r.width - 3 - w
+            }
+            let fitted = utf::ellipsize(name, nameLimit - nameStart)
+            self.screen.print(row, nameStart, fitted, &style, nameLimit)
+            if searching {
+                for h in self.search.hits {
+                    if h.line != index { continue }
+                    let a = utf::columnOf(e.name, h.start, 4)
+                    let b = utf::columnOf(e.name, h.end, 4)
+                    let current = self.search.current >= 0 && self.search.hits.look(self.search.current).line == index
+                    let bg = if current { t.hitCurrent } else { -2 }
+                    self.screen.overlay(row, nameStart + a, b - a, term::UNDERLINE, t.hit, bg, t.hit)
+                }
+            }
+        }
+    }
+
+    fn drawEditor(&self, p: pane::Pane) {
+        let t = self.cfg.theme
+        let r = p.rect
+        if r.height < 1 || r.width < 4 { return }
+        let d = p.doc
+        p.clampCursor()
+        let focused = p.id == self.focusedPaneId()
+        let tab = self.cfg.tabWidth
+
+        // Header: the name, where it lives, and what the server thinks.
+        var errors = 0
+        var warnings = 0
+        for x in d.diagnostics {
+            if x.severity == 1 { errors += 1 } elif x.severity == 2 { warnings += 1 }
+        }
+        var right = ""
+        let errorText = if errors == 0 { "" } elif errors == 1 { "1 error" } else { errors.$str() + " errors" }
+        let warningText = if warnings == 0 { "" } elif warnings == 1 { "1 warning" } else { warnings.$str() + " warnings" }
+        if errors > 0 { right += errorText + "  " }
+        if warnings > 0 { right += warningText + "  " }
+        right += (p.cursor.line + 1).$str() + ":" + (utf::columnOf(p.line(), p.cursor.col, tab) + 1).$str()
+        let place = if d.path.$isEmpty() { "" } else { self.shownDir(utf::dirName(d.path)) }
+        self.header(p, d.name() + (if d.readOnly { " (read-only)" } else { "" }), place, right)
+        if errors > 0 || warnings > 0 {
+            // Colour the counts.
+            let w = utf::displayWidth(right)
+            var c = r.col + r.width - 1 - w
+            if errors > 0 {
+                let n = errorText.$length()
+                self.screen.restyle(r.row, c, n, term::fg(t.error))
+                c += n + 2
+            }
+            if warnings > 0 {
+                self.screen.restyle(r.row, c, warningText.$length(), term::fg(t.warning))
+            }
+        }
+
+        let rows = r.height - 1
+        let digits = if self.cfg.lineNumbers { widthOf(d.lineCount()) } else { 0 }
+        let gutter = if self.cfg.lineNumbers { (if digits < 3 { 3 } else { digits }) + 3 } else { 2 }
+        let textCol = r.col + gutter
+        let textWidth = r.width - gutter
+        p.textRows = rows
+        p.textCols = textWidth
+        p.gutter = gutter
+        p.wrap = self.cfg.wrap
+        p.reveal(self.cfg.scrollOff, tab)
+
+        let lang = d.language
+        let sel = p.selection()
+        let searching = self.search.showing && self.search.pane == p.id && self.search.version == d.version
+        var hitIndex = if searching { firstHitAtOrAfter(&self.search.hits, p.top) } else { 0 }
+        let brackets = if focused { matchingBracket(d, &p.cursor) } else { vector::Vector<buffer::Pos>() }
+
+        let limit = textCol + textWidth
+        var screenRow = 0
+        var l = p.top
+        var firstSeg = p.topRow
+        while screenRow < rows && l < d.lineCount() {
+            let text = d.line(l)
+            let segs = p.segments(l, tab)
+            let n = text.$length()
+
+            // What the server said about this line. What it said before the
+            // latest edit is not shown on the line being typed: it comes
+            // back, fresh, once typing pauses.
+            let typing = d.version != d.diagVersion && l == d.editedLine
+            var worst = 0
+            var firstMessage = ""
+            for x in d.diagnostics {
+                if typing { break }
+                if l >= x.line && l <= x.endLine && (worst == 0 || x.severity < worst) {
+                    worst = x.severity
+                    if l == x.line { firstMessage = x.message.$clone() }
+                }
+            }
+
+            // The text's colours.
+            var kinds = vector::Vector<i64>()
+            match lang {
+                Some(language) => {
+                    let state = highlight::stateBefore(d, language, l)
+                    let (k, next) = highlight::kinds(language, text, state)
+                    kinds = k
+                },
+                None => {},
+            }
+            var selFrom = -1
+            var selTo = -1
+            var selPastEnd = false
+            match sel {
+                Some((a, b)) => {
+                    if l >= a.line && l <= b.line {
+                        selFrom = if l == a.line { a.col } else { 0 }
+                        selTo = if l == b.line { b.col } else { n }
+                        selPastEnd = l < b.line
+                    }
+                },
+                None => {},
+            }
+            // Indent guides, where the text has not started yet.
+            let indentCols = if self.cfg.indentGuides { self.guideDepth(d, l, tab) } else { 0 }
+            let step = p.indentWidth(self.cfg)
+            let lineEndCol = utf::columnOf(text, n, tab)
+
+            var si = firstSeg
+            while si < segs.length() && screenRow < rows {
+                let seg = segs.get(si)
+                let row = r.row + 1 + screenRow
+                let last = si == segs.length() - 1
+
+                // The gutter: on a line's first row, its mark and number.
+                if si == 0 {
+                    if worst > 0 {
+                        self.screen.print(row, r.col, "▎", term::fg(self.severityColor(worst)), textCol)
+                    }
+                    if self.cfg.lineNumbers {
+                        var num = l + 1
+                        if self.cfg.relativeNumbers && l != p.cursor.line { num = if l > p.cursor.line { l - p.cursor.line } else { p.cursor.line - l } }
+                        let label = num.$str()
+                        var numStyle = if l == p.cursor.line { term::fg(if focused { t.accent } else { t.muted }).with(term::BOLD) } else { term::fg(t.subtle) }
+                        // A line with a problem says so in its number.
+                        if worst == 1 || worst == 2 { numStyle = term::fg(self.severityColor(worst)).with(if l == p.cursor.line { term::BOLD } else { 0 }) }
+                        self.screen.print(row, textCol - 2 - label.$length(), label, &numStyle, textCol)
+                    }
+                } elif worst > 0 {
+                    self.screen.print(row, r.col, "▎", term::fg(self.severityColor(worst)), textCol)
+                }
+
+                // The row's characters.
+                // The line's own column at the row's first byte.
+                var col = if seg.start > 0 { utf::columnOf(text, seg.start, tab) } else { 0 }
+                var b = seg.start
+                while b < seg.end {
+                    var cp = text.$byteAt(b) as i64
+                    var nb = b + 1
+                    if cp >= 0x80 { cp = utf::decode(text, b); nb = utf::next(text, b) }
+                    let w = if cp == 9 { tab - (col % tab) } else { utf::width(cp) }
+                    let x = textCol + seg.indent + col - seg.startCol
+                    if x + w > textCol && x < limit {
+                        var style = if b < kinds.length() { self.kindStyle(kinds.get(b)) } else { term::plain() }
+                        if b >= selFrom && b < selTo { style = style.onBg(t.selection) }
+                        if cp == 9 || cp == 32 {
+                            let guide = si == 0 && col < indentCols && col % step == 0 && cp == 32
+                            let glyph = if guide { 0x2502 } else { 32 }
+                            let gs = if guide && style.bg < 0 { term::fg(t.border) } else { style }
+                            var k = 0
+                            while k < w {
+                                if x + k >= textCol && x + k < limit {
+                                    self.screen.put(row, x + k, if k == 0 { glyph } else { 32 }, &gs)
+                                }
+                                k += 1
+                            }
+                        } elif x >= textCol && x + w <= limit {
+                            self.screen.put(row, x, cp, &style)
+                        }
+                    }
+                    col += w
+                    b = nb
+                }
+                if si == 0 && utf::isBlank(text) && indentCols > 0 {
+                    // A blank line carries the guides of the block it sits in.
+                    var g = 0
+                    while g < indentCols {
+                        let x = textCol + g - seg.startCol
+                        if g >= lineEndCol && x >= textCol && x < limit { self.screen.put(row, x, 0x2502, term::fg(t.border)) }
+                        g += step
+                    }
+                }
+                let endX = textCol + seg.indent + col - seg.startCol
+                if last && selPastEnd && endX >= textCol && endX < limit {
+                    self.screen.put(row, endX, 32, term::plain().onBg(t.selection))
+                }
+
+                // Search hits on this row.
+                if searching {
+                    while hitIndex < self.search.hits.length() && self.search.hits.look(hitIndex).line < l { hitIndex += 1 }
+                    var k = hitIndex
+                    while k < self.search.hits.length() && self.search.hits.look(k).line == l {
+                        let h = self.search.hits.get(k)
+                        let (hx, hw) = spanOn(text, &seg, h.start, h.end, tab, textCol, limit)
+                        if hw > 0 {
+                            if k == self.search.current {
+                                self.screen.overlay(row, hx, hw, term::BOLD, t.hit, t.hitCurrent, -2)
+                            } else {
+                                self.screen.overlay(row, hx, hw, term::UNDERLINE, t.hit, -2, t.hit)
+                            }
+                        }
+                        k += 1
+                    }
+                }
+
+                // Diagnostics: errors take over the text's colour, the rest
+                // only underline; a problem past the end gets a caret.
+                for x in d.diagnostics {
+                    if typing { break }
+                    if l < x.line || l > x.endLine { continue }
+                    let from = if l == x.line { x.col } else { 0 }
+                    var upto = if l == x.endLine { x.endCol } else { n }
+                    let color = self.severityColor(x.severity)
+                    if from >= n {
+                        if last && l == x.line && endX >= textCol && endX < limit {
+                            self.screen.put(row, endX, 0x2038, term::fg(color).with(term::BOLD))
+                        }
+                        continue
+                    }
+                    if upto <= from { upto = utf::next(text, from) }
+                    let (dx, dw) = spanOn(text, &seg, from, upto, tab, textCol, limit)
+                    if dw > 0 {
+                        let fgc = if x.severity == 1 { color } else { -2 }
+                        let attrs = if x.severity == 1 { term::CURLY | term::BOLD } else { term::CURLY }
+                        self.screen.overlay(row, dx, dw, attrs, fgc, -2, color)
+                    }
+                }
+                // The first message, after the line's last row.
+                if last && worst > 0 && !firstMessage.$isEmpty() {
+                    let mx = endX + 3
+                    let room = limit - mx
+                    if room > 8 {
+                        let attrs = if worst <= 2 { term::ITALIC } else { term::ITALIC | term::DIM }
+                        self.screen.print(row, mx, utf::ellipsize(firstLine(firstMessage), room), term::fg(self.severityColor(worst)).with(attrs), limit)
+                    }
+                }
+
+                // The bracket pair around the cursor.
+                for bp in brackets {
+                    if bp.line != l { continue }
+                    let (bx, bw) = spanOn(text, &seg, bp.col, bp.col + 1, tab, textCol, limit)
+                    if bw > 0 { self.screen.overlay(row, bx, 1, term::BOLD | term::UNDERLINE, t.gold, -2, t.gold) }
+                }
+
+                screenRow += 1
+                si += 1
+            }
+            l += 1
+            firstSeg = 0
+        }
+
+        if focused && !self.prompt.active() {
+            let (cr, cxOff) = p.cursorScreen(tab)
+            let cx = textCol + cxOff
+            let cy = r.row + 1 + cr
+            if cr >= 0 && cr < rows && cx >= textCol && cx < textCol + textWidth {
+                self.screen.placeCursor(cy, cx, 1)
+            }
+        }
+    }
+
+    /// How many columns of guides line `l` gets: its own indent, or for a
+    /// blank line, the smaller of the indents around it.
+    fn guideDepth(&self, d: buffer::Document, l: i64, tab: i64) -> i64 {
+        let text = d.line(l)
+        if !utf::isBlank(text) {
+            return utf::columnOf(text, utf::indentOf(text).$length(), tab)
+        }
+        var above = 0
+        var k = l - 1
+        while k >= 0 && l - k < 100 {
+            let s = d.line(k)
+            if !utf::isBlank(s) { above = utf::columnOf(s, utf::indentOf(s).$length(), tab); break }
+            k -= 1
+        }
+        var below = 0
+        k = l + 1
+        while k < d.lineCount() && k - l < 100 {
+            let s = d.line(k)
+            if !utf::isBlank(s) { below = utf::columnOf(s, utf::indentOf(s).$length(), tab); break }
+            k += 1
+        }
+        if above < below { above } else { below }
+    }
+
+    fn severityColor(&self, severity: i64) -> i64 {
+        let t = self.cfg.theme
+        if severity == 1 { t.error } elif severity == 2 { t.warning } elif severity == 3 { t.info } else { t.hint }
+    }
+
+    fn kindStyle(&self, kind: i64) -> term::Style {
+        let t = self.cfg.theme
+        match kind {
+            1 => term::fg(t.keyword),
+            2 => term::fg(t.control),
+            3 => term::fg(t.typeName),
+            4 => term::fg(t.function),
+            5 => term::fg(t.string),
+            6 => term::fg(t.number),
+            7 => term::fg(t.comment).with(term::ITALIC),
+            8 => term::fg(t.constant),
+            9 => term::fg(t.decorator),
+            10 => term::fg(t.macroColor),
+            11 => term::fg(t.intrinsic),
+            12 => term::fg(t.op),
+            13 => term::fg(t.punctuation),
+            14 => term::fg(t.escape),
+            15 => term::fg(t.heading).with(term::BOLD),
+            _ => term::fg(t.text),
+        }
+    }
+
+    //=== The peek panel ===================================================//
+
+    /// A read-only editor along the bottom, its title in the dividing line.
+    fn drawPeek(&self) {
+        let t = self.cfg.theme
+        let r = self.outputRect
+        self.screen.fill(r.row, r.col, r.width, 0x2500, term::fg(t.border))
+        let p = self.peek
+        p.rect = layout::Rect { row: r.row, col: r.col, height: r.height, width: r.width }
+        self.drawEditor(p)
+        // The title line reads as a divider with words in it.
+        let note = " read-only · / search · enter to close "
+        let w = utf::displayWidth(note)
+        let position = (p.cursor.line + 1).$str() + ":" + (utf::columnOf(p.line(), p.cursor.col, self.cfg.tabWidth) + 1).$str()
+        let at = r.col + r.width - 1 - utf::displayWidth(position) - 1 - w
+        if at > r.col + 40 {
+            self.screen.print(r.row, at, note, term::fg(t.muted), at + w)
+        }
+    }
+
+    //=== The shell output =================================================//
+
+    fn drawOutput(&self) {
+        let t = self.cfg.theme
+        let r = self.outputRect
+        let focused = self.focus == app::OUTPUT
+        let border = term::fg(t.border)
+        self.screen.fill(r.row, r.col, r.width, 0x2500, &border)
+        if !self.hasJob { return }
+        let j = self.job
+        // The title sits in the line: ── ✓ make test ── 0.4s · enter to dismiss ──
+        var icon = "$"
+        var iconColor = t.accent
+        var state = ""
+        if j.running {
+            icon = spinner(j.elapsed())
+            iconColor = t.gold
+            state = shell::duration(j.elapsed()) + " · " + self.cfg.prefixName() + "+a to stop"
+        } elif j.aborted {
+            icon = "■"
+            iconColor = t.warning
+            state = "stopped after " + shell::duration(j.seconds) + " · enter to dismiss"
+        } elif j.status == 0 {
+            icon = "✓"
+            iconColor = t.ok
+            state = shell::duration(j.seconds) + " · enter to dismiss"
+        } else {
+            icon = "✗"
+            iconColor = t.error
+            state = "exit " + j.status.$str() + " · " + shell::duration(j.seconds) + " · enter to dismiss"
+        }
+        var c = r.col + 2
+        c = self.screen.print(r.row, c, " " + icon + " ", term::fg(iconColor).with(term::BOLD), r.col + r.width)
+        let cmdStyle = if focused { term::fg(t.accent).with(term::BOLD) } else { term::fg(t.muted) }
+        let stateWidth = utf::displayWidth(state) + 2
+        let room = r.col + r.width - 3 - stateWidth - c
+        c = self.screen.print(r.row, c, utf::ellipsize(j.command, room) + " ", &cmdStyle, r.col + r.width)
+        self.screen.print(r.row, r.col + r.width - 2 - stateWidth, " " + state + " ", term::fg(t.subtle), r.col + r.width - 2)
+
+        let rows = r.height - 1
+        let total = j.lineCount()
+        let most = if total - rows > 0 { total - rows } else { 0 }
+        var first = if self.outputFollow { most } else { self.outputTop }
+        if first > most { first = most }
+        if first < 0 { first = 0 }
+        self.outputTop = first
+        for i in 0..rows {
+            let l = first + i
+            if l >= total { break }
+            drawAnsi(self.screen, r.row + 1 + i, r.col + 1, j.line(l), r.col + r.width - 1)
+        }
+        if total > rows && !self.outputFollow {
+            let note = " " + (first + 1).$str() + "–" + (first + rows).$str() + " of " + total.$str() + " "
+            self.screen.print(r.row + r.height - 1, r.col + r.width - 1 - utf::displayWidth(note), note, term::fg(t.muted).with(term::REVERSE), r.col + r.width)
+        }
+    }
+
+    //=== The bottom line ==================================================//
+
+    fn drawStatus(&self, row: i64, cols: i64) {
+        let t = self.cfg.theme
+        if self.prompt.active() {
+            self.drawPrompt(row, cols)
+            return
+        }
+        let p = self.current()
+        var mode = "EXPLORE"
+        if self.focus == app::OUTPUT { mode = "OUTPUT" }
+        elif self.focus == app::PEEK { mode = "PEEK" }
+        elif p.mode == pane::EDITOR { mode = if p.selecting && p.selection().hasValue() { "SELECT" } else { "EDIT" } }
+        var c = self.screen.print(row, 1, mode, term::fg(t.accent).with(term::BOLD), cols)
+        c += 2
+
+        // The right side: language, server, indent.
+        var right = ""
+        if p.mode == pane::EDITOR && p.hasDoc {
+            match p.doc.language {
+                Some(l) => {
+                    right += l.name
+                    let root = glue::projectRoot(utf::dirName(p.doc.path))
+                    for client in self.clients {
+                        if client.language == l.name && client.root == root {
+                            right += if client.ready { " ✓" } elif client.alive() { " …" } else { " ✗" }
+                        }
+                    }
+                    right += "  "
+                },
+                None => {},
+            }
+            right += (if p.usesTabs(self.cfg) { "tabs" } else { "spaces:" + p.indentWidth(self.cfg).$str() })
+            if p.doc.crlf { right += "  crlf" }
+        } else {
+            right = self.shownDir(self.cwd)
+        }
+        right = utf::ellipsizeStart(right, (cols - c) / 2)
+        let rightWidth = utf::displayWidth(right)
+        let rightAt = cols - 1 - rightWidth
+        self.screen.print(row, rightAt, right, term::fg(t.muted), cols)
+
+        let fresh = self.messageAt.elapsed().asMilliseconds() < 5000
+        if fresh && !self.message.$isEmpty() {
+            let color = if self.messageKind == app::ERROR { t.error } elif self.messageKind == app::WARN { t.warning } elif self.messageKind == app::GOOD { t.ok } else { t.text }
+            self.screen.print(row, c, utf::ellipsize(self.message, rightAt - c - 2), term::fg(color), rightAt - 1)
+            return
+        }
+        // Otherwise, a hint for what is focused.
+        let pre = self.cfg.prefixName() + "+"
+        var hint = ""
+        if self.focus == app::OUTPUT {
+            hint = "↑↓ scroll · enter dismiss · esc back"
+        } elif self.focus == app::PEEK {
+            hint = "↑↓ move · / search · n/N next/prev · enter close"
+        } elif p.mode == pane::EXPLORER {
+            hint = "enter open · : command · / search · " + pre + "h help"
+        } else {
+            hint = pre + "l language · " + pre + "/ search · " + pre + "; command · esc files"
+        }
+        // On a line with a problem, the problem.
+        var problem = 0
+        if self.focus != app::OUTPUT && p.mode == pane::EDITOR && p.hasDoc {
+            for x in p.doc.diagnostics {
+                if p.cursor.line >= x.line && p.cursor.line <= x.endLine && (problem == 0 || x.severity < problem) {
+                    problem = x.severity
+                    hint = firstLine(x.message)
+                }
+            }
+        }
+        if problem > 0 && !self.searchActiveFor(p) {
+            self.screen.print(row, c, utf::ellipsize(hint, rightAt - c - 2), term::fg(self.severityColor(problem)), rightAt - 1)
+            return
+        }
+        if self.searchActiveFor(p) {
+            hint = (self.search.current + 1).$str() + "/" + self.search.hits.length().$str() + " · " + pre + "j/" + pre + "p next/prev · :noh clears"
+        }
+        self.screen.print(row, c, utf::ellipsize(hint, rightAt - c - 2), term::fg(t.text), rightAt - 1)
+    }
+
+    fn searchActiveFor(&self, p: pane::Pane) -> bool {
+        self.search.showing && self.search.pane == p.id && self.search.hits.length() > 0
+    }
+
+    fn drawPrompt(&self, row: i64, cols: i64) {
+        let t = self.cfg.theme
+        let label = self.prompt.label.$clone()
+        let kind = self.prompt.kind
+        var c = self.screen.print(row, 1, label, term::fg(t.accent).with(term::BOLD), cols)
+        var right = ""
+        var rightColor = t.text
+        if kind == app::PROMPT_SEARCH {
+            if !self.search.error.$isEmpty() { right = self.search.error.$clone(); rightColor = t.error }
+            elif self.search.pattern.$isEmpty() { right = "regex · smart case" }
+            elif self.search.hits.isEmpty() { right = "no matches"; rightColor = t.warning }
+            else { right = (self.search.current + 1).$str() + " of " + self.search.hits.length().$str() + "  ←/→" }
+        } elif kind == app::PROMPT_COMMAND {
+            right = "tab complete · ↑↓ choose · enter run"
+        } elif kind == app::PROMPT_CONFIRM {
+            right = ""
+        }
+        let rightWidth = utf::displayWidth(right)
+        let limit = cols - 3 - rightWidth
+        // Long input scrolls so its end stays visible.
+        let shownText = utf::ellipsizeStart(self.prompt.text, limit - c - 1)
+        c = self.screen.print(row, c, shownText, term::plain(), limit)
+        if kind != app::PROMPT_CONFIRM { self.screen.placeCursor(row, c, 1) }
+        if rightWidth > 0 { self.screen.print(row, cols - 1 - rightWidth, right, term::fg(rightColor), cols) }
+
+        if kind == app::PROMPT_COMMAND && self.prompt.items.length() > 0 {
+            self.drawPromptItems(row, cols)
+        }
+    }
+
+    fn drawPromptItems(&self, row: i64, cols: i64) {
+        let t = self.cfg.theme
+        let items = self.prompt.items
+        let n = items.length()
+        var visible = if n < 10 { n } else { 10 }
+        if visible > row - 2 { visible = row - 2 }
+        if visible <= 0 { return }
+        var top = self.prompt.top
+        if self.prompt.selected < top { top = self.prompt.selected }
+        if self.prompt.selected >= top + visible { top = self.prompt.selected - visible + 1 }
+        self.prompt.top = top
+        var labelWidth = 8
+        var detailWidth = 0
+        for it in items {
+            let w = utf::displayWidth(it.label)
+            if w > labelWidth { labelWidth = w }
+            let dw = utf::displayWidth(it.detail)
+            if dw > detailWidth { detailWidth = dw }
+        }
+        var width = labelWidth + 4 + (if detailWidth > 0 { detailWidth + 3 } else { 0 })
+        if width > cols - 2 { width = cols - 2 }
+        if labelWidth > width - 4 { labelWidth = width - 4 }
+        let boxTop = row - visible - 2
+        let title = if n > visible { (self.prompt.selected + 1).$str() + "/" + n.$str() } else { "" }
+        self.box(boxTop, 0, visible + 2, width + 2, title)
+        for i in 0..visible {
+            let it = items.get(top + i)
+            let r = boxTop + 1 + i
+            let selected = top + i == self.prompt.selected
+            self.itemRow(r, 1, width, &it, selected, labelWidth)
+        }
+    }
+
+    /// One line of a dropdown.
+    fn itemRow(&self, row: i64, col: i64, width: i64, it: &app::Item, selected: bool, labelWidth: i64) {
+        let t = self.cfg.theme
+        let limit = col + width
+        if selected { self.screen.print(row, col, "›", term::fg(t.accent).with(term::BOLD), limit) }
+        self.screen.print(row, col + 1, it.icon, term::fg(if it.iconColor >= 0 || it.iconColor == -1 { it.iconColor } else { t.muted }), limit)
+        let labelStyle = if selected { term::fg(t.accent).with(term::BOLD) } else { term::plain() }
+        let label = utf::ellipsize(it.label, labelWidth)
+        let after = self.screen.print(row, col + 3, label, &labelStyle, limit)
+        if !it.detail.$isEmpty() {
+            let at = col + 3 + labelWidth + 2
+            if at < limit - 3 {
+                let detail = utf::ellipsize(it.detail, limit - at)
+                self.screen.print(row, if at > after + 1 { at } else { after + 1 }, detail, term::fg(t.subtle), limit)
+            }
+        }
+    }
+
+    /// A thin rounded box, its inside cleared.
+    fn box(&self, row: i64, col: i64, height: i64, width: i64, title: &String) {
+        let t = self.cfg.theme
+        let b = term::fg(t.border)
+        if height < 2 || width < 2 { return }
+        for r in 0..height {
+            for c in 0..width {
+                let rr = row + r
+                let cc = col + c
+                let edgeV = r == 0 || r == height - 1
+                let edgeH = c == 0 || c == width - 1
+                var ch = 32
+                if edgeV && edgeH {
+                    ch = if r == 0 && c == 0 { 0x256D } elif r == 0 { 0x256E } elif c == 0 { 0x2570 } else { 0x256F }
+                } elif edgeV { ch = 0x2500 }
+                elif edgeH { ch = 0x2502 }
+                self.screen.put(rr, cc, ch, &b)
+            }
+        }
+        if !title.$isEmpty() && width > 6 {
+            self.screen.print(row, col + 2, " " + utf::ellipsize(title, width - 6) + " ", term::fg(t.muted), col + width - 1)
+        }
+    }
+
+    //=== Popups ==========================================================//
+
+    fn drawPopups(&self) {
+        if !self.sigLabel.$isEmpty() && self.sigPane == self.focus { self.drawSignature() }
+        if self.menu.active() { self.drawMenu() }
+        if !self.hover.isEmpty() { self.drawHover() }
+    }
+
+    /// Where the cursor of the current editor is on screen.
+    fn cursorCell(&self) -> (i64, i64) {
+        let p = self.current()
+        if p.mode != pane::EDITOR { return (p.rect.row + 1, p.rect.col + 2) }
+        let r = p.rect
+        let (row, x) = p.cursorScreen(self.cfg.tabWidth)
+        (r.row + 1 + row, r.col + p.gutter + x)
+    }
+
+    fn drawMenu(&self) {
+        let (rows, cols) = (self.screen.rows, self.screen.cols)
+        let items = self.menu.items
+        let n = items.length()
+        if n == 0 { return }
+        var labelWidth = 6
+        var detailWidth = 0
+        for it in items {
+            let w = utf::displayWidth(it.label)
+            if w > labelWidth { labelWidth = w }
+            let dw = utf::displayWidth(it.detail)
+            if dw > detailWidth { detailWidth = dw }
+        }
+        let completion = self.menu.kind == app::MENU_COMPLETION
+        let maxWidth = if completion { 64 } else { cols - 8 }
+        if labelWidth > maxWidth - 6 { labelWidth = maxWidth - 6 }
+        if detailWidth > 40 { detailWidth = 40 }
+        var width = labelWidth + 4 + (if detailWidth > 0 { detailWidth + 2 } else { 0 })
+        if width > maxWidth { width = maxWidth }
+        if width < 20 && !self.menu.title.$isEmpty() { width = 20 }
+        var visible = if n < 10 { n } else { 10 }
+        let (cy, cx) = self.cursorCell()
+        var top = 0
+        var left = 0
+        if completion {
+            // Hanging from the start of the word, below the line or above it.
+            let p = self.current()
+            let from = if items.look(0).from >= 0 && items.look(0).from <= p.cursor.col { items.look(0).from } else { p.wordBefore().0 }
+            let segs = p.segments(p.cursor.line, self.cfg.tabWidth)
+            let seg = segs.get(pane::segIndex(&segs, p.cursor.col))
+            left = p.rect.col + p.gutter + pane::xOf(p.line(), &seg, if from >= seg.start { from } else { seg.start }, self.cfg.tabWidth) - 2
+            if cy + 1 + visible + 2 <= rows - 1 { top = cy + 1 }
+            else {
+                if cy - visible - 2 < 0 { visible = cy - 2 }
+                top = cy - visible - 2
+            }
+        } else {
+            // Lists of places sit in the middle of the pane.
+            let p = self.current()
+            let r = if self.focus == app::OUTPUT { self.outputRect } else { p.rect }
+            if visible > r.height - 3 { visible = r.height - 3 }
+            if visible < 1 { visible = if rows - 4 < n { rows - 4 } else { n } }
+            if width > r.width - 2 && r.width > 20 { width = r.width - 2 }
+            left = r.col + (r.width - width - 2) / 2
+            top = r.row + 1 + (r.height - visible - 2) / 3
+        }
+        if visible < 1 { return }
+        if left + width + 2 > cols { left = cols - width - 2 }
+        if left < 0 { left = 0 }
+        if top < 0 { top = 0 }
+        var first = self.menu.top
+        if self.menu.selected < first { first = self.menu.selected }
+        if self.menu.selected >= first + visible { first = self.menu.selected - visible + 1 }
+        self.menu.top = first
+        var title = self.menu.title.$clone()
+        if n > visible { title += (if title.$isEmpty() { "" } else { " " }) + (self.menu.selected + 1).$str() + "/" + n.$str() }
+        self.box(top, left, visible + 2, width + 2, title)
+        for i in 0..visible {
+            if first + i >= n { break }
+            let it = items.get(first + i)
+            self.itemRow(top + 1 + i, left + 1, width, &it, first + i == self.menu.selected, labelWidth)
+        }
+    }
+
+    /// The signature of the call being typed, over the line, the parameter
+    /// in hand picked out.
+    fn drawSignature(&self) {
+        let t = self.cfg.theme
+        let cols = self.screen.cols
+        let p = self.current()
+        if p.mode != pane::EDITOR { return }
+        let (cy, cx) = self.cursorCell()
+        let label = self.sigLabel.$clone()
+        let doc = self.sigDoc.$clone()
+        var width = utf::displayWidth(label)
+        let docWidth = utf::displayWidth(doc)
+        if docWidth > width { width = docWidth }
+        if width > cols - 4 { width = cols - 4 }
+        if width < 4 { return }
+        let height = if doc.$isEmpty() { 1 } else { 2 }
+        // Above the line when there is room; the completion list goes below.
+        var top = cy - height - 2
+        if top < 0 { top = cy + 1 }
+        var left = cx - 2
+        if left + width + 4 > cols { left = cols - width - 4 }
+        if left < 0 { left = 0 }
+        self.box(top, left, height + 2, width + 4, "")
+        let x = left + 2
+        let limit = x + width
+        // The signature in three parts: before, the parameter, after.
+        if self.sigFrom >= 0 && self.sigTo > self.sigFrom && self.sigTo <= label.$length() {
+            var c = self.screen.print(top + 1, x, label.$substring(0, self.sigFrom), term::fg(t.muted), limit)
+            c = self.screen.print(top + 1, c, label.$substring(self.sigFrom, self.sigTo), term::fg(t.accent).with(term::BOLD | term::UNDERLINE), limit)
+            self.screen.print(top + 1, c, label.$substring(self.sigTo, label.$length()), term::fg(t.muted), limit)
+        } else {
+            self.screen.print(top + 1, x, label, term::fg(t.muted), limit)
+        }
+        if !doc.$isEmpty() {
+            self.screen.print(top + 2, x, utf::ellipsize(doc, width), term::fg(t.subtle).with(term::ITALIC), limit)
+        }
+    }
+
+    fn drawHover(&self) {
+        let (rows, cols) = (self.screen.rows, self.screen.cols)
+        let (cursorY, cursorX) = self.cursorCell()
+        let cy = if self.hoverRow >= 0 { self.hoverRow } else { cursorY }
+        let cx = if self.hoverRow >= 0 { self.hoverCol } else { cursorX }
+        var width = 10
+        for l in self.hover {
+            let w = utf::displayWidth(l)
+            if w > width { width = w }
+        }
+        if width > cols - 4 { width = cols - 4 }
+        let centred = self.hoverRow == -2
+        var height = self.hover.length()
+        let tallest = if centred { rows - 4 } else { 16 }
+        if height > tallest { height = tallest }
+        var top = cy - height - 2
+        if centred {
+            top = (rows - 1 - height - 2) / 2
+        } elif top < 0 {
+            top = cy + 1
+            if top + height + 2 > rows - 1 { height = rows - 1 - top - 2 }
+        }
+        if height < 1 { return }
+        var left = if centred { (cols - width - 4) / 2 } else { cx - 2 }
+        if left + width + 4 > cols { left = cols - width - 4 }
+        if left < 0 { left = 0 }
+        // A new panel starts at its top.
+        let first = self.hover.get(0)
+        if first != self.hoverFirst { self.hoverTop = 0; self.hoverFirst = first }
+        self.hoverShown = height
+        if self.hoverTop > self.hover.length() - height { self.hoverTop = self.hover.length() - height }
+        if self.hoverTop < 0 { self.hoverTop = 0 }
+        let more = self.hover.length() - height
+        let title = if more > 0 && !self.hoverByMouse {
+            self.hoverTitle + "  " + (self.hoverTop + 1).$str() + "–" + (self.hoverTop + height).$str() + " of " + self.hover.length().$str() + " · ↑↓"
+        } elif more > 0 { self.hoverTitle + " (+" + more.$str() + " lines)" } else { self.hoverTitle.$clone() }
+        self.box(top, left, height + 2, width + 4, title)
+        let p = self.current()
+        let t = self.cfg.theme
+        var state = 0
+        for k in 0..height {
+            let i = self.hoverTop + k
+            let line = self.hover.get(i)
+            let row = top + 1 + k
+            let limit = left + 2 + width
+            if i < self.hoverCode && self.hoverTitle != "diagnostics" {
+                // The signature, coloured as the code it is.
+                match self.hoverLanguage {
+                    Some(lang) => {
+                        let (kinds, next) = highlight::kinds(lang, line, state)
+                        state = next
+                        var c = left + 2
+                        var b = 0
+                        while b < line.$length() && c < limit {
+                            var cp = line.$byteAt(b) as i64
+                            var nb = b + 1
+                            if cp >= 0x80 { cp = utf::decode(line, b); nb = utf::next(line, b) }
+                            let style = if b < kinds.length() { self.kindStyle(kinds.get(b)) } else { term::plain() }
+                            c += self.screen.put(row, c, cp, &style)
+                            b = nb
+                        }
+                    },
+                    None => { self.screen.print(row, left + 2, line, term::fg(t.function), limit) },
+                }
+                continue
+            }
+            if i == self.hoverCode && self.hoverCode > 0 && line.$isEmpty() && self.hoverTitle != "diagnostics" {
+                // Between the signature and the words.
+                self.screen.fill(row, left + 1, width + 2, 0x2500, term::fg(t.border))
+                continue
+            }
+            docLine(self.screen, row, left + 2, line, limit, t)
+        }
+        // A popup keeps the cursor where it was, but hidden under it —
+        // unless the mouse asked for it, when typing carries on.
+        if !self.hoverByMouse { self.screen.cursorVisible = false }
+    }
+}
+
+//=== Helpers =============================================================//
+
+/// Which cells hold a split line.
+struct Lines {
+    rows: i64
+    cols: i64
+    cells: vector::Vector<bool>
+}
+
+fn makeLines(rows: i64, cols: i64) -> Lines {
+    var cells = vector::Vector<bool>()
+    cells.reserve(rows * cols)
+    for i in 0..(rows * cols) { cells.push(false) }
+    Lines { rows: rows, cols: cols, cells: cells }
+}
+
+extend Lines {
+    fn mark(&var self, r: i64, c: i64) {
+        if r < 0 || r >= self.rows || c < 0 || c >= self.cols { return }
+        self.cells.set(r * self.cols + c, true)
+    }
+    fn at(&self, r: i64, c: i64) -> bool {
+        if r < 0 || r >= self.rows || c < 0 || c >= self.cols { return false }
+        self.cells.get(r * self.cols + c)
+    }
+}
+
+/// The box-drawing character for a line cell, from which neighbours are
+/// lines too.
+fn junction(up: bool, down: bool, left: bool, right: bool) -> i64 {
+    let v = up || down
+    let h = left || right
+    if v && h {
+        if up && down && left && right { return 0x253C }
+        if up && down && right { return 0x251C }
+        if up && down && left { return 0x2524 }
+        if down && left && right { return 0x252C }
+        if up && left && right { return 0x2534 }
+        if down && right { return 0x250C }
+        if down && left { return 0x2510 }
+        if up && right { return 0x2514 }
+        return 0x2518
+    }
+    if v { return 0x2502 }
+    0x2500
+}
+
+/// The part of bytes `a` up to `b` that falls on `seg`, as (screen column,
+/// width), clipped to the text area; width 0 when none of it is there.
+fn spanOn(text: &String, seg: &pane::Seg, a: i64, b: i64, tab: i64, textCol: i64, limit: i64) -> (i64, i64) {
+    let from = if a > seg.start { a } else { seg.start }
+    let upto = if b < seg.end { b } else { seg.end }
+    if upto <= from { return (0, 0) }
+    var x0 = textCol + pane::xOf(text, seg, from, tab)
+    var x1 = textCol + pane::xOf(text, seg, upto, tab)
+    if x0 < textCol { x0 = textCol }
+    if x1 > limit { x1 = limit }
+    if x1 <= x0 { return (0, 0) }
+    (x0, x1 - x0)
+}
+
+fn widthOf(n: i64) -> i64 {
+    var w = 1
+    var v = n
+    while v >= 10 { v = v / 10; w += 1 }
+    w
+}
+
+fn clampLow(v: i64) -> i64 { if v < 0 { 0 } else { v } }
+
+fn firstLine(s: &String) -> String {
+    let nl = utf::findFrom(s, "\n", 0)
+    if nl < 0 { return s.$clone() }
+    s.$substring(0, nl)
+}
+
+fn spinner(seconds: f64) -> String {
+    let frames: [10:String] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    frames[((seconds * 10.0) as i64) % 10]
+}
+
+/// The first hit on line `line` or later.
+fn firstHitAtOrAfter(hits: &vector::Vector<app::Hit>, line: i64) -> i64 {
+    var lo = 0
+    var hi = hits.length()
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if hits.look(mid).line < line { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}
+
+/// The bracket at (or just before) the cursor and its partner, when both
+/// are found within a few thousand lines.
+fn matchingBracket(d: buffer::Document, at: &buffer::Pos) -> vector::Vector<buffer::Pos> {
+    var out = vector::Vector<buffer::Pos>()
+    let text = d.line(at.line)
+    var col = -1
+    var b = 0
+    if at.col < text.$length() {
+        b = text.$byteAt(at.col) as i64
+        if isBracket(b) { col = at.col }
+    }
+    if col < 0 && at.col > 0 {
+        b = text.$byteAt(at.col - 1) as i64
+        if isBracket(b) { col = at.col - 1 }
+    }
+    if col < 0 { return out }
+    let open = b == 40 || b == 91 || b == 123
+    let partner = match b { 40 => 41, 41 => 40, 91 => 93, 93 => 91, 123 => 125, _ => 123 }
+    var depth = 0
+    var l = at.line
+    var c = col
+    var steps = 0
+    loop {
+        let s = d.line(l)
+        if open {
+            while c < s.$length() {
+                let x = s.$byteAt(c) as i64
+                if x == b { depth += 1 }
+                elif x == partner {
+                    depth -= 1
+                    if depth == 0 {
+                        out.push(buffer::pos(at.line, col))
+                        out.push(buffer::pos(l, c))
+                        return out
+                    }
+                }
+                c += 1
+            }
+            l += 1
+            if l >= d.lineCount() { return out }
+            c = 0
+        } else {
+            while c >= 0 {
+                let x = s.$byteAt(c) as i64
+                if x == b { depth += 1 }
+                elif x == partner {
+                    depth -= 1
+                    if depth == 0 {
+                        out.push(buffer::pos(at.line, col))
+                        out.push(buffer::pos(l, c))
+                        return out
+                    }
+                }
+                c -= 1
+            }
+            l -= 1
+            if l < 0 { return out }
+            c = d.lineLength(l) - 1
+        }
+        steps += 1
+        if steps > 3000 { return out }
+    }
+}
+
+/// A line of documentation: `code` in the accent colour, headings bold.
+fn docLine(screen: term::Screen, row: i64, col: i64, line: &String, limit: i64, t: config::Theme) {
+    let trimmed = utf::trim(line)
+    if utf::startsWith(trimmed, "#") {
+        var k = 0
+        while k < trimmed.$length() && (trimmed.$byteAt(k) as i64) == 35 { k += 1 }
+        screen.print(row, col, utf::trim(trimmed.$substring(k, trimmed.$length())), term::fg(t.heading).with(term::BOLD), limit)
+        return
+    }
+    var c = col
+    var inCode = false
+    var start = 0
+    var i = 0
+    let n = line.$length()
+    while i <= n {
+        if i == n || (line.$byteAt(i) as i64) == 96 {
+            let piece = line.$substring(start, i)
+            let style = if inCode { term::fg(t.accent) } else { term::plain() }
+            c = screen.print(row, c, piece, &style, limit)
+            if i < n { inCode = !inCode }
+            start = i + 1
+        }
+        i += 1
+    }
+}
+
+fn isBracket(b: i64) -> bool { b == 40 || b == 41 || b == 91 || b == 93 || b == 123 || b == 125 }
+
+/// A line of program output, with its SGR colours honoured and every other
+/// escape sequence dropped.
+fn drawAnsi(screen: term::Screen, row: i64, col: i64, text: &String, limit: i64) {
+    var style = term::plain()
+    var c = col
+    var i = 0
+    let n = text.$length()
+    while i < n && c < limit {
+        let b = text.$byteAt(i) as i64
+        if b == 27 {
+            // ESC [ params final
+            if i + 1 < n && (text.$byteAt(i + 1) as i64) == 91 {
+                var j = i + 2
+                while j < n && !((text.$byteAt(j) as i64) >= 0x40 && (text.$byteAt(j) as i64) <= 0x7E) { j += 1 }
+                if j < n && (text.$byteAt(j) as i64) == 109 {
+                    style = applySgr(style, text.$substring(i + 2, j))
+                }
+                i = j + 1
+                continue
+            }
+            // ESC ] ... BEL / ST: titles, hyperlinks.
+            if i + 1 < n && (text.$byteAt(i + 1) as i64) == 93 {
+                var j = i + 2
+                while j < n && (text.$byteAt(j) as i64) != 7 && !((text.$byteAt(j) as i64) == 27 && j + 1 < n && (text.$byteAt(j + 1) as i64) == 92) { j += 1 }
+                i = if j < n && (text.$byteAt(j) as i64) == 7 { j + 1 } else { j + 2 }
+                continue
+            }
+            i += 2
+            continue
+        }
+        var cp = b
+        var nb = i + 1
+        if b >= 0x80 { cp = utf::decode(text, i); nb = utf::next(text, i) }
+        if cp == 9 {
+            let w = 8 - ((c - col) % 8)
+            c += w
+            i = nb
+            continue
+        }
+        if cp < 32 { i = nb; continue }
+        let w = utf::width(cp)
+        if c + w > limit { break }
+        screen.put(row, c, cp, &style)
+        c += w
+        i = nb
+    }
+}
+
+fn applySgr(start: term::Style, params: &String) -> term::Style {
+    var s = start
+    var parts = vector::Vector<i64>()
+    var cur = 0
+    var have = false
+    var i = 0
+    while i <= params.$length() {
+        let b = if i < params.$length() { params.$byteAt(i) as i64 } else { 59 }
+        if b == 59 || b == 58 {
+            parts.push(if have { cur } else { 0 })
+            cur = 0
+            have = false
+        } elif b >= 48 && b <= 57 {
+            cur = cur * 10 + (b - 48)
+            have = true
+        }
+        i += 1
+    }
+    var k = 0
+    while k < parts.length() {
+        let p = parts.get(k)
+        if p == 0 { s = term::plain() }
+        elif p == 1 { s = s.with(term::BOLD) }
+        elif p == 2 { s = s.with(term::DIM) }
+        elif p == 3 { s = s.with(term::ITALIC) }
+        elif p == 4 { s = s.with(term::UNDERLINE) }
+        elif p == 7 { s = s.with(term::REVERSE) }
+        elif p == 22 { s = term::Style { fg: s.fg, bg: s.bg, attrs: s.attrs & ~(term::BOLD | term::DIM), ul: s.ul } }
+        elif p >= 30 && p <= 37 { s = s.withFg(p - 30) }
+        elif p >= 90 && p <= 97 { s = s.withFg(p - 90 + 8) }
+        elif p == 39 { s = s.withFg(-1) }
+        elif p >= 40 && p <= 47 { s = s.onBg(p - 40) }
+        elif p >= 100 && p <= 107 { s = s.onBg(p - 100 + 8) }
+        elif p == 49 { s = s.onBg(-1) }
+        elif (p == 38 || p == 48) && k + 1 < parts.length() {
+            let mode = parts.get(k + 1)
+            var color = -1
+            if mode == 5 && k + 2 < parts.length() { color = parts.get(k + 2); k += 2 }
+            elif mode == 2 && k + 4 < parts.length() { color = term::rgb(parts.get(k + 2), parts.get(k + 3), parts.get(k + 4)); k += 4 }
+            s = if p == 38 { s.withFg(color) } else { s.onBg(color) }
+            k += 1
+        }
+        k += 1
+    }
+    s
+}

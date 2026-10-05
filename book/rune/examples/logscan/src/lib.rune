@@ -1,0 +1,5 @@
+// logscan — the library half of the package.
+//
+//     logscan::level    Level and how it reads and prints
+//     logscan::record   one parsed log line
+//     logscan::filter   which records to keep

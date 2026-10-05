@@ -1,0 +1,60 @@
+import std::{io, process, text}
+import std::dictionary::{Map}
+import std::collections::{slice, vector}
+
+/// Lower-cases a word and keeps only letters and apostrophes.
+fn clean(word: &String) -> String {
+    var out = ""
+    for c in text::lower(word) {
+        if (c >= 'a' && c <= 'z') || c == '\'' {
+            out += c
+        }
+    }
+    out
+}
+
+/// Adds every word of `line` to `counts`.
+fn countLine(counts: &var Map<String, i64>, line: &String) {
+    for raw in text::split(line, " ") {
+        let word = clean(raw)
+        if word.$isEmpty() { continue }
+        counts.put(word.$clone(), counts.atOr(&word, 0) + 1)
+    }
+}
+
+/// The counts as (word, count) pairs, most frequent first. Ties go alphabetical.
+fn ranked(counts: &Map<String, i64>) -> vector::Vector<(String, i64)> {
+    var entries = vector::Vector<(String, i64)>()
+    for (word, n) in counts {
+        entries.push((word.$clone(), *n))
+    }
+    slice::sortedBy(entries.asSlice(), ||(a: (String, i64), b: (String, i64)) -> bool {
+        a.1 > b.1 || (a.1 == b.1 && a.0 < b.0)
+    })
+}
+
+fn main() -> i64 {
+    var limit = 10
+    if process::argument(1) is Some(arg) {
+        match arg.$toInt() {
+            Some(n) => limit = n,
+            None => {
+                io::eprintln("usage: wordcount [how-many]")
+                return 1
+            }
+        }
+    }
+
+    var counts = Map<String, i64>()
+    while io::readLineOrEnd() is Some(line) {
+        countLine(&var counts, &line)
+    }
+
+    var shown = 0
+    for entry in ranked(&counts) {
+        if shown == limit { break }
+        println!("{:>5}  {}", entry.1, entry.0)
+        shown += 1
+    }
+    0
+}

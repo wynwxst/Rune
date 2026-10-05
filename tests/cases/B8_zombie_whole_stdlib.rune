@@ -1,0 +1,11 @@
+// An ordinary compile borrow-checks only the library bodies its own code
+// reaches through calls. This one checks every body in the standard library,
+// so a finding introduced anywhere in it still fails the suite.
+// FLAGS: --zombie-whole-stdlib
+// EXPECT: clean
+import std::io
+
+fn main() -> i64 {
+    io::println("clean")
+    0
+}

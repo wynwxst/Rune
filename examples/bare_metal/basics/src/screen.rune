@@ -1,0 +1,98 @@
+pub enum Color {
+    Black = 0,
+    Blue = 1,
+    Green = 2,
+    Cyan = 3,
+    Red = 4,
+    Magenta = 5,
+    Brown = 6,
+    LightGray = 7,
+    DarkGray = 8,
+    LightBlue = 9,
+    LightGreen = 10,
+    LightCyan = 11,
+    LightRed = 12,
+    Pink = 13,
+    Yellow = 14,
+    White = 15,
+}
+
+pub struct ColorCode{
+    c: u8
+}
+
+extend ColorCode {
+    fn new(foreground: Color, background: Color) -> ColorCode {
+        ColorCode {c: (background as u8) << 4 | (foreground as u8)}
+    }
+}
+
+struct Char {
+    ascii: u8
+    ccode: ColorCode
+}
+
+global BUFFER_HEIGHT = 25usize
+global BUFFER_WIDTH = 80usize
+
+
+pub struct Buffer {
+    chars: [BUFFER_HEIGHT:[BUFFER_WIDTH:Char]]
+}
+
+pub struct Writer {
+    cpos: usize,
+    ccode: ColorCode
+    buffer: *var Buffer
+
+    pub fn new_line(&self){}
+
+    pub fn write_byte(&var self,by: Byte){
+        match by {
+            '\n' => {
+                self.new_line()
+            },
+            _ => {
+                if self.cpos >= BUFFER_WIDTH {
+                    self.new_line()
+                }
+
+                row = BUFFER_HEIGHT -1
+                col = self.cpos
+
+                ccode = self.ccode
+
+                self.buffer.chars[row][col] = Char {
+                    ascii: by,
+                    ccode: ccode
+                }
+                self.cpos += 1
+            }
+        }
+    }
+
+    pub fn write_string(&var self, str: CString){
+        let buf = str as *var u8
+        var bidx = 0
+        var byte = buf[bidx]
+
+        while byte != 0 {
+            match byte {
+                0x20..=0x7e => {
+                    self.write_byte(byte)
+                },
+                _ => {self.write_byte(0xfe)}
+            }
+            bidx += 1
+            byte = buf[bidx]
+        }
+    }
+}
+
+#unsafe pub fn newWriter() -> Writer {
+    Writer {
+        cpos: 0,
+        ccode: ColorCode::new(foreground: .Yellow, background: .Black),
+        buffer: (0xB8000 as *var Buffer)
+    }
+}

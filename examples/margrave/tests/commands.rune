@@ -1,0 +1,17 @@
+// The command line: what it offers while a command is typed.
+import std::testing
+import std::io
+import grve::app
+import grve::config
+import grve::keys
+import grve::commands
+
+fn main() -> i64 {
+    let ws = app::App(config::Config(), "/tmp")
+    ws.openCommand("")
+    testing::isTrue("names offered", ws.prompt.items.length() > 10)
+    ws.prompt.text = "g "
+    ws.refreshCompletions()
+    testing::isTrue("paths offered", ws.prompt.items.length() > 0)
+    testing::summary()
+}

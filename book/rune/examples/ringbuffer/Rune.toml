@@ -1,0 +1,15 @@
+[package]
+name = "ringbuffer"
+version = "0.1.0"
+edition = "2026"
+description = "A fixed-size buffer that forgets its oldest value"
+authors = []
+
+[build]
+safety = "full"
+memory = "zombie"
+optimize = 0
+debug = true
+warnings-as-errors = false
+
+[dependencies]

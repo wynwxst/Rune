@@ -1,0 +1,54 @@
+// Brackets and quotes closing themselves as they are typed.
+import std::testing
+import grve::buffer
+import grve::config
+import grve::pane
+
+fn typed(keys: [String], cfg: config::Config) -> pane::Pane {
+    let p = pane::Pane(1)
+    p.open(buffer::Document(""))
+    for k in keys { p.typeText(k, cfg) }
+    p
+}
+
+fn main() -> i64 {
+    let cfg = config::Config()
+    let a = typed(["f", "(", "x"], cfg)
+    testing::equal("pairs", a.line(), "f(x)")
+    testing::equal("cursor inside", a.cursor.col, 3)
+    a.typeText(")", cfg)
+    testing::equal("steps over", a.line(), "f(x)")
+    testing::equal("after the closer", a.cursor.col, 4)
+
+    testing::equal("quotes", typed(["\"", "h", "i", "\""], cfg).line(), "\"hi\"")
+    testing::equal("apostrophe", typed(["i", "t", "'", "s"], cfg).line(), "it's")
+    testing::equal("nested", typed(["[", "{", "("], cfg).line(), "[{()}]")
+    testing::equal("not before a word", typed(["x", "\x1b"], cfg).line(), "x\x1b")
+
+    let b = typed(["(", "x"], cfg)
+    b.cursor = buffer::pos(0, 0)
+    b.typeText("[", cfg)
+    testing::equal("no pair before text", b.line(), "[(x)")
+
+    let c = typed(["{"], cfg)
+    c.backspace(cfg)
+    testing::equal("backspace takes both", c.line(), "")
+
+    let w = typed(["w", "o", "r", "d"], cfg)
+    w.anchor = buffer::pos(0, 0)
+    w.selecting = true
+    w.typeText("\"", cfg)
+    testing::equal("wraps a selection", w.line(), "\"word\"")
+    testing::equal("still selected", w.selectedText(), "word")
+
+    let u = typed(["(", "a"], cfg)
+    u.doc.undo()
+    testing::equal("typing inside undoes alone", u.line(), "()")
+    u.doc.undo()
+    testing::equal("then the pair", u.line(), "")
+
+    let off = config::Config()
+    off.autoPairs = false
+    testing::equal("switched off", typed(["("], off).line(), "(")
+    testing::summary()
+}

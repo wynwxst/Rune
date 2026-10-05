@@ -1,0 +1,39 @@
+// Tests for pantry::inventory. Each file in tests/ is its own program.
+// `rune test` builds and runs it, and the exit code says whether it passed.
+import std::testing
+import pantry::inventory::{Item, Pantry}
+import pantry::unit::{Unit}
+
+fn flour(quantity: i64) -> Item {
+    Item { name: "flour", quantity: quantity, unit: Unit::Grams }
+}
+
+fn main() -> i64 {
+    // An item
+    var item = flour(500)
+    assert!(item.take(200))
+    assertEq!(item.quantity, 300)
+    assertNot!(item.take(301), "cannot take more than is there")
+    assertEq!(item.quantity, 300, "a refused take changes nothing")
+    assertNot!(item.isLow())
+    assert!(item.take(299))
+    assert!(item.isLow(), "one gram left is low")
+
+    // A pantry
+    var pantry = Pantry::new()
+    pantry.add(flour(500))
+    pantry.add(Item { name: "eggs", quantity: 6, unit: Unit::Pieces })
+    assertEq!(pantry.items.length(), 2)
+
+    pantry.add(flour(250))
+    assertEq!(pantry.items.length(), 2, "adding an existing name merges")
+    assertEq!(pantry.items.look(0).quantity, 750)
+
+    assert!(pantry.consume(&"flour", 700))
+    assertNot!(pantry.consume(&"flour", 700), "only 50 left")
+    assertNot!(pantry.consume(&"sugar", 1), "unknown item")
+    testing::isSome::<i64>("finds eggs", pantry.indexOf(&"eggs"))
+    testing::isNone::<i64>("does not find sugar", pantry.indexOf(&"sugar"))
+
+    testing::summary()
+}

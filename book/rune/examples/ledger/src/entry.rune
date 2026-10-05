@@ -1,0 +1,18 @@
+import std::time
+
+/// One line of the ledger.
+pub struct Entry {
+    pub date: time::Date
+    pub description: String
+    /// Money in cents. Negative is spending.
+    pub cents: i64
+}
+
+/// Writes cents as money: `-350` is `-3.50`.
+pub fn money(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" }
+    let absolute = if cents < 0 { 0 - cents } else { cents }
+    let whole = absolute / 100
+    let part = absolute % 100
+    sign + whole.$str() + "." + (if part < 10 { "0" } else { "" }) + part.$str()
+}

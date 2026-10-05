@@ -1,0 +1,25 @@
+import std::collections::vector
+import shapes::vec2::{Vec2}
+import shapes::shape::{Circle, Rect, Polygon}
+import shapes::scene::{Scene}
+
+fn main() {
+    var scene = Scene::new()
+    scene.add(Circle { center: Vec2 { x: 0.0, y: 0.0 }, radius: 2.0 })
+    scene.add(Rect { corner: Vec2 { x: 1.0, y: 1.0 }, size: Vec2 { x: 3.0, y: 4.0 } })
+
+    // A triangle, with its corners worked out by vector arithmetic.
+    let origin = Vec2 { x: 0.0, y: 0.0 }
+    let along = Vec2 { x: 6.0, y: 0.0 }
+    let up = Vec2 { x: 0.0, y: 5.0 }
+    var corners = vector::Vector<Vec2>()
+    corners.push(origin)
+    corners.push(origin + along)
+    corners.push(origin + along * 0.5 + up)
+    scene.add(Polygon { corners: corners })
+
+    println!("{} shapes:", scene.count())
+    scene.describeAll()
+    println!("total area: {}", scene.totalArea())
+    println!("largest is shape number {}", (scene.largest() ?? -1) + 1)
+}

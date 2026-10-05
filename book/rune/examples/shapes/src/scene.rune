@@ -1,0 +1,52 @@
+import std::collections::vector
+import shapes::shape::{Shape}
+
+/// A collection of shapes of any kinds.
+pub struct Scene {
+    shapes: vector::Vector<dyn Shape>
+}
+
+extend Scene {
+    pub fn new() -> Self {
+        Scene { shapes: vector::Vector<dyn Shape>() }
+    }
+
+    /// Adds any shape. The scene owns it from now on.
+    pub fn add(&var self, shape: dyn Shape) {
+        self.shapes.push(shape)
+    }
+
+    pub fn count(&self) -> i64 {
+        self.shapes.length()
+    }
+
+    pub fn totalArea(&self) -> f64 {
+        var total = 0.0
+        for s in self.shapes {
+            total += s.area()
+        }
+        total
+    }
+
+    /// The position of the shape with the largest area, if there are any.
+    pub fn largest(&self) -> i64? {
+        var best: i64? = nil
+        var bestArea = 0.0
+        var i = 0
+        while i < self.shapes.length() {
+            let area = self.shapes.look(i).area()
+            if best.isNil() || area > bestArea {
+                best = i
+                bestArea = area
+            }
+            i += 1
+        }
+        best
+    }
+
+    pub fn describeAll(&self) {
+        for s in self.shapes {
+            println!("  {}", s.describe())
+        }
+    }
+}

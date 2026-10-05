@@ -1,0 +1,487 @@
+// `:` commands — what they do, and what the command line offers while one
+// is being typed: command names first, then files and folders for the
+// commands that take a path, listed as the path is typed.
+
+import std::collections::vector
+import std::env
+import std::io
+import grve::app
+import grve::buffer
+import grve::config
+import grve::glue
+import grve::layout
+import grve::pane
+import grve::sys
+import grve::utf
+
+struct Command {
+    name: String
+    /// "", "path", "dir", "shell", "set" or "text": what follows the name.
+    takes: String
+    help: String
+}
+
+fn commands() -> vector::Vector<Command> {
+    var out = vector::Vector<Command>()
+    out.push(Command { name: "g", takes: "path", help: "go to a folder or file" })
+    out.push(Command { name: "o", takes: "path", help: "open a file or folder in a split on the right" })
+    out.push(Command { name: "sp", takes: "path", help: "open a file or folder in a split below" })
+    out.push(Command { name: "e", takes: "path", help: "edit a file in this pane" })
+    out.push(Command { name: "sh", takes: "shell", help: "run a shell command in the working directory; % is this file" })
+    out.push(Command { name: "w", takes: "path", help: "write the file (or write it to a new path)" })
+    out.push(Command { name: "wa", takes: "", help: "write every changed file" })
+    out.push(Command { name: "q", takes: "", help: "close this pane; the last one quits" })
+    out.push(Command { name: "q!", takes: "", help: "close this pane, dropping its changes" })
+    out.push(Command { name: "wq", takes: "", help: "write, then close" })
+    out.push(Command { name: "qa", takes: "", help: "quit" })
+    out.push(Command { name: "qa!", takes: "", help: "quit, dropping every change" })
+    out.push(Command { name: "cd", takes: "dir", help: "change the working directory" })
+    out.push(Command { name: "new", takes: "", help: "a new, empty buffer here" })
+    out.push(Command { name: "mkdir", takes: "dir", help: "make a folder" })
+    out.push(Command { name: "only", takes: "", help: "close every other pane" })
+    out.push(Command { name: "noh", takes: "", help: "clear search highlights" })
+    out.push(Command { name: "set", takes: "set", help: "tab=N  tabs  spaces  wrap  numbers  relative  hidden  guides" })
+    out.push(Command { name: "format", takes: "", help: "format the document with its language server" })
+    out.push(Command { name: "lsp", takes: "", help: "language servers: status, or `:lsp restart`" })
+    out.push(Command { name: "theme", takes: "theme", help: "switch colour scheme: margrave rose nord gruvbox mono paper" })
+    out.push(Command { name: "reload", takes: "", help: "read the configuration again" })
+    out.push(Command { name: "config", takes: "", help: "open the configuration folder" })
+    out.push(Command { name: "help", takes: "", help: "every key and command" })
+    out
+}
+
+fn setOptions() -> vector::Vector<String> {
+    vector::from(["tab=", "tabs", "spaces", "wrap", "nowrap", "numbers", "nonumbers", "relative", "norelative",
+        "hidden", "nohidden", "guides", "noguides"])
+}
+
+/// (name, rest) — `sh ls` → ("sh", "ls"), `!ls` → ("sh", "ls").
+fn split(text: &String) -> (String, String) {
+    let t = utf::trimStart(text)
+    if utf::startsWith(t, "!") { return ("sh", t.$substring(1, t.$length())) }
+    var i = 0
+    while i < t.$length() && (t.$byteAt(i) as i64) != 32 { i += 1 }
+    let name = t.$substring(0, i)
+    var j = i
+    while j < t.$length() && (t.$byteAt(j) as i64) == 32 { j += 1 }
+    (name, t.$substring(j, t.$length()))
+}
+
+fn find(name: &String) -> Command? {
+    for c in commands() {
+        if c.name == name { return c.$clone() }
+    }
+    // Long spellings people type out of habit.
+    let alias = match name {
+        "go" => "g", "open" => "o", "vs" => "o", "vsplit" => "o", "split" => "sp", "edit" => "e",
+        "write" => "w", "quit" => "q", "x" => "wq", "shell" => "sh", "nohl" => "noh", "enew" => "new",
+        _ => "",
+    }
+    if alias.$isEmpty() { return nil }
+    find(alias)
+}
+
+extend app::App {
+    //=== Offering completions ============================================//
+
+    /// Works out what the dropdown above the command line shows.
+    pub fn refreshCompletions(&self) {
+        var items = vector::Vector<app::Item>()
+        let text = self.prompt.text.$clone()
+        let trimmed = utf::trimStart(text)
+        let hasSpace = utf::findFrom(trimmed, " ", 0) >= 0
+        if !hasSpace && !utf::startsWith(trimmed, "!") {
+            // Still on the command's name.
+            for c in commands() {
+                if utf::startsWith(c.name, trimmed) {
+                    items.push(app::Item { label: c.name.$clone(), detail: c.help.$clone(), icon: ":",
+                        iconColor: self.cfg.theme.accent, insert: c.name.$clone(),
+                        data: c.takes.$clone() })
+                }
+            }
+            // An exact name with nothing after it needs no list.
+            if items.length() == 1 && items.look(0).label == trimmed && items.look(0).data.$isEmpty() { items.clear() }
+        } else {
+            let (name, rest) = split(text)
+            let takes = match find(name) { Some(c) => c.takes.$clone(), None => "" }
+            if takes == "path" || takes == "dir" || takes == "shell" {
+                // The word being typed is the path.
+                var start = rest.$length()
+                while start > 0 && (rest.$byteAt(start - 1) as i64) != 32 { start -= 1 }
+                if takes != "shell" { start = 0 }
+                let word = rest.$substring(start, rest.$length())
+                let before = text.$substring(0, text.$length() - rest.$length() + start)
+                items = self.pathItems(word, before, takes == "dir")
+            } elif takes == "theme" {
+                for t in config::themeNames() {
+                    if utf::startsWith(t, rest) {
+                        let current = t == self.cfg.theme.name
+                        items.push(app::Item { label: t.$clone(), detail: if current { "current" } else { "" },
+                            icon: "◆", iconColor: self.cfg.theme.accent, insert: name + " " + t })
+                    }
+                }
+            } elif takes == "set" {
+                for o in setOptions() {
+                    if utf::startsWith(o, rest) {
+                        items.push(app::Item { label: o.$clone(), icon: "=", iconColor: self.cfg.theme.muted,
+                            insert: name + " " + o })
+                    }
+                }
+            }
+        }
+        self.prompt.items = items
+        self.prompt.selected = 0
+        self.prompt.top = 0
+    }
+
+    /// Names in the folder `word` points into that start with what follows
+    /// its last slash. Each item's insert is the whole command line with
+    /// the name filled in.
+    fn pathItems(&self, word: &String, before: &String, dirsOnly: bool) -> vector::Vector<app::Item> {
+        var items = vector::Vector<app::Item>()
+        let slash = utf::lastByte(word, 47)
+        let dirPart = if slash >= 0 { word.$substring(0, slash + 1) } else { "" }
+        let base = word.$substring(slash + 1, word.$length())
+        let here = self.cwd.$clone()
+        let dir = if dirPart.$isEmpty() { here } else { self.resolve(dirPart, here) }
+        let showDots = utf::startsWith(base, ".")
+        let lowered = utf::lower(base)
+        var dirs = vector::Vector<app::Item>()
+        var files = vector::Vector<app::Item>()
+        var later = vector::Vector<app::Item>()
+        match io::readDirectory(dir) {
+            Ok(entries) => {
+                for e in entries {
+                    if utf::startsWith(e.name, ".") && !showDots { continue }
+                    let full = utf::join(dir, e.name)
+                    let isDir = sys::isDirectory(full)
+                    if dirsOnly && !isDir { continue }
+                    let lname = utf::lower(e.name)
+                    let starts = utf::startsWith(lname, lowered)
+                    if !starts && (lowered.$isEmpty() || utf::findFrom(lname, lowered, 0) < 0) { continue }
+                    let shownName = if isDir { e.name + "/" } else { e.name.$clone() }
+                    let item = app::Item {
+                        label: shownName.$clone(),
+                        detail: if isDir { "" } else { utf::humanSize(sys::fileSize(full)) },
+                        icon: if isDir { "▸" } else { " " },
+                        iconColor: self.cfg.theme.directory,
+                        insert: before + dirPart + shownName,
+                    }
+                    if !starts { later.push(item) }
+                    elif isDir { dirs.push(item) }
+                    else { files.push(item) }
+                }
+            },
+            Err(e) => {},
+        }
+        sortByLabel(&var dirs)
+        sortByLabel(&var files)
+        sortByLabel(&var later)
+        for x in dirs { items.push(x.$clone()) }
+        for x in files { items.push(x.$clone()) }
+        for x in later { items.push(x.$clone()) }
+        items
+    }
+
+    /// Tab: takes the highlighted completion into the command line.
+    pub fn takeCompletion(&self) {
+        if self.prompt.items.isEmpty() { return }
+        let it = self.prompt.items.get(self.prompt.selected)
+        var text = it.insert.$clone()
+        // A command that takes something gets its space.
+        if it.icon == ":" && !it.data.$isEmpty() { text += " " }
+        self.prompt.text = text
+        self.refreshCompletions()
+    }
+
+    //=== Running them ====================================================//
+
+    pub fn runCommand(&self, text: &String) {
+        let t = utf::trim(text)
+        if t.$isEmpty() { return }
+        match t.$toInt() {
+            Some(n) => { self.goToLine(n); return },
+            None => {},
+        }
+        let (name, rest) = split(t)
+        let cmd = match find(name) {
+            Some(c) => c,
+            None => { self.fail("not a command: " + name + "  (:help lists them)"); return },
+        }
+        let p = self.current()
+        let arg = utf::trim(rest)
+        let n = cmd.name.$clone()
+        if n == "w" { self.write(p, arg) }
+        elif n == "wa" {
+            var count = 0
+            for d in self.docs {
+                if d.dirty() && !d.path.$isEmpty() {
+                    if self.save(d.$clone()) { count += 1 }
+                }
+            }
+            self.good("wrote " + count.$str() + " file" + (if count == 1 { "" } else { "s" }))
+        }
+        elif n == "q" { self.closePane(p.id, false) }
+        elif n == "q!" { self.closePane(p.id, true) }
+        elif n == "wq" {
+            if p.hasDoc && p.mode == pane::EDITOR && p.doc.dirty() {
+                if !self.save(p.doc) { return }
+            }
+            self.closePane(p.id, false)
+        }
+        elif n == "qa" { self.quit(false) }
+        elif n == "qa!" { self.quit(true) }
+        elif n == "e" {
+            if arg.$isEmpty() {
+                if p.hasDoc && !p.doc.path.$isEmpty() {
+                    if p.doc.dirty() { self.confirm("drop your changes to " + p.doc.name() + " and read it again? [y/N]", "reload") }
+                    else { p.doc.read(); p.clampCursor(); self.info("reloaded " + p.doc.name()) }
+                }
+                return
+            }
+            self.openIn(p, self.resolve(arg, self.cwd))
+        }
+        elif n == "o" || n == "sp" {
+            let kind = if n == "o" { layout::ROW } else { layout::COLUMN }
+            let target = if !arg.$isEmpty() { self.resolve(arg, self.cwd) }
+            elif p.hasDoc && p.mode == pane::EDITOR && !p.doc.path.$isEmpty() { p.doc.path.$clone() }
+            else { p.dir.$clone() }
+            self.openSplit(target, kind)
+        }
+        elif n == "g" {
+            let target = if arg.$isEmpty() { self.home.$clone() } else { self.resolve(arg, self.cwd) }
+            match sys::fileKind(target) {
+                sys::Kind::Directory => {
+                    p.list(target, self.cfg.showHidden)
+                    p.mode = pane::EXPLORER
+                },
+                sys::Kind::Missing => self.fail("nothing at " + self.shown(target)),
+                _ => self.openIn(p, target),
+            }
+        }
+        elif n == "cd" {
+            let target = if arg.$isEmpty() { self.current().dir.$clone() } else { self.resolve(arg, self.cwd) }
+            if !sys::isDirectory(target) { self.fail("not a folder: " + self.shown(target)); return }
+            env::setCurrentDirectory(target)
+            self.cwd = target.$clone()
+            p.list(target, self.cfg.showHidden)
+            if !p.hasDoc { p.mode = pane::EXPLORER }
+            self.info("working directory: " + self.shownDir(target))
+        }
+        elif n == "sh" {
+            if arg.$isEmpty() { self.info("usage: :sh <command>"); return }
+            var command = arg.$clone()
+            if p.hasDoc && !p.doc.path.$isEmpty() { command = withFile(command, utf::shellQuote(p.doc.path)) }
+            let dir = self.cwd.$clone()
+            self.run(command, dir)
+        }
+        elif n == "new" {
+            let d = buffer::Document("")
+            d.title = "untitled"
+            self.docs.push(d)
+            p.open(d)
+        }
+        elif n == "mkdir" {
+            if arg.$isEmpty() { self.info("usage: :mkdir <folder>"); return }
+            let target = self.resolve(arg, self.cwd)
+            match io::makeDirectories(target) {
+                Some(e) => self.fail("could not make " + self.shown(target) + ": " + io::describe(e)),
+                None => {
+                    self.good("made " + self.shown(target))
+                    self.refreshExplorers()
+                },
+            }
+        }
+        elif n == "only" {
+            for id in self.layout.panes() {
+                if id != p.id { self.closePane(id, false) }
+            }
+        }
+        elif n == "noh" { self.search.showing = false }
+        elif n == "set" { self.setOption(arg) }
+        elif n == "format" { self.requestFormat() }
+        elif n == "lsp" {
+            if arg == "restart" { self.restartServers(); return }
+            if self.clients.isEmpty() { self.info("no language servers running"); return }
+            var s = ""
+            for c in self.clients {
+                if !s.$isEmpty() { s += "   " }
+                s += c.name + ": " + c.status + (if c.failed.$isEmpty() { "" } else { " (" + c.failed + ")" })
+            }
+            self.info(s)
+        }
+        elif n == "theme" {
+            if arg.$isEmpty() {
+                var names = ""
+                for t in config::themeNames() { names += (if names.$isEmpty() { "" } else { "  " }) + t }
+                self.info("theme: " + self.cfg.theme.name + "   (" + names + ")")
+                return
+            }
+            if self.cfg.theme.use(arg) {
+                self.screen.invalidate()
+                self.good("theme " + arg + " — set `name` under [theme] in config.toml to keep it")
+            } else {
+                self.fail("no theme '" + arg + "'")
+            }
+        }
+        elif n == "reload" { self.reloadConfig() }
+        elif n == "config" {
+            p.list(self.cfg.directory, self.cfg.showHidden)
+            p.mode = pane::EXPLORER
+        }
+        elif n == "help" { self.showHelp() }
+    }
+
+    fn goToLine(&self, n: i64) {
+        let p = self.current()
+        if !p.hasDoc || p.mode != pane::EDITOR { return }
+        p.remember()
+        var l = n - 1
+        if l < 0 { l = 0 }
+        if l >= p.doc.lineCount() { l = p.doc.lineCount() - 1 }
+        p.selecting = false
+        p.setCursor(buffer::pos(l, utf::indentOf(p.doc.line(l)).$length()), self.cfg.tabWidth)
+        p.centre()
+        p.reveal(self.cfg.scrollOff, self.cfg.tabWidth)
+    }
+
+    fn write(&self, p: pane::Pane, arg: &String) {
+        if !p.hasDoc || p.mode != pane::EDITOR { self.info("nothing to write here"); return }
+        if !arg.$isEmpty() {
+            let target = self.resolve(arg, self.cwd)
+            if self.findDocument(target).hasValue() && target != p.doc.path {
+                self.fail(self.shown(target) + " is open already")
+                return
+            }
+            self.closeDocument(p.doc)
+            p.doc.path = target
+            p.doc.readOnly = false
+            p.doc.language = self.cfg.languageFor(target)
+            p.doc.invalidate(0)
+            p.dir = utf::dirName(target)
+        }
+        if self.save(p.doc) { self.attach(p.doc) }
+    }
+
+    fn setOption(&self, arg: &String) {
+        let (key, value) = match utf::findFrom(arg, "=", 0) {
+            -1 => (arg.$clone(), ""),
+            at => (utf::trim(arg.$substring(0, at)), utf::trim(arg.$substring(at + 1, arg.$length()))),
+        }
+        if key == "tab" || key == "tabwidth" || key == "ts" {
+            match value.$toInt() {
+                Some(n) => { if n >= 1 && n <= 16 { self.cfg.tabWidth = n } },
+                None => {},
+            }
+            self.info("tab width " + self.cfg.tabWidth.$str())
+        }
+        elif key == "tabs" { self.cfg.useTabs = true; self.info("indenting with tabs") }
+        elif key == "spaces" { self.cfg.useTabs = false; self.info("indenting with spaces") }
+        elif key == "numbers" || key == "nu" { self.cfg.lineNumbers = true }
+        elif key == "nonumbers" || key == "nonu" { self.cfg.lineNumbers = false }
+        elif key == "relative" || key == "rnu" { self.cfg.relativeNumbers = true; self.cfg.lineNumbers = true }
+        elif key == "norelative" || key == "nornu" { self.cfg.relativeNumbers = false }
+        elif key == "hidden" { self.cfg.showHidden = true; self.refreshExplorers() }
+        elif key == "nohidden" { self.cfg.showHidden = false; self.refreshExplorers() }
+        elif key == "wrap" { self.cfg.wrap = true }
+        elif key == "nowrap" { self.cfg.wrap = false }
+        elif key == "guides" { self.cfg.indentGuides = true }
+        elif key == "noguides" { self.cfg.indentGuides = false }
+        else { self.fail("no option '" + key + "'") }
+    }
+
+    /// prefix+?: every command and chord, under the prefix in force, in a
+    /// panel the next key puts away.
+    pub fn showCommands(&self) {
+        let p = self.cfg.prefixName()
+        let shown = if p == "alt" { "alt (Option on macOS)" } else { p.$clone() }
+        var lines = vector::Vector<String>()
+        lines.push("The prefix is `" + shown + "` — `[keys] prefix` in config.toml.")
+        lines.push("")
+        lines.push("# Commands")
+        for c in commands() {
+            let arg = if c.takes == "path" || c.takes == "dir" { " <path>" } elif c.takes == "shell" { " <command>" }
+            elif c.takes == "set" { " <option>" } else { "" }
+            lines.push(utf::padEnd(":" + c.name + arg, 16) + c.help)
+        }
+        lines.push(utf::padEnd(":<number>", 16) + "go to that line")
+        lines.push("")
+        lines.push("# Everywhere")
+        let chords: [16:(String, String)] = [
+            ("arrows", "move between panes"), (";", "command line"), ("/", "search"),
+            ("?", "this list"), ("a", "stop the running shell command"), ("q", "close the pane"),
+            ("\\ / -", "split right / below"), ("=", "even the splits"), ("9 / 0", "back / forward"),
+            ("shift+h", "the full help"),
+            ("c x v", "copy, cut, paste"), ("[ ]", "dedent, indent"), ("delete", "delete the line"),
+            ("s z y", "save, undo, redo"), ("g", "go to line"), ("shift+arrows", "jump by word / paragraph"),
+        ]
+        var i = 0
+        for (key, what) in chords {
+            if i == 10 { lines.push(""); lines.push("# Editing") }
+            lines.push(utf::padEnd("`" + p + "+" + key + "`", 22) + what)
+            i += 1
+        }
+        lines.push("")
+        lines.push("# Language")
+        let lsp: [6:(String, String)] = [
+            ("l", "the language menu"), ("d k r o", "definition, docs, references, symbols"),
+            ("shift+d / r / o", "the same, read-only in a peek panel below"),
+            ("f . n e", "format, code actions, rename, line diagnostics"),
+            ("j / p", "next / previous search hit"), ("enter", "this file again, split right"),
+        ]
+        for (key, what) in lsp { lines.push(utf::padEnd("`" + p + "+" + key + "`", 22) + what) }
+        lines.push("")
+        lines.push("# Explorer")
+        lines.push("enter open · e right open plainly · o s split · d new folder · n new file")
+        lines.push(": command · / search · ! shell · . hidden · r refresh · y copy path")
+        self.hover = lines
+        self.hoverTitle = "commands"
+        self.hoverCode = 0
+        self.hoverLanguage = nil
+        self.hoverByMouse = false
+        self.hoverRow = -2
+    }
+
+    pub fn reloadConfig(&self) {
+        let fresh = config::load()
+        self.cfg = fresh
+        self.screen.curly = fresh.undercurl
+        self.decoder.macOption = fresh.macOption
+        for d in self.docs {
+            let doc = d.$clone()
+            if !doc.path.$isEmpty() { doc.language = fresh.languageFor(doc.path) }
+            doc.invalidate(0)
+        }
+        self.screen.invalidate()
+        if fresh.warnings.isEmpty() { self.good("configuration reloaded") }
+        else { self.warn(fresh.warnings.get(0)) }
+    }
+}
+
+/// `%` (on its own, not `%%`) replaced with the current file.
+fn withFile(command: &String, path: &String) -> String {
+    var out = ""
+    var i = 0
+    let n = command.$length()
+    while i < n {
+        let b = command.$byteAt(i) as i64
+        if b == 37 {
+            if i + 1 < n && (command.$byteAt(i + 1) as i64) == 37 { out += "%"; i += 2; continue }
+            out += path
+        } else {
+            out += command.$substring(i, i + 1)
+        }
+        i += 1
+    }
+    out
+}
+
+fn sortByLabel(items: &var vector::Vector<app::Item>) {
+    var keys = vector::Vector<String>()
+    // By index: `for` over a `&var Vector` parameter crashes (a compiler
+    // bug, not this code's).
+    for i in 0..items.length() { keys.push(utf::lower(items.look(i).label)) }
+    let sorted = glue::sortItems(items.$clone(), keys)
+    items.clear()
+    for it in sorted { items.push(it.$clone()) }
+}

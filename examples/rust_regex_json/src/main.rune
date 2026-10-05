@@ -1,0 +1,125 @@
+// regex and serde_json, from Rune, through a small C-ABI crate (rust/).
+import std::io
+import tk
+
+/// A Rust string handed over: read, then given back to Rust to free.
+fn take(s: CString) -> String {
+    if unsafe { s as usize } == 0 { return "" }
+    let out = s.$str()
+    unsafe { tk::tk_free_text(s) }
+    out
+}
+
+/// A compiled `regex::Regex`, owned here.
+struct Pattern {
+    handle: *var tk::Regex
+
+    fn deinit(&self) { unsafe { tk::rx_free(self.handle) } }
+
+    pub fn ok(&self) -> bool { unsafe { self.handle as usize } != 0 }
+    pub fn matches(&self, text: &String) -> bool {
+        unsafe { tk::rx_is_match(self.handle, text.$cstr()) }
+    }
+    pub fn count(&self, text: &String) -> i64 {
+        unsafe { tk::rx_count(self.handle, text.$cstr()) as i64 }
+    }
+    pub fn replaceAll(&self, text: &String, with: &String) -> String {
+        take(unsafe { tk::rx_replace_all(self.handle, text.$cstr(), with.$cstr()) })
+    }
+    /// Every match, as text, found one after another with `rx_find`.
+    pub fn all(&self, text: &String) -> String {
+        var out = ""
+        var from: usize = 0
+        while true {
+            let span = unsafe { tk::rx_find(self.handle, text.$cstr(), from) }
+            if !span.found { break }
+            if !out.$isEmpty() { out += "," }
+            out += text.$substring(span.start as i64, span.end as i64)
+            from = if span.end > span.start { span.end } else { span.end + 1 }
+        }
+        out
+    }
+}
+
+fn compile(pattern: String) -> Pattern {
+    Pattern { handle: unsafe { tk::rx_new(pattern.$cstr()) } }
+}
+
+/// Called by Rust for each capture group.
+fn onGroup(user: *var u8, index: usize, group: CString) {
+    io::println("  group " + index.$str() + ": " + group.$str())
+    unsafe { (user as *var i64)[0] += 1 }
+}
+
+/// A parsed `serde_json::Value`, owned here.
+struct Json {
+    handle: *var tk::Value
+
+    fn deinit(&self) { unsafe { tk::json_free(self.handle) } }
+
+    pub fn at(&self, path: String) -> *tk::Value {
+        unsafe { tk::json_pointer(self.handle as *tk::Value, path.$cstr()) }
+    }
+    pub fn number(&self, path: String) -> f64 {
+        var n = 0.0
+        let v = self.at(path)
+        if unsafe { v as usize } == 0 { return -1.0 }
+        if !unsafe { tk::json_number(v, &var n as *var f64) } { return -1.0 }
+        n
+    }
+    pub fn text(&self, path: String) -> String {
+        let v = self.at(path)
+        if unsafe { v as usize } == 0 { return "<missing>" }
+        take(unsafe { tk::json_string(v) })
+    }
+    pub fn render(&self, pretty: bool) -> String {
+        take(unsafe { tk::json_to_string(self.handle as *tk::Value, pretty) })
+    }
+}
+
+fn main() -> i64 {
+    io::println("tk API " + tk::tk_version().$str() + " (" + tk::API_VERSION.$str() + ")")
+
+    // regex
+    let date = compile("(\\d{4})-(\\d{2})-(\\d{2})")
+    let log = "deployed 2024-03-15, rolled back 2024-03-16, redeployed 2025-01-02"
+    io::println("dates found: " + date.count(log).$str() + " -> " + date.all(log))
+    io::println("reordered: " + date.replaceAll(log, "$3/$2/$1"))
+    var groups: i64 = 0
+    let seen = unsafe {
+        tk::rx_captures(date.handle as *tk::Regex, log.$cstr(),
+                        onGroup as @cfunction(*var u8, usize, CString),
+                        &var groups as *var u8)
+    }
+    io::println("groups: " + seen.$str() + ", callbacks: " + groups.$str())
+
+    let email = compile("^[\\w.+-]+@[\\w-]+\\.[\\w.]+$")
+    for candidate in ["ada@example.com", "not an email", "x+tag@sub.domain.org"] {
+        io::println("  " + candidate + " -> " + email.matches(candidate).$str())
+    }
+    let unicode = compile("\\p{Greek}+")
+    io::println("greek: " + unicode.all("alpha α, beta β, gamma γδε"))
+
+    let broken = compile("(unclosed")
+    io::println("broken pattern compiles: " + broken.ok().$str())
+    io::println("why: " + take(unsafe { tk::rx_error("(unclosed") }).$substring(0, 26))
+
+    // serde_json
+    let source = "{\"name\": \"rune\", \"version\": 0.1, \"tags\": [\"fast\", \"small\"], \"deps\": {\"regex\": 1}}"
+    let doc = Json { handle: unsafe { tk::json_parse(source.$cstr()) } }
+    io::println("name: " + doc.text("/name") + ", version: " + doc.number("/version").$str())
+    io::println("second tag: " + doc.text("/tags/1") + ", tags: " +
+                unsafe { tk::json_len(doc.at("/tags")) }.$str())
+    io::println("deps is an object: " +
+                (unsafe { tk::json_kind(doc.at("/deps")) } == tk::JsonKind_Object).$str())
+    io::println("missing: " + doc.text("/nope/0"))
+    unsafe { tk::json_set_number(doc.handle, "stars", 42.0) }
+    io::println(doc.render(false))
+    io::println(doc.render(true))
+
+    let bad = "{\"a\": [1, 2,}"
+    let failed = unsafe { tk::json_parse(bad.$cstr()) }
+    io::println("bad JSON parses: " + (unsafe { failed as usize } != 0).$str())
+    io::println("why: " + take(unsafe { tk::json_error(bad.$cstr()) }))
+    0
+}

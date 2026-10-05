@@ -1,0 +1,247 @@
+// The operating system, as margrave needs it. The C half is `c/sys.c`; this
+// file is the checked edge over it, so nothing else in the program writes
+// `unsafe`.
+
+import std::io
+
+extern "C" {
+    fn mg_term_enter() -> i32
+    fn mg_term_leave()
+    fn mg_term_size(rows: *var i32, cols: *var i32)
+    fn mg_winch_fd() -> i32
+    fn mg_wcwidth(cp: u32) -> i32
+    fn mg_poll(fds: *i32, count: i32, timeout: i32, ready: *var i32) -> i32
+    fn mg_read(fd: i32, buffer: *var u8, most: i64) -> i64
+    fn mg_write(fd: i32, data: *u8, count: i64) -> i64
+    fn mg_close(fd: i32)
+    fn mg_spawn(command: CString, directory: CString, input: i32, merge: i32,
+                inputFd: *var i32, outputFd: *var i32) -> i32
+    fn mg_reap(pid: i32, status: *var i32) -> i32
+    fn mg_kill(pid: i32, sig: i32)
+    fn mg_pipe_into(command: CString, data: *u8, count: i64) -> i32
+    fn mg_file_kind(path: CString) -> i32
+    fn mg_file_size(path: CString) -> i64
+    fn mg_file_mtime(path: CString) -> i64
+    fn mg_realpath(path: CString) -> CString
+    fn mg_file_magic(path: CString) -> CString
+    fn mg_file_head_hex(path: CString, count: i32) -> CString
+    fn mg_regex_new(pattern: CString, icase: i32, error: *var u8, size: i32) -> *var u8
+    fn mg_regex_find(handle: *var u8, text: CString, from: i64, start: *var i64, end: *var i64) -> i32
+    fn mg_regex_free(handle: *var u8)
+}
+
+//=== The terminal ========================================================//
+
+/// Raw mode on. False when standard input is not a terminal.
+#safe("termios state is the C half's own")
+pub fn enterRaw() -> bool { mg_term_enter() == 0i32 }
+
+#safe("termios state is the C half's own")
+pub fn leaveRaw() { mg_term_leave() }
+
+/// (rows, columns) of the window.
+#safe("two locals, written once each")
+pub fn windowSize() -> (i64, i64) {
+    var rows: i32 = 0
+    var cols: i32 = 0
+    mg_term_size(&var rows as *var i32, &var cols as *var i32)
+    (rows as i64, cols as i64)
+}
+
+/// Readable whenever the window has been resized.
+#safe("a descriptor number")
+pub fn resizeDescriptor() -> i64 { mg_winch_fd() as i64 }
+
+/// Columns a code point takes: 0, 1 or 2.
+#safe("wcwidth is total")
+pub fn charWidth(cp: i64) -> i64 {
+    if cp < 0 || cp > 0x10FFFF { return 1 }
+    mg_wcwidth(cp as u32) as i64
+}
+
+//=== Descriptors =========================================================//
+
+pub fn writeText(fd: i64, text: &String) {
+    writeRaw(fd, text)
+}
+
+#safe("the pointer is to the string's own bytes for the length of the call")
+fn writeRaw(fd: i64, text: &String) {
+    if text.$isEmpty() { return }
+    mg_write(fd as i32, text.$cstr() as *u8, text.$length())
+}
+
+/// Writes a whole buffer.
+#safe("the block is valid for its length until the buffer changes")
+pub fn writeBytes(fd: i64, data: &io::Bytes) {
+    if data.length() == 0 { return }
+    mg_write(fd as i32, data.raw() as *u8, data.length())
+}
+
+/// Waits for any of `fds`. Returns which ones are readable, as a mask over
+/// their positions. Zero when the time ran out.
+#safe("both arrays are locals of the size passed")
+pub fn waitAny(fds: [i64], timeout: i64) -> i64 {
+    var list: [16:i32] = [0i32; 16]
+    var ready: [16:i32] = [0i32; 16]
+    var n = fds.$length()
+    if n > 16 { n = 16 }
+    for i in 0..n { list[i] = fds[i] as i32 }
+    let got = mg_poll(&list[0] as *i32, n as i32, timeout as i32, &var ready[0] as *var i32)
+    if got <= 0i32 { return 0 }
+    var mask = 0
+    for i in 0..n {
+        if ready[i] != 0i32 { mask |= 1 << i }
+    }
+    mask
+}
+
+/// What is waiting on `fd`, appended to `into`. >0 bytes read, 0 at the end
+/// of the stream, -1 when nothing was there, -2 on an error.
+#safe("the buffer reserves exactly what read may write")
+pub fn readInto(fd: i64, sink: &var io::Bytes) -> i64 {
+    let at = sink.writePoint(65536)
+    let n = mg_read(fd as i32, at, 65536)
+    if n > 0 { sink.advance(n) }
+    n
+}
+
+#safe("closing a descriptor we own")
+pub fn close(fd: i64) {
+    if fd >= 0 { mg_close(fd as i32) }
+}
+
+//=== Children ============================================================//
+
+/// A started child: its pid and the two ends we hold.
+pub struct Child {
+    pub pid: i64 = -1
+    pub input: i64 = -1
+    pub output: i64 = -1
+}
+
+/// Starts `sh -c command` in `directory`. With `input`, its standard input
+/// is a pipe we write; with `merge`, its errors arrive with its output.
+#safe("both out-parameters are locals")
+pub fn spawn(command: &String, directory: &String, input: bool, merge: bool) -> Child? {
+    var inFd: i32 = -1
+    var outFd: i32 = -1
+    let pid = mg_spawn(command.$cstr(), directory.$cstr(), if input { 1i32 } else { 0i32 },
+                       if merge { 1i32 } else { 0i32 },
+                       &var inFd as *var i32, &var outFd as *var i32)
+    if pid < 0i32 { return nil }
+    Child { pid: pid as i64, input: inFd as i64, output: outFd as i64 }
+}
+
+/// The exit status when `pid` has finished, nil while it runs.
+#safe("one local out-parameter")
+pub fn reap(pid: i64) -> i64? {
+    var status: i32 = 0
+    if mg_reap(pid as i32, &var status as *var i32) == 0i32 { return nil }
+    status as i64
+}
+
+pub global SIGTERM: i64 = 15
+pub global SIGKILL: i64 = 9
+
+#safe("signals only our own child's group")
+pub fn kill(pid: i64, sig: i64) { mg_kill(pid as i32, sig as i32) }
+
+/// Runs `command` with `data` on its standard input, waiting for it.
+#safe("the pointer is to the string's own bytes for the length of the call")
+pub fn pipeInto(command: &String, data: &String) -> bool {
+    mg_pipe_into(command.$cstr(), data.$cstr() as *u8, data.$length()) == 0i32
+}
+
+//=== Files ===============================================================//
+
+pub enum Kind { Missing, File, Directory, Executable, Other }
+
+#safe("stat on a NUL-terminated path")
+pub fn fileKind(path: &String) -> Kind {
+    match mg_file_kind(path.$cstr()) as i64 {
+        1 => Kind::File,
+        2 => Kind::Directory,
+        3 => Kind::Executable,
+        4 => Kind::Other,
+        _ => Kind::Missing,
+    }
+}
+
+pub fn isDirectory(path: &String) -> bool {
+    match fileKind(path) { Kind::Directory => true, _ => false }
+}
+
+pub fn isFile(path: &String) -> bool {
+    match fileKind(path) { Kind::File => true, Kind::Executable => true, _ => false }
+}
+
+#safe("stat on a NUL-terminated path")
+pub fn fileSize(path: &String) -> i64 { mg_file_size(path.$cstr()) }
+
+#safe("stat on a NUL-terminated path")
+pub fn modified(path: &String) -> i64 { mg_file_mtime(path.$cstr()) }
+
+/// What a file's first bytes say it is — `macho macho-exec executable`,
+/// `elf`, `script`, `pdf`, `zip`... — one word per kind, space-separated.
+/// Empty when nothing is recognised.
+#safe("the C half returns its own static buffer, copied at once")
+pub fn fileMagic(path: &String) -> String { mg_file_magic(path.$cstr()).$str() }
+
+/// The first `count` bytes of a file (at most 64) as lowercase hex.
+#safe("the C half returns its own static buffer, copied at once")
+pub fn fileHeadHex(path: &String, count: i64) -> String {
+    mg_file_head_hex(path.$cstr(), count as i32).$str()
+}
+
+/// The canonical absolute path, or the empty string when there is nothing
+/// there.
+#safe("the C half returns its own static buffer, copied at once")
+pub fn realPath(path: &String) -> String { mg_realpath(path.$cstr()).$str() }
+
+//=== Regular expressions =================================================//
+
+/// A compiled POSIX extended regular expression.
+pub class Regex {
+    handle: *var u8
+    pub error: String
+
+    #safe("the error buffer is a local of the size passed")
+    fn init(self, pattern: &String, ignoreCase: bool) {
+        var message: [256:u8] = [0u8; 256]
+        self.handle = mg_regex_new(pattern.$cstr(), if ignoreCase { 1i32 } else { 0i32 },
+                                   &var message[0] as *var u8, 256i32)
+        self.error = ""
+        if self.isNull() {
+            var text = ""
+            var i = 0
+            while i < 255 && message[i] != 0u8 {
+                text += (message[i] as i64 as Character).$str()
+                i += 1
+            }
+            self.error = if text.$isEmpty() { "invalid pattern" } else { text }
+        }
+    }
+
+    #safe("freed once; the handle is cleared after")
+    fn deinit(self) {
+        if !self.isNull() { mg_regex_free(self.handle) }
+    }
+
+    #safe("compares the handle with null")
+    fn isNull(&self) -> bool { (self.handle as usize) == 0usize }
+
+    pub fn valid(&self) -> bool { !self.isNull() }
+
+    /// The first match at or after byte `from`, as (start, end) bytes.
+    #safe("the handle is valid, checked above; the text is NUL-terminated")
+    pub fn find(&self, text: &String, from: i64) -> (i64, i64)? {
+        if self.isNull() || from > text.$length() { return nil }
+        var s: i64 = 0
+        var e: i64 = 0
+        if mg_regex_find(self.handle, text.$cstr(), from, &var s as *var i64, &var e as *var i64) == 0i32 {
+            return nil
+        }
+        (s, e)
+    }
+}

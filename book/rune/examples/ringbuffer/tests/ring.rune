@@ -1,0 +1,41 @@
+import std::testing
+import ringbuffer::ring::{RingBuffer}
+
+fn main() -> i64 {
+    var buffer = RingBuffer<i64>(3)
+    assertEq!(buffer.length(), 0)
+    assertNot!(buffer.isFull())
+
+    // filling it up evicts nothing
+    testing::isNone::<i64>("first push evicts nothing", buffer.push(1))
+    testing::isNone::<i64>("second push evicts nothing", buffer.push(2))
+    testing::isNone::<i64>("third push evicts nothing", buffer.push(3))
+    assert!(buffer.isFull())
+
+    // a fourth push drops the oldest
+    assertEq!(buffer.push(4) ?? -1, 1, "the oldest, 1, is handed back")
+    assertEq!(buffer.push(5) ?? -1, 2)
+    assertEq!(buffer.length(), 3, "the length stays at the capacity")
+
+    // oldest first
+    assertEq!(*buffer.look(0), 3)
+    assertEq!(*buffer.look(1), 4)
+    assertEq!(*buffer.look(2), 5)
+
+    // iteration agrees
+    var seen = 0
+    var sum = 0
+    for n in buffer {
+        sum += *n
+        seen += 1
+    }
+    assertEq!(seen, 3)
+    assertEq!(sum, 12)
+
+    // it holds anything
+    var words = RingBuffer<String>(1)
+    words.push("a")
+    assertEq!(words.push("b") ?? "none", "a")
+
+    testing::summary()
+}

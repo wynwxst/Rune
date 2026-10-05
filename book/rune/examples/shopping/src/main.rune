@@ -1,0 +1,16 @@
+import pantry::inventory::{Item, Pantry}
+import pantry::unit::{Unit}
+
+fn main() {
+    var kitchen = Pantry::new()
+    kitchen.add(Item { name: "flour", quantity: 100, unit: Unit::Grams })
+    kitchen.add(Item { name: "milk", quantity: 800, unit: Unit::Millilitres, low: 250 })
+    kitchen.add(Item { name: "eggs", quantity: 1, unit: Unit::Pieces })
+
+    println!("Shopping list:")
+    for item in kitchen.items {
+        if item.isLow() {
+            println!("  {}", item.name)
+        }
+    }
+}

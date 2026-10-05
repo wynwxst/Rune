@@ -1,0 +1,1053 @@
+// A pane: one rectangle of the window, showing either a folder (the
+// explorer) or a document (the editor). Each pane keeps its own cursor,
+// selection and scroll position, so two panes may show one document in two
+// places.
+//
+// Everything that moves a cursor or changes text through one lives here;
+// what a key means is decided in app.rune.
+
+import std::io
+import std::collections::vector
+import grve::buffer
+import grve::config
+import grve::layout
+import grve::sys
+import grve::utf
+
+pub global EXPLORER: i64 = 0
+pub global EDITOR: i64 = 1
+
+/// One screen row of a line: bytes `start` up to `end`, drawn from
+/// `indent` columns into the text area. `startCol` is the line's own column
+/// at `start` — so a byte `b` of the row sits at
+/// `indent + columnOf(line, b) - startCol`. Without wrapping a line is one
+/// row, and `startCol` is the horizontal scroll.
+pub struct Seg {
+    pub start: i64
+    pub end: i64
+    pub startCol: i64
+    pub indent: i64
+}
+
+pub struct Entry {
+    pub name: String
+    pub isDir: bool = false
+    pub isExec: bool = false
+    pub size: i64 = -1
+}
+
+/// A place in a file, for going back to it.
+pub struct Location {
+    pub path: String
+    pub line: i64
+    pub col: i64
+    pub top: i64
+}
+
+pub class Pane {
+    pub id: i64
+    pub mode: i64
+
+    // The explorer.
+    pub dir: String
+    pub entries: vector::Vector<Entry>
+    pub selected: i64
+    pub listTop: i64
+    pub listError: String
+
+    // The editor.
+    pub hasDoc: bool
+    pub doc: buffer::Document
+    pub cursor: buffer::Pos
+    pub anchor: buffer::Pos
+    pub selecting: bool
+    /// The column up and down try to keep.
+    pub goal: i64
+    pub top: i64
+    pub left: i64
+    /// Wrapping long lines, and which row of line `top` is the first shown.
+    pub wrap: bool
+    pub topRow: i64
+    /// Where up and down are heading, on screen, and the cursor position
+    /// that heading was taken from.
+    stickyX: i64
+    stickyAt: buffer::Pos
+
+    /// Places this pane has been, for alt+9 (back) and alt+0 (forward).
+    pub back: vector::Vector<Location>
+    pub forward: vector::Vector<Location>
+
+    // Where it was last drawn.
+    pub rect: layout::Rect
+    pub textRows: i64
+    pub textCols: i64
+    pub gutter: i64
+
+    fn init(self, id: i64) {
+        self.id = id
+        self.mode = EXPLORER
+        // Set by the first `list`, which then counts as arriving somewhere.
+        self.dir = ""
+        self.entries = vector::Vector<Entry>()
+        self.selected = 0
+        self.listTop = 0
+        self.listError = ""
+        self.hasDoc = false
+        self.doc = buffer::Document("")
+        self.cursor = buffer::pos(0, 0)
+        self.anchor = buffer::pos(0, 0)
+        self.selecting = false
+        self.goal = 0
+        self.top = 0
+        self.left = 0
+        self.wrap = true
+        self.topRow = 0
+        self.stickyX = -1
+        self.stickyAt = buffer::pos(-1, -1)
+        self.back = vector::Vector<Location>()
+        self.forward = vector::Vector<Location>()
+        self.rect = layout::Rect {}
+        self.textRows = 1
+        self.textCols = 1
+        self.gutter = 0
+    }
+
+    //=== The explorer ====================================================//
+
+    /// Lists `dir`, keeping the selection on the same name where it can.
+    pub fn list(&self, dir: &String, showHidden: bool) {
+        let keep = match self.selectedEntry() { Some(e) => e.name.$clone(), None => "" }
+        let sameDir = dir == self.dir
+        self.dir = dir.$clone()
+        self.listError = ""
+        var found = vector::Vector<Entry>()
+        match io::readDirectory(dir) {
+            Ok(items) => {
+                for e in items {
+                    if !showHidden && utf::startsWith(e.name, ".") { continue }
+                    let full = utf::join(dir, e.name)
+                    let kind = sys::fileKind(full)
+                    let isDir = match kind { sys::Kind::Directory => true, _ => false }
+                    let isExec = match kind { sys::Kind::Executable => true, _ => false }
+                    found.push(Entry {
+                        name: e.name.$clone(), isDir: isDir, isExec: isExec,
+                        size: if isDir { -1 } else { sys::fileSize(full) },
+                    })
+                }
+            },
+            Err(e) => self.listError = io::describe(e),
+        }
+        var sorted = sortEntries(found)
+        if dir != "/" { sorted.insert(0, Entry { name: "..", isDir: true }) }
+        self.entries = sorted
+        if !sameDir {
+            self.selected = if self.entries.length() > 1 && dir != "/" { 1 } else { 0 }
+            self.listTop = 0
+        } else {
+            self.selected = 0
+            var i = 0
+            while i < self.entries.length() {
+                if self.entries.look(i).name == keep { self.selected = i }
+                i += 1
+            }
+        }
+        if self.selected >= self.entries.length() { self.selected = self.entries.length() - 1 }
+        if self.selected < 0 { self.selected = 0 }
+    }
+
+    /// Lists the folder above, with the one we came from selected.
+    pub fn up(&self, showHidden: bool) {
+        if self.dir == "/" { return }
+        let from = utf::baseName(self.dir)
+        self.list(utf::dirName(self.dir), showHidden)
+        self.selectName(from)
+    }
+
+    pub fn selectName(&self, name: &String) {
+        var i = 0
+        while i < self.entries.length() {
+            if self.entries.look(i).name == name { self.selected = i; return }
+            i += 1
+        }
+    }
+
+    pub fn selectedEntry(&self) -> Entry? {
+        if self.selected < 0 || self.selected >= self.entries.length() { return nil }
+        self.entries.get(self.selected)
+    }
+
+    pub fn selectedPath(&self) -> String {
+        match self.selectedEntry() {
+            Some(e) => {
+                if e.name == ".." { return utf::dirName(self.dir) }
+                utf::join(self.dir, e.name)
+            },
+            None => self.dir.$clone(),
+        }
+    }
+
+    pub fn moveSelection(&self, delta: i64) {
+        let n = self.entries.length()
+        if n == 0 { return }
+        var s = self.selected + delta
+        if s < 0 { s = 0 }
+        if s >= n { s = n - 1 }
+        self.selected = s
+    }
+
+    /// Scrolls the listing so the selection shows in `rows` rows.
+    pub fn showSelection(&self, rows: i64) {
+        if rows <= 0 { return }
+        let margin = if rows > 8 { 2 } else { 0 }
+        if self.selected < self.listTop + margin { self.listTop = self.selected - margin }
+        if self.selected >= self.listTop + rows - margin { self.listTop = self.selected - rows + 1 + margin }
+        let most = self.entries.length() - rows
+        if self.listTop > most { self.listTop = most }
+        if self.listTop < 0 { self.listTop = 0 }
+    }
+
+    //=== Documents =======================================================//
+
+    pub fn open(&self, doc: buffer::Document) {
+        let same = self.hasDoc && self.doc.path == doc.path && !doc.path.$isEmpty()
+        self.doc = doc
+        self.hasDoc = true
+        self.mode = EDITOR
+        if !same {
+            self.cursor = buffer::pos(0, 0)
+            self.selecting = false
+            self.top = 0
+            self.left = 0
+            self.goal = 0
+        }
+        if !doc.path.$isEmpty() { self.dir = utf::dirName(doc.path) }
+    }
+
+    pub fn line(&self) -> String { self.doc.line(self.cursor.line) }
+
+    /// Where the pane is now, when it has a file open.
+    pub fn location(&self) -> Location? {
+        if !self.hasDoc || self.doc.path.$isEmpty() { return nil }
+        Location { path: self.doc.path.$clone(), line: self.cursor.line, col: self.cursor.col, top: self.top }
+    }
+
+    /// Records the current place before going somewhere else. Going
+    /// somewhere new forgets what was ahead.
+    pub fn remember(&self) {
+        match self.location() {
+            Some(here) => {
+                if self.back.length() > 0 {
+                    let last = self.back.look(self.back.length() - 1)
+                    if last.path == here.path && last.line == here.line { return }
+                }
+                self.back.push(here)
+                if self.back.length() > 100 { self.back.remove(0) }
+                self.forward.clear()
+            },
+            None => {},
+        }
+    }
+
+    /// The selection as (start, end), when there is one.
+    pub fn selection(&self) -> (buffer::Pos, buffer::Pos)? {
+        if !self.selecting || self.anchor.equals(&self.cursor) { return nil }
+        buffer::ordered(&self.anchor, &self.cursor)
+    }
+
+    pub fn selectedText(&self) -> String {
+        match self.selection() {
+            Some((a, b)) => self.doc.slice(&a, &b),
+            None => "",
+        }
+    }
+
+    /// Before a move: Shift starts or extends a selection, anything else
+    /// ends it.
+    pub fn prepare(&self, grow: bool) {
+        if grow {
+            if !self.selecting {
+                self.anchor = buffer::pos(self.cursor.line, self.cursor.col)
+                self.selecting = true
+            }
+        } else {
+            self.selecting = false
+        }
+    }
+
+    pub fn setCursor(&self, p: &buffer::Pos, tab: i64) {
+        self.cursor = self.doc.clamp(p)
+        self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+    }
+
+    pub fn clampCursor(&self) {
+        self.cursor = self.doc.clamp(&self.cursor)
+        self.anchor = self.doc.clamp(&self.anchor)
+    }
+
+    //=== Moving ===//
+
+    pub fn left1(&self, grow: bool, tab: i64) {
+        if !grow {
+            match self.selection() {
+                Some((a, b)) => { self.selecting = false; self.setCursor(&a, tab); return },
+                None => {},
+            }
+        }
+        self.prepare(grow)
+        if self.cursor.col > 0 {
+            self.cursor = buffer::pos(self.cursor.line, utf::prev(self.line(), self.cursor.col))
+        } elif self.cursor.line > 0 {
+            let l = self.cursor.line - 1
+            self.cursor = buffer::pos(l, self.doc.lineLength(l))
+        }
+        self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+    }
+
+    pub fn right1(&self, grow: bool, tab: i64) {
+        if !grow {
+            match self.selection() {
+                Some((a, b)) => { self.selecting = false; self.setCursor(&b, tab); return },
+                None => {},
+            }
+        }
+        self.prepare(grow)
+        let len = self.doc.lineLength(self.cursor.line)
+        if self.cursor.col < len {
+            self.cursor = buffer::pos(self.cursor.line, utf::next(self.line(), self.cursor.col))
+        } elif self.cursor.line < self.doc.lineCount() - 1 {
+            self.cursor = buffer::pos(self.cursor.line + 1, 0)
+        }
+        self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+    }
+
+    /// Up (negative) or down by `lines`, keeping to the goal column. With
+    /// wrapping, a "line" is a row on screen.
+    pub fn vertical(&self, lines: i64, grow: bool, tab: i64) {
+        if self.wrapping() {
+            self.verticalRows(lines, grow, tab)
+            return
+        }
+        self.prepare(grow)
+        var l = self.cursor.line + lines
+        if l < 0 {
+            l = 0
+            self.cursor = buffer::pos(0, 0)
+            self.goal = 0
+            return
+        }
+        if l >= self.doc.lineCount() {
+            l = self.doc.lineCount() - 1
+            self.cursor = buffer::pos(l, self.doc.lineLength(l))
+            self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+            return
+        }
+        let text = self.doc.line(l)
+        self.cursor = buffer::pos(l, utf::byteAtColumn(text, self.goal, tab))
+    }
+
+    fn verticalRows(&self, steps: i64, grow: bool, tab: i64) {
+        self.prepare(grow)
+        var l = self.cursor.line
+        var segs = self.segments(l, tab)
+        var i = segIndex(&segs, self.cursor.col)
+        var x = self.stickyX
+        if x < 0 || !self.stickyAt.equals(&self.cursor) {
+            x = xOf(self.doc.line(l), segs.look(i), self.cursor.col, tab)
+        }
+        var left = if steps < 0 { 0 - steps } else { steps }
+        while left > 0 {
+            if steps < 0 {
+                if i > 0 { i -= 1 }
+                elif l > 0 { l -= 1; segs = self.segments(l, tab); i = segs.length() - 1 }
+                else { self.cursor = buffer::pos(0, 0); self.stickyX = -1; return }
+            } else {
+                if i < segs.length() - 1 { i += 1 }
+                elif l < self.doc.lineCount() - 1 { l += 1; segs = self.segments(l, tab); i = 0 }
+                else { self.cursor = self.doc.end(); self.stickyX = -1; return }
+            }
+            left -= 1
+        }
+        let text = self.doc.line(l)
+        self.cursor = buffer::pos(l, byteAtX(text, segs.look(i), x, tab, i == segs.length() - 1))
+        self.stickyX = x
+        self.stickyAt = buffer::pos(self.cursor.line, self.cursor.col)
+    }
+
+    //=== Rows on screen ===//
+
+    pub fn wrapping(&self) -> bool { self.wrap && self.textCols >= 12 }
+
+    /// The rows line `l` takes. Long lines break after a space where one
+    /// falls in the last two thirds of the row, mid-word otherwise; the rows
+    /// after the first hang at the line's own indent.
+    pub fn segments(&self, l: i64, tab: i64) -> vector::Vector<Seg> {
+        var out = vector::Vector<Seg>()
+        let text = self.doc.line(l)
+        let n = text.$length()
+        if !self.wrapping() {
+            out.push(Seg { start: 0, end: n, startCol: self.left, indent: 0 })
+            return out
+        }
+        // One column is kept free, for the cursor after the last character.
+        let width = self.textCols - 1
+        let lead = utf::columnOf(text, utf::indentOf(text).$length(), tab)
+        let hang = if lead < width / 2 && lead < n { lead } else { 0 }
+        var start = 0
+        var startCol = 0
+        var indent = 0
+        var room = width
+        var col = 0
+        var b = 0
+        var breakAt = -1
+        var breakCol = 0
+        while b < n {
+            var cp = text.$byteAt(b) as i64
+            var nb = b + 1
+            if cp >= 0x80 { cp = utf::decode(text, b); nb = utf::next(text, b) }
+            let w = if cp == 9 { tab - (col % tab) } else { utf::width(cp) }
+            if col + w - startCol > room && b > start {
+                var cut = b
+                var cutCol = col
+                if cp == 32 {
+                    // The word before fits exactly: break at this space, which
+                    // ends the row unseen in the column kept for the cursor.
+                    cut = nb
+                    cutCol = col + w
+                } elif breakAt > start && breakCol - startCol > room / 3 { cut = breakAt; cutCol = breakCol }
+                out.push(Seg { start: start, end: cut, startCol: startCol, indent: indent })
+                start = cut
+                startCol = cutCol
+                indent = hang
+                room = width - hang
+                breakAt = -1
+                if cut != b { b = cut; col = cutCol; continue }
+            }
+            if cp == 32 { breakAt = nb; breakCol = col + w }
+            col += w
+            b = nb
+        }
+        out.push(Seg { start: start, end: n, startCol: startCol, indent: indent })
+        out
+    }
+
+    /// Where the cursor is drawn, as (row from the top of the text, column
+    /// into it). The row is negative, or past the last, when it is off
+    /// screen.
+    pub fn cursorScreen(&self, tab: i64) -> (i64, i64) {
+        let segs = self.segments(self.cursor.line, tab)
+        let i = segIndex(&segs, self.cursor.col)
+        let x = xOf(self.line(), segs.look(i), self.cursor.col, tab)
+        if self.cursor.line < self.top || (self.cursor.line == self.top && i < self.topRow) {
+            // Above the view: how far above, counted in rows.
+            var above = 0
+            var l = self.cursor.line
+            var from = i
+            while l < self.top {
+                above += self.segments(l, tab).length() - from
+                from = 0
+                l += 1
+                if above > self.textRows + 2 { return (0 - above, x) }
+            }
+            return (0 - (above + self.topRow - from), x)
+        }
+        var rows = 0
+        var l = self.top
+        var first = self.topRow
+        while l < self.cursor.line {
+            rows += self.segments(l, tab).length() - first
+            first = 0
+            l += 1
+            if rows > self.textRows + 2 { return (rows, x) }
+        }
+        (rows + i - first, x)
+    }
+
+    /// The position under a cell of the text area: `row` rows from the top,
+    /// `x` columns in. Rows past the end land on the last line.
+    pub fn positionAt(&self, row: i64, x: i64, tab: i64) -> buffer::Pos {
+        var l = self.top
+        var i = self.topRow
+        var left = if row < 0 { 0 } else { row }
+        var segs = self.segments(l, tab)
+        if i >= segs.length() { i = segs.length() - 1 }
+        while left > 0 {
+            if i < segs.length() - 1 { i += 1 }
+            elif l < self.doc.lineCount() - 1 { l += 1; segs = self.segments(l, tab); i = 0 }
+            else { break }
+            left -= 1
+        }
+        let text = self.doc.line(l)
+        let at = byteAtX(text, segs.look(i), if x < 0 { 0 } else { x }, tab, i == segs.length() - 1)
+        buffer::pos(l, at)
+    }
+
+    /// Scrolls (wrapping) so the cursor's row shows with `margin` rows
+    /// around it.
+    fn revealRows(&self, margin: i64, tab: i64) {
+        let rows = self.textRows
+        var m = margin
+        if m * 2 >= rows { m = (rows - 1) / 2 }
+        if self.top >= self.doc.lineCount() { self.top = self.doc.lineCount() - 1 }
+        if self.top < 0 { self.top = 0 }
+        let topSegs = self.segments(self.top, tab).length()
+        if self.topRow >= topSegs { self.topRow = topSegs - 1 }
+        if self.topRow < 0 { self.topRow = 0 }
+        let segs = self.segments(self.cursor.line, tab)
+        let ci = segIndex(&segs, self.cursor.col)
+        // Far away: start from the cursor rather than walk there.
+        let above = self.cursor.line < self.top || (self.cursor.line == self.top && ci < self.topRow)
+        let far = self.cursor.line > self.top + rows * 2
+        if above || far {
+            self.top = self.cursor.line
+            self.topRow = ci
+            // Coming from above, the cursor sits low on the screen.
+            let back = if far { rows - 1 - m } else { m }
+            for k in 0..back { self.rowUp(tab) }
+            return
+        }
+        let (at, x) = self.cursorScreen(tab)
+        var d = at
+        while d > rows - 1 - m { self.rowDown(tab); d -= 1 }
+        while d < m && (self.top > 0 || self.topRow > 0) { self.rowUp(tab); d += 1 }
+    }
+
+    pub fn rowUp(&self, tab: i64) {
+        if self.topRow > 0 { self.topRow -= 1; return }
+        if self.top == 0 { return }
+        self.top -= 1
+        self.topRow = self.segments(self.top, tab).length() - 1
+    }
+
+    pub fn rowDown(&self, tab: i64) {
+        if self.topRow < self.segments(self.top, tab).length() - 1 { self.topRow += 1; return }
+        if self.top >= self.doc.lineCount() - 1 { return }
+        self.top += 1
+        self.topRow = 0
+    }
+
+    /// Home goes to the first character that is not blank, then to the very
+    /// start.
+    pub fn home(&self, grow: bool, tab: i64) {
+        self.prepare(grow)
+        let first = utf::indentOf(self.line()).$length()
+        let col = if self.cursor.col == first { 0 } else { first }
+        self.cursor = buffer::pos(self.cursor.line, col)
+        self.goal = utf::columnOf(self.line(), col, tab)
+    }
+
+    pub fn end(&self, grow: bool, tab: i64) {
+        self.prepare(grow)
+        self.cursor = buffer::pos(self.cursor.line, self.doc.lineLength(self.cursor.line))
+        self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+    }
+
+    pub fn wordRight(&self, grow: bool, tab: i64) {
+        self.prepare(grow)
+        let text = self.line()
+        var c = self.cursor.col
+        let n = text.$length()
+        if c >= n {
+            if self.cursor.line < self.doc.lineCount() - 1 {
+                self.cursor = buffer::pos(self.cursor.line + 1, 0)
+                let next = self.line()
+                self.cursor = buffer::pos(self.cursor.line, utf::indentOf(next).$length())
+            }
+            self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+            return
+        }
+        let cls = classOf(text.$byteAt(c) as i64)
+        while c < n && classOf(text.$byteAt(c) as i64) == cls { c = utf::next(text, c) }
+        while c < n && classOf(text.$byteAt(c) as i64) == 0 { c += 1 }
+        self.cursor = buffer::pos(self.cursor.line, c)
+        self.goal = utf::columnOf(text, c, tab)
+    }
+
+    pub fn wordLeft(&self, grow: bool, tab: i64) {
+        self.prepare(grow)
+        let text = self.line()
+        var c = self.cursor.col
+        if c == 0 {
+            if self.cursor.line > 0 {
+                let l = self.cursor.line - 1
+                self.cursor = buffer::pos(l, self.doc.lineLength(l))
+            }
+            self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+            return
+        }
+        while c > 0 && classOf(text.$byteAt(c - 1) as i64) == 0 { c -= 1 }
+        if c > 0 {
+            let cls = classOf(text.$byteAt(c - 1) as i64)
+            while c > 0 && classOf(text.$byteAt(c - 1) as i64) == cls { c = utf::prev(text, c) }
+        }
+        self.cursor = buffer::pos(self.cursor.line, c)
+        self.goal = utf::columnOf(text, c, tab)
+    }
+
+    /// To the next blank line after some text, or the previous one.
+    pub fn paragraph(&self, down: bool, grow: bool, tab: i64) {
+        self.prepare(grow)
+        var l = self.cursor.line
+        let n = self.doc.lineCount()
+        let step = if down { 1 } else { -1 }
+        // Skip blank lines first, then text, stopping at the next blank.
+        while l + step >= 0 && l + step < n && utf::isBlank(self.doc.line(l + step)) { l += step }
+        while l + step >= 0 && l + step < n && !utf::isBlank(self.doc.line(l + step)) { l += step }
+        l += step
+        if l < 0 { l = 0 }
+        if l >= n { l = n - 1 }
+        let col = if down && l == n - 1 { self.doc.lineLength(l) } else { 0 }
+        self.cursor = buffer::pos(l, col)
+        self.goal = utf::columnOf(self.line(), col, tab)
+    }
+
+    pub fn documentEdge(&self, end: bool, grow: bool, tab: i64) {
+        self.prepare(grow)
+        self.cursor = if end { self.doc.end() } else { buffer::pos(0, 0) }
+        self.goal = utf::columnOf(self.line(), self.cursor.col, tab)
+    }
+
+    pub fn selectAll(&self) {
+        self.anchor = buffer::pos(0, 0)
+        self.cursor = self.doc.end()
+        self.selecting = true
+    }
+
+    /// Scrolls so the cursor shows with `margin` lines around it.
+    pub fn reveal(&self, margin: i64, tab: i64) {
+        let rows = self.textRows
+        if rows <= 0 { return }
+        if self.wrapping() {
+            self.left = 0
+            self.revealRows(margin, tab)
+            return
+        }
+        self.topRow = 0
+        var m = margin
+        if m * 2 >= rows { m = (rows - 1) / 2 }
+        if self.cursor.line < self.top + m { self.top = self.cursor.line - m }
+        if self.cursor.line > self.top + rows - 1 - m { self.top = self.cursor.line - rows + 1 + m }
+        let most = self.doc.lineCount() - 1
+        if self.top > most { self.top = most }
+        if self.top < 0 { self.top = 0 }
+        let col = utf::columnOf(self.line(), self.cursor.col, tab)
+        let cols = self.textCols
+        if cols > 4 {
+            if col < self.left { self.left = col - cols / 4 }
+            if col >= self.left + cols - 1 { self.left = col - cols + cols / 4 }
+            if self.left < 0 { self.left = 0 }
+        }
+    }
+
+    /// Puts the cursor's line in the middle — after a jump.
+    pub fn centre(&self) {
+        self.topRow = 0
+        self.top = self.cursor.line - self.textRows / 2
+        if self.top < 0 { self.top = 0 }
+    }
+
+    //=== Changing ===//
+
+    /// The text to insert for one level of indent: what the file already
+    /// uses, or the configured default.
+    pub fn unit(&self, cfg: config::Config) -> String {
+        if self.usesTabs(cfg) { "\t" } else { utf::spaces(self.indentWidth(cfg)) }
+    }
+
+    pub fn usesTabs(&self, cfg: config::Config) -> bool {
+        if self.doc.indentTabs >= 0 { return self.doc.indentTabs == 1 }
+        cfg.useTabs
+    }
+
+    /// Columns per indent level.
+    pub fn indentWidth(&self, cfg: config::Config) -> i64 {
+        if self.doc.indentTabs == 1 { return cfg.tabWidth }
+        if self.doc.indentWidth > 0 { return self.doc.indentWidth }
+        cfg.tabWidth
+    }
+
+    /// Removes the selection, if any; true when there was one.
+    pub fn deleteSelection(&self) -> bool {
+        match self.selection() {
+            Some((a, b)) => {
+                self.doc.remove(&a, &b)
+                self.cursor = a
+                self.selecting = false
+                true
+            },
+            None => { self.selecting = false; false },
+        }
+    }
+
+    /// Types `text` at the cursor, over the selection if there is one.
+    /// Characters typed one after another undo together. Brackets and
+    /// quotes pair up when `auto_pairs` is on.
+    pub fn typeText(&self, text: &String, cfg: config::Config) {
+        if self.doc.readOnly { return }
+        if cfg.autoPairs && self.pairKey(text, cfg) { return }
+        let single = text.$length() <= 4 && utf::findFrom(text, "\n", 0) < 0 && text != " "
+        let hadSelection = self.selection().hasValue()
+        if hadSelection || !single || !self.doc.continuesTyping(&self.cursor) {
+            self.doc.beginGroup(&self.cursor)
+        }
+        self.deleteSelection()
+        // A closing bracket on a line of nothing but indent steps back out.
+        if text == "}" || text == ")" || text == "]" {
+            let line = self.line()
+            if self.cursor.col == line.$length() && utf::isBlank(line) && line.$length() > 0 {
+                let cut = dedentWidth(line, self.indentWidth(cfg))
+                if cut > 0 {
+                    self.doc.remove(buffer::pos(self.cursor.line, line.$length() - cut), buffer::pos(self.cursor.line, line.$length()))
+                    self.cursor = buffer::pos(self.cursor.line, line.$length() - cut)
+                }
+            }
+        }
+        self.cursor = self.doc.insert(&self.cursor, text)
+        self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+    }
+
+    /// Brackets and quotes. True when the key was dealt with here:
+    ///   * with a selection, an opener wraps it: `word` → `(word)`;
+    ///   * a closer typed in front of the same closer steps over it;
+    ///   * an opener gets its closer too, where what follows is blank, a
+    ///     closer or punctuation — and, for a quote, where it is not the
+    ///     apostrophe in `it's`.
+    fn pairKey(&self, text: &String, cfg: config::Config) -> bool {
+        if text.$length() != 1 { return false }
+        let c = text.$byteAt(0) as i64
+        let closer = closerOf(c)
+        let isQuote = c == 34 || c == 39 || c == 96
+        let isCloser = c == 41 || c == 93 || c == 125
+        if closer < 0 && !isCloser { return false }
+        let line = self.line()
+        let col = self.cursor.col
+        let next = if col < line.$length() { line.$byteAt(col) as i64 } else { -1 }
+        let prev = if col > 0 { line.$byteAt(col - 1) as i64 } else { -1 }
+
+        match self.selection() {
+            Some((a, b)) => {
+                if closer < 0 { return false }
+                self.doc.beginGroup(&self.cursor)
+                // The closer first, so the opener's insert does not move it.
+                self.doc.insert(&b, utf::fromCode(closer))
+                self.doc.insert(&a, text)
+                let shift = if a.line == b.line { 1 } else { 0 }
+                self.anchor = buffer::pos(a.line, a.col + 1)
+                self.cursor = buffer::pos(b.line, b.col + shift)
+                self.selecting = true
+                self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+                return true
+            },
+            None => {},
+        }
+
+        // Step over the closer that is already there.
+        if (isCloser || isQuote) && next == c {
+            self.cursor = buffer::pos(self.cursor.line, col + 1)
+            self.goal = utf::columnOf(line, col + 1, cfg.tabWidth)
+            self.doc.beginGroup(&self.cursor)
+            return true
+        }
+        if closer < 0 { return false }
+        let roomAfter = next < 0 || next == 32 || next == 9 || next == 41 || next == 93 || next == 125 ||
+                        next == 44 || next == 59 || next == 58 || next == 46
+        if !roomAfter { return false }
+        if isQuote && (utf::isWordByte(prev) || prev == c || prev == 92) { return false }
+        self.doc.beginGroup(&self.cursor)
+        self.doc.insert(&self.cursor, text + utf::fromCode(closer))
+        self.cursor = buffer::pos(self.cursor.line, col + 1)
+        self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+        // What is typed inside undoes on its own.
+        self.doc.beginGroup(&self.cursor)
+        true
+    }
+
+    /// Inserts a block of text — a paste — as one change.
+    pub fn insertBlock(&self, text: &String, cfg: config::Config) {
+        if self.doc.readOnly { return }
+        self.doc.beginGroup(&self.cursor)
+        self.deleteSelection()
+        self.cursor = self.doc.insert(&self.cursor, text)
+        self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+    }
+
+    /// Enter: a new line indented like this one, one level deeper after an
+    /// opening bracket, with a closing bracket at the cursor moved below.
+    pub fn newline(&self, cfg: config::Config) {
+        if self.doc.readOnly { return }
+        self.doc.beginGroup(&self.cursor)
+        self.deleteSelection()
+        let line = self.line()
+        let indent = utf::indentOf(line)
+        let before = utf::trim(line.$substring(0, self.cursor.col))
+        let after = line.$substring(self.cursor.col, line.$length())
+        let opener = if before.$isEmpty() { 0 } else { before.$byteAt(before.$length() - 1) as i64 }
+        let opens = opener == 123 || opener == 40 || opener == 91 || (opener == 58 && endsWithColonBlock(&before))
+        let afterTrim = utf::trim(after)
+        let closer = if afterTrim.$isEmpty() { 0 } else { afterTrim.$byteAt(0) as i64 }
+        let closes = (opener == 123 && closer == 125) || (opener == 40 && closer == 41) || (opener == 91 && closer == 93)
+        // Trailing blanks before the cursor go.
+        var col = self.cursor.col
+        while col > indent.$length() && utf::isSpaceByte(line.$byteAt(col - 1) as i64) { col -= 1 }
+        if col < self.cursor.col {
+            self.doc.remove(buffer::pos(self.cursor.line, col), &self.cursor)
+            self.cursor = buffer::pos(self.cursor.line, col)
+        }
+        // And so do the blanks the rest of the line starts with.
+        var lead = 0
+        while lead < after.$length() && utf::isSpaceByte(after.$byteAt(lead) as i64) { lead += 1 }
+        if lead > 0 {
+            self.doc.remove(&self.cursor, buffer::pos(self.cursor.line, self.cursor.col + lead))
+        }
+        let deeper = if opens { indent + self.unit(cfg) } else { indent.$clone() }
+        if closes {
+            self.doc.insert(&self.cursor, "\n" + deeper + "\n" + indent)
+            self.cursor = buffer::pos(self.cursor.line + 1, deeper.$length())
+        } else {
+            self.cursor = self.doc.insert(&self.cursor, "\n" + deeper)
+        }
+        // What is typed on the new line undoes on its own.
+        self.doc.beginGroup(&self.cursor)
+        self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+    }
+
+    pub fn backspace(&self, cfg: config::Config) {
+        if self.doc.readOnly { return }
+        self.doc.beginGroup(&self.cursor)
+        if self.deleteSelection() { return }
+        // Inside an empty pair, both halves go: `(|)` → `|`.
+        if cfg.autoPairs && self.cursor.col > 0 {
+            let line = self.line()
+            let before = line.$byteAt(self.cursor.col - 1) as i64
+            let after = if self.cursor.col < line.$length() { line.$byteAt(self.cursor.col) as i64 } else { -1 }
+            if after >= 0 && closerOf(before) == after {
+                let at = buffer::pos(self.cursor.line, self.cursor.col - 1)
+                self.doc.remove(&at, buffer::pos(self.cursor.line, self.cursor.col + 1))
+                self.cursor = at
+                self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+                return
+            }
+        }
+        if self.cursor.col == 0 {
+            if self.cursor.line == 0 { return }
+            let l = self.cursor.line - 1
+            let at = buffer::pos(l, self.doc.lineLength(l))
+            self.doc.remove(&at, &self.cursor)
+            self.cursor = at
+        } else {
+            let line = self.line()
+            var from = utf::prev(line, self.cursor.col)
+            // In the indent, a whole level at a time.
+            let indent = utf::indentOf(line)
+            if !self.usesTabs(cfg) && self.cursor.col <= indent.$length() && (line.$byteAt(self.cursor.col - 1) as i64) == 32 {
+                let col = self.cursor.col
+                let w = self.indentWidth(cfg)
+                var stop = ((col - 1) / w) * w
+                if stop < 0 { stop = 0 }
+                from = stop
+            }
+            let at = buffer::pos(self.cursor.line, from)
+            self.doc.remove(&at, &self.cursor)
+            self.cursor = at
+        }
+        self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+    }
+
+    pub fn deleteForward(&self, cfg: config::Config) {
+        if self.doc.readOnly { return }
+        self.doc.beginGroup(&self.cursor)
+        if self.deleteSelection() { return }
+        let len = self.doc.lineLength(self.cursor.line)
+        if self.cursor.col < len {
+            let upto = utf::next(self.line(), self.cursor.col)
+            self.doc.remove(&self.cursor, buffer::pos(self.cursor.line, upto));
+        } elif self.cursor.line < self.doc.lineCount() - 1 {
+            self.doc.remove(&self.cursor, buffer::pos(self.cursor.line + 1, 0));
+        }
+    }
+
+    /// The first and last line the selection touches, or the cursor's.
+    pub fn lineSpan(&self) -> (i64, i64) {
+        match self.selection() {
+            Some((a, b)) => {
+                // A selection ending at the start of a line does not take it.
+                let last = if b.col == 0 && b.line > a.line { b.line - 1 } else { b.line }
+                (a.line, last)
+            },
+            None => (self.cursor.line, self.cursor.line),
+        }
+    }
+
+    /// Deletes whole lines: the cursor's, or every one the selection
+    /// touches. Returns the text removed.
+    pub fn deleteLines(&self, cfg: config::Config) -> String {
+        if self.doc.readOnly { return "" }
+        let (first, last) = self.lineSpan()
+        self.doc.beginGroup(&self.cursor)
+        self.selecting = false
+        var gone = ""
+        let n = self.doc.lineCount()
+        if last < n - 1 {
+            gone = self.doc.remove(buffer::pos(first, 0), buffer::pos(last + 1, 0))
+        } elif first > 0 {
+            gone = self.doc.remove(buffer::pos(first - 1, self.doc.lineLength(first - 1)), buffer::pos(last, self.doc.lineLength(last)))
+            gone = gone.$substring(1, gone.$length()) + "\n"
+        } else {
+            gone = self.doc.remove(buffer::pos(0, 0), self.doc.end()) + "\n"
+        }
+        let l = if first >= self.doc.lineCount() { self.doc.lineCount() - 1 } else { first }
+        self.cursor = buffer::pos(l, 0)
+        let text = self.line()
+        self.cursor = buffer::pos(l, utf::byteAtColumn(text, self.goal, cfg.tabWidth))
+        gone
+    }
+
+    /// Indents (`by` 1) or dedents (`by` -1) every line in the span.
+    pub fn shiftLines(&self, by: i64, cfg: config::Config) {
+        if self.doc.readOnly { return }
+        let (first, last) = self.lineSpan()
+        self.doc.beginGroup(&self.cursor)
+        let unit = self.unit(cfg)
+        var l = first
+        while l <= last {
+            let line = self.doc.line(l)
+            var delta = 0
+            if by > 0 {
+                if !line.$isEmpty() {
+                    self.doc.insert(buffer::pos(l, 0), unit)
+                    delta = unit.$length()
+                }
+            } else {
+                let cut = leadingCut(line, self.indentWidth(cfg))
+                if cut > 0 {
+                    self.doc.remove(buffer::pos(l, 0), buffer::pos(l, cut))
+                    delta = 0 - cut
+                }
+            }
+            if self.cursor.line == l { self.cursor = buffer::pos(l, clampCol(self.cursor.col + delta)) }
+            if self.selecting && self.anchor.line == l { self.anchor = buffer::pos(l, clampCol(self.anchor.col + delta)) }
+            l += 1
+        }
+        self.clampCursor()
+        self.goal = utf::columnOf(self.line(), self.cursor.col, cfg.tabWidth)
+    }
+
+    /// The word the cursor is in or just after: (start byte, the word).
+    pub fn wordBefore(&self) -> (i64, String) {
+        let text = self.line()
+        var s = self.cursor.col
+        while s > 0 && utf::isWordByte(text.$byteAt(s - 1) as i64) { s -= 1 }
+        (s, text.$substring(s, self.cursor.col))
+    }
+
+    /// The whole word under the cursor.
+    pub fn wordAt(&self) -> String {
+        let text = self.line()
+        var s = self.cursor.col
+        while s > 0 && utf::isWordByte(text.$byteAt(s - 1) as i64) { s -= 1 }
+        var e = self.cursor.col
+        while e < text.$length() && utf::isWordByte(text.$byteAt(e) as i64) { e += 1 }
+        text.$substring(s, e)
+    }
+}
+
+/// The character that closes `c`, or -1 when `c` opens nothing.
+fn closerOf(c: i64) -> i64 {
+    match c { 40 => 41, 91 => 93, 123 => 125, 34 => 34, 39 => 39, 96 => 96, _ => -1 }
+}
+
+/// The row of `segs` that byte `col` is on: a byte at a row's end is the
+/// start of the next row.
+pub fn segIndex(segs: &vector::Vector<Seg>, col: i64) -> i64 {
+    var i = 0
+    while i + 1 < segs.length() && segs.look(i + 1).start <= col { i += 1 }
+    i
+}
+
+/// The column into the text area byte `b` of `text` is drawn at on `seg`.
+pub fn xOf(text: &String, seg: &Seg, b: i64, tab: i64) -> i64 {
+    seg.indent + utf::columnOf(text, b, tab) - seg.startCol
+}
+
+/// The byte drawn at column `x` of `seg`, kept inside the row — the last
+/// row may also have the end of the line.
+pub fn byteAtX(text: &String, seg: &Seg, x: i64, tab: i64, last: bool) -> i64 {
+    let col = x - seg.indent + seg.startCol
+    var b = utf::byteAtColumn(text, if col < 0 { 0 } else { col }, tab)
+    if b < seg.start { b = seg.start }
+    if b > seg.end { b = seg.end }
+    if !last && b >= seg.end && seg.end > seg.start { b = utf::prev(text, seg.end) }
+    b
+}
+
+fn clampCol(c: i64) -> i64 { if c < 0 { 0 } else { c } }
+
+/// Blanks to take off the front of a line to dedent it one level.
+fn leadingCut(line: &String, width: i64) -> i64 {
+    if line.$isEmpty() { return 0 }
+    if (line.$byteAt(0) as i64) == 9 { return 1 }
+    var n = 0
+    while n < width && n < line.$length() && (line.$byteAt(n) as i64) == 32 { n += 1 }
+    n
+}
+
+/// Blanks to take off the end of an all-blank line to dedent it one level.
+fn dedentWidth(line: &String, width: i64) -> i64 {
+    let n = line.$length()
+    if n == 0 { return 0 }
+    if (line.$byteAt(n - 1) as i64) == 9 { return 1 }
+    var k = 0
+    while k < width && k < n && (line.$byteAt(n - 1 - k) as i64) == 32 { k += 1 }
+    // Back to a whole level, not merely `width` blanks.
+    let rem = n % width
+    if rem != 0 && rem < k { return rem }
+    k
+}
+
+/// A Python-style block opener: `def f():`, `if x:`, `else:`.
+fn endsWithColonBlock(before: &String) -> bool {
+    let words: [12:String] = ["def ", "class ", "if ", "elif ", "else", "for ", "while ", "try", "except", "finally", "with ", "match "]
+    let t = utf::trim(before)
+    for w in words {
+        if utf::startsWith(t, w) { return true }
+    }
+    false
+}
+
+/// 0 blank, 1 word, 2 punctuation: what word movement stops between.
+fn classOf(b: i64) -> i64 {
+    if b == 32 || b == 9 { return 0 }
+    if utf::isWordByte(b) { return 1 }
+    2
+}
+
+fn lessEntry(a: &Entry, b: &Entry) -> bool {
+    if a.isDir != b.isDir { return a.isDir }
+    let la = utf::lower(a.name)
+    let lb = utf::lower(b.name)
+    if la != lb { return la < lb }
+    a.name < b.name
+}
+
+/// Folders first, then by name ignoring case.
+fn sortEntries(items: vector::Vector<Entry>) -> vector::Vector<Entry> {
+    let n = items.length()
+    if n <= 1 { return items }
+    var left = vector::Vector<Entry>()
+    var right = vector::Vector<Entry>()
+    var i = 0
+    while i < n {
+        if i < n / 2 { left.push(items.get(i)) } else { right.push(items.get(i)) }
+        i += 1
+    }
+    let a = sortEntries(left)
+    let b = sortEntries(right)
+    var out = vector::Vector<Entry>()
+    var x = 0
+    var y = 0
+    while x < a.length() && y < b.length() {
+        if lessEntry(a.look(x), b.look(y)) { out.push(a.get(x)); x += 1 } else { out.push(b.get(y)); y += 1 }
+    }
+    while x < a.length() { out.push(a.get(x)); x += 1 }
+    while y < b.length() { out.push(b.get(y)); y += 1 }
+    out
+}

@@ -1,0 +1,17 @@
+[package]
+name = "grve"
+version = "0.1.0"
+edition = "2025"
+description = "Margrave: a quiet terminal workspace — files, splits, shell output and an editor with LSP."
+
+[build]
+# An editor is a web of shared, mutable state — panes point at buffers, the
+# language client at documents — which is what reference counting is for.
+memory = "arc"
+safety = "full"
+optimize = 0
+debug = true
+c-sources = ["c/sys.c"]
+c-flags = ["-Wall", "-Wextra", "-O2"]
+
+[dependencies]

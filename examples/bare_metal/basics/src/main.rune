@@ -1,0 +1,34 @@
+#runtime(none)
+#entry(none)
+import std::process
+
+import basics::screen
+
+global HELLO: CString = "Hello World!"
+
+extern "C" {
+    fn memset(block: *var u8, value: i32, size: usize) -> *var u8
+}
+
+#lint(allow(empty-block))
+#panicHandler
+#unsafe fn panick(message: CString, location:CString) -> Never {
+    writer = screen::newWriter()
+    writer.write_string(message)
+    writer.write_byte(' ')
+    writer.write_string(location)
+    loop {}
+}
+
+
+#lint(allow(empty-block))
+#export("kernel_main")
+#unsafe fn main(magic: u32, mbInfo: u32) -> Never {
+    if (magic != 0x2BADB002){
+        panick("Failed to verify multiboot","main+3")
+    }
+    writer = screen::newWriter()
+
+    writer.write_string(str: HELLO)
+    loop{}
+}

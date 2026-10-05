@@ -1,0 +1,5 @@
+// pantry — the library half of the package.
+//
+// Every other file in src/ is a module of it: `pantry::unit`,
+// `pantry::inventory` and `pantry::command`. The program in main.rune and the
+// programs in tests/ import them from here.

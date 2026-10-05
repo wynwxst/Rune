@@ -1,0 +1,1341 @@
+// Language servers, from the editor's side: which server a document goes
+// to, keeping it told about edits, asking it things, and turning what it
+// says back into menus, jumps, popups and edits.
+
+import std::io
+import std::json
+import std::time
+import std::collections::vector
+import grve::app
+import grve::buffer
+import grve::config
+import grve::lsp
+import grve::pane
+import grve::sys
+import grve::utf
+
+/// The nearest folder above `dir` that looks like a project's top.
+pub fn projectRoot(dir: &String) -> String {
+    let markers: [9:String] = ["Rune.toml", ".git", "Cargo.toml", "go.mod", "package.json",
+                               "pyproject.toml", "compile_commands.json", "setup.py", "Makefile"]
+    var d = dir.$clone()
+    loop {
+        for m in markers {
+            if io::exists(utf::join(d, m)) { return d }
+        }
+        if d == "/" || d.$isEmpty() { break }
+        d = utf::dirName(d)
+    }
+    dir.$clone()
+}
+
+fn kindIcon(kind: i64) -> String {
+    match kind {
+        2 => "m", 3 => "ƒ", 4 => "ƒ", 5 => ".", 6 => "v", 7 => "S", 8 => "I", 9 => "M",
+        10 => "p", 12 => "#", 13 => "E", 14 => "k", 15 => "»", 17 => "F", 20 => "e",
+        21 => "c", 22 => "S", 23 => "!", 25 => "T",
+        _ => "·",
+    }
+}
+
+fn symbolIcon(kind: i64) -> String {
+    match kind {
+        2 => "M", 5 => "C", 6 => "m", 7 => ".", 8 => ".", 9 => "ƒ", 10 => "E", 11 => "I",
+        12 => "ƒ", 13 => "v", 14 => "c", 22 => "e", 23 => "S", 26 => "T",
+        _ => "·",
+    }
+}
+
+extend app::App {
+    //=== Which server ====================================================//
+
+    fn clientFor(&self, d: buffer::Document) -> lsp::Client? {
+        let language = match d.language { Some(l) => l.name.$clone(), None => return nil }
+        let server = match self.cfg.serverFor(language) { Some(s) => s, None => return nil }
+        let root = projectRoot(utf::dirName(d.path))
+        for c in self.clients {
+            if c.name == server.name && c.root == root {
+                if c.alive() { return c.$clone() }
+                return nil
+            }
+        }
+        let c = lsp::Client(server.name, server.command, root, language)
+        self.clients.push(c)
+        if !lsp::installed(server.command) {
+            c.failed = "'" + server.command + "' is not installed"
+            c.status = "missing"
+            return nil
+        }
+        if !c.start() {
+            self.warn(server.name + ": " + c.failed)
+            return nil
+        }
+        c
+    }
+
+    /// Opens a document with its language server, starting the server if
+    /// this is the first of its files.
+    pub fn attach(&self, d: buffer::Document) {
+        if d.path.$isEmpty() || d.opened { return }
+        let c = match self.clientFor(d) { Some(x) => x, None => return }
+        let language = match d.language { Some(l) => l.name.$clone(), None => "" }
+        c.notify("textDocument/didOpen", "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(d.path)) +
+            ",\"languageId\":" + json::quote(language) + ",\"version\":" + d.version.$str() +
+            ",\"text\":" + json::quote(d.plainText()) + "}}")
+        d.opened = true
+        d.sentVersion = d.version
+    }
+
+    pub fn closeDocument(&self, d: buffer::Document) {
+        if !d.opened { return }
+        match self.clientFor(d) {
+            Some(c) => c.notify("textDocument/didClose", "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(d.path)) + "}}"),
+            None => {},
+        }
+        d.opened = false
+    }
+
+    pub fn didSave(&self, d: buffer::Document) {
+        self.sync(d)
+        if !d.opened { self.attach(d); return }
+        match self.clientFor(d) {
+            Some(c) => c.notify("textDocument/didSave", "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(d.path)) + "}}"),
+            None => {},
+        }
+    }
+
+    /// Sends a document's text if the server has an older version.
+    pub fn sync(&self, d: buffer::Document) {
+        if !d.opened || d.sentVersion == d.version { return }
+        match self.clientFor(d) {
+            Some(c) => {
+                c.notify("textDocument/didChange", "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(d.path)) +
+                    ",\"version\":" + d.version.$str() + "},\"contentChanges\":[{\"text\":" + json::quote(d.plainText()) + "}]}")
+                d.sentVersion = d.version
+            },
+            None => {},
+        }
+    }
+
+    /// Called every turn of the loop: once typing has paused, servers hear
+    /// about the edits.
+    pub fn syncIdle(&self) {
+        // The server waits for its own pause before checking, so this only
+        // has to keep from sending the whole text on every key.
+        if self.lastEdit.elapsed().asMilliseconds() < 250 { return }
+        for d in self.docs { self.sync(d.$clone()) }
+    }
+
+    /// True while some document has edits its server has not heard of.
+    pub fn syncPending(&self) -> bool {
+        for d in self.docs {
+            if d.opened && d.sentVersion != d.version { return true }
+        }
+        false
+    }
+
+    /// `{"textDocument":{"uri":…},"position":{…}}` for the cursor in `p`.
+    fn here(&self, p: pane::Pane) -> String { self.hereAt(p, &p.cursor) }
+
+    fn hereAt(&self, p: pane::Pane, at: &buffer::Pos) -> String {
+        let line = p.doc.line(at.line)
+        "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(p.doc.path)) + "},\"position\":" +
+            lsp::position(at.line, utf::utf16Units(line, at.col)) + "}"
+    }
+
+    /// Sends a request about the current pane's document. False (with a
+    /// message) when there is no server to ask.
+    pub fn ask(&self, method: &String, params: &String, purpose: &String) -> bool {
+        let p = self.current()
+        self.askAbout(p, &p.cursor, method, params, purpose, false) >= 0
+    }
+
+    /// A request about position `at` in pane `p`'s document; its id, or -1.
+    /// `quiet` says nothing when there is no server to ask.
+    pub fn askAbout(&self, p: pane::Pane, at: &buffer::Pos, method: &String, params: &String, purpose: &String, quiet: bool) -> i64 {
+        if !p.hasDoc || p.mode != pane::EDITOR { return -1 }
+        let d = p.doc
+        let c = match self.clientFor(d) {
+            Some(x) => x,
+            None => {
+                if !quiet { self.warn(self.serverProblem(d)) }
+                return -1
+            },
+        }
+        if !d.opened { self.attach(d) }
+        self.sync(d)
+        let id = c.request(method, params, purpose)
+        self.requests.push(app::Request {
+            server: c.name.$clone(), id: id, purpose: purpose.$clone(), pane: p.id,
+            path: d.path.$clone(), at: buffer::pos(at.line, at.col), version: d.version,
+        })
+        if !c.ready && !quiet { self.info(c.name + " is starting…") }
+        id
+    }
+
+    /// Called every turn of the loop: once the mouse has rested on a word
+    /// in an editor for a moment, ask what it is.
+    pub fn mouseIdle(&self) {
+        if self.mouseAsked || self.mouseMoved.elapsed().asMilliseconds() < 450 { return }
+        self.mouseAsked = true
+        if self.prompt.active() || self.menu.active() || (!self.hover.isEmpty() && !self.hoverByMouse) { return }
+        let row = self.mouseRow
+        let col = self.mouseCol
+        var target: pane::Pane? = nil
+        for placed in self.layout.placed {
+            let r = placed.rect
+            if row > r.row && row < r.row + r.height && col >= r.col && col < r.col + r.width {
+                target = self.paneById(placed.pane)
+            }
+        }
+        let p = match target { Some(x) => x, None => return }
+        if !p.hasDoc || p.mode != pane::EDITOR { return }
+        let textCol = p.rect.col + p.gutter
+        if col < textCol { return }
+        let pos = p.positionAt(row - p.rect.row - 1, col - textCol, self.cfg.tabWidth)
+        let line = pos.line
+        let at = pos.col
+        let text = p.doc.line(line)
+        if at >= text.$length() || !utf::isWordByte(text.$byteAt(at) as i64) { return }
+        // Only when the mouse is really over that character, not past the
+        // end of a short row.
+        let segs = p.segments(line, self.cfg.tabWidth)
+        let seg = segs.get(pane::segIndex(&segs, at))
+        let atX = pane::xOf(text, &seg, at, self.cfg.tabWidth)
+        if col - textCol < atX || col - textCol > atX + 1 { return }
+        var s = at
+        while s > 0 && utf::isWordByte(text.$byteAt(s - 1) as i64) { s -= 1 }
+        var e = at
+        while e < text.$length() && utf::isWordByte(text.$byteAt(e) as i64) { e += 1 }
+        let id = self.askAbout(p, &pos, "textDocument/definition", self.hereAt(p, &pos), "mouseDocs", true)
+        if id < 0 { return }
+        self.mouseRequest = id
+        self.hoverRow = row
+        // The word may itself wrap; the popup hangs from where it starts
+        // on the mouse's row.
+        let ws = if s > seg.start { s } else { seg.start }
+        let we = if e < seg.end { e } else { seg.end }
+        self.hoverCol = textCol + pane::xOf(text, &seg, ws, self.cfg.tabWidth)
+        self.hoverEnd = textCol + pane::xOf(text, &seg, we, self.cfg.tabWidth)
+    }
+
+    fn serverProblem(&self, d: buffer::Document) -> String {
+        let language = match d.language { Some(l) => l.name.$clone(), None => return "no language server for this file" }
+        match self.cfg.serverFor(language) {
+            Some(s) => {
+                for c in self.clients {
+                    if c.name == s.name && !c.failed.$isEmpty() { return s.name + ": " + c.failed }
+                }
+                s.name + " is not running"
+            },
+            None => "no language server for " + language + " — see lsp.toml",
+        }
+    }
+
+    pub fn hasServer(&self) -> bool {
+        let p = self.current()
+        if !p.hasDoc { return false }
+        self.clientFor(p.doc).hasValue()
+    }
+
+    //=== Asking ==========================================================//
+
+    /// Asks for the signature of the call the cursor is in.
+    pub fn requestSignature(&self) {
+        let p = self.current()
+        if !p.hasDoc || p.mode != pane::EDITOR { return }
+        self.askAbout(p, &p.cursor, "textDocument/signatureHelp", self.here(p), "signature", true)
+    }
+
+    pub fn hideSignature(&self) {
+        self.sigLabel = ""
+        self.sigPane = -1
+    }
+
+    pub fn requestCompletion(&self) {
+        let p = self.current()
+        if !self.hasServer() {
+            self.wordCompletion()
+            return
+        }
+        self.ask("textDocument/completion", self.here(p), "completion")
+    }
+
+    pub fn requestDefinition(&self) {
+        let p = self.current()
+        self.ask("textDocument/definition", self.here(p), "definition")
+    }
+
+    /// alt+k: the documentation of the name under the cursor, read from
+    /// the doc comment at its definition.
+    pub fn requestHover(&self) {
+        let p = self.current()
+        self.ask("textDocument/definition", self.here(p), "docs")
+    }
+
+    pub fn requestReferences(&self) {
+        let p = self.current()
+        let base = self.here(p)
+        let params = base.$substring(0, base.$length() - 1) + ",\"context\":{\"includeDeclaration\":true}}"
+        self.ask("textDocument/references", params, "references")
+    }
+
+    pub fn requestSymbols(&self) {
+        let p = self.current()
+        self.ask("textDocument/documentSymbol", "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(p.doc.path)) + "}}", "symbols")
+    }
+
+    pub fn requestFormat(&self) {
+        let p = self.current()
+        let opts = "{\"tabSize\":" + self.cfg.tabWidth.$str() + ",\"insertSpaces\":" + (!self.cfg.useTabs).$str() + "}"
+        self.ask("textDocument/formatting", "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(p.doc.path)) + "},\"options\":" + opts + "}", "format")
+    }
+
+    pub fn requestCodeActions(&self) {
+        let p = self.current()
+        let line = p.cursor.line
+        var diags = ""
+        for d in p.doc.diagnostics {
+            if line >= d.line && line <= d.endLine {
+                if !diags.$isEmpty() { diags += "," }
+                diags += "{\"range\":{\"start\":" + lsp::position(d.line, utf::utf16Units(p.doc.line(d.line), d.col)) +
+                    ",\"end\":" + lsp::position(d.endLine, utf::utf16Units(p.doc.line(d.endLine), d.endCol)) +
+                    "},\"severity\":" + d.severity.$str() + ",\"message\":" + json::quote(d.message) + "}"
+            }
+        }
+        let (a, b) = match p.selection() {
+            Some(sel) => sel,
+            None => (buffer::pos(line, 0), buffer::pos(line, p.doc.lineLength(line))),
+        }
+        let range = "{\"start\":" + lsp::position(a.line, utf::utf16Units(p.doc.line(a.line), a.col)) +
+            ",\"end\":" + lsp::position(b.line, utf::utf16Units(p.doc.line(b.line), b.col)) + "}"
+        self.ask("textDocument/codeAction", "{\"textDocument\":{\"uri\":" + json::quote(lsp::uriOf(p.doc.path)) +
+            "},\"range\":" + range + ",\"context\":{\"diagnostics\":[" + diags + "]}}", "codeAction")
+    }
+
+    pub fn requestRename(&self, name: &String) {
+        let p = self.current()
+        let base = self.here(p)
+        self.ask("textDocument/rename", base.$substring(0, base.$length() - 1) + ",\"newName\":" + json::quote(name) + "}", "rename")
+    }
+
+    //=== Listening =======================================================//
+
+    /// Every descriptor a server might be writing on.
+    pub fn serverDescriptors(&self) -> vector::Vector<i64> {
+        var out = vector::Vector<i64>()
+        for c in self.clients { if c.alive() && c.output >= 0 { out.push(c.output) } }
+        out
+    }
+
+    /// Reads from the server writing on `fd` and acts on what it said.
+    pub fn serviceServer(&self, fd: i64) {
+        for c in self.clients {
+            if c.output != fd { continue }
+            let client = c.$clone()
+            let messages = client.poll()
+            for m in messages { self.handle(client, m.$clone()) }
+            if !client.alive() && !client.failed.$isEmpty() {
+                self.warn(client.name + " stopped: " + client.failed)
+                for doc in self.docs {
+                    let d = doc.$clone()
+                    match d.language {
+                        Some(l) => { if l.name == client.language { d.opened = false } },
+                        None => {},
+                    }
+                }
+            }
+            return
+        }
+    }
+
+    fn handle(&self, c: lsp::Client, m: json::Value) {
+        let method = lsp::textOf(m.get("method"))
+        let idValue = m.get("id")
+        if !method.$isEmpty() {
+            match idValue {
+                Some(idv) => {
+                    // A request from the server. Answer what we can, and
+                    // null to the rest, so it is never left waiting.
+                    let id = json::compact(idv)
+                    if method == "workspace/applyEdit" {
+                        match lsp::dig(&m, "params.edit") {
+                            Some(edit) => self.applyWorkspaceEdit(&edit),
+                            None => {},
+                        }
+                        c.reply(id, "{\"applied\":true}")
+                    } elif method == "workspace/configuration" {
+                        let n = match lsp::dig(&m, "params.items") { Some(items) => items.length(), None => 0 }
+                        var nulls = "["
+                        for i in 0..n { nulls += if i == 0 { "null" } else { ",null" } }
+                        c.reply(id, nulls + "]")
+                    } elif method == "workspace/workspaceFolders" {
+                        c.reply(id, "[{\"uri\":" + json::quote(lsp::uriOf(c.root)) + ",\"name\":" + json::quote(utf::baseName(c.root)) + "}]")
+                    } else {
+                        c.reply(id, "null")
+                    }
+                },
+                None => {
+                    if method == "textDocument/publishDiagnostics" { self.takeDiagnostics(&m) }
+                    elif method == "window/showMessage" {
+                        let kind = lsp::intOf(lsp::dig(&m, "params.type"), 3)
+                        let text = lsp::textOf(lsp::dig(&m, "params.message"))
+                        if kind <= 2 { self.warn(c.name + ": " + text) }
+                    }
+                },
+            }
+            return
+        }
+        let id = match idValue { Some(v) => v.asInt() ?? -1, None => return }
+        c.purposeOf(id)
+        var found = -1
+        var i = 0
+        while i < self.requests.length() {
+            let r = self.requests.look(i)
+            if r.id == id && r.server == c.name { found = i }
+            i += 1
+        }
+        if found < 0 { return }
+        let r = self.requests.remove(found).unwrap()
+        match m.get("error") {
+            Some(e) => {
+                let text = lsp::textOf(e.get("message"))
+                if r.purpose != "completion" { self.warn(c.name + ": " + text) }
+                return
+            },
+            None => {},
+        }
+        let result = match m.get("result") { Some(v) => v, None => json::null() }
+        if r.purpose == "completion" { self.gotCompletion(&r, &result) }
+        elif r.purpose == "definition" { self.gotDefinition(&result) }
+        elif r.purpose == "hover" { self.gotHover(&result, "hover") }
+        elif r.purpose == "mouseHover" {
+            // Only if the mouse is still where it asked.
+            if r.id == self.mouseRequest && self.mouseAsked { self.gotHover(&result, "mouseHover") }
+        }
+        elif r.purpose == "signature" { self.gotSignature(&r, &result) }
+        elif r.purpose == "definitionDoc" { self.gotHover(&result, "definitionDoc") }
+        elif r.purpose == "docs" { self.gotDocs(&r, &result, false) }
+        elif r.purpose == "mouseDocs" {
+            if r.id == self.mouseRequest && self.mouseAsked { self.gotDocs(&r, &result, true) }
+        }
+        elif r.purpose == "references" { self.gotReferences(&result) }
+        elif r.purpose == "symbols" { self.gotSymbols(&r, &result) }
+        elif r.purpose == "format" { self.gotFormat(&r, &result) }
+        elif r.purpose == "codeAction" { self.gotCodeActions(&result) }
+        elif r.purpose == "rename" {
+            if result.isNull() { self.warn("nothing to rename here") }
+            else { self.applyWorkspaceEdit(&result); self.good("renamed") }
+        }
+    }
+
+    //=== Diagnostics ===//
+
+    fn takeDiagnostics(&self, m: &json::Value) {
+        let path = lsp::pathOf(lsp::textOf(lsp::dig(m, "params.uri")))
+        let d = match self.findDocument(path) {
+            Some(x) => x,
+            None => match self.findDocument(sys::realPath(path)) { Some(y) => y, None => return },
+        }
+        var out = vector::Vector<buffer::Diagnostic>()
+        match lsp::dig(m, "params.diagnostics") {
+            Some(list) => {
+                var i = 0
+                while i < list.length() {
+                    match list.index(i) {
+                        Some(item) => {
+                            let (a, b) = self.rangeIn(d, item.get("range"))
+                            out.push(buffer::Diagnostic {
+                                line: a.line, col: a.col, endLine: b.line, endCol: b.col,
+                                severity: lsp::intOf(item.get("severity"), 1),
+                                message: lsp::textOf(item.get("message")),
+                                source: lsp::textOf(item.get("source")),
+                            })
+                        },
+                        None => {},
+                    }
+                    i += 1
+                }
+            },
+            None => {},
+        }
+        d.diagnostics = out
+        d.diagVersion = d.version
+    }
+
+    /// An LSP range as byte positions in `d`.
+    fn rangeIn(&self, d: buffer::Document, range: json::Value?) -> (buffer::Pos, buffer::Pos) {
+        match range {
+            Some(r) => {
+                let a = self.posIn(d, r.get("start"))
+                let b = self.posIn(d, r.get("end"))
+                (a, b)
+            },
+            None => (buffer::pos(0, 0), buffer::pos(0, 0)),
+        }
+    }
+
+    fn posIn(&self, d: buffer::Document, p: json::Value?) -> buffer::Pos {
+        match p {
+            Some(v) => {
+                var line = lsp::intOf(v.get("line"), 0)
+                // A line past the last one is the end of the document —
+                // where an edit replacing everything ends.
+                if line >= d.lineCount() { return d.end() }
+                if line < 0 { line = 0 }
+                let ch = lsp::intOf(v.get("character"), 0)
+                buffer::pos(line, utf::byteOfUtf16(d.line(line), ch))
+            },
+            None => buffer::pos(0, 0),
+        }
+    }
+
+    //=== Completion ===//
+
+    fn gotCompletion(&self, r: &app::Request, result: &json::Value) {
+        let p = match self.paneById(r.pane) { Some(x) => x, None => return }
+        if !p.hasDoc || p.doc.path != r.path || p.cursor.line != r.at.line { return }
+        let list = match result.get("items") { Some(items) => items, None => result.$clone() }
+        let (wordStart, word) = p.wordBefore()
+        var items = vector::Vector<app::Item>()
+        var keys = vector::Vector<String>()
+        var i = 0
+        while i < list.length() && i < 2000 {
+            match list.index(i) {
+                Some(it) => {
+                    let label = lsp::textOf(it.get("label"))
+                    var insert = lsp::textOf(it.get("insertText"))
+                    var from = wordStart
+                    match it.get("textEdit") {
+                        Some(te) => {
+                            let newText = lsp::textOf(te.get("newText"))
+                            if !newText.$isEmpty() { insert = newText }
+                            let range = match te.get("range") { Some(x) => x, None => match te.get("replace") { Some(y) => y, None => json::null() } }
+                            let start = lsp::intOf(lsp::dig(&range, "start.line"), -1)
+                            if start == p.cursor.line {
+                                from = utf::byteOfUtf16(p.line(), lsp::intOf(lsp::dig(&range, "start.character"), 0))
+                            }
+                        },
+                        None => {},
+                    }
+                    if insert.$isEmpty() { insert = label.$clone() }
+                    var filter = lsp::textOf(it.get("filterText"))
+                    if filter.$isEmpty() { filter = label.$clone() }
+                    var detail = lsp::textOf(it.get("detail"))
+                    if detail.$isEmpty() { detail = lsp::textOf(lsp::dig(&it, "labelDetails.description")) }
+                    let kind = lsp::intOf(it.get("kind"), 0)
+                    var sortKey = lsp::textOf(it.get("sortText"))
+                    if sortKey.$isEmpty() { sortKey = label.$clone() }
+                    items.push(app::Item {
+                        label: label, detail: firstLine(detail), icon: kindIcon(kind),
+                        iconColor: self.kindColor(kind), insert: insert, from: from, filter: filter,
+                    })
+                    keys.push(sortKey)
+                },
+                None => {},
+            }
+            i += 1
+        }
+        let sorted = sortItems(items, keys)
+        if sorted.isEmpty() {
+            self.wordCompletion()
+            return
+        }
+        self.showCompletion(p, sorted)
+    }
+
+    fn kindColor(&self, kind: i64) -> i64 {
+        let t = self.cfg.theme
+        match kind {
+            2 => t.function, 3 => t.function, 4 => t.function,
+            5 => t.text, 6 => t.text, 10 => t.text,
+            7 => t.typeName, 8 => t.typeName, 13 => t.typeName, 22 => t.typeName, 25 => t.typeName,
+            9 => t.keyword, 14 => t.keyword,
+            12 => t.constant, 20 => t.constant, 21 => t.constant,
+            15 => t.macroColor,
+            _ => t.muted,
+        }
+    }
+
+    /// Completion from the words already in the document — what Tab offers
+    /// when no server is.
+    pub fn wordCompletion(&self) {
+        let p = self.current()
+        let (start, word) = p.wordBefore()
+        if word.$isEmpty() {
+            self.info("nothing to complete")
+            return
+        }
+        var seen = vector::Vector<String>()
+        var items = vector::Vector<app::Item>()
+        let lowered = utf::lower(word)
+        let n = p.doc.lineCount()
+        // Nearest lines first: the cursor's, then outwards.
+        var radius = 0
+        while radius < n && items.length() < 200 {
+            var side = 0
+            while side < 2 {
+                let l = if side == 0 { p.cursor.line - radius } else { p.cursor.line + radius }
+                side += 1
+                if radius == 0 && side == 2 { continue }
+                if l < 0 || l >= n { continue }
+                let text = p.doc.line(l)
+                var i = 0
+                while i < text.$length() {
+                    if !utf::isWordByte(text.$byteAt(i) as i64) || (i > 0 && utf::isWordByte(text.$byteAt(i - 1) as i64)) { i += 1; continue }
+                    var j = i
+                    while j < text.$length() && utf::isWordByte(text.$byteAt(j) as i64) { j += 1 }
+                    let w = text.$substring(i, j)
+                    i = j
+                    if w.$length() <= word.$length() || !utf::startsWith(utf::lower(w), lowered) { continue }
+                    var dup = false
+                    for s in seen { if s == w { dup = true } }
+                    if dup { continue }
+                    seen.push(w.$clone())
+                    items.push(app::Item { label: w.$clone(), detail: "", icon: "w", iconColor: self.cfg.theme.muted,
+                                           insert: w.$clone(), from: start, filter: w.$clone() })
+                }
+            }
+            radius += 1
+        }
+        if items.isEmpty() {
+            self.info("no completions for '" + word + "'")
+            return
+        }
+        self.showCompletion(p, items)
+    }
+
+    fn showCompletion(&self, p: pane::Pane, items: vector::Vector<app::Item>) {
+        self.menu = app::Menu()
+        self.menu.kind = app::MENU_COMPLETION
+        self.menu.all = items
+        self.menu.pane = p.id
+        self.filterCompletion()
+        if self.menu.items.isEmpty() {
+            self.menu.kind = app::MENU_NONE
+            self.info("no completions")
+            return
+        }
+        // One candidate that is already what was typed needs no menu.
+        if self.menu.items.length() == 1 && self.menu.all.length() == 1 {
+            self.acceptCompletion()
+        }
+    }
+
+    /// Narrows the completion list to what has been typed since it opened.
+    pub fn filterCompletion(&self) {
+        let p = match self.paneById(self.menu.pane) { Some(x) => x, None => { self.menu.kind = app::MENU_NONE; return } }
+        var exact = vector::Vector<app::Item>()
+        var fuzzy = vector::Vector<app::Item>()
+        for it in self.menu.all {
+            let from = if it.from >= 0 && it.from <= p.cursor.col { it.from } else { p.wordBefore().0 }
+            let typed = utf::lower(p.line().$substring(from, p.cursor.col))
+            let candidate = utf::lower(it.filter)
+            if typed.$isEmpty() || utf::startsWith(candidate, typed) { exact.push(it.$clone()) }
+            elif subsequence(typed, candidate) { fuzzy.push(it.$clone()) }
+        }
+        for f in fuzzy { exact.push(f.$clone()) }
+        self.menu.items = exact
+        self.menu.selected = 0
+        self.menu.top = 0
+    }
+
+    /// Puts the selected completion in.
+    pub fn acceptCompletion(&self) {
+        let it = match self.menu.current() { Some(x) => x, None => { self.menu.kind = app::MENU_NONE; return } }
+        self.menu.kind = app::MENU_NONE
+        let p = match self.paneById(self.menu.pane) { Some(x) => x, None => return }
+        var from = if it.from >= 0 && it.from <= p.cursor.col { it.from } else { p.wordBefore().0 }
+        p.doc.beginGroup(&p.cursor)
+        p.selecting = false
+        // Whatever of the word continues past the cursor is replaced too.
+        let line = p.line()
+        var end = p.cursor.col
+        while end < line.$length() && utf::isWordByte(line.$byteAt(end) as i64) { end += 1 }
+        p.doc.remove(buffer::pos(p.cursor.line, from), buffer::pos(p.cursor.line, end))
+        p.cursor = p.doc.insert(buffer::pos(p.cursor.line, from), it.insert)
+        p.goal = utf::columnOf(p.line(), p.cursor.col, self.cfg.tabWidth)
+        self.lastEdit = time::now()
+    }
+
+    //=== Signatures ===//
+
+    fn gotSignature(&self, r: &app::Request, result: &json::Value) {
+        let p = match self.paneById(r.pane) { Some(x) => x, None => return }
+        // Stale when the cursor has gone to another line since.
+        if !p.hasDoc || p.doc.path != r.path || p.cursor.line != r.at.line || self.focus != p.id {
+            return
+        }
+        let sigs = match result.get("signatures") { Some(s) => s, None => json::null() }
+        if result.isNull() || sigs.length() == 0 {
+            self.hideSignature()
+            return
+        }
+        var which = lsp::intOf(result.get("activeSignature"), 0)
+        if which < 0 || which >= sigs.length() { which = 0 }
+        let sig = sigs.index(which) ?? json::null()
+        let label = lsp::textOf(sig.get("label"))
+        if label.$isEmpty() { self.hideSignature(); return }
+        var active = lsp::intOf(sig.get("activeParameter"), lsp::intOf(result.get("activeParameter"), 0))
+        var from = -1
+        var upto = -1
+        match sig.get("parameters") {
+            Some(params) => {
+                if active >= params.length() { active = params.length() - 1 }
+                match params.index(active) {
+                    Some(param) => {
+                        let pl = param.get("label") ?? json::null()
+                        match pl.asText() {
+                            Some(text) => {
+                                // A name: found after the opening parenthesis.
+                                let open = utf::findFrom(label, "(", 0)
+                                from = utf::findFrom(label, text, if open < 0 { 0 } else { open })
+                                if from >= 0 { upto = from + text.$length() }
+                            },
+                            None => {
+                                // [start, end] in UTF-16 units.
+                                from = utf::byteOfUtf16(label, lsp::intOf(pl.index(0), 0))
+                                upto = utf::byteOfUtf16(label, lsp::intOf(pl.index(1), 0))
+                            },
+                        }
+                    },
+                    None => {},
+                }
+            },
+            None => {},
+        }
+        var doc = ""
+        match sig.get("documentation") {
+            Some(d) => {
+                let text = match d.asText() { Some(s) => s, None => lsp::textOf(d.get("value")) }
+                for raw in buffer::splitLines(text) {
+                    let t = utf::trim(raw)
+                    if !t.$isEmpty() && !utf::startsWith(t, "```") && t != "---" { doc = plainMarkdown(t); break }
+                }
+            },
+            None => {},
+        }
+        self.sigLabel = label
+        self.sigFrom = from
+        self.sigTo = upto
+        self.sigDoc = doc
+        self.sigPane = p.id
+    }
+
+    //=== Documentation ===//
+
+    /// The definition is known: show its documentation, or — when it has
+    /// no doc comment — ask the server's hover instead.
+    fn gotDocs(&self, r: &app::Request, result: &json::Value, byMouse: bool) {
+        var target = result.$clone()
+        if result.length() > 0 && result.get("uri").isNil() { target = result.index(0) ?? json::null() }
+        var uri = lsp::textOf(target.get("uri"))
+        var range = target.get("range")
+        if uri.$isEmpty() {
+            uri = lsp::textOf(target.get("targetUri"))
+            range = match target.get("targetSelectionRange") { Some(x) => x, None => target.get("targetRange") }
+        }
+        if !uri.$isEmpty() {
+            let rr = range ?? json::null()
+            if self.showDocs(lsp::pathOf(uri), lsp::intOf(lsp::dig(&rr, "start.line"), 0), byMouse) { return }
+        }
+        // No doc comment to read: what the server's hover says.
+        let p = match self.paneById(r.pane) { Some(x) => x, None => return }
+        let purpose = if byMouse { "mouseHover" } else { "hover" }
+        let id = self.askAbout(p, &r.at, "textDocument/hover", self.hereAt(p, &r.at), purpose, true)
+        if byMouse { self.mouseRequest = id }
+    }
+
+    /// Reads the definition at `line` of `path` and the doc comment above
+    /// it, and opens the panel. False when there is no doc comment.
+    pub fn showDocs(&self, path: &String, line: i64, byMouse: bool) -> bool {
+        var source = vector::Vector<String>()
+        var language: config::Language? = nil
+        match self.findDocument(path) {
+            Some(d) => { source = d.lines.$clone(); language = d.language },
+            None => {
+                match io::readToString(path) {
+                    Ok(text) => source = buffer::splitLines(text),
+                    Err(e) => return false,
+                }
+                language = self.cfg.languageFor(path)
+            },
+        }
+        if line < 0 || line >= source.length() { return false }
+
+        // The comment: contiguous comment lines above, past any decorators.
+        var doc = vector::Vector<String>()
+        var l = line - 1
+        while l >= 0 && (utf::startsWith(utf::trim(source.look(l)), "@") || utf::startsWith(utf::trim(source.look(l)), "#[")) { l -= 1 }
+        while l >= 0 {
+            let t = utf::trim(source.look(l))
+            if !isDocComment(t) { break }
+            doc.insert(0, docText(t))
+            l -= 1
+        }
+        // A Python docstring sits below instead.
+        if doc.isEmpty() && line + 1 < source.length() {
+            let first = utf::trim(source.look(line + 1))
+            let dq = utf::fromCode(34).$repeat(3)
+            let sq = utf::fromCode(39).$repeat(3)
+            if utf::startsWith(first, dq) || utf::startsWith(first, sq) {
+                let quote = first.$substring(0, 3)
+                var k = line + 1
+                while k < source.length() && k < line + 60 {
+                    var t = utf::trim(source.look(k))
+                    if k == line + 1 { t = t.$substring(3, t.$length()) }
+                    let end = utf::findFrom(t, quote, 0)
+                    if end >= 0 { doc.push(t.$substring(0, end)); break }
+                    doc.push(t)
+                    k += 1
+                }
+            }
+        }
+        while doc.length() > 0 && utf::trim(doc.look(0)).$isEmpty() { doc.remove(0) }
+        while doc.length() > 0 && utf::trim(doc.look(doc.length() - 1)).$isEmpty() { doc.pop() }
+        if doc.isEmpty() { return false }
+
+        // The signature: from the definition's line to where its body opens.
+        var signature = vector::Vector<String>()
+        var k = line
+        while k < source.length() && k < line + 6 {
+            var t = utf::trimEnd(source.look(k))
+            if k == line { t = utf::trim(t) }
+            let open = t.$length() > 0 && (t.$byteAt(t.$length() - 1) as i64) == 123
+            if open { t = utf::trimEnd(t.$substring(0, t.$length() - 1)) }
+            signature.push(t)
+            if open || utf::endsWith(t, ":") || utf::findFrom(t, "{", 0) >= 0 || utf::endsWith(t, ";") { break }
+            k += 1
+        }
+        var lines = vector::Vector<String>()
+        for s in signature { lines.push(s.$clone()) }
+        lines.push("")
+        var blank = false
+        for d in doc {
+            if utf::trim(d).$isEmpty() {
+                if !blank { lines.push("") }
+                blank = true
+                continue
+            }
+            blank = false
+            for piece in wrap(d, 78) { lines.push(piece.$clone()) }
+        }
+        self.hover = lines
+        self.hoverCode = signature.length()
+        self.hoverLanguage = language
+        self.hoverTitle = self.shown(path) + ":" + (line + 1).$str()
+        self.hoverByMouse = byMouse
+        if !byMouse { self.hoverRow = -1 }
+        true
+    }
+
+    //=== Going places ===//
+
+    /// The first location in a Location, Location[] or LocationLink[].
+    fn gotDefinition(&self, result: &json::Value) {
+        var target = result.$clone()
+        if result.length() > 0 && result.get("uri").isNil() {
+            target = result.index(0) ?? json::null()
+        }
+        if target.isNull() {
+            self.info("no definition found")
+            self.peekNext = false
+            return
+        }
+        var uri = lsp::textOf(target.get("uri"))
+        var range = target.get("range")
+        if uri.$isEmpty() {
+            uri = lsp::textOf(target.get("targetUri"))
+            range = match target.get("targetSelectionRange") { Some(x) => x, None => target.get("targetRange") }
+        }
+        if uri.$isEmpty() { self.info("no definition found"); return }
+        let r = range ?? json::null()
+        let line = lsp::intOf(lsp::dig(&r, "start.line"), 0)
+        let ch = lsp::intOf(lsp::dig(&r, "start.character"), 0)
+        let peeking = self.peekNext || self.focus == app::PEEK
+        self.jumpTo(lsp::pathOf(uri), line, ch)
+        if peeking { return }
+        // And say what it is: its signature and doc comment.
+        let p = self.current()
+        if p.hasDoc && p.mode == pane::EDITOR {
+            if !self.showDocs(p.doc.path, p.cursor.line, false) {
+                if self.askAbout(p, &p.cursor, "textDocument/hover", self.here(p), "definitionDoc", true) < 0 {
+                    self.showDocAbove()
+                }
+            }
+        }
+    }
+
+    /// Opens `path` in the current pane at an LSP line and character.
+    pub fn jumpTo(&self, path: &String, line: i64, character: i64) {
+        // Asked for with shift, or asked from inside the peek: it goes there.
+        if self.peekNext || self.focus == app::PEEK {
+            self.peekNext = false
+            self.openPeek(path, line, character)
+            return
+        }
+        let p = self.current()
+        if !p.hasDoc || p.doc.path != path {
+            self.openIn(p, path)
+        } else {
+            p.remember()
+        }
+        if !p.hasDoc { return }
+        p.mode = pane::EDITOR
+        let l = if line < p.doc.lineCount() { line } else { p.doc.lineCount() - 1 }
+        let col = utf::byteOfUtf16(p.doc.line(l), character)
+        p.selecting = false
+        p.setCursor(buffer::pos(l, col), self.cfg.tabWidth)
+        p.centre()
+        p.reveal(self.cfg.scrollOff, self.cfg.tabWidth)
+    }
+
+    fn gotHover(&self, result: &json::Value, purpose: &String) {
+        let lines = self.hoverLines(result)
+        if lines.isEmpty() {
+            if purpose == "hover" { self.info("nothing to show here") }
+            elif purpose == "definitionDoc" { self.showDocAbove() }
+            return
+        }
+        self.hover = lines
+        self.hoverCode = 1
+        self.hoverLanguage = self.current().doc.language
+        self.hoverTitle = if purpose == "definitionDoc" { "definition" } else { "hover" }
+        self.hoverByMouse = purpose == "mouseHover"
+        if !self.hoverByMouse { self.hoverRow = -1 }
+    }
+
+    /// What a hover reply says, as lines for the popup.
+    fn hoverLines(&self, result: &json::Value) -> vector::Vector<String> {
+        var none = vector::Vector<String>()
+        if result.isNull() { return none }
+        let contents = match result.get("contents") { Some(c) => c, None => return none }
+        var text = ""
+        if contents.asText().hasValue() { text = contents.asText().unwrap() }
+        elif contents.get("value").hasValue() { text = lsp::textOf(contents.get("value")) }
+        else {
+            var i = 0
+            while i < contents.length() {
+                match contents.index(i) {
+                    Some(part) => {
+                        let piece = match part.asText() { Some(s) => s, None => lsp::textOf(part.get("value")) }
+                        if !text.$isEmpty() { text += "\n\n" }
+                        text += piece
+                    },
+                    None => {},
+                }
+                i += 1
+            }
+        }
+        var lines = vector::Vector<String>()
+        var blank = false
+        for raw in buffer::splitLines(text) {
+            let trimmed = utf::trim(raw)
+            // Markdown's furniture, not its words.
+            if utf::startsWith(trimmed, "```") || trimmed == "---" || trimmed == "***" { continue }
+            if trimmed.$isEmpty() {
+                if blank || lines.isEmpty() { continue }
+                blank = true
+                lines.push("")
+                continue
+            }
+            blank = false
+            for piece in wrap(plainMarkdown(raw), 76) { lines.push(piece.$clone()) }
+        }
+        while lines.length() > 0 && utf::trim(lines.look(lines.length() - 1)).$isEmpty() { lines.pop() }
+        while lines.length() > 0 && utf::trim(lines.look(0)).$isEmpty() { lines.remove(0) }
+        lines
+    }
+
+    /// The definition's line and the comment block right above it — what
+    /// prefix+d shows when the server has no hover to give.
+    fn showDocAbove(&self) {
+        let p = self.current()
+        if !p.hasDoc { return }
+        var block = vector::Vector<String>()
+        var l = p.cursor.line - 1
+        while l >= 0 && block.length() < 30 {
+            let t = utf::trim(p.doc.line(l))
+            let stripped = commentText(t)
+            match stripped {
+                Some(s) => block.insert(0, s),
+                None => break,
+            }
+            l -= 1
+        }
+        // Attributes between the comment and the definition do not end it.
+        var lines = vector::Vector<String>()
+        lines.push(utf::trim(p.line()))
+        if block.length() > 0 { lines.push("") }
+        for b in block {
+            for piece in wrap(b, 76) { lines.push(piece.$clone()) }
+        }
+        self.hover = lines
+        self.hoverCode = 1
+        self.hoverLanguage = p.doc.language
+        self.hoverTitle = "definition"
+        self.hoverByMouse = false
+        self.hoverRow = -1
+    }
+
+    fn gotReferences(&self, result: &json::Value) {
+        var items = vector::Vector<app::Item>()
+        var i = 0
+        while i < result.length() {
+            match result.index(i) {
+                Some(loc) => items.push(self.locationItem(lsp::pathOf(lsp::textOf(loc.get("uri"))), loc.get("range"), "")),
+                None => {},
+            }
+            i += 1
+        }
+        if items.isEmpty() { self.info("no references"); self.peekNext = false; return }
+        if items.length() == 1 {
+            let it = items.get(0)
+            self.jumpTo(it.path, it.line, it.col)
+            return
+        }
+        self.openMenu(app::MENU_LOCATIONS, items.length().$str() + " references", items)
+    }
+
+    fn locationItem(&self, path: String, range: json::Value?, name: &String) -> app::Item {
+        let r = range ?? json::null()
+        let line = lsp::intOf(lsp::dig(&r, "start.line"), 0)
+        let ch = lsp::intOf(lsp::dig(&r, "start.character"), 0)
+        var text = ""
+        match self.findDocument(path) {
+            Some(d) => text = d.line(line),
+            None => {
+                match io::readToString(path) {
+                    Ok(all) => {
+                        let lines = buffer::splitLines(all)
+                        if line < lines.length() { text = lines.get(line) }
+                    },
+                    Err(e) => {},
+                }
+            },
+        }
+        let label = if name.$isEmpty() { self.shown(path) + ":" + (line + 1).$str() } else { name.$clone() }
+        app::Item { label: label, detail: utf::trim(text), icon: "→", iconColor: self.cfg.theme.accent,
+                    path: path, line: line, col: ch }
+    }
+
+    fn gotSymbols(&self, r: &app::Request, result: &json::Value) {
+        var items = vector::Vector<app::Item>()
+        self.collectSymbols(r.path, result, 0, &var items)
+        if items.isEmpty() { self.info("no symbols"); return }
+        self.openMenu(app::MENU_LOCATIONS, "symbols", items)
+    }
+
+    fn collectSymbols(&self, path: &String, list: &json::Value, depth: i64, items: &var vector::Vector<app::Item>) {
+        var i = 0
+        while i < list.length() {
+            match list.index(i) {
+                Some(s) => {
+                    let name = lsp::textOf(s.get("name"))
+                    let kind = lsp::intOf(s.get("kind"), 0)
+                    var range = s.get("selectionRange")
+                    if range.isNil() { range = s.get("range") }
+                    if range.isNil() { range = lsp::dig(&s, "location.range") }
+                    let r = range ?? json::null()
+                    items.push(app::Item {
+                        label: utf::spaces(depth * 2) + name, detail: lsp::textOf(s.get("detail")),
+                        icon: symbolIcon(kind), iconColor: self.cfg.theme.function, path: path.$clone(),
+                        line: lsp::intOf(lsp::dig(&r, "start.line"), 0), col: lsp::intOf(lsp::dig(&r, "start.character"), 0),
+                    })
+                    match s.get("children") {
+                        Some(kids) => self.collectSymbols(path, &kids, depth + 1, items),
+                        None => {},
+                    }
+                },
+                None => {},
+            }
+            i += 1
+        }
+    }
+
+    pub fn openMenu(&self, kind: i64, title: &String, items: vector::Vector<app::Item>) {
+        self.menu = app::Menu()
+        self.menu.kind = kind
+        self.menu.title = title.$clone()
+        self.menu.peek = self.peekNext || self.focus == app::PEEK
+        self.peekNext = false
+        self.menu.all = items.$clone()
+        self.menu.items = items
+        self.menu.pane = self.current().id
+    }
+
+    //=== Edits ===//
+
+    fn gotFormat(&self, r: &app::Request, result: &json::Value) {
+        let d = match self.findDocument(r.path) { Some(x) => x, None => return }
+        if d.version != r.version { self.warn("the document changed while it was being formatted — try again"); return }
+        if result.length() == 0 { self.info("already formatted"); return }
+        self.applyEdits(d, result)
+        d.detectIndent()
+        self.good("formatted")
+    }
+
+    /// Applies TextEdit[] to a document as one undoable change.
+    pub fn applyEdits(&self, d: buffer::Document, edits: &json::Value) {
+        // Positions are all in terms of the text before any edit, so they
+        // are worked out first, then applied from the end backwards.
+        var starts = vector::Vector<buffer::Pos>()
+        var ends = vector::Vector<buffer::Pos>()
+        var texts = vector::Vector<String>()
+        var i = 0
+        while i < edits.length() {
+            match edits.index(i) {
+                Some(e) => {
+                    let (a, b) = self.rangeIn(d, e.get("range"))
+                    var text = lsp::textOf(e.get("newText"))
+                    // An edit running to the very end takes the file's
+                    // last newline with it, and its text brings one back —
+                    // which here is the document's final newline, not a line.
+                    let endLine = lsp::intOf(lsp::dig(&e, "range.end.line"), 0)
+                    if endLine >= d.lineCount() && d.finalNewline && utf::endsWith(text, "\n") {
+                        text = text.$substring(0, text.$length() - 1)
+                    }
+                    starts.push(a)
+                    ends.push(b)
+                    texts.push(text)
+                },
+                None => {},
+            }
+            i += 1
+        }
+        var order = vector::Vector<i64>()
+        for k in 0..starts.length() { order.push(k) }
+        // Latest first; a simple insertion sort, edits are few.
+        var x = 1
+        while x < order.length() {
+            var y = x
+            while y > 0 && starts.look(order.get(y - 1)).before(starts.look(order.get(y))) {
+                order.swap(y, y - 1)
+                y -= 1
+            }
+            x += 1
+        }
+        let cursorPane = self.current()
+        d.beginGroup(&cursorPane.cursor)
+        for k in order {
+            d.remove(starts.look(k), ends.look(k))
+            d.insert(starts.look(k), texts.look(k))
+        }
+        for p in self.panes {
+            if p.hasDoc && p.doc.path == d.path { p.clampCursor() }
+        }
+        self.lastEdit = time::now()
+    }
+
+    pub fn applyWorkspaceEdit(&self, edit: &json::Value) {
+        match edit.get("changes") {
+            Some(changes) => {
+                match changes.asObject() {
+                    Some(obj) => {
+                        for uri in obj.keys() {
+                            let d = self.document(lsp::pathOf(uri))
+                            match changes.get(uri.$clone()) {
+                                Some(list) => self.applyEdits(d, &list),
+                                None => {},
+                            }
+                        }
+                    },
+                    None => {},
+                }
+            },
+            None => {},
+        }
+        match edit.get("documentChanges") {
+            Some(list) => {
+                var i = 0
+                while i < list.length() {
+                    match list.index(i) {
+                        Some(change) => {
+                            let uri = lsp::textOf(lsp::dig(&change, "textDocument.uri"))
+                            match change.get("edits") {
+                                Some(edits) => {
+                                    if !uri.$isEmpty() { self.applyEdits(self.document(lsp::pathOf(uri)), &edits) }
+                                },
+                                None => {},
+                            }
+                        },
+                        None => {},
+                    }
+                    i += 1
+                }
+            },
+            None => {},
+        }
+    }
+
+    fn gotCodeActions(&self, result: &json::Value) {
+        var items = vector::Vector<app::Item>()
+        var i = 0
+        while i < result.length() {
+            match result.index(i) {
+                Some(a) => items.push(app::Item {
+                    label: lsp::textOf(a.get("title")), detail: lsp::textOf(a.get("kind")),
+                    icon: "✦", iconColor: self.cfg.theme.gold, data: json::compact(a),
+                }),
+                None => {},
+            }
+            i += 1
+        }
+        if items.isEmpty() { self.info("no code actions here"); return }
+        self.openMenu(app::MENU_ACTIONS, "code actions", items)
+    }
+
+    /// Carries out a chosen code action.
+    pub fn runCodeAction(&self, data: &String) {
+        let a = match json::parse(data.$clone()) { Ok(v) => v, Err(e) => return }
+        match a.get("edit") {
+            Some(edit) => self.applyWorkspaceEdit(&edit),
+            None => {},
+        }
+        // A bare Command, or an action that also runs one.
+        let command = match a.get("command") { Some(c) => c, None => return }
+        let name = match command.asText() { Some(s) => s, None => lsp::textOf(command.get("command")) }
+        let args = match command.get("arguments") { Some(x) => json::compact(x), None => match a.get("arguments") { Some(y) => json::compact(y), None => "[]" } }
+        if name.$isEmpty() { return }
+        self.ask("workspace/executeCommand", "{\"command\":" + json::quote(name) + ",\"arguments\":" + args + "}", "command")
+    }
+
+    /// Restarts every server, re-opening their documents.
+    pub fn restartServers(&self) {
+        for c in self.clients { c.stop() }
+        self.clients.clear()
+        self.requests.clear()
+        for doc in self.docs {
+            let d = doc.$clone()
+            d.opened = false
+            self.attach(d)
+        }
+        self.info("language servers restarted")
+    }
+
+    pub fn stopServers(&self) {
+        for c in self.clients { c.stop() }
+    }
+}
+
+/// Emphasis markers and code ticks taken out: `*function in* \`std::io\``
+/// reads as `function in std::io`.
+fn plainMarkdown(s: &String) -> String {
+    var out = ""
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        let next = if i + 1 < s.$length() { s.$byteAt(i + 1) as i64 } else { 0 }
+        let prevSpace = i == 0 || (s.$byteAt(i - 1) as i64) == 32
+        if b == 96 { i += 1; continue }
+        if (b == 42 || b == 95) && (prevSpace || next == 32 || next == 0 || next == b || i + 1 == s.$length() || !utf::isWordByte(next)) {
+            i += 1
+            continue
+        }
+        if b == 92 && i + 1 < s.$length() { out += s.$substring(i + 1, i + 2); i += 2; continue }
+        out += s.$substring(i, i + 1)
+        i += 1
+    }
+    out
+}
+
+/// A line that belongs to a doc comment: `///`, `//!`, `//`, `#`, `--`,
+/// and the `/** … */` family.
+fn isDocComment(t: &String) -> bool {
+    if utf::startsWith(t, "#[") || utf::startsWith(t, "#!") { return false }
+    utf::startsWith(t, "//") || utf::startsWith(t, "#") || utf::startsWith(t, "--") ||
+    utf::startsWith(t, "/*") || utf::startsWith(t, "*")
+}
+
+/// A doc comment line without its marker, indentation inside kept.
+fn docText(t: &String) -> String {
+    let markers: [9:String] = ["///", "//!", "//", "/**", "*/", "--", "#", "*", "/*"]
+    for m in markers {
+        if utf::startsWith(t, m) {
+            var rest = t.$substring(m.$length(), t.$length())
+            if utf::endsWith(rest, "*/") { rest = rest.$substring(0, rest.$length() - 2) }
+            if utf::startsWith(rest, " ") { rest = rest.$substring(1, rest.$length()) }
+            return utf::trimEnd(rest)
+        }
+    }
+    t.$clone()
+}
+
+/// The text of a comment line (`///`, `//`, `#`, `--`, ` * `), or nil when
+/// the line is not one.
+fn commentText(t: &String) -> String? {
+    let markers: [8:String] = ["///", "//!", "//", "--", "#", "/**", "*/", "*"]
+    for m in markers {
+        if utf::startsWith(t, m) {
+            if m == "#" && utf::startsWith(t, "#[") { return nil }
+            return utf::trim(t.$substring(m.$length(), t.$length()))
+        }
+    }
+    nil
+}
+
+fn firstLine(s: &String) -> String {
+    let nl = utf::findFrom(s, "\n", 0)
+    if nl < 0 { return s.$clone() }
+    s.$substring(0, nl)
+}
+
+/// True when every byte of `needle` appears in `hay`, in order.
+fn subsequence(needle: &String, hay: &String) -> bool {
+    var j = 0
+    var i = 0
+    while i < hay.$length() && j < needle.$length() {
+        if hay.$byteAt(i) == needle.$byteAt(j) { j += 1 }
+        i += 1
+    }
+    j == needle.$length()
+}
+
+/// Items ordered by their keys (stable).
+pub fn sortItems(items: vector::Vector<app::Item>, keys: vector::Vector<String>) -> vector::Vector<app::Item> {
+    var order = vector::Vector<i64>()
+    for k in 0..items.length() { order.push(k) }
+    mergeSort(&var order, &keys)
+    var out = vector::Vector<app::Item>()
+    for k in order { out.push(items.get(k)) }
+    out
+}
+
+fn mergeSort(order: &var vector::Vector<i64>, keys: &vector::Vector<String>) {
+    let n = order.length()
+    if n <= 1 { return }
+    var a = vector::Vector<i64>()
+    var b = vector::Vector<i64>()
+    for k in 0..n {
+        if k < n / 2 { a.push(order.get(k)) } else { b.push(order.get(k)) }
+    }
+    mergeSort(&var a, keys)
+    mergeSort(&var b, keys)
+    order.clear()
+    var x = 0
+    var y = 0
+    while x < a.length() && y < b.length() {
+        if keys.look(b.get(y)) < keys.look(a.get(x)) { order.push(b.get(y)); y += 1 }
+        else { order.push(a.get(x)); x += 1 }
+    }
+    while x < a.length() { order.push(a.get(x)); x += 1 }
+    while y < b.length() { order.push(b.get(y)); y += 1 }
+}
+
+/// `text` broken into lines of at most `width` columns, at spaces.
+pub fn wrap(text: &String, width: i64) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var rest = text.$clone()
+    while utf::displayWidth(rest) > width {
+        var cut = utf::byteAtColumn(rest, width, 4)
+        var k = cut
+        while k > 0 && (rest.$byteAt(k) as i64) != 32 { k -= 1 }
+        if k > width / 3 { cut = k }
+        out.push(rest.$substring(0, cut))
+        var next = cut
+        while next < rest.$length() && (rest.$byteAt(next) as i64) == 32 { next += 1 }
+        rest = rest.$substring(next, rest.$length())
+    }
+    out.push(rest)
+    out
+}

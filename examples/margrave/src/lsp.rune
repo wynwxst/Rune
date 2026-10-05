@@ -1,0 +1,394 @@
+// A Language Server Protocol client: one server process per language,
+// spoken to over its standard input and output.
+//
+// Nothing here waits. Requests go out with an id and are remembered by what
+// they were for; `poll` turns whatever the server has written into messages,
+// and the editor decides what a reply means when it arrives — the cursor may
+// have moved since, and that is the editor's business, not this file's.
+
+import std::io
+import std::json
+import std::collections::vector
+import std::dictionary
+import grve::sys
+import grve::utf
+
+pub class Client {
+    pub name: String
+    pub command: String
+    pub root: String
+    pub language: String
+    pub pid: i64
+    input: i64
+    pub output: i64
+    inbox: String
+    nextId: i64
+    /// The handshake is done; requests before it wait in `queue`.
+    pub ready: bool
+    pub failed: String
+    queue: vector::Vector<String>
+    /// What each outstanding request was for, by id.
+    pending: dictionary::Map<i64, String>
+    pub completionTriggers: String
+    pub canFormat: bool
+    pub canRename: bool
+    pub canCodeAction: bool
+    pub status: String
+
+    fn init(self, name: &String, command: &String, root: &String, language: &String) {
+        self.name = name.$clone()
+        self.command = command.$clone()
+        self.root = root.$clone()
+        self.language = language.$clone()
+        self.pid = -1
+        self.input = -1
+        self.output = -1
+        self.inbox = ""
+        self.nextId = 1
+        self.ready = false
+        self.failed = ""
+        self.queue = vector::Vector<String>()
+        self.pending = dictionary::Map<i64, String>()
+        self.completionTriggers = "."
+        self.canFormat = false
+        self.canRename = false
+        self.canCodeAction = false
+        self.status = "starting"
+    }
+
+    pub fn alive(&self) -> bool { self.pid > 0 }
+
+    /// Starts the server and sends `initialize`. False when it could not be
+    /// started at all.
+    pub fn start(&self) -> bool {
+        match sys::spawn("exec " + self.command, self.root, true, false) {
+            Some(child) => {
+                self.pid = child.pid
+                self.input = child.input
+                self.output = child.output
+            },
+            None => {
+                self.failed = "could not start '" + self.command + "'"
+                self.status = "failed"
+                return false
+            },
+        }
+        let params = "{\"processId\":null,\"clientInfo\":{\"name\":\"margrave\",\"version\":\"0.1.0\"}," +
+            "\"rootUri\":" + json::quote(uriOf(self.root)) + "," +
+            "\"rootPath\":" + json::quote(self.root) + "," +
+            "\"workspaceFolders\":[{\"uri\":" + json::quote(uriOf(self.root)) + ",\"name\":" + json::quote(utf::baseName(self.root)) + "}]," +
+            "\"capabilities\":{" +
+              "\"general\":{\"positionEncodings\":[\"utf-16\"]}," +
+              "\"textDocument\":{" +
+                "\"synchronization\":{\"didSave\":true,\"dynamicRegistration\":false}," +
+                "\"completion\":{\"completionItem\":{\"snippetSupport\":false,\"documentationFormat\":[\"plaintext\",\"markdown\"]},\"contextSupport\":true}," +
+                "\"hover\":{\"contentFormat\":[\"plaintext\",\"markdown\"]}," +
+                "\"definition\":{\"linkSupport\":true}," +
+                "\"references\":{}," +
+                "\"documentSymbol\":{\"hierarchicalDocumentSymbolSupport\":true}," +
+                "\"formatting\":{}," +
+                "\"rename\":{\"prepareSupport\":false}," +
+                "\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":[\"quickfix\",\"refactor\",\"source\"]}}}," +
+                "\"signatureHelp\":{\"signatureInformation\":{\"documentationFormat\":[\"plaintext\"]}}," +
+                "\"publishDiagnostics\":{\"relatedInformation\":false}" +
+              "}," +
+              "\"workspace\":{\"workspaceFolders\":true,\"configuration\":false,\"applyEdit\":true}," +
+              "\"window\":{\"workDoneProgress\":false}" +
+            "}}"
+        self.write(self.frame("initialize", params, self.claim("initialize")))
+        true
+    }
+
+    /// Takes the next id, remembering what it is for.
+    fn claim(&self, purpose: &String) -> i64 {
+        let id = self.nextId
+        self.nextId += 1
+        self.pending.put(id, purpose.$clone())
+        id
+    }
+
+    fn frame(&self, method: &String, params: &String, id: i64) -> String {
+        let idPart = if id >= 0 { "\"id\":" + id.$str() + "," } else { "" }
+        "{\"jsonrpc\":\"2.0\"," + idPart + "\"method\":" + json::quote(method) + ",\"params\":" + params + "}"
+    }
+
+    fn write(&self, body: &String) {
+        if self.input < 0 { return }
+        sys::writeText(self.input, "Content-Length: " + body.$length().$str() + "\r\n\r\n" + body)
+    }
+
+    fn send(&self, body: &String) {
+        if !self.ready { self.queue.push(body.$clone()); return }
+        self.write(body)
+    }
+
+    /// Sends a request; returns its id.
+    pub fn request(&self, method: &String, params: &String, purpose: &String) -> i64 {
+        let id = self.claim(purpose)
+        self.send(self.frame(method, params, id))
+        id
+    }
+
+    pub fn notify(&self, method: &String, params: &String) {
+        self.send(self.frame(method, params, -1))
+    }
+
+    /// Answers a request the server made of us.
+    pub fn reply(&self, id: &String, result: &String) {
+        self.write("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + result + "}")
+    }
+
+    /// What request `id` was for, forgetting it.
+    pub fn purposeOf(&self, id: i64) -> String {
+        match self.pending.remove(id) {
+            Some(p) => p,
+            None => "",
+        }
+    }
+
+    /// Everything the server has finished saying since last asked. Called
+    /// when its output is readable; an empty read means it has gone.
+    pub fn poll(&self) -> vector::Vector<json::Value> {
+        var out = vector::Vector<json::Value>()
+        if self.output < 0 { return out }
+        var chunk = io::Bytes()
+        loop {
+            let n = sys::readInto(self.output, &var chunk)
+            if n == 0 {
+                self.died("the server exited")
+                break
+            }
+            if n < 0 { break }
+        }
+        if chunk.length() > 0 { self.inbox += chunk.toString() }
+        loop {
+            let headerEnd = utf::findFrom(self.inbox, "\r\n\r\n", 0)
+            if headerEnd < 0 { break }
+            let header = utf::lower(self.inbox.$substring(0, headerEnd))
+            let at = utf::findFrom(header, "content-length:", 0)
+            if at < 0 {
+                // Not a header we understand: skip past it.
+                self.inbox = self.inbox.$substring(headerEnd + 4, self.inbox.$length())
+                continue
+            }
+            var stop = utf::findFrom(header, "\r\n", at)
+            if stop < 0 { stop = header.$length() }
+            let length = utf::parseInt(header.$substring(at + 15, stop)) ?? 0
+            let bodyStart = headerEnd + 4
+            if self.inbox.$length() < bodyStart + length { break }
+            let body = self.inbox.$substring(bodyStart, bodyStart + length)
+            self.inbox = self.inbox.$substring(bodyStart + length, self.inbox.$length())
+            match json::parse(body) {
+                Ok(v) => {
+                    if self.handshake(&v) { continue }
+                    out.push(v)
+                },
+                Err(e) => {},
+            }
+        }
+        out
+    }
+
+    /// The reply to `initialize`, handled here. True when `v` was it.
+    fn handshake(&self, v: &json::Value) -> bool {
+        if self.ready { return false }
+        let id = match v.get("id") { Some(i) => i.asInt() ?? -1, None => -1 }
+        if id < 0 { return false }
+        let purpose = match self.pending.peek(id) { Some(p) => p.$clone(), None => "" }
+        if purpose != "initialize" { return false }
+        self.pending.remove(id)
+        match dig(v, "result.capabilities") {
+            Some(caps) => {
+                match dig(&caps, "completionProvider.triggerCharacters") {
+                    Some(list) => {
+                        var t = ""
+                        var i = 0
+                        while i < list.length() {
+                            t += textOf(list.index(i))
+                            i += 1
+                        }
+                        if !t.$isEmpty() { self.completionTriggers = t }
+                    },
+                    None => {},
+                }
+                self.canFormat = truthy(caps.get("documentFormattingProvider"))
+                self.canRename = truthy(caps.get("renameProvider"))
+                self.canCodeAction = truthy(caps.get("codeActionProvider"))
+            },
+            None => {},
+        }
+        self.ready = true
+        self.status = "ready"
+        self.write(self.frame("initialized", "{}", -1))
+        for m in self.queue { self.write(m) }
+        self.queue.clear()
+        true
+    }
+
+    fn died(&self, why: &String) {
+        sys::close(self.output)
+        sys::close(self.input)
+        self.output = -1
+        self.input = -1
+        if self.pid > 0 { sys::reap(self.pid) }
+        self.pid = -1
+        self.ready = false
+        self.status = "stopped"
+        self.failed = why.$clone()
+    }
+
+    /// Asks it to stop, and makes sure it does.
+    pub fn stop(&self) {
+        if self.pid <= 0 { return }
+        if self.ready {
+            self.write(self.frame("shutdown", "null", self.claim("shutdown")))
+            self.write(self.frame("exit", "null", -1))
+        }
+        sys::close(self.input)
+        self.input = -1
+        sys::kill(self.pid, sys::SIGTERM)
+        sys::close(self.output)
+        self.output = -1
+        sys::reap(self.pid)
+        self.pid = -1
+        self.ready = false
+        self.status = "stopped"
+    }
+}
+
+//=== Reading JSON ========================================================//
+
+/// The value at a dotted path: `"result.capabilities"`. A numeric step
+/// indexes an array.
+pub fn dig(v: &json::Value, path: &String) -> json::Value? {
+    var cur = v.$clone()
+    var start = 0
+    var i = 0
+    while i <= path.$length() {
+        if i == path.$length() || (path.$byteAt(i) as i64) == 46 {
+            let step = path.$substring(start, i)
+            let next = match step.$toInt() {
+                Some(n) => cur.index(n),
+                None => cur.get(step),
+            }
+            match next {
+                Some(x) => cur = x,
+                None => return nil,
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    cur
+}
+
+pub fn textOf(v: json::Value?) -> String {
+    match v {
+        Some(x) => x.asText() ?? "",
+        None => "",
+    }
+}
+
+pub fn intOf(v: json::Value?, fallback: i64) -> i64 {
+    match v {
+        Some(x) => x.asInt() ?? fallback,
+        None => fallback,
+    }
+}
+
+/// A capability is on when it is `true` or an options object.
+fn truthy(v: json::Value?) -> bool {
+    match v {
+        Some(x) => match x.asBool() {
+            Some(b) => b,
+            None => !x.isNull(),
+        },
+        None => false,
+    }
+}
+
+pub fn isNull(v: &json::Value) -> bool { v.isNull() }
+
+//=== Paths and URIs ======================================================//
+
+pub fn uriOf(path: &String) -> String {
+    var out = "file://"
+    var i = 0
+    let hex = "0123456789ABCDEF"
+    while i < path.$length() {
+        let b = path.$byteAt(i) as i64
+        let plain = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) ||
+                    b == 47 || b == 45 || b == 46 || b == 95 || b == 126
+        if plain {
+            out += path.$substring(i, i + 1)
+        } else {
+            out += "%" + hex.$substring(b >> 4, (b >> 4) + 1) + hex.$substring(b & 15, (b & 15) + 1)
+        }
+        i += 1
+    }
+    out
+}
+
+pub fn pathOf(uri: &String) -> String {
+    var s = uri.$clone()
+    if utf::startsWith(s, "file://") { s = s.$substring(7, s.$length()) }
+    var out = io::Bytes()
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        if b == 37 && i + 2 < s.$length() {
+            let hi = hexValue(s.$byteAt(i + 1) as i64)
+            let lo = hexValue(s.$byteAt(i + 2) as i64)
+            if hi >= 0 && lo >= 0 {
+                out.push((hi * 16 + lo) as u8)
+                i += 3
+                continue
+            }
+        }
+        out.push(b as u8)
+        i += 1
+    }
+    out.toString()
+}
+
+fn hexValue(b: i64) -> i64 {
+    if b >= 48 && b <= 57 { return b - 48 }
+    if b >= 97 && b <= 102 { return b - 87 }
+    if b >= 65 && b <= 70 { return b - 55 }
+    -1
+}
+
+/// `{"line":l,"character":c}`.
+pub fn position(line: i64, character: i64) -> String {
+    "{\"line\":" + line.$str() + ",\"character\":" + character.$str() + "}"
+}
+
+/// True when the command's program can be found: on PATH, or as a path.
+pub fn installed(command: &String) -> bool {
+    let program = firstWord(command)
+    if program.$isEmpty() { return false }
+    if utf::findFrom(program, "/", 0) >= 0 { return sys::isFile(program) }
+    match sys::spawn("command -v " + utf::shellQuote(program) + " >/dev/null 2>&1", "", false, false) {
+        Some(child) => {
+            var status: i64? = nil
+            var tries = 0
+            while status.isNil() && tries < 400 {
+                sys::waitAny([child.output], 5)
+                var sink = io::Bytes()
+                sys::readInto(child.output, &var sink)
+                status = sys::reap(child.pid)
+                tries += 1
+            }
+            sys::close(child.output)
+            (status ?? 1) == 0
+        },
+        None => false,
+    }
+}
+
+fn firstWord(s: &String) -> String {
+    let t = utf::trim(s)
+    var i = 0
+    while i < t.$length() && (t.$byteAt(i) as i64) != 32 { i += 1 }
+    t.$substring(0, i)
+}

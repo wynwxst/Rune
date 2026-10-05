@@ -1,0 +1,15 @@
+import std::io
+import odd
+
+fn main() -> i64 {
+    io::println(odd::level_of(3).$str() + " " + odd::Level_High.$str())
+    io::println(odd::edition_2024(2, 3).$str() + " " + odd::rust_side_name(5).$str())
+    io::println(odd::helper().$str() + " " + odd::from_inner(1.5, 0.25).$str())
+    io::println(odd::thing_static(9).$str() + " " + odd::uses_abs(-4i32).$str())
+    io::println(odd::BIG.$str() + " " + odd::NEG.$str() + " " + odd::BITS.$str() + " " +
+                odd::RATIO.$str() + " " + odd::ON.$str())
+    var h = odd::Header { tag: [1u8, 2u8, 3u8, 4u8], count: 77, level: odd::Level_Low }
+    io::println(unsafe { odd::header_count(&h as *odd::Header) }.$str() + " " +
+                unsafe { odd::maybe(&var h as *var odd::Header) }.$str())
+    0
+}

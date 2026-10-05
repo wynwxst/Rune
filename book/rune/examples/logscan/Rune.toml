@@ -1,0 +1,15 @@
+[package]
+name = "logscan"
+version = "0.1.0"
+edition = "2026"
+description = "Filters and summarises log files"
+authors = []
+
+[build]
+safety = "full"
+memory = "zombie"
+optimize = 0
+debug = true
+warnings-as-errors = false
+
+[dependencies]

@@ -1,0 +1,387 @@
+// The screen: a grid of cells drawn into each frame, and the difference from
+// the last frame written out in one synchronized burst. Nothing ever paints a
+// background unless a style asks for one, which is what keeps the window
+// transparent.
+
+import std::io
+import std::collections::vector
+import grve::sys
+import grve::utf
+
+//=== Colours and styles ==================================================//
+
+/// A colour is -1 for the terminal's own, 0..255 for a palette entry, or
+/// `RGB | 0xRRGGBB` for true colour.
+pub global RGB: i64 = 0x1000000
+pub global DEFAULT: i64 = -1
+
+pub global BOLD: i64 = 1
+pub global DIM: i64 = 2
+pub global ITALIC: i64 = 4
+pub global UNDERLINE: i64 = 8
+pub global REVERSE: i64 = 16
+pub global CURLY: i64 = 32
+pub global STRIKE: i64 = 64
+
+pub fn rgb(r: i64, g: i64, b: i64) -> i64 { RGB | (r << 16) | (g << 8) | b }
+
+/// `#rrggbb`, `#rgb`, a palette number, or a basic colour name.
+pub fn parseColor(text: &String) -> i64? {
+    let s = utf::lower(utf::trim(text))
+    if s == "default" || s == "none" || s.$isEmpty() { return DEFAULT }
+    if utf::startsWith(&s, "#") {
+        let hex = s.$substring(1, s.$length())
+        if hex.$length() == 6 {
+            let v = parseHex(&hex)?
+            return RGB | v
+        }
+        if hex.$length() == 3 {
+            let v = parseHex(&hex)?
+            let r = (v >> 8) & 15
+            let g = (v >> 4) & 15
+            let b = v & 15
+            return rgb(r * 17, g * 17, b * 17)
+        }
+        return nil
+    }
+    match s.$toInt() {
+        Some(n) => { if n >= 0 && n < 256 { return n } },
+        None => {},
+    }
+    let names: [8:String] = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
+    for i in 0..8 {
+        if names[i] == s { return i }
+        if "bright" + names[i] == s || "bright_" + names[i] == s { return i + 8 }
+    }
+    nil
+}
+
+fn parseHex(s: &String) -> i64? {
+    var v = 0
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        var d = -1
+        if b >= 48 && b <= 57 { d = b - 48 }
+        elif b >= 97 && b <= 102 { d = b - 87 }
+        elif b >= 65 && b <= 70 { d = b - 55 }
+        if d < 0 { return nil }
+        v = v * 16 + d
+        i += 1
+    }
+    v
+}
+
+/// Mixes two true colours; `t` is how much of `b` (0..100). Anything that is
+/// not true colour comes back as `a`.
+pub fn blend(a: i64, b: i64, t: i64) -> i64 {
+    if a < RGB || b < RGB { return a }
+    let ar = (a >> 16) & 255
+    let ag = (a >> 8) & 255
+    let ab = a & 255
+    let br = (b >> 16) & 255
+    let bg = (b >> 8) & 255
+    let bb = b & 255
+    rgb((ar * (100 - t) + br * t) / 100, (ag * (100 - t) + bg * t) / 100, (ab * (100 - t) + bb * t) / 100)
+}
+
+/// How a cell is drawn.
+pub struct Style {
+    pub fg: i64 = -1
+    pub bg: i64 = -1
+    pub attrs: i64 = 0
+    /// Underline colour, when the underline should not be the text's.
+    pub ul: i64 = -1
+}
+
+extend Style {
+    pub fn with(&self, attrs: i64) -> Style {
+        Style { fg: self.fg, bg: self.bg, attrs: self.attrs | attrs, ul: self.ul }
+    }
+    pub fn onBg(&self, bg: i64) -> Style {
+        Style { fg: self.fg, bg: bg, attrs: self.attrs, ul: self.ul }
+    }
+    pub fn withFg(&self, fg: i64) -> Style {
+        Style { fg: fg, bg: self.bg, attrs: self.attrs, ul: self.ul }
+    }
+    pub fn underlined(&self, color: i64, curly: bool) -> Style {
+        let a = if curly { CURLY } else { UNDERLINE }
+        Style { fg: self.fg, bg: self.bg, attrs: self.attrs | a, ul: color }
+    }
+}
+
+pub fn fg(color: i64) -> Style { Style { fg: color } }
+pub fn plain() -> Style { Style {} }
+
+//=== The grid ============================================================//
+
+/// One cell. `ch` 0 marks the right half of a double-width character.
+pub struct Cell {
+    pub ch: i64 = 32
+    pub fg: i64 = -1
+    pub bg: i64 = -1
+    pub attrs: i64 = 0
+    pub ul: i64 = -1
+}
+
+fn same(a: &Cell, b: &Cell) -> bool {
+    a.ch == b.ch && a.fg == b.fg && a.bg == b.bg && a.attrs == b.attrs && a.ul == b.ul
+}
+
+pub class Screen {
+    pub rows: i64
+    pub cols: i64
+    cells: vector::Vector<Cell>
+    shown: vector::Vector<Cell>
+    pub cursorRow: i64
+    pub cursorCol: i64
+    pub cursorVisible: bool
+    /// 0 a block, 1 a bar, 2 an underline.
+    pub cursorShape: i64
+    full: bool
+    /// Undercurl (`4:3`) rather than a plain underline for diagnostics.
+    pub curly: bool
+    // The cursor as last written, so an unchanged frame writes nothing.
+    shownRow: i64
+    shownCol: i64
+    shownVisible: bool
+    shownShape: i64
+
+    fn init(self) {
+        self.rows = 0
+        self.cols = 0
+        self.cells = vector::Vector<Cell>()
+        self.shown = vector::Vector<Cell>()
+        self.cursorRow = 0
+        self.cursorCol = 0
+        self.cursorVisible = false
+        self.cursorShape = 1
+        self.full = true
+        self.curly = false
+        self.shownRow = -1
+        self.shownCol = -1
+        self.shownVisible = false
+        self.shownShape = -1
+    }
+
+    pub fn resize(&self, rows: i64, cols: i64) {
+        if rows == self.rows && cols == self.cols { return }
+        self.rows = rows
+        self.cols = cols
+        self.cells = vector::Vector<Cell>()
+        self.shown = vector::Vector<Cell>()
+        let n = rows * cols
+        self.cells.reserve(n)
+        self.shown.reserve(n)
+        for i in 0..n {
+            self.cells.push(Cell {})
+            self.shown.push(Cell { ch: -1 })
+        }
+        self.full = true
+    }
+
+    /// Everything drawn again on the next flush, whatever was there.
+    pub fn invalidate(&self) { self.full = true }
+
+    /// A blank frame.
+    pub fn clear(&self) {
+        let n = self.rows * self.cols
+        for i in 0..n { self.cells.set(i, Cell {}) }
+        self.cursorVisible = false
+    }
+
+    /// One character. Returns the columns it took (0 when off screen).
+    pub fn put(&self, row: i64, col: i64, cp: i64, style: &Style) -> i64 {
+        if row < 0 || row >= self.rows || col < 0 || col >= self.cols { return 0 }
+        var ch = cp
+        if ch < 32 || ch == 127 { ch = 0x00B7 }
+        let w = utf::width(ch)
+        let i = row * self.cols + col
+        if w == 2 && col + 1 >= self.cols {
+            self.cells.set(i, Cell { ch: 32, fg: style.fg, bg: style.bg, attrs: style.attrs, ul: style.ul })
+            return 1
+        }
+        self.cells.set(i, Cell { ch: ch, fg: style.fg, bg: style.bg, attrs: style.attrs, ul: style.ul })
+        if w == 2 {
+            self.cells.set(i + 1, Cell { ch: 0, fg: style.fg, bg: style.bg, attrs: style.attrs, ul: style.ul })
+        }
+        w
+    }
+
+    /// Text from `col`, stopping before `limit`. Tabs become single spaces.
+    /// Returns the column after the last character drawn.
+    pub fn print(&self, row: i64, col: i64, text: &String, style: &Style, limit: i64) -> i64 {
+        var c = col
+        var i = 0
+        let n = text.$length()
+        let stop = if limit > self.cols { self.cols } else { limit }
+        while i < n && c < stop {
+            var cp = text.$byteAt(i) as i64
+            var nx = i + 1
+            if cp >= 0x80 {
+                cp = utf::decode(text, i)
+                nx = utf::next(text, i)
+            }
+            if cp == 9 { cp = 32 }
+            let w = utf::width(cp)
+            if c + w > stop { break }
+            self.put(row, c, cp, style)
+            c += w
+            i = nx
+        }
+        c
+    }
+
+    /// `width` cells of `cp` from `col`.
+    pub fn fill(&self, row: i64, col: i64, width: i64, cp: i64, style: &Style) {
+        var c = col
+        while c < col + width && c < self.cols {
+            self.put(row, c, cp, style)
+            c += 1
+        }
+    }
+
+    /// Changes the style of cells already drawn, keeping their characters.
+    pub fn restyle(&self, row: i64, col: i64, width: i64, style: &Style) {
+        if row < 0 || row >= self.rows { return }
+        var c = if col < 0 { 0 } else { col }
+        while c < col + width && c < self.cols {
+            let i = row * self.cols + c
+            let old = self.cells.look(i)
+            self.cells.set(i, Cell { ch: old.ch, fg: style.fg, bg: style.bg, attrs: style.attrs, ul: style.ul })
+            c += 1
+        }
+    }
+
+    /// Adds attributes and, where given, colours to cells already drawn.
+    pub fn overlay(&self, row: i64, col: i64, width: i64, attrs: i64, fgc: i64, bgc: i64, ulc: i64) {
+        if row < 0 || row >= self.rows { return }
+        var c = if col < 0 { 0 } else { col }
+        while c < col + width && c < self.cols {
+            let i = row * self.cols + c
+            let old = self.cells.look(i)
+            self.cells.set(i, Cell {
+                ch: old.ch,
+                fg: if fgc == -2 { old.fg } else { fgc },
+                bg: if bgc == -2 { old.bg } else { bgc },
+                attrs: old.attrs | attrs,
+                ul: if ulc == -2 { old.ul } else { ulc },
+            })
+            c += 1
+        }
+    }
+
+    pub fn placeCursor(&self, row: i64, col: i64, shape: i64) {
+        self.cursorRow = row
+        self.cursorCol = col
+        self.cursorShape = shape
+        self.cursorVisible = row >= 0 && row < self.rows && col >= 0 && col < self.cols
+    }
+
+    /// Writes what changed since the last flush.
+    pub fn flush(&self) {
+        var out = io::Bytes()
+        out.appendText("\x1b[?2026h\x1b[?25l")
+        if self.full {
+            out.appendText("\x1b[0m\x1b[2J")
+        }
+        var atRow = -1
+        var atCol = -1
+        var styled = false
+        var cur = Cell { ch: -1 }
+        for r in 0..self.rows {
+            var c = 0
+            while c < self.cols {
+                let i = r * self.cols + c
+                let cell = self.cells.look(i)
+                if cell.ch == 0 { c += 1; continue }
+                if !self.full && same(cell, self.shown.look(i)) { c += 1; continue }
+                if atRow != r || atCol != c {
+                    out.appendText("\x1b[" + (r + 1).$str() + ";" + (c + 1).$str() + "H")
+                }
+                if !styled || cell.fg != cur.fg || cell.bg != cur.bg || cell.attrs != cur.attrs || cell.ul != cur.ul {
+                    self.sgr(&var out, cell)
+                    cur = Cell { ch: 0, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, ul: cell.ul }
+                    styled = true
+                }
+                utf::encodeInto(&var out, cell.ch)
+                self.shown.set(i, Cell { ch: cell.ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, ul: cell.ul })
+                let w = utf::width(cell.ch)
+                if w == 2 && c + 1 < self.cols {
+                    let j = i + 1
+                    let half = self.cells.look(j)
+                    self.shown.set(j, Cell { ch: half.ch, fg: half.fg, bg: half.bg, attrs: half.attrs, ul: half.ul })
+                }
+                atRow = r
+                atCol = c + w
+                c += w
+            }
+        }
+        let cursorSame = self.shownVisible == self.cursorVisible && (!self.cursorVisible ||
+            (self.shownRow == self.cursorRow && self.shownCol == self.cursorCol && self.shownShape == self.cursorShape))
+        if atRow < 0 && !self.full && cursorSame { return }
+        self.shownRow = self.cursorRow
+        self.shownCol = self.cursorCol
+        self.shownVisible = self.cursorVisible
+        self.shownShape = self.cursorShape
+        out.appendText("\x1b[0m")
+        if self.cursorVisible {
+            out.appendText("\x1b[" + (self.cursorRow + 1).$str() + ";" + (self.cursorCol + 1).$str() + "H")
+            let shape = if self.cursorShape == 0 { 2 } elif self.cursorShape == 2 { 4 } else { 6 }
+            out.appendText("\x1b[" + shape.$str() + " q\x1b[?25h")
+        }
+        out.appendText("\x1b[?2026l")
+        self.full = false
+        sys::writeBytes(1, &out)
+    }
+
+    fn sgr(&self, out: &var io::Bytes, cell: &Cell) {
+        var s = "\x1b[0"
+        if (cell.attrs & BOLD) != 0 { s += ";1" }
+        if (cell.attrs & DIM) != 0 { s += ";2" }
+        if (cell.attrs & ITALIC) != 0 { s += ";3" }
+        if (cell.attrs & CURLY) != 0 {
+            s += if self.curly { ";4:3" } else { ";4" }
+        } elif (cell.attrs & UNDERLINE) != 0 {
+            s += ";4"
+        }
+        if (cell.attrs & REVERSE) != 0 { s += ";7" }
+        if (cell.attrs & STRIKE) != 0 { s += ";9" }
+        s += colorCode(cell.fg, 38)
+        s += colorCode(cell.bg, 48)
+        // Underline colour only where undercurl is on: a terminal without
+        // it reads `58;2;r;g;b` as dim and a background colour.
+        if self.curly && cell.ul >= 0 && (cell.attrs & (UNDERLINE | CURLY)) != 0 { s += colorCode(cell.ul, 58) }
+        s += "m"
+        out.appendText(s)
+    }
+}
+
+fn colorCode(color: i64, base: i64) -> String {
+    if color < 0 { return "" }
+    if color >= RGB {
+        let v = color & 0xFFFFFF
+        return ";" + base.$str() + ";2;" + ((v >> 16) & 255).$str() + ";" + ((v >> 8) & 255).$str() + ";" + (v & 255).$str()
+    }
+    if color < 8 && base != 58 { return ";" + (base - 8 + color).$str() }
+    ";" + base.$str() + ";5;" + color.$str()
+}
+
+//=== Talking to the terminal ============================================//
+
+/// Alternate screen, bracketed paste, the kitty keyboard protocol (and a
+/// query asking whether it took), and — with `mouse` — clicks, drags and
+/// the wheel, reported in SGR form.
+pub fn begin(mouse: bool) {
+    sys::writeText(1, "\x1b[?1049h\x1b[?2004h\x1b[>29u\x1b[?u\x1b[H\x1b[2J")
+    if mouse { sys::writeText(1, "\x1b[?1003h\x1b[?1006h") }
+}
+
+pub fn end() {
+    sys::writeText(1, "\x1b[?1006l\x1b[?1003l\x1b[<u\x1b[?2004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l")
+}
+
+/// Leaves the screen for a while — for a program that wants the terminal.
+pub fn suspend() { end(); sys::leaveRaw() }
+
+pub fn resume(mouse: bool) { sys::enterRaw(); begin(mouse) }

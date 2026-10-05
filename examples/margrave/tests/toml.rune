@@ -1,0 +1,55 @@
+// The TOML reader against the shapes a configuration file actually uses,
+// and the errors it gives for the ones that are wrong.
+import std::testing
+import std::io
+import grve::toml
+
+fn parsed(src: String) -> toml::Value {
+    match toml::parse(src) {
+        Ok(v) => v,
+        Err(e) => { io::println("unexpected error: " + e); toml::table() },
+    }
+}
+
+fn failure(src: String) -> String {
+    match toml::parse(src) {
+        Ok(v) => "no error",
+        Err(e) => e,
+    }
+}
+
+fn main() -> i64 {
+    let doc = parsed("# comment\ntitle = \"Margrave\" # trailing\n\n[editor]\ntab_width = 4\nnumbers = true\nratio = 0.3\n\n[theme.syntax]\nkeyword = '#c4a7e7'\n")
+    testing::equal("string", doc.str("title", ""), "Margrave")
+    testing::equal("int", doc.number("editor.tab_width", 0), 4)
+    testing::equal("bool", doc.boolean("editor.numbers", false), true)
+    testing::equal("float", doc.real("editor.ratio", 0.0), 0.3)
+    testing::equal("nested", doc.str("theme.syntax.keyword", ""), "#c4a7e7")
+    testing::equal("fallback", doc.number("editor.missing", 7), 7)
+
+    let arrays = parsed("[[action]]\nmatch = \"*.tar.gz\"\nrun = \"tar -xvf {}\"\n\n[[action]]\nmatch = [\"*.png\", \"*.jpg\",]\nrun = 'open {}'\n")
+    let actions = arrays.get("action").unwrap()
+    testing::equal("array of tables", actions.items.length(), 2)
+    testing::equal("first", actions.items.get(0).str("run", ""), "tar -xvf {}")
+    testing::equal("list", actions.items.get(1).get("match").unwrap().strings().length(), 2)
+
+    let inline = parsed("point = { x = 1, y = -2 }\na.b.c = 0x1F\nbig = 1_000_000\nexp = 6.02e23\nwhen = 1979-05-27 07:32:00\n")
+    testing::equal("inline", inline.number("point.y", 0), -2)
+    testing::equal("dotted hex", inline.number("a.b.c", 0), 31)
+    testing::equal("underscores", inline.number("big", 0), 1000000)
+    testing::equal("date", inline.str("when", ""), "1979-05-27 07:32:00")
+
+    let strings = parsed("a = \"tab\\tquote\\\" \\u00e9\"\nb = \"\"\"\nline one\n  line two\"\"\"\nc = '''\nraw \\n'''\nd = \"\"\"joined \\\n     here\"\"\"\n\"quoted key\" = 1\n")
+    testing::equal("escapes", strings.str("a", ""), "tab\tquote\" é")
+    testing::equal("multi", strings.str("b", ""), "line one\n  line two")
+    testing::equal("literal", strings.str("c", ""), "raw \\n")
+    testing::equal("continuation", strings.str("d", ""), "joined here")
+    testing::equal("quoted key", strings.number("quoted key", 0), 1)
+
+    testing::equal("bare value", failure("a = hello\n"), "1: 'hello' is not a value TOML knows (strings need quotes)")
+    testing::equal("duplicate", failure("a = 1\na = 2\n"), "2: 'a' is defined twice")
+    testing::equal("table twice", failure("[x]\n[x]\n"), "2: table 'x' is defined twice")
+    testing::equal("unterminated", failure("a = \"open\n"), "1: unterminated string")
+    testing::equal("trailing", failure("a = 1 2\n"), "1: expected the end of the line, found '2'")
+    testing::summary()
+}

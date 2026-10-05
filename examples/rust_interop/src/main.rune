@@ -1,0 +1,77 @@
+// Calling a Rust crate from Rune.
+//
+// `geometry` is a Cargo crate in rust/geometry, named in Rune.toml as
+// `geometry = { cargo = "rust/geometry" }`. `rune build` builds it with Cargo
+// and reads what it exports over the C ABI into the module imported below:
+// its `#[no_mangle] pub extern "C"` functions, its `#[repr(C)]` structs and
+// enums, and its constants. The generated module is in
+// target/debug/cargo/geometry.rune.
+import std::io
+import geometry
+
+/// A Rust polygon owned on this side: Rust's memory is given back when the
+/// Rune value goes out of scope.
+struct Shape {
+    handle: *var geometry::Polygon
+
+    fn deinit(&self) {
+        unsafe { geometry::polygon_free(self.handle) }
+    }
+
+    pub fn corner(&var self, x: f64, y: f64) {
+        unsafe { geometry::polygon_push(self.handle, geometry::Point { x: x, y: y }) }
+    }
+
+    pub fn area(&self) -> f64 {
+        unsafe { geometry::polygon_area(self.handle) }
+    }
+}
+
+fn shape() -> Shape { Shape { handle: geometry::polygon_new() } }
+
+fn square(n: i32) -> i32 { n * n }
+
+fn main() -> i64 {
+    // A safe Rust function taking no addresses is an ordinary call.
+    io::println("add: " + geometry::add(40, 2).$str())
+
+    // `#[repr(C)]` structs by value, both ways.
+    let a = geometry::Point { x: 0.0, y: 0.0 }
+    let b = geometry::Point { x: 3.0, y: 4.0 }
+    io::println("distance: " + geometry::distance(a, b).$str())
+    let r = geometry::Rect { min: a, max: b }
+    io::println("area: " + geometry::rect_area(r).$str())
+
+    // An enum is its integer type, with a global per variant.
+    let t = geometry::turn(a, b, geometry::Point { x: 0.0, y: 5.0 })
+    io::println("turns left: " + (t == geometry::Turn_Left).$str())
+
+    // Constants with literal values come across as globals.
+    io::println(geometry::NAME.$str() + " " + geometry::CIRCLE_SIDES.$str() +
+                " " + geometry::PI.$str())
+
+    // A Rune function handed to Rust as a C callback.
+    let callback = unsafe { square as @cfunction(i32) -> i32 }
+    let sum = geometry::sum_mapped(4, callback)
+    io::println("sum of squares: " + sum.$str())
+
+    // Anything taking an address is called as a C function is.
+    let pts: [3:geometry::Point] = [a, b, geometry::Point { x: 6.0, y: 2.0 }]
+    let c = unsafe { geometry::centroid(&pts as *geometry::Point, 3) }
+    io::println("centroid: " + c.x.$str() + ", " + c.y.$str())
+    io::println("bytes: " + unsafe { geometry::byte_length("héllo") }.$str())
+
+    // A string Rust allocated, read here and given back to Rust to free.
+    let text = geometry::greeting(2)
+    io::println(text.$str())
+    unsafe { geometry::free_text(text) }
+
+    // An opaque Rust object behind a handle Rune owns.
+    var s = shape()
+    s.corner(0.0, 0.0)
+    s.corner(4.0, 0.0)
+    s.corner(4.0, 3.0)
+    s.corner(0.0, 3.0)
+    io::println("polygon area: " + s.area().$str())
+    0
+}

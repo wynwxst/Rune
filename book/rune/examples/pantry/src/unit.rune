@@ -1,0 +1,26 @@
+/// A unit a quantity is measured in.
+pub enum Unit {
+    Grams
+    Millilitres
+    Pieces
+}
+
+extend Unit {
+    /// Reads `g`, `ml` or `pcs`.
+    pub fn parse(word: &String) -> Unit? {
+        match word {
+            "g" => Unit::Grams,
+            "ml" => Unit::Millilitres,
+            "pcs" => Unit::Pieces,
+            _ => nil,
+        }
+    }
+
+    pub fn suffix(&self) -> String {
+        match self {
+            .Grams => "g",
+            .Millilitres => "ml",
+            .Pieces => "pcs",
+        }
+    }
+}

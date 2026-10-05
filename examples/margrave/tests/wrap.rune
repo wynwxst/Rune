@@ -1,0 +1,42 @@
+// Soft wrapping: where long lines break, how continuation rows hang, and
+// moving and finding positions through the rows.
+import std::testing
+import grve::buffer
+import grve::pane
+
+fn main() -> i64 {
+    let p = pane::Pane(1)
+    p.open(buffer::Document(""))
+    p.textCols = 21          // 20 usable columns
+    p.textRows = 10
+    p.doc.insert(buffer::pos(0, 0), "    alpha beta gamma delta epsilon\nshort")
+    let segs = p.segments(0, 4)
+    testing::equal("rows", segs.length(), 2)
+    testing::equal("breaks after a space", segs.look(0).end, 21)
+    testing::equal("continuation hangs at the indent", segs.look(1).indent, 4)
+    testing::equal("one row for a short line", p.segments(1, 4).length(), 1)
+
+    let hard = pane::Pane(2)
+    hard.open(buffer::Document(""))
+    hard.textCols = 13
+    hard.doc.insert(buffer::pos(0, 0), "abcdefghijklmnopqrstuvwxyz")
+    testing::equal("no space: breaks mid-word", hard.segments(0, 4).look(0).end, 12)
+
+    // A byte at a row's end belongs to the next row.
+    testing::equal("boundary goes to the next row", pane::segIndex(&segs, 21), 1)
+    // Down from the first row stays on the line, on its second row.
+    p.cursor = buffer::pos(0, 10)
+    p.vertical(1, false, 4)
+    testing::equal("down a row, same line", p.cursor.line, 0)
+    testing::isTrue("on the second row", p.cursor.col >= 21)
+    p.vertical(1, false, 4)
+    testing::equal("then the next line", p.cursor.line, 1)
+    // Screen positions round-trip.
+    let at = p.positionAt(1, 6, 4)
+    testing::equal("click on the continuation", at.line, 0)
+    testing::equal("lands under the mouse", at.col, 23)
+
+    p.wrap = false
+    testing::equal("off: one row", p.segments(0, 4).length(), 1)
+    testing::summary()
+}

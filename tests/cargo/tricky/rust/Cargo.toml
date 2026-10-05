@@ -1,0 +1,11 @@
+[package]
+name = "odd-crate"
+version = "0.1.0"
+edition = "2021"
+description = """
+A crate whose manifest has a multi-line string, \
+    as Cargo writes them.
+"""
+
+[features]
+extra = []

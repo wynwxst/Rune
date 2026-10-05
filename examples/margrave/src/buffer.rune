@@ -1,0 +1,514 @@
+// A document: a file's lines, what has been done to them, and what a
+// language server last said about them.
+//
+// Positions are (line, byte offset into the line). Every change goes through
+// `insert` and `remove`, which record it; `undo` replays the record backwards
+// a group at a time, so one keystroke's worth of typing — or one paste, one
+// indent, one format — comes back as a unit.
+
+import std::io
+import std::collections::vector
+import grve::utf
+import grve::sys
+import grve::config
+
+pub struct Pos {
+    pub line: i64 = 0
+    pub col: i64 = 0
+}
+
+extend Pos {
+    pub fn before(&self, other: &Pos) -> bool {
+        self.line < other.line || (self.line == other.line && self.col < other.col)
+    }
+    pub fn equals(&self, other: &Pos) -> bool { self.line == other.line && self.col == other.col }
+}
+
+pub fn pos(line: i64, col: i64) -> Pos { Pos { line: line, col: col } }
+
+/// The earlier and the later of two positions.
+pub fn ordered(a: &Pos, b: &Pos) -> (Pos, Pos) {
+    if b.before(a) { (pos(b.line, b.col), pos(a.line, a.col)) } else { (pos(a.line, a.col), pos(b.line, b.col)) }
+}
+
+struct Edit {
+    /// True: `text` went in at `at`. False: `text` came out from `at`.
+    inserted: bool
+    at: Pos
+    text: String
+    group: i64
+    /// Where the cursor was before the group began, to put it back on undo.
+    cursor: Pos
+}
+
+/// What a language server reported, in byte offsets.
+pub struct Diagnostic {
+    pub line: i64
+    pub col: i64
+    pub endLine: i64
+    pub endCol: i64
+    /// 1 error, 2 warning, 3 information, 4 hint.
+    pub severity: i64
+    pub message: String
+    pub source: String = ""
+}
+
+pub class Document {
+    pub path: String
+    pub lines: vector::Vector<String>
+    pub version: i64
+    pub language: config::Language?
+    pub readOnly: bool
+    /// What to call it when it has no path.
+    pub title: String
+    pub crlf: bool
+    pub finalNewline: bool
+    pub modifiedOnDisk: i64
+    pub diagnostics: vector::Vector<Diagnostic>
+    /// The version the diagnostics were reported for, and the line the
+    /// latest edit was on.
+    pub diagVersion: i64
+    pub editedLine: i64
+    /// The highlighter's state at the start of each line, for as many
+    /// lines as have been worked out.
+    pub hlStates: vector::Vector<i64>
+    /// The version the language server last heard about.
+    pub sentVersion: i64
+    pub opened: bool
+    /// The indentation the file already uses: a width in spaces, and
+    /// whether it is tabs (-1 when the file does not say).
+    pub indentWidth: i64
+    pub indentTabs: i64
+    undoStack: vector::Vector<Edit>
+    redoStack: vector::Vector<Edit>
+    group: i64
+    groupCursor: Pos
+    savedDepth: i64
+
+    fn init(self, path: &String) {
+        self.path = path.$clone()
+        self.lines = vector::Vector<String>()
+        self.lines.push("")
+        self.version = 1
+        self.language = nil
+        self.readOnly = false
+        self.title = utf::baseName(path)
+        self.crlf = false
+        self.finalNewline = true
+        self.modifiedOnDisk = -1
+        self.diagnostics = vector::Vector<Diagnostic>()
+        self.diagVersion = 0
+        self.editedLine = -1
+        self.hlStates = vector::Vector<i64>()
+        self.sentVersion = 0
+        self.opened = false
+        self.indentWidth = 0
+        self.indentTabs = -1
+        self.undoStack = vector::Vector<Edit>()
+        self.redoStack = vector::Vector<Edit>()
+        self.group = 0
+        self.groupCursor = pos(0, 0)
+        self.savedDepth = 0
+    }
+
+    //=== Files ===//
+
+    /// Reads `path`. A file that is not there yet is an empty document that
+    /// will be created on save.
+    pub fn read(&self) -> String? {
+        if !io::exists(self.path) { return nil }
+        match io::readToString(self.path) {
+            Ok(text) => {
+                self.setText(text)
+                self.detectIndent()
+                self.modifiedOnDisk = sys::modified(self.path)
+                self.undoStack.clear()
+                self.redoStack.clear()
+                self.savedDepth = 0
+                nil
+            },
+            Err(e) => io::describe(e),
+        }
+    }
+
+    fn setText(&self, text: &String) {
+        var out = splitLines(text)
+        let n = text.$length()
+        self.finalNewline = n == 0 || (text.$byteAt(n - 1) as i64) == 10
+        // "a\n" is one line, not two: the newline is remembered instead.
+        if n > 0 && self.finalNewline && out.length() > 1 { out.pop() }
+        self.crlf = utf::findFrom(text, "\r\n", 0) >= 0
+        self.lines = out
+        self.version += 1
+        self.invalidate(0)
+    }
+
+    /// Works out the indentation from the first couple of thousand lines:
+    /// tabs or spaces, and the step most often taken between one line and
+    /// the next.
+    pub fn detectIndent(&self) {
+        var tabs = 0
+        var spaceLines = 0
+        var votes: [9:i64] = [0; 9]
+        var previous = 0
+        var l = 0
+        let n = if self.lines.length() < 2000 { self.lines.length() } else { 2000 }
+        while l < n {
+            let line = self.lines.look(l)
+            l += 1
+            if utf::isBlank(line) { continue }
+            let first = line.$byteAt(0) as i64
+            if first == 9 { tabs += 1; continue }
+            var width = 0
+            while width < line.$length() && (line.$byteAt(width) as i64) == 32 { width += 1 }
+            if width > 0 { spaceLines += 1 }
+            let step = width - previous
+            if step >= 2 && step <= 8 { votes[step] += 1 }
+            previous = width
+        }
+        if tabs > spaceLines && tabs > 0 {
+            self.indentTabs = 1
+            return
+        }
+        var best = 0
+        var bestVotes = 0
+        for w in 2..9 {
+            if votes[w] > bestVotes { best = w; bestVotes = votes[w] }
+        }
+        if best > 0 {
+            self.indentTabs = 0
+            self.indentWidth = best
+        }
+    }
+
+    /// The whole text, with the file's own line endings.
+    pub fn text(&self) -> String {
+        if self.lines.length() == 1 && self.lines.look(0).$isEmpty() { return "" }
+        let nl = if self.crlf { "\r\n" } else { "\n" }
+        var out = io::Bytes()
+        var i = 0
+        let n = self.lines.length()
+        while i < n {
+            out.appendText(self.lines.get(i))
+            if i < n - 1 || self.finalNewline { out.appendText(nl) }
+            i += 1
+        }
+        out.toString()
+    }
+
+    /// The text as a language server wants it: always `\n`.
+    pub fn plainText(&self) -> String {
+        var out = io::Bytes()
+        var i = 0
+        let n = self.lines.length()
+        while i < n {
+            out.appendText(self.lines.get(i))
+            if i < n - 1 || self.finalNewline { out.push(10u8) }
+            i += 1
+        }
+        out.toString()
+    }
+
+    /// Writes it out. Nil on success, else what went wrong.
+    pub fn save(&self) -> String? {
+        if self.path.$isEmpty() { return "this buffer has no file name — use :w <path>" }
+        if self.readOnly { return "this buffer is read-only" }
+        let dir = utf::dirName(self.path)
+        if !sys::isDirectory(dir) {
+            match io::makeDirectories(dir) {
+                Some(e) => return "could not create " + dir + ": " + io::describe(e),
+                None => {},
+            }
+        }
+        match io::writeString(self.path, self.text()) {
+            Ok(n) => {
+                self.savedDepth = self.undoStack.length()
+                self.modifiedOnDisk = sys::modified(self.path)
+                nil
+            },
+            Err(e) => io::describe(e),
+        }
+    }
+
+    pub fn dirty(&self) -> bool { self.undoStack.length() != self.savedDepth }
+
+    /// What is there now counts as saved.
+    pub fn markClean(&self) { self.savedDepth = self.undoStack.length() }
+
+    pub fn name(&self) -> String {
+        if self.path.$isEmpty() { return self.title.$clone() }
+        utf::baseName(self.path)
+    }
+
+    //=== Reading ===//
+
+    pub fn lineCount(&self) -> i64 { self.lines.length() }
+
+    pub fn line(&self, i: i64) -> String {
+        if i < 0 || i >= self.lines.length() { return "" }
+        self.lines.get(i)
+    }
+
+    pub fn lineLength(&self, i: i64) -> i64 {
+        if i < 0 || i >= self.lines.length() { return 0 }
+        self.lines.look(i).$length()
+    }
+
+    /// The nearest position that exists.
+    pub fn clamp(&self, p: &Pos) -> Pos {
+        var l = p.line
+        if l < 0 { l = 0 }
+        if l >= self.lines.length() { l = self.lines.length() - 1 }
+        var c = p.col
+        let len = self.lines.look(l).$length()
+        if c < 0 { c = 0 }
+        if c > len { c = len }
+        pos(l, c)
+    }
+
+    pub fn end(&self) -> Pos {
+        let l = self.lines.length() - 1
+        pos(l, self.lines.look(l).$length())
+    }
+
+    /// The text between two positions.
+    pub fn slice(&self, a: &Pos, b: &Pos) -> String {
+        let (s, e) = ordered(a, b)
+        if s.line == e.line {
+            return self.lines.look(s.line).$substring(s.col, e.col)
+        }
+        var out = io::Bytes()
+        let first = self.lines.look(s.line)
+        out.appendText(first.$substring(s.col, first.$length()))
+        var l = s.line + 1
+        while l < e.line {
+            out.push(10u8)
+            out.appendText(self.lines.get(l))
+            l += 1
+        }
+        out.push(10u8)
+        out.appendText(self.lines.look(e.line).$substring(0, e.col))
+        out.toString()
+    }
+
+    //=== Changing ===//
+
+    /// Starts a new undo group; `cursor` is where to return to on undo.
+    pub fn beginGroup(&self, cursor: &Pos) {
+        self.group += 1
+        self.groupCursor = pos(cursor.line, cursor.col)
+    }
+
+    /// Inserts `text` (which may hold newlines) at `at`. Returns the
+    /// position just after it.
+    pub fn insert(&self, at: &Pos, text: &String) -> Pos {
+        if text.$isEmpty() { return pos(at.line, at.col) }
+        let p = self.clamp(at)
+        let endAt = self.rawInsert(&p, text)
+        self.record(true, &p, text)
+        endAt
+    }
+
+    /// Removes the text between two positions and returns it.
+    pub fn remove(&self, a: &Pos, b: &Pos) -> String {
+        let (s, e) = ordered(self.clamp(a), self.clamp(b))
+        if s.equals(&e) { return "" }
+        let gone = self.rawRemove(&s, &e)
+        self.record(false, &s, gone)
+        gone
+    }
+
+    /// Replaces the whole text, as one undoable change.
+    pub fn replaceAll(&self, text: &String) {
+        let all = self.slice(pos(0, 0), self.end())
+        if all == text { return }
+        self.remove(pos(0, 0), self.end())
+        self.insert(pos(0, 0), text)
+    }
+
+    fn record(&self, inserted: bool, at: &Pos, text: &String) {
+        self.undoStack.push(Edit {
+            inserted: inserted, at: pos(at.line, at.col), text: text.$clone(),
+            group: self.group, cursor: pos(self.groupCursor.line, self.groupCursor.col),
+        })
+        // Something new has happened: what was undone stays undone. When the
+        // saved state lay in what is thrown away, it cannot come back.
+        if self.redoStack.length() > 0 {
+            self.redoStack.clear()
+            if self.savedDepth > self.undoStack.length() - 1 { self.savedDepth = -1 }
+        }
+        self.version += 1
+    }
+
+    fn rawInsert(&self, p: &Pos, text: &String) -> Pos {
+        let parts = splitLines(text)
+        self.editedLine = p.line + parts.length() - 1
+        self.shiftDiagnostics(p.line, parts.length() - 1)
+        let line = self.lines.get(p.line)
+        let head = line.$substring(0, p.col)
+        let tail = line.$substring(p.col, line.$length())
+        let n = parts.length()
+        self.invalidate(p.line)
+        if n == 1 {
+            self.lines.set(p.line, head + parts.look(0) + tail)
+            return pos(p.line, p.col + parts.look(0).$length())
+        }
+        let last = parts.look(n - 1)
+        let endPos = pos(p.line + n - 1, last.$length())
+        if n > 64 {
+            // Rebuild rather than shift the rest of the file once per line.
+            var out = vector::Vector<String>()
+            out.reserve(self.lines.length() + n)
+            for i in 0..p.line { out.push(self.lines.get(i)) }
+            out.push(head + parts.look(0))
+            for i in 1..(n - 1) { out.push(parts.get(i)) }
+            out.push(last + tail)
+            for i in (p.line + 1)..self.lines.length() { out.push(self.lines.get(i)) }
+            self.lines = out
+            return endPos
+        }
+        self.lines.set(p.line, head + parts.look(0))
+        var i = 1
+        while i < n - 1 {
+            self.lines.insert(p.line + i, parts.get(i))
+            i += 1
+        }
+        self.lines.insert(p.line + n - 1, last + tail)
+        endPos
+    }
+
+    fn rawRemove(&self, s: &Pos, e: &Pos) -> String {
+        let gone = self.slice(s, e)
+        self.editedLine = s.line
+        self.shiftDiagnostics(s.line, s.line - e.line)
+        self.invalidate(s.line)
+        let first = self.lines.get(s.line)
+        let lastLine = self.lines.get(e.line)
+        let joined = first.$substring(0, s.col) + lastLine.$substring(e.col, lastLine.$length())
+        let count = e.line - s.line
+        if count > 64 {
+            var out = vector::Vector<String>()
+            for i in 0..s.line { out.push(self.lines.get(i)) }
+            out.push(joined)
+            for i in (e.line + 1)..self.lines.length() { out.push(self.lines.get(i)) }
+            self.lines = out
+            return gone
+        }
+        self.lines.set(s.line, joined)
+        var k = 0
+        while k < count {
+            self.lines.remove(s.line + 1)
+            k += 1
+        }
+        gone
+    }
+
+    /// Lines were added (`delta` > 0) or removed below line `at`: the
+    /// diagnostics after it move with their text until the server says
+    /// again. Ones inside removed lines fold onto `at`.
+    fn shiftDiagnostics(&self, at: i64, delta: i64) {
+        if delta == 0 || self.diagnostics.isEmpty() { return }
+        var moved = vector::Vector<Diagnostic>()
+        for x in self.diagnostics {
+            var line = x.line
+            var endLine = x.endLine
+            if line > at { line = if line + delta < at { at } else { line + delta } }
+            if endLine > at { endLine = if endLine + delta < at { at } else { endLine + delta } }
+            moved.push(Diagnostic { line: line, col: x.col, endLine: endLine, endCol: x.endCol,
+                                    severity: x.severity, message: x.message.$clone(), source: x.source.$clone() })
+        }
+        self.diagnostics = moved
+    }
+
+    /// Takes back the last group. Returns where the cursor goes.
+    pub fn undo(&self) -> Pos? {
+        if self.undoStack.isEmpty() { return nil }
+        let g = self.undoStack.look(self.undoStack.length() - 1).group
+        var cursor = pos(0, 0)
+        while !self.undoStack.isEmpty() && self.undoStack.look(self.undoStack.length() - 1).group == g {
+            let e = self.undoStack.pop().unwrap()
+            if e.inserted {
+                let endAt = endOf(&e.at, &e.text)
+                self.rawRemove(&e.at, &endAt)
+            } else {
+                self.rawInsert(&e.at, &e.text)
+            }
+            cursor = pos(e.cursor.line, e.cursor.col)
+            self.redoStack.push(e)
+        }
+        self.version += 1
+        self.clamp(&cursor)
+    }
+
+    /// Does the last undone group again. Returns where the cursor goes.
+    pub fn redo(&self) -> Pos? {
+        if self.redoStack.isEmpty() { return nil }
+        let g = self.redoStack.look(self.redoStack.length() - 1).group
+        var cursor = pos(0, 0)
+        while !self.redoStack.isEmpty() && self.redoStack.look(self.redoStack.length() - 1).group == g {
+            let e = self.redoStack.pop().unwrap()
+            if e.inserted {
+                cursor = self.rawInsert(&e.at, &e.text)
+            } else {
+                self.rawRemove(&e.at, endOf(&e.at, &e.text))
+                cursor = pos(e.at.line, e.at.col)
+            }
+            self.undoStack.push(e)
+        }
+        self.version += 1
+        self.clamp(&cursor)
+    }
+
+    /// True when the last recorded change was typing that ended at `at` in
+    /// the current group — so the next character can join it.
+    pub fn continuesTyping(&self, at: &Pos) -> bool {
+        if self.undoStack.isEmpty() { return false }
+        let e = self.undoStack.look(self.undoStack.length() - 1)
+        if e.group != self.group || !e.inserted { return false }
+        let endAt = endOf(&e.at, &e.text)
+        endAt.equals(at)
+    }
+
+    /// The highlighter must look at line `from` and everything after again:
+    /// what a line starts in depends only on the lines above it.
+    pub fn invalidate(&self, from: i64) {
+        let keep = if from + 1 < 1 { 1 } else { from + 1 }
+        if self.hlStates.length() > keep {
+            var out = vector::Vector<i64>()
+            for i in 0..keep { out.push(self.hlStates.get(i)) }
+            self.hlStates = out
+        }
+    }
+}
+
+/// Where text inserted at `at` ends.
+pub fn endOf(at: &Pos, text: &String) -> Pos {
+    var line = at.line
+    var col = at.col
+    var i = 0
+    var lastBreak = -1
+    while i < text.$length() {
+        if (text.$byteAt(i) as i64) == 10 { line += 1; lastBreak = i }
+        i += 1
+    }
+    if lastBreak < 0 { return pos(line, col + text.$length()) }
+    pos(line, text.$length() - lastBreak - 1)
+}
+
+/// `text` cut at each newline, a trailing `\r` dropped from every piece.
+pub fn splitLines(text: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var start = 0
+    var i = 0
+    while i < text.$length() {
+        if (text.$byteAt(i) as i64) == 10 {
+            var end = i
+            if end > start && (text.$byteAt(end - 1) as i64) == 13 { end -= 1 }
+            out.push(text.$substring(start, end))
+            start = i + 1
+        }
+        i += 1
+    }
+    out.push(text.$substring(start, text.$length()))
+    out
+}

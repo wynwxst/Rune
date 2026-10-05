@@ -1,0 +1,20 @@
+[package]
+name = "various_ffi"
+version = "0.1.0"
+edition = "2026"
+description = ""
+authors = []
+
+[build]
+# none | minimal | full — how much checking the compiler inserts.
+safety = "full"
+# zombie | arc — single ownership proven by the Zombie borrow
+# checker with no counting at all, or reference counting.
+memory = "zombie"
+optimize = 0
+debug = true
+warnings-as-errors = false
+
+[dependencies]
+
+# This package builds src/main.rune into an executable.

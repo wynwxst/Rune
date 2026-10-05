@@ -1,0 +1,21 @@
+import std::text
+import logscan::level::{Level}
+import logscan::record::{Record}
+
+/// Which records to keep.
+pub struct Filter {
+    /// Records below this level are dropped.
+    pub minimum: Level
+    /// When not empty, only records whose message contains it are kept.
+    pub contains: String = ""
+}
+
+extend Filter {
+    pub fn keeps(&self, record: &Record) -> bool {
+        if record.level.rank() < self.minimum.rank() { return false }
+        if !self.contains.$isEmpty() && !text::contains(record.message, self.contains) {
+            return false
+        }
+        true
+    }
+}

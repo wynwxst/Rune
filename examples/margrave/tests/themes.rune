@@ -1,0 +1,34 @@
+// The built-in colour schemes, and how config.toml's own colours sit on top.
+import std::testing
+import grve::config
+import grve::term
+import grve::toml
+
+fn main() -> i64 {
+    for name in config::themeNames() {
+        let t = config::Theme()
+        testing::isTrue("loads " + name, t.use(name))
+        testing::equal("named " + name, t.name, name.$clone())
+    }
+    let t = config::Theme()
+    testing::isFalse("unknown", t.use("nope"))
+    t.use("nord")
+    testing::equal("nord keyword", t.keyword, term::rgb(0x81, 0xa1, 0xc1))
+    t.use("margrave")
+    testing::equal("back to margrave", t.keyword, term::rgb(0x95, 0x7f, 0xb8))
+
+    // A file written before themes existed: margrave's colours, written out.
+    let old = "[theme]\nname = 'gruvbox'\nkeyword = '#957fb8'\naccent = '#123456'\n"
+    let doc = toml::parse(old).unwrap()
+    let c = config::Config()
+    c.theme.use(doc.str("theme.name", "margrave"))
+    let section = doc.get("theme").unwrap()
+    var warnings = vector::Vector<String>()
+    c.theme.apply(section, &var warnings)
+    testing::equal("stock colour does not mask the scheme", c.theme.keyword, term::rgb(0xfb, 0x49, 0x34))
+    testing::equal("a real override applies", c.theme.accent, term::rgb(0x12, 0x34, 0x56))
+    testing::equal("no warnings", warnings.length(), 0)
+    testing::summary()
+}
+
+import std::collections::vector

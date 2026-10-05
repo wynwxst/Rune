@@ -1,0 +1,762 @@
+// The workspace: every pane, every open document, the shell job, the
+// language servers, and what is on the bottom line. This file holds the
+// state and the operations everything else is built from; keys.rune says
+// what keys do, commands.rune what `:` commands do, glue.rune how language
+// server replies are used, and view.rune draws it all.
+
+import std::io
+import std::env
+import std::time
+import std::process
+import std::collections::vector
+import grve::sys
+import grve::term
+import grve::input
+import grve::config
+import grve::buffer
+import grve::pane
+import grve::layout
+import grve::shell
+import grve::lsp
+import grve::utf
+
+
+/// Focus on the shell output rather than a pane.
+pub global OUTPUT: i64 = -1
+/// The id of the peek panel: a read-only look at a file along the bottom.
+pub global PEEK: i64 = 1000000
+
+// What the bottom line is doing.
+pub global PROMPT_NONE: i64 = 0
+pub global PROMPT_COMMAND: i64 = 1
+pub global PROMPT_SEARCH: i64 = 2
+pub global PROMPT_INPUT: i64 = 3
+pub global PROMPT_CONFIRM: i64 = 4
+
+// What a dropdown is listing.
+pub global MENU_NONE: i64 = 0
+pub global MENU_COMPLETION: i64 = 1
+pub global MENU_LSP: i64 = 2
+pub global MENU_LOCATIONS: i64 = 3
+pub global MENU_ACTIONS: i64 = 4
+
+// Message kinds.
+pub global INFO: i64 = 0
+pub global GOOD: i64 = 1
+pub global WARN: i64 = 2
+pub global ERROR: i64 = 3
+
+pub struct Item {
+    pub label: String
+    pub detail: String = ""
+    /// One character shown before the label, and its colour.
+    pub icon: String = " "
+    pub iconColor: i64 = -1
+    /// Completion: what goes in, from which column of the cursor's line.
+    pub insert: String = ""
+    pub from: i64 = -1
+    pub filter: String = ""
+    /// A location: where to go.
+    pub path: String = ""
+    pub line: i64 = 0
+    pub col: i64 = 0
+    /// Anything else the item needs when chosen.
+    pub data: String = ""
+}
+
+/// The bottom line when it is being typed into.
+pub class Prompt {
+    pub kind: i64
+    pub text: String
+    pub label: String
+    /// What INPUT and CONFIRM prompts are for.
+    pub purpose: String
+    pub items: vector::Vector<Item>
+    pub selected: i64
+    pub top: i64
+    pub historyAt: i64
+
+    fn init(self) {
+        self.kind = PROMPT_NONE
+        self.text = ""
+        self.label = ""
+        self.purpose = ""
+        self.items = vector::Vector<Item>()
+        self.selected = 0
+        self.top = 0
+        self.historyAt = -1
+    }
+
+    pub fn active(&self) -> bool { self.kind != PROMPT_NONE }
+}
+
+/// A dropdown list: completions, the LSP menu, references, symbols.
+pub class Menu {
+    pub kind: i64
+    pub title: String
+    /// Choosing a place opens it in the peek panel rather than the pane.
+    pub peek: bool
+    pub all: vector::Vector<Item>
+    pub items: vector::Vector<Item>
+    pub selected: i64
+    pub top: i64
+    /// Screen position it hangs from.
+    pub row: i64
+    pub col: i64
+    pub pane: i64
+
+    fn init(self) {
+        self.kind = MENU_NONE
+        self.title = ""
+        self.peek = false
+        self.all = vector::Vector<Item>()
+        self.items = vector::Vector<Item>()
+        self.selected = 0
+        self.top = 0
+        self.row = 0
+        self.col = 0
+        self.pane = -1
+    }
+
+    pub fn active(&self) -> bool { self.kind != MENU_NONE }
+
+    pub fn move(&self, delta: i64) {
+        let n = self.items.length()
+        if n == 0 { return }
+        self.selected = (self.selected + delta + n) % n
+    }
+
+    pub fn current(&self) -> Item? {
+        if self.selected < 0 || self.selected >= self.items.length() { return nil }
+        self.items.get(self.selected)
+    }
+}
+
+/// One regular-expression hit.
+pub struct Hit {
+    pub line: i64
+    pub start: i64
+    pub end: i64
+}
+
+/// Searching with `/`.
+pub class Search {
+    pub pattern: String
+    pub regex: sys::Regex?
+    pub hits: vector::Vector<Hit>
+    pub current: i64
+    pub pane: i64
+    pub origin: buffer::Pos
+    pub error: String
+    /// Hits stay drawn after the prompt closes, until `:noh` or an edit.
+    pub showing: bool
+    pub version: i64
+
+    fn init(self) {
+        self.pattern = ""
+        self.regex = nil
+        self.hits = vector::Vector<Hit>()
+        self.current = -1
+        self.pane = -1
+        self.origin = buffer::pos(0, 0)
+        self.error = ""
+        self.showing = false
+        self.version = -1
+    }
+}
+
+/// A request to a language server, and what it was asked about.
+pub struct Request {
+    pub server: String
+    pub id: i64
+    pub purpose: String
+    pub pane: i64
+    pub path: String
+    pub at: buffer::Pos
+    pub version: i64
+}
+
+pub class App {
+    pub cfg: config::Config
+    pub screen: term::Screen
+    pub decoder: input::Decoder
+    pub panes: vector::Vector<pane::Pane>
+    pub layout: layout::Layout
+    pub focus: i64
+    pub lastPane: i64
+    pub nextId: i64
+    pub docs: vector::Vector<buffer::Document>
+    pub job: shell::Job
+    pub hasJob: bool
+    pub outputVisible: bool
+    pub outputTop: i64
+    pub outputFollow: bool
+    pub outputRect: layout::Rect
+    pub prompt: Prompt
+    pub menu: Menu
+    pub hover: vector::Vector<String>
+    pub hoverTitle: String
+    pub message: String
+    pub messageKind: i64
+    pub messageAt: time::Instant
+    pub search: Search
+    pub clients: vector::Vector<lsp::Client>
+    pub requests: vector::Vector<Request>
+    pub lastEdit: time::Instant
+    pub clipboard: String
+    /// The clipboard holds whole lines (copied with nothing selected), so a
+    /// paste goes in above the cursor's line rather than at the cursor.
+    pub lineClip: bool
+    pub quitting: bool
+    pub cwd: String
+    pub home: String
+    pub history: vector::Vector<String>
+    /// The last left click, to tell a double click; and the pane a drag
+    /// is selecting in (-1 when none).
+    /// Where the popup hangs: a screen cell, or -1 for "at the cursor".
+    /// A popup the mouse asked for stays while the mouse is on its word
+    /// (`hoverRow`, columns `hoverCol` up to `hoverEnd`).
+    /// The peek panel, whether it shows, and whether the next place a
+    /// language server names should open in it (prefix+shift+d, …).
+    pub peek: pane::Pane
+    pub peekVisible: bool
+    pub peekNext: bool
+    pub hoverRow: i64
+    pub hoverCol: i64
+    pub hoverEnd: i64
+    pub hoverByMouse: bool
+    /// A documentation panel: its first `hoverCode` lines are the
+    /// signature, drawn as code in `hoverLanguage`.
+    pub hoverCode: i64
+    /// Scrolling a panel taller than the screen: the first line shown, how
+    /// many fit, and which panel that was for.
+    pub hoverTop: i64
+    pub hoverShown: i64
+    pub hoverFirst: String
+    pub hoverLanguage: config::Language?
+    /// The mouse at rest: where, since when, and the request it led to.
+    pub mouseRow: i64
+    pub mouseCol: i64
+    pub mouseMoved: time::Instant
+    pub mouseAsked: bool
+    pub mouseRequest: i64
+    /// Signature help: the signature, which bytes of it are the parameter
+    /// being typed, a line of its documentation, and the pane it is for.
+    pub sigLabel: String
+    pub sigFrom: i64
+    pub sigTo: i64
+    pub sigDoc: String
+    pub sigPane: i64
+    pub clickAt: time::Instant
+    pub clickRow: i64
+    pub clickCol: i64
+    pub dragPane: i64
+
+    fn init(self, cfg: config::Config, cwd: &String) {
+        self.cfg = cfg
+        self.screen = term::Screen()
+        self.screen.curly = cfg.undercurl
+        self.decoder = input::Decoder()
+        self.decoder.macOption = cfg.macOption
+        self.panes = vector::Vector<pane::Pane>()
+        self.layout = layout::Layout(1)
+        self.focus = 1
+        self.lastPane = 1
+        self.nextId = 2
+        self.docs = vector::Vector<buffer::Document>()
+        self.job = shell::Job("", "")
+        self.hasJob = false
+        self.outputVisible = false
+        self.outputTop = 0
+        self.outputFollow = true
+        self.outputRect = layout::Rect {}
+        self.prompt = Prompt()
+        self.menu = Menu()
+        self.hover = vector::Vector<String>()
+        self.hoverTitle = ""
+        self.message = ""
+        self.messageKind = INFO
+        self.messageAt = time::now()
+        self.search = Search()
+        self.clients = vector::Vector<lsp::Client>()
+        self.requests = vector::Vector<Request>()
+        self.lastEdit = time::now()
+        self.clipboard = ""
+        self.lineClip = false
+        self.quitting = false
+        self.cwd = cwd.$clone()
+        self.home = env::home() ?? ""
+        self.history = vector::Vector<String>()
+        self.peek = pane::Pane(PEEK)
+        self.peekVisible = false
+        self.peekNext = false
+        self.hoverRow = -1
+        self.hoverCol = -1
+        self.hoverEnd = -1
+        self.hoverByMouse = false
+        self.hoverCode = 0
+        self.hoverTop = 0
+        self.hoverShown = 0
+        self.hoverFirst = ""
+        self.hoverLanguage = nil
+        self.mouseRow = -1
+        self.mouseCol = -1
+        self.mouseMoved = time::now()
+        self.mouseAsked = true
+        self.mouseRequest = -1
+        self.sigLabel = ""
+        self.sigFrom = -1
+        self.sigTo = -1
+        self.sigDoc = ""
+        self.sigPane = -1
+        self.clickAt = time::now()
+        self.clickRow = -1
+        self.clickCol = -1
+        self.dragPane = -1
+        let first = pane::Pane(1)
+        first.list(cwd, cfg.showHidden)
+        self.panes.push(first)
+    }
+
+    //=== Messages ========================================================//
+
+    pub fn say(&self, text: &String, kind: i64) {
+        self.message = text.$clone()
+        self.messageKind = kind
+        self.messageAt = time::now()
+    }
+
+    pub fn info(&self, text: &String) { self.say(text, INFO) }
+    pub fn good(&self, text: &String) { self.say(text, GOOD) }
+    pub fn warn(&self, text: &String) { self.say(text, WARN) }
+    pub fn fail(&self, text: &String) { self.say(text, ERROR) }
+
+    //=== Panes ===========================================================//
+
+    pub fn paneById(&self, id: i64) -> pane::Pane? {
+        if id == PEEK { return self.peek.$clone() }
+        for p in self.panes {
+            if p.id == id { return p.$clone() }
+        }
+        nil
+    }
+
+    /// The pane keys go to — or, while the output has focus, the pane that
+    /// had it before.
+    pub fn current(&self) -> pane::Pane {
+        let id = if self.focus == OUTPUT { self.lastPane } else { self.focus }
+        match self.paneById(id) {
+            Some(p) => p,
+            None => self.panes.get(0),
+        }
+    }
+
+    pub fn focusPane(&self, id: i64) {
+        let fromPane = self.focus != OUTPUT && self.focus != PEEK
+        if id == OUTPUT {
+            if !self.outputVisible { return }
+            if fromPane { self.lastPane = self.focus }
+            self.focus = OUTPUT
+        } elif id == PEEK {
+            if !self.peekVisible { return }
+            if fromPane { self.lastPane = self.focus }
+            self.focus = PEEK
+        } else {
+            self.focus = id
+            self.lastPane = id
+        }
+        self.menu.kind = MENU_NONE
+        self.hover.clear()
+        self.sigLabel = ""
+    }
+
+    /// A new pane beside (`layout::ROW`) or below (`layout::COLUMN`) the
+    /// current one, showing the same folder.
+    pub fn splitPane(&self, kind: i64) -> pane::Pane {
+        let from = self.current()
+        let id = self.nextId
+        self.nextId += 1
+        let p = pane::Pane(id)
+        p.list(from.dir, self.cfg.showHidden)
+        self.panes.push(p)
+        self.layout.split(from.id, id, kind)
+        self.focusPane(id)
+        p
+    }
+
+    /// Closes a pane; the last one closing ends the program.
+    pub fn closePane(&self, id: i64, force: bool) {
+        if id == PEEK { self.closePeek(); return }
+        let p = match self.paneById(id) { Some(x) => x, None => return }
+        if p.hasDoc && p.doc.dirty() && !force && self.panesShowing(p.doc.path) == 1 {
+            self.warn(p.doc.name() + " has unsaved changes — :w to save, :q! to close anyway")
+            return
+        }
+        if self.panes.length() == 1 {
+            self.quit(force)
+            return
+        }
+        self.layout.remove(id)
+        var kept = vector::Vector<pane::Pane>()
+        for q in self.panes { if q.id != id { kept.push(q.$clone()) } }
+        self.panes = kept
+        let ids = self.layout.panes()
+        if self.focus == id || self.lastPane == id {
+            self.focusPane(ids.get(0))
+        }
+        self.forgetUnshown()
+    }
+
+    fn panesShowing(&self, path: &String) -> i64 {
+        var n = 0
+        for p in self.panes {
+            if p.hasDoc && p.doc.path == path { n += 1 }
+        }
+        n
+    }
+
+    /// Closes documents no pane shows any more and that have nothing unsaved.
+    fn forgetUnshown(&self) {
+        var kept = vector::Vector<buffer::Document>()
+        for d in self.docs {
+            if d.dirty() || self.panesShowing(d.path) > 0 { kept.push(d.$clone()) }
+            else { self.closeDocument(d.$clone()) }
+        }
+        self.docs = kept
+    }
+
+    pub fn quit(&self, force: bool) {
+        if !force {
+            var unsaved = vector::Vector<String>()
+            for d in self.docs { if d.dirty() { unsaved.push(d.name()) } }
+            if unsaved.length() > 0 {
+                var names = ""
+                for n in unsaved { names += (if names.$isEmpty() { "" } else { ", " }) + n }
+                self.warn("unsaved: " + names + " — :wa to save all, :qa! to quit anyway")
+                return
+            }
+        }
+        if self.hasJob && self.job.running { self.job.abort() }
+        self.quitting = true
+    }
+
+    //=== Paths ===========================================================//
+
+    /// `p` made absolute against `base`, with `~` expanded and `.`/`..`
+    /// worked out.
+    pub fn resolve(&self, p: &String, base: &String) -> String {
+        var s = utf::trim(p)
+        if s == "~" { s = self.home.$clone() }
+        elif utf::startsWith(s, "~/") { s = self.home + s.$substring(1, s.$length()) }
+        if !utf::startsWith(s, "/") { s = utf::join(base, s) }
+        normalise(s)
+    }
+
+    /// How a path is shown: `~/x` for home, relative inside the working
+    /// directory.
+    pub fn shown(&self, p: &String) -> String {
+        if !self.cwd.$isEmpty() && utf::startsWith(p, self.cwd + "/") {
+            return p.$substring(self.cwd.$length() + 1, p.$length())
+        }
+        if !self.home.$isEmpty() && (p == self.home || utf::startsWith(p, self.home + "/")) {
+            return "~" + p.$substring(self.home.$length(), p.$length())
+        }
+        p.$clone()
+    }
+
+    pub fn shownDir(&self, p: &String) -> String {
+        if !self.home.$isEmpty() && (p == self.home || utf::startsWith(p, self.home + "/")) {
+            return "~" + p.$substring(self.home.$length(), p.$length())
+        }
+        p.$clone()
+    }
+
+    //=== Documents =======================================================//
+
+    pub fn findDocument(&self, path: &String) -> buffer::Document? {
+        for d in self.docs {
+            if d.path == path { return d.$clone() }
+        }
+        nil
+    }
+
+    /// The open document for `path`, read from disk if it is not open.
+    pub fn document(&self, path: &String) -> buffer::Document {
+        match self.findDocument(path) {
+            Some(d) => return d,
+            None => {},
+        }
+        let d = buffer::Document(path)
+        match d.read() {
+            Some(e) => self.fail("could not read " + self.shown(path) + ": " + e),
+            None => {},
+        }
+        if !io::exists(path) { self.info("new file: " + self.shown(path)) }
+        d.language = self.cfg.languageFor(path)
+        self.docs.push(d)
+        self.attach(d)
+        d
+    }
+
+    /// Shows `path` in `p`: a folder in the explorer, a file in the editor.
+    pub fn openIn(&self, p: pane::Pane, path: &String) {
+        if sys::isDirectory(path) {
+            p.list(path, self.cfg.showHidden)
+            p.mode = pane::EXPLORER
+            return
+        }
+        if sys::fileSize(path) > 64 * 1024 * 1024 {
+            self.fail(self.shown(path) + " is too big to open here")
+            return
+        }
+        if !p.hasDoc || p.doc.path != path { p.remember() }
+        let d = self.document(path)
+        p.open(d)
+        self.search.showing = false
+    }
+
+    /// alt+9 (`step` -1) and alt+0 (1): back and forward through the files
+    /// and jumps this pane has been through.
+    pub fn history(&self, step: i64) {
+        let p = self.current()
+        loop {
+            let from = if step < 0 { p.back } else { p.forward }
+            if from.isEmpty() {
+                self.info(if step < 0 { "nothing to go back to" } else { "nothing to go forward to" })
+                return
+            }
+            let target = from.pop().unwrap()
+            if !io::exists(target.path) && self.findDocument(target.path).isNil() { continue }
+            match p.location() {
+                Some(here) => {
+                    if step < 0 { p.forward.push(here) } else { p.back.push(here) }
+                },
+                None => {},
+            }
+            if !p.hasDoc || p.doc.path != target.path {
+                let d = self.document(target.path)
+                p.open(d)
+            }
+            p.mode = pane::EDITOR
+            p.selecting = false
+            p.setCursor(buffer::pos(target.line, target.col), self.cfg.tabWidth)
+            p.top = target.top
+            p.reveal(self.cfg.scrollOff, self.cfg.tabWidth)
+            self.info(self.shown(target.path) + ":" + (target.line + 1).$str() +
+                      "   ← " + p.back.length().$str() + "  → " + p.forward.length().$str())
+            return
+        }
+    }
+
+    /// Opens a path in a new split. ROW puts it on the right.
+    pub fn openSplit(&self, path: &String, kind: i64) {
+        let p = self.splitPane(kind)
+        self.openIn(p, path)
+    }
+
+    /// Writes a document, telling its language server.
+    pub fn save(&self, d: buffer::Document) -> bool {
+        match d.save() {
+            Some(e) => {
+                self.fail("could not save " + d.name() + ": " + e)
+                false
+            },
+            None => {
+                let n = d.lineCount()
+                self.good("saved " + self.shown(d.path) + "  " + n.$str() + (if n == 1 { " line" } else { " lines" }))
+                self.didSave(d)
+                self.refreshExplorers()
+                true
+            },
+        }
+    }
+
+    pub fn refreshExplorers(&self) {
+        for p in self.panes {
+            if sys::isDirectory(p.dir) { p.list(p.dir, self.cfg.showHidden) }
+        }
+    }
+
+    /// Reads back documents changed on disk — after a shell command, say —
+    /// when nothing in them is unsaved.
+    pub fn reloadChanged(&self) {
+        for d in self.docs {
+            if d.path.$isEmpty() || d.dirty() { continue }
+            let m = sys::modified(d.path)
+            if m >= 0 && m != d.modifiedOnDisk {
+                d.read()
+                for p in self.panes { if p.hasDoc && p.doc.path == d.path { p.clampCursor() } }
+                self.info("reloaded " + d.name() + " (changed on disk)")
+            }
+        }
+    }
+
+    //=== The peek panel ==================================================//
+
+    /// Opens `path` read-only along the bottom, at an LSP line and
+    /// character, and moves focus there.
+    pub fn openPeek(&self, path: &String, line: i64, character: i64) {
+        let d = buffer::Document(path)
+        match self.findDocument(path) {
+            Some(open) => {
+                // What is on screen, unsaved edits and all.
+                d.lines = open.lines.$clone()
+                d.finalNewline = open.finalNewline
+            },
+            None => {
+                match d.read() {
+                    Some(e) => { self.fail("could not read " + self.shown(path) + ": " + e); return },
+                    None => {},
+                }
+            },
+        }
+        d.language = self.cfg.languageFor(path)
+        d.readOnly = true
+        d.markClean()
+        let p = self.peek
+        p.open(d)
+        let l = if line < d.lineCount() { (if line < 0 { 0 } else { line }) } else { d.lineCount() - 1 }
+        p.selecting = false
+        p.setCursor(buffer::pos(l, utf::byteOfUtf16(d.line(l), character)), self.cfg.tabWidth)
+        p.top = if l > 2 { l - 2 } else { 0 }
+        p.left = 0
+        self.peekVisible = true
+        self.focusPane(PEEK)
+    }
+
+    pub fn closePeek(&self) {
+        if !self.peekVisible { return }
+        self.peekVisible = false
+        if self.search.pane == PEEK { self.search.showing = false }
+        if self.focus == PEEK {
+            if self.outputVisible { self.focus = OUTPUT } else { self.focusPane(self.lastPane) }
+        }
+    }
+
+    //=== The shell =======================================================//
+
+    /// Runs a command; its output opens along the bottom.
+    pub fn run(&self, command: &String, dir: &String) {
+        if self.hasJob && self.job.running {
+            self.warn("a command is still running — " + self.cfg.prefixName() + "+a stops it")
+            return
+        }
+        self.job = shell::Job(command, dir)
+        self.hasJob = true
+        self.outputTop = 0
+        self.outputFollow = true
+        self.outputVisible = true
+        if !self.job.start(self.cfg.shell) {
+            self.fail("could not start: " + command)
+        }
+        self.focusPane(OUTPUT)
+    }
+
+    pub fn abortJob(&self) {
+        if self.hasJob && self.job.running {
+            self.job.abort()
+            self.warn("stopping " + self.job.command)
+        } else {
+            self.info("no command is running")
+        }
+    }
+
+    pub fn dismissOutput(&self) {
+        if self.hasJob && self.job.running { return }
+        self.outputVisible = false
+        if self.focus == OUTPUT { self.focusPane(self.lastPane) }
+    }
+
+    /// The command an action runs on `path`, placeholders filled.
+    pub fn actionCommand(&self, a: &config::Action, path: &String) -> String {
+        let name = utf::baseName(path)
+        var stem = name.$clone()
+        let dot = utf::findFrom(stem, ".", 1)
+        if dot > 0 { stem = stem.$substring(0, dot) }
+        var out = a.run.$clone()
+        out = replaceAll(out, "{name}", utf::shellQuote(name))
+        out = replaceAll(out, "{dir}", utf::shellQuote(utf::dirName(path)))
+        out = replaceAll(out, "{stem}", utf::shellQuote(stem))
+        out = replaceAll(out, "{}", utf::shellQuote(path))
+        out
+    }
+
+    //=== The clipboard ===================================================//
+
+    pub fn copy(&self, text: &String) {
+        if text.$isEmpty() { return }
+        self.clipboard = text.$clone()
+        if !self.cfg.copyCommand.$isEmpty() {
+            if sys::pipeInto(self.cfg.copyCommand, text) { return }
+        }
+        // No clipboard program: ask the terminal (OSC 52), which also works
+        // over ssh.
+        sys::writeText(1, "\x1b]52;c;" + base64(text) + "\x07")
+    }
+
+    pub fn paste(&self) -> String {
+        if !self.cfg.pasteCommand.$isEmpty() {
+            match process::run("/bin/sh", vector::from(["-c", self.cfg.pasteCommand.$clone()])) {
+                Some(out) => {
+                    if out.succeeded() && !out.stdout.$isEmpty() { return out.stdout.$clone() }
+                },
+                None => {},
+            }
+        }
+        self.clipboard.$clone()
+    }
+}
+
+/// `.` and `..` worked out of an absolute path, symbolic links left alone.
+pub fn normalise(path: &String) -> String {
+    var parts = vector::Vector<String>()
+    var start = 0
+    var i = 0
+    let n = path.$length()
+    while i <= n {
+        if i == n || (path.$byteAt(i) as i64) == 47 {
+            let piece = path.$substring(start, i)
+            if piece == ".." {
+                if parts.length() > 0 { parts.pop() }
+            } elif !piece.$isEmpty() && piece != "." {
+                parts.push(piece)
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    var out = ""
+    for p in parts { out += "/" + p }
+    if out.$isEmpty() { "/" } else { out }
+}
+
+pub fn replaceAll(text: &String, needle: &String, with: &String) -> String {
+    var out = ""
+    var at = 0
+    loop {
+        let found = utf::findFrom(text, needle, at)
+        if found < 0 { break }
+        out += text.$substring(at, found) + with
+        at = found + needle.$length()
+    }
+    out + text.$substring(at, text.$length())
+}
+
+pub fn base64(text: &String) -> String {
+    let table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var out = io::Bytes()
+    var i = 0
+    let n = text.$length()
+    while i < n {
+        let b0 = text.$byteAt(i) as i64
+        let b1 = if i + 1 < n { text.$byteAt(i + 1) as i64 } else { 0 }
+        let b2 = if i + 2 < n { text.$byteAt(i + 2) as i64 } else { 0 }
+        let v = (b0 << 16) | (b1 << 8) | b2
+        out.push(table.$byteAt((v >> 18) & 63))
+        out.push(table.$byteAt((v >> 12) & 63))
+        out.push(if i + 1 < n { table.$byteAt((v >> 6) & 63) } else { 61u8 })
+        out.push(if i + 2 < n { table.$byteAt(v & 63) } else { 61u8 })
+        i += 3
+    }
+    out.toString()
+}

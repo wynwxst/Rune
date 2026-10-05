@@ -1,0 +1,1019 @@
+// Settings, read from TOML files in ~/.config/mgrve/ ($XDG_CONFIG_HOME is
+// honoured when set):
+//
+//   config.toml     the editor, the keys, the explorer, the shell, the theme
+//   actions.toml    what Enter does to a file in the explorer, by pattern
+//   lsp.toml        which language server to start for which files
+//   languages.toml  syntax definitions beyond the built-in ones
+//
+// The first run writes all four, commented, so there is something to edit.
+// A file that does not parse is reported and the defaults stand in for it.
+
+import std::io
+import std::env
+import std::collections::vector
+import grve::toml
+import grve::term
+import grve::input
+import grve::utf
+import grve::sys
+
+//=== The theme ===========================================================//
+
+/// The built-in colour schemes. None of them paints a background but the
+/// selection and the current search hit.
+pub fn themeNames() -> vector::Vector<String> {
+    vector::from(["margrave", "rose", "nord", "gruvbox", "mono", "paper"])
+}
+
+/// A built-in scheme as `key=colour` pairs, or an empty list.
+fn palette(name: &String) -> vector::Vector<String> {
+    if name == "margrave" { return vector::from(["text=default", "muted=#727169", "subtle=#54546d", "border=#3a3a4e", "accent=#b8a4e3", "gold=#e6c384", "selection=#2d2a45", "match=#e6c384", "match_current=#4f432a", "error=#e46876", "warning=#e6c384", "info=#7fb4ca", "hint=#938aa9", "ok=#98bb6c", "directory=#7e9cd8", "executable=#98bb6c", "link=#7aa89f", "keyword=#957fb8", "control=#b8a4e3", "type=#7aa89f", "function=#7e9cd8", "string=#98bb6c", "number=#d27e99", "comment=#727169", "constant=#ffa066", "decorator=#e6c384", "macro=#e6c384", "intrinsic=#7fb4ca", "operator=#c0a36e", "punctuation=#9cabca", "escape=#ff5d62", "heading=#b8a4e3"]) }
+    if name == "rose" { return vector::from(["text=default", "muted=#6e6a86", "subtle=#59546f", "border=#393552", "accent=#c4a7e7", "gold=#f6c177", "selection=#2a283e", "match=#f6c177", "match_current=#4a3d2a", "error=#eb6f92", "warning=#f6c177", "info=#9ccfd8", "hint=#c4a7e7", "ok=#3e8fb0", "directory=#9ccfd8", "executable=#3e8fb0", "link=#ea9a97", "keyword=#3e8fb0", "control=#c4a7e7", "type=#9ccfd8", "function=#ea9a97", "string=#f6c177", "number=#ea9a97", "comment=#6e6a86", "constant=#eb6f92", "decorator=#c4a7e7", "macro=#ea9a97", "intrinsic=#9ccfd8", "operator=#908caa", "punctuation=#908caa", "escape=#eb6f92", "heading=#c4a7e7"]) }
+    if name == "nord" { return vector::from(["text=default", "muted=#7b88a1", "subtle=#4c566a", "border=#3b4252", "accent=#88c0d0", "gold=#ebcb8b", "selection=#3b4252", "match=#ebcb8b", "match_current=#4c4636", "error=#bf616a", "warning=#ebcb8b", "info=#81a1c1", "hint=#b48ead", "ok=#a3be8c", "directory=#81a1c1", "executable=#a3be8c", "link=#8fbcbb", "keyword=#81a1c1", "control=#81a1c1", "type=#8fbcbb", "function=#88c0d0", "string=#a3be8c", "number=#b48ead", "comment=#616e88", "constant=#d08770", "decorator=#ebcb8b", "macro=#5e81ac", "intrinsic=#8fbcbb", "operator=#81a1c1", "punctuation=#d8dee9", "escape=#ebcb8b", "heading=#88c0d0"]) }
+    if name == "gruvbox" { return vector::from(["text=default", "muted=#928374", "subtle=#665c54", "border=#504945", "accent=#d3869b", "gold=#fabd2f", "selection=#3c3836", "match=#fabd2f", "match_current=#504020", "error=#fb4934", "warning=#fabd2f", "info=#83a598", "hint=#8ec07c", "ok=#b8bb26", "directory=#83a598", "executable=#b8bb26", "link=#8ec07c", "keyword=#fb4934", "control=#fb4934", "type=#fabd2f", "function=#8ec07c", "string=#b8bb26", "number=#d3869b", "comment=#928374", "constant=#d3869b", "decorator=#fe8019", "macro=#8ec07c", "intrinsic=#83a598", "operator=#fe8019", "punctuation=#a89984", "escape=#fe8019", "heading=#fabd2f"]) }
+    if name == "mono" { return vector::from(["text=default", "muted=#808080", "subtle=#5a5a5a", "border=#3c3c3c", "accent=#d0d0d0", "gold=#e0c080", "selection=#333333", "match=#e0c080", "match_current=#4a4030", "error=#e06c75", "warning=#d7ba7d", "info=#a0a0a0", "hint=#909090", "ok=#a8c098", "directory=#d8d8d8", "executable=#c0c0c0", "link=#a0a0a0", "keyword=#c8c8c8", "control=#ffffff", "type=#b0b0b0", "function=#e8e8e8", "string=#9a9a9a", "number=#b8b8b8", "comment=#6a6a6a", "constant=#c0c0c0", "decorator=#a0a0a0", "macro=#a0a0a0", "intrinsic=#a0a0a0", "operator=#8a8a8a", "punctuation=#7a7a7a", "escape=#c0c0c0", "heading=#ffffff"]) }
+    if name == "paper" { return vector::from(["text=default", "muted=#8a8a8a", "subtle=#a0a0a0", "border=#c8c8c8", "accent=#6b4fbb", "gold=#9a6a00", "selection=#e6e0f5", "match=#9a6a00", "match_current=#f3e3b5", "error=#c4314b", "warning=#9a6a00", "info=#2f6f9f", "hint=#7a6aa8", "ok=#3d7a35", "directory=#2f5fbf", "executable=#3d7a35", "link=#0f7a72", "keyword=#7a3fb0", "control=#8b2fc9", "type=#0f7a72", "function=#2f5fbf", "string=#3d7a35", "number=#b03a6a", "comment=#8a8a80", "constant=#b35a00", "decorator=#9a6a00", "macro=#9a6a00", "intrinsic=#2f6f9f", "operator=#7a6a3a", "punctuation=#5a6478", "escape=#c4314b", "heading=#6b4fbb"]) }
+    vector::Vector<String>()
+}
+
+
+
+/// Every colour the program draws with. -1 means the terminal's own.
+pub class Theme {
+    /// The built-in scheme it started from.
+    pub name: String
+    pub text: i64
+    pub muted: i64
+    pub subtle: i64
+    pub border: i64
+    pub accent: i64
+    pub gold: i64
+    pub selection: i64
+    pub hit: i64
+    pub hitCurrent: i64
+    pub error: i64
+    pub warning: i64
+    pub info: i64
+    pub hint: i64
+    pub ok: i64
+    pub directory: i64
+    pub executable: i64
+    pub link: i64
+
+    pub keyword: i64
+    pub control: i64
+    pub typeName: i64
+    pub function: i64
+    pub string: i64
+    pub number: i64
+    pub comment: i64
+    pub constant: i64
+    pub decorator: i64
+    pub macroColor: i64
+    pub intrinsic: i64
+    pub op: i64
+    pub punctuation: i64
+    pub escape: i64
+    pub heading: i64
+
+    fn init(self) {
+        // "Margrave": a dusk palette — ink, lavender and old gold — that
+        // reads on a dark transparent window without painting one.
+        self.name = "margrave"
+        self.text = -1
+        self.muted = term::rgb(0x72, 0x71, 0x69)
+        self.subtle = term::rgb(0x54, 0x54, 0x6d)
+        self.border = term::rgb(0x3a, 0x3a, 0x4e)
+        self.accent = term::rgb(0xb8, 0xa4, 0xe3)
+        self.gold = term::rgb(0xe6, 0xc3, 0x84)
+        self.selection = term::rgb(0x2d, 0x2a, 0x45)
+        self.hit = term::rgb(0xe6, 0xc3, 0x84)
+        self.hitCurrent = term::rgb(0x4f, 0x43, 0x2a)
+        self.error = term::rgb(0xe4, 0x68, 0x76)
+        self.warning = term::rgb(0xe6, 0xc3, 0x84)
+        self.info = term::rgb(0x7f, 0xb4, 0xca)
+        self.hint = term::rgb(0x93, 0x8a, 0xa9)
+        self.ok = term::rgb(0x98, 0xbb, 0x6c)
+        self.directory = term::rgb(0x7e, 0x9c, 0xd8)
+        self.executable = term::rgb(0x98, 0xbb, 0x6c)
+        self.link = term::rgb(0x7a, 0xa8, 0x9f)
+
+        self.keyword = term::rgb(0x95, 0x7f, 0xb8)
+        self.control = term::rgb(0xb8, 0xa4, 0xe3)
+        self.typeName = term::rgb(0x7a, 0xa8, 0x9f)
+        self.function = term::rgb(0x7e, 0x9c, 0xd8)
+        self.string = term::rgb(0x98, 0xbb, 0x6c)
+        self.number = term::rgb(0xd2, 0x7e, 0x99)
+        self.comment = term::rgb(0x72, 0x71, 0x69)
+        self.constant = term::rgb(0xff, 0xa0, 0x66)
+        self.decorator = term::rgb(0xe6, 0xc3, 0x84)
+        self.macroColor = term::rgb(0xe6, 0xc3, 0x84)
+        self.intrinsic = term::rgb(0x7f, 0xb4, 0xca)
+        self.op = term::rgb(0xc0, 0xa3, 0x6e)
+        self.punctuation = term::rgb(0x9c, 0xab, 0xca)
+        self.escape = term::rgb(0xff, 0x5d, 0x62)
+        self.heading = term::rgb(0xb8, 0xa4, 0xe3)
+    }
+
+    /// Switches to a built-in scheme. False when there is none of that name.
+    pub fn use(&self, name: &String) -> bool {
+        let pairs = palette(name)
+        if pairs.isEmpty() { return false }
+        for pair in pairs {
+            let eq = utf::findFrom(pair, "=", 0)
+            let key = pair.$substring(0, eq)
+            match term::parseColor(pair.$substring(eq + 1, pair.$length())) {
+                Some(colour) => { self.setColor(key, colour); },
+                None => {},
+            }
+        }
+        self.name = name.$clone()
+        true
+    }
+
+    /// A colour by its config name.
+    pub fn colorOf(&self, name: &String) -> i64? {
+        match name {
+            "text" => self.text,
+            "muted" => self.muted,
+            "subtle" => self.subtle,
+            "border" => self.border,
+            "accent" => self.accent,
+            "gold" => self.gold,
+            "selection" => self.selection,
+            "match" => self.hit,
+            "match_current" => self.hitCurrent,
+            "error" => self.error,
+            "warning" => self.warning,
+            "info" => self.info,
+            "hint" => self.hint,
+            "ok" => self.ok,
+            "directory" => self.directory,
+            "executable" => self.executable,
+            "link" => self.link,
+            "keyword" => self.keyword,
+            "control" => self.control,
+            "type" => self.typeName,
+            "function" => self.function,
+            "string" => self.string,
+            "number" => self.number,
+            "comment" => self.comment,
+            "constant" => self.constant,
+            "decorator" => self.decorator,
+            "macro" => self.macroColor,
+            "intrinsic" => self.intrinsic,
+            "operator" => self.op,
+            "punctuation" => self.punctuation,
+            "escape" => self.escape,
+            "heading" => self.heading,
+            _ => nil,
+        }
+    }
+
+    /// Takes whatever `[theme]` sets; unknown names are reported.
+    pub fn apply(&self, t: toml::Value, warnings: &var vector::Vector<String>) {
+        let stock = Theme()
+        var i = 0
+        while i < t.keys.length() {
+            let name = t.keys.look(i)
+            let v = t.vals.get(i)
+            if name == "syntax" && v.isTable() {
+                self.apply(v, warnings)
+                i += 1
+                continue
+            }
+            if name == "name" || name == "undercurl" { i += 1; continue }
+            let parsed = match v.kind {
+                toml::Kind::Text => term::parseColor(v.text),
+                toml::Kind::Int => term::parseColor(v.int.$str()),
+                _ => nil,
+            }
+            // A config file written before themes existed lists margrave's
+            // own colours; with another scheme chosen, those are not taken
+            // as overrides — only colours that differ from margrave's are.
+            let same = match (stock.colorOf(name), parsed) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
+            if self.name != "margrave" && same {
+                i += 1
+                continue
+            }
+            match parsed {
+                Some(c) => { if !self.setColor(name, c) { warnings.push("theme: no colour called '" + name + "'") } },
+                None => warnings.push("theme." + name + ": not a colour (use \"#rrggbb\", 0-255 or a name)"),
+            }
+            i += 1
+        }
+    }
+
+    fn setColor(&self, name: &String, c: i64) -> bool {
+        match name {
+            "text" => self.text = c,
+            "muted" => self.muted = c,
+            "subtle" => self.subtle = c,
+            "border" => self.border = c,
+            "accent" => self.accent = c,
+            "gold" => self.gold = c,
+            "selection" => self.selection = c,
+            "match" => self.hit = c,
+            "match_current" => self.hitCurrent = c,
+            "error" => self.error = c,
+            "warning" => self.warning = c,
+            "info" => self.info = c,
+            "hint" => self.hint = c,
+            "ok" => self.ok = c,
+            "directory" => self.directory = c,
+            "executable" => self.executable = c,
+            "link" => self.link = c,
+            "keyword" => self.keyword = c,
+            "control" => self.control = c,
+            "type" => self.typeName = c,
+            "function" => self.function = c,
+            "string" => self.string = c,
+            "number" => self.number = c,
+            "comment" => self.comment = c,
+            "constant" => self.constant = c,
+            "decorator" => self.decorator = c,
+            "macro" => self.macroColor = c,
+            "intrinsic" => self.intrinsic = c,
+            "operator" => self.op = c,
+            "punctuation" => self.punctuation = c,
+            "escape" => self.escape = c,
+            "heading" => self.heading = c,
+            _ => return false,
+        }
+        true
+    }
+}
+
+//=== Actions, servers and languages ======================================//
+
+/// What Enter does to a file whose name matches one of `patterns`, or whose
+/// contents are one of the kinds in `magic`. With both, both must hold.
+pub struct Action {
+    pub patterns: vector::Vector<String>
+    /// Kinds read from the file's first bytes — `macho-exec`, `elf`,
+    /// `script`, `pdf` (see `sys::fileMagic`) — or a hex prefix, `0x7f454c46`.
+    pub magic: vector::Vector<String> = vector::Vector<String>()
+    pub run: String
+    /// Ask before running it.
+    pub confirm: bool = false
+}
+
+/// A language server, and the files it is for.
+pub struct Server {
+    pub name: String
+    pub command: String
+    pub languages: vector::Vector<String>
+}
+
+/// What the highlighter needs to know about a language.
+pub class Language {
+    pub name: String
+    pub extensions: vector::Vector<String>
+    /// Whole file names, for files with no extension: `Makefile`.
+    pub fileNames: vector::Vector<String>
+    pub lineComment: String
+    pub blockStart: String
+    pub blockEnd: String
+    pub keywords: vector::Vector<String>
+    pub controls: vector::Vector<String>
+    pub types: vector::Vector<String>
+    pub constants: vector::Vector<String>
+    /// Characters that open a string, each closed by itself.
+    pub quotes: String
+    /// `@name` is a decorator.
+    pub decorators: bool
+    /// `$name` is an intrinsic (Rune) or a variable (shell).
+    pub dollar: bool
+    /// `name!` is a macro.
+    pub bangMacros: bool
+    /// A capitalised word is a type.
+    pub capitalTypes: bool
+    /// `"""` opens a string that may span lines.
+    pub tripleQuotes: bool
+    /// Lines starting with `#` are headings (Markdown).
+    pub markdown: bool
+
+    fn init(self, name: &String) {
+        self.name = name.$clone()
+        self.extensions = vector::Vector<String>()
+        self.fileNames = vector::Vector<String>()
+        self.lineComment = ""
+        self.blockStart = ""
+        self.blockEnd = ""
+        self.keywords = vector::Vector<String>()
+        self.controls = vector::Vector<String>()
+        self.types = vector::Vector<String>()
+        self.constants = vector::Vector<String>()
+        self.quotes = "\""
+        self.decorators = false
+        self.dollar = false
+        self.bangMacros = false
+        self.capitalTypes = false
+        self.tripleQuotes = false
+        self.markdown = false
+    }
+
+    pub fn isKeyword(&self, w: &String) -> bool { contains(&self.keywords, w) }
+    pub fn isControl(&self, w: &String) -> bool { contains(&self.controls, w) }
+    pub fn isType(&self, w: &String) -> bool { contains(&self.types, w) }
+    pub fn isConstant(&self, w: &String) -> bool { contains(&self.constants, w) }
+}
+
+fn contains(list: &vector::Vector<String>, w: &String) -> bool {
+    for x in list { if x == w { return true } }
+    false
+}
+
+fn words(s: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var start = -1
+    var i = 0
+    while i <= s.$length() {
+        let b = if i < s.$length() { s.$byteAt(i) as i64 } else { 32 }
+        if b == 32 || b == 9 || b == 10 || b == 44 {
+            if start >= 0 { out.push(s.$substring(start, i)); start = -1 }
+        } elif start < 0 {
+            start = i
+        }
+        i += 1
+    }
+    out
+}
+
+fn lang(name: &String, exts: &String, line: &String, bs: &String, be: &String,
+        kw: &String, ctl: &String, ty: &String, cs: &String, quotes: &String) -> Language {
+    let l = Language(name)
+    l.extensions = words(exts)
+    l.lineComment = line.$clone()
+    l.blockStart = bs.$clone()
+    l.blockEnd = be.$clone()
+    l.keywords = words(kw)
+    l.controls = words(ctl)
+    l.types = words(ty)
+    l.constants = words(cs)
+    l.quotes = quotes.$clone()
+    l
+}
+
+/// The languages margrave knows without being told.
+pub fn builtinLanguages() -> vector::Vector<Language> {
+    var out = vector::Vector<Language>()
+
+    let rune = lang("rune", "rune", "//", "/*", "*/",
+        "fn var let mut global class struct enum mark bind to extend super self Self import pub as into is extern where unsafe operator dyn type weak uniq move macro async await typeof some",
+        "if elif else while loop for in match return break continue defer",
+        "i8 i16 i32 i64 isize u8 u16 u32 u64 usize int uint byte Byte f32 f64 float double bool Character CString String Never Any Option Result Vector Map Set",
+        "true false nil None Some Ok Err", "\"'")
+    rune.decorators = true
+    rune.dollar = true
+    rune.bangMacros = true
+    rune.capitalTypes = true
+    out.push(rune)
+
+    out.push(lang("c", "c h cpp cc cxx hpp hh hxx m mm", "//", "/*", "*/",
+        "struct union enum typedef static extern const volatile inline sizeof register auto class namespace template typename public private protected virtual override using new delete operator friend constexpr noexcept explicit mutable this #include #define #ifdef #ifndef #endif #if #else #elif #pragma",
+        "if else while for do switch case default return break continue goto try catch throw",
+        "void char short int long float double signed unsigned bool size_t ssize_t int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t uintptr_t intptr_t FILE std string vector auto",
+        "true false NULL nullptr EOF", "\"'"))
+
+    let py = lang("python", "py pyi pyw", "#", "", "",
+        "def class lambda import from as global nonlocal pass del with async await yield is not and or in self cls",
+        "if elif else while for try except finally return break continue raise assert match case",
+        "int float str bytes bool list dict set tuple object type",
+        "True False None", "\"'")
+    py.decorators = true
+    py.capitalTypes = true
+    py.tripleQuotes = true
+    out.push(py)
+
+    let js = lang("javascript", "js jsx mjs cjs ts tsx mts", "//", "/*", "*/",
+        "function var let const class extends new delete typeof instanceof in of import export from as default async await yield this super static get set interface type enum implements declare readonly public private protected abstract namespace keyof",
+        "if else while for do switch case return break continue try catch finally throw",
+        "string number boolean any unknown never void object Array Promise Map Set Record",
+        "true false null undefined NaN Infinity", "\"'`")
+    js.capitalTypes = true
+    js.decorators = true
+    out.push(js)
+
+    let rs = lang("rust", "rs", "//", "/*", "*/",
+        "fn let mut const static struct enum trait impl type use mod pub crate super self Self as where unsafe extern ref move dyn async await",
+        "if else while loop for in match return break continue",
+        "i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str String Vec Box Option Result",
+        "true false None Some Ok Err", "\"")
+    rs.bangMacros = true
+    rs.capitalTypes = true
+    out.push(rs)
+
+    let go = lang("go", "go", "//", "/*", "*/",
+        "func var const type struct interface map chan package import defer go range",
+        "if else for switch case default return break continue goto fallthrough select",
+        "int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 byte rune string bool error any",
+        "true false nil iota", "\"'`")
+    go.capitalTypes = false
+    out.push(go)
+
+    let sh = lang("shell", "sh bash zsh fish", "#", "", "",
+        "function local export readonly declare unset alias source set shift eval exec",
+        "if then else elif fi for while until do done case esac in return break continue exit",
+        "echo printf cd test read trap", "true false", "\"'")
+    sh.dollar = true
+    sh.fileNames = words(".bashrc .zshrc .profile .bash_profile .zprofile")
+    out.push(sh)
+
+    out.push(lang("toml", "toml", "#", "", "", "", "", "", "true false", "\"'"))
+    out.push(lang("json", "json jsonc", "//", "/*", "*/", "", "", "", "true false null", "\""))
+    out.push(lang("yaml", "yaml yml", "#", "", "", "", "", "", "true false null yes no", "\"'"))
+
+    let md = lang("markdown", "md markdown", "", "", "", "", "", "", "", "`")
+    md.markdown = true
+    out.push(md)
+
+    let lua = lang("lua", "lua", "--", "--[[", "]]",
+        "function local end and or not then do in",
+        "if elseif else while for repeat until return break goto", "", "true false nil", "\"'")
+    out.push(lua)
+
+    let mk = lang("make", "mk mak", "#", "", "", "include define endef export override ifeq ifneq ifdef ifndef else endif", "", "", "", "\"'")
+    mk.fileNames = words("Makefile makefile GNUmakefile")
+    mk.dollar = true
+    out.push(mk)
+
+    out.push(lang("cmake", "cmake", "#", "", "",
+        "function endfunction macro endmacro set project add_executable add_library target_link_libraries include find_package option",
+        "if elseif else endif foreach endforeach while endwhile return", "", "ON OFF TRUE FALSE", "\""))
+    out
+}
+
+//=== The configuration ===================================================//
+
+pub class Config {
+    pub tabWidth: i64
+    pub useTabs: bool
+    pub lineNumbers: bool
+    pub relativeNumbers: bool
+    pub scrollOff: i64
+    pub indentGuides: bool
+    pub prefix: i64
+    pub macOption: bool
+    pub showHidden: bool
+    pub shellSplit: f64
+    pub shell: String
+    pub copyCommand: String
+    pub pasteCommand: String
+    pub undercurl: bool
+    pub autoSave: bool
+    pub mouse: bool
+    pub autoPairs: bool
+    /// Long lines wrap onto further rows instead of running off the side.
+    pub wrap: bool
+    pub theme: Theme
+    pub actions: vector::Vector<Action>
+    pub servers: vector::Vector<Server>
+    pub languages: vector::Vector<Language>
+    /// What was wrong with the files, for the status line.
+    pub warnings: vector::Vector<String>
+    pub directory: String
+
+    fn init(self) {
+        self.tabWidth = 2
+        self.useTabs = false
+        self.lineNumbers = true
+        self.relativeNumbers = false
+        self.scrollOff = 4
+        self.indentGuides = true
+        self.prefix = input::ALT
+        self.macOption = true
+        self.showHidden = false
+        self.shellSplit = 0.30
+        self.shell = "/bin/sh"
+        let mac = sys::isFile("/usr/bin/pbcopy")
+        self.copyCommand = if mac { "pbcopy" } else { "" }
+        self.pasteCommand = if mac { "pbpaste" } else { "" }
+        // Terminal.app does not take the `4:3` form undercurl is written in.
+        self.undercurl = (env::get("TERM_PROGRAM") ?? "") != "Apple_Terminal"
+        self.autoSave = false
+        self.mouse = true
+        self.autoPairs = true
+        self.wrap = true
+        self.theme = Theme()
+        self.actions = vector::Vector<Action>()
+        self.servers = vector::Vector<Server>()
+        self.languages = builtinLanguages()
+        self.warnings = vector::Vector<String>()
+        self.directory = configDirectory()
+        if !mac {
+            // Wayland, then X.
+            if !(env::get("WAYLAND_DISPLAY") ?? "").$isEmpty() {
+                self.copyCommand = "wl-copy"
+                self.pasteCommand = "wl-paste -n"
+            } elif !(env::get("DISPLAY") ?? "").$isEmpty() {
+                self.copyCommand = "xclip -selection clipboard"
+                self.pasteCommand = "xclip -selection clipboard -o"
+            }
+        }
+    }
+
+    /// The prefix as it is written in help text.
+    pub fn prefixName(&self) -> String {
+        if self.prefix == input::CTRL { return "ctrl" }
+        if self.prefix == input::SUPER { return "super" }
+        "alt"
+    }
+
+    /// The language for a path, by file name or extension.
+    pub fn languageFor(&self, path: &String) -> Language? {
+        let name = utf::baseName(path)
+        let ext = utf::extension(path)
+        for l in self.languages {
+            for f in l.fileNames { if f == name { return l.$clone() } }
+            if !ext.$isEmpty() {
+                for e in l.extensions { if e == ext { return l.$clone() } }
+            }
+        }
+        nil
+    }
+
+    /// The server configured for a language, if any.
+    pub fn serverFor(&self, language: &String) -> Server? {
+        for s in self.servers {
+            for l in s.languages { if l == language { return s.$clone() } }
+        }
+        nil
+    }
+
+    /// The action for a file, if any: by its name, its contents, or both.
+    pub fn actionFor(&self, path: &String) -> Action? {
+        let name = utf::baseName(path)
+        // The file is only opened when an action asks what is in it, and
+        // then only once.
+        var kinds = ""
+        var read = false
+        for a in self.actions {
+            var byName = a.patterns.isEmpty()
+            for p in a.patterns {
+                let subject = if utf::findFrom(p, "/", 0) >= 0 { path.$clone() } else { name.$clone() }
+                if glob(p, subject) { byName = true; break }
+            }
+            if !byName { continue }
+            if a.magic.isEmpty() { return a.$clone() }
+            if !read {
+                kinds = " " + sys::fileMagic(path) + " "
+                read = true
+            }
+            for m in a.magic {
+                if magicMatches(m, kinds, path) { return a.$clone() }
+            }
+        }
+        nil
+    }
+}
+
+/// Whether one `magic` entry holds for a file whose kinds are `kinds`
+/// (space-padded): a kind by name, or `0x` and the hex its first bytes
+/// begin with.
+fn magicMatches(m: &String, kinds: &String, path: &String) -> bool {
+    let want = utf::lower(m)
+    if want.$length() > 2 && want.$substring(0, 2) == "0x" {
+        let hex = want.$substring(2, want.$length())
+        let head = sys::fileHeadHex(path, (hex.$length() + 1) / 2)
+        return hex.$length() > 0 && head.$length() >= hex.$length() &&
+               head.$substring(0, hex.$length()) == hex
+    }
+    utf::findFrom(kinds, " " + want + " ", 0) >= 0
+}
+
+pub fn configDirectory() -> String {
+    let xdg = env::get("XDG_CONFIG_HOME") ?? ""
+    if !xdg.$isEmpty() { return utf::join(xdg, "mgrve") }
+    let home = env::home() ?? "."
+    utf::join(utf::join(home, ".config"), "mgrve")
+}
+
+/// Reads every file, writing the defaults first when the directory is new.
+pub fn load() -> Config {
+    let c = Config()
+    let dir = c.directory.$clone()
+    if !sys::isDirectory(dir) {
+        match io::makeDirectories(dir) {
+            Some(e) => c.warnings.push("could not create " + dir + ": " + io::describe(e)),
+            None => {
+                writeDefault(utf::join(dir, "config.toml"), defaultConfig())
+                writeDefault(utf::join(dir, "actions.toml"), defaultActions())
+                writeDefault(utf::join(dir, "lsp.toml"), defaultServers())
+                writeDefault(utf::join(dir, "languages.toml"), defaultLanguages())
+            },
+        }
+    }
+    match readFile(c, utf::join(dir, "config.toml")) {
+        Some(doc) => applyConfig(c, doc),
+        None => {},
+    }
+    var haveActions = false
+    match readFile(c, utf::join(dir, "actions.toml")) {
+        Some(doc) => { applyActions(c, doc); haveActions = true },
+        None => {},
+    }
+    if !haveActions { applyActions(c, parseDefault(defaultActions())) }
+    var haveServers = false
+    match readFile(c, utf::join(dir, "lsp.toml")) {
+        Some(doc) => { applyServers(c, doc); haveServers = true },
+        None => {},
+    }
+    if !haveServers { applyServers(c, parseDefault(defaultServers())) }
+    match readFile(c, utf::join(dir, "languages.toml")) {
+        Some(doc) => applyLanguages(c, doc),
+        None => {},
+    }
+    c
+}
+
+fn parseDefault(text: String) -> toml::Value {
+    match toml::parse(text) {
+        Ok(v) => v,
+        Err(e) => toml::table(),
+    }
+}
+
+fn writeDefault(path: String, text: String) {
+    if !io::exists(path) { io::writeString(path, text) }
+}
+
+fn readFile(c: Config, path: String) -> toml::Value? {
+    if !io::exists(path) { return nil }
+    match toml::load(path) {
+        Ok(v) => v,
+        Err(e) => {
+            c.warnings.push(e)
+            nil
+        },
+    }
+}
+
+fn applyConfig(c: Config, doc: toml::Value) {
+    c.tabWidth = clamp(doc.number("editor.tab_width", c.tabWidth), 1, 16)
+    let indent = doc.str("editor.indent", if c.useTabs { "tabs" } else { "spaces" })
+    c.useTabs = indent == "tabs"
+    c.lineNumbers = doc.boolean("editor.line_numbers", c.lineNumbers)
+    c.relativeNumbers = doc.boolean("editor.relative_numbers", c.relativeNumbers)
+    c.scrollOff = clamp(doc.number("editor.scroll_off", c.scrollOff), 0, 20)
+    c.indentGuides = doc.boolean("editor.indent_guides", c.indentGuides)
+    c.autoSave = doc.boolean("editor.save_on_exit_to_explorer", c.autoSave)
+    c.mouse = doc.boolean("editor.mouse", c.mouse)
+    c.autoPairs = doc.boolean("editor.auto_pairs", c.autoPairs)
+    c.wrap = doc.boolean("editor.wrap", c.wrap)
+    let p = utf::lower(doc.str("keys.prefix", "alt"))
+    if p == "alt" || p == "option" || p == "opt" || p == "meta" { c.prefix = input::ALT }
+    elif p == "ctrl" || p == "control" { c.prefix = input::CTRL }
+    elif p == "super" || p == "cmd" || p == "command" { c.prefix = input::SUPER }
+    else { c.warnings.push("keys.prefix: '" + p + "' is not alt, ctrl or super") }
+    c.macOption = doc.boolean("keys.mac_option_fallback", c.macOption)
+    c.showHidden = doc.boolean("explorer.show_hidden", c.showHidden)
+    let split = doc.real("shell.output_height", c.shellSplit)
+    c.shellSplit = if split < 0.1 { 0.1 } elif split > 0.9 { 0.9 } else { split }
+    c.shell = doc.str("shell.program", c.shell)
+    c.copyCommand = doc.str("clipboard.copy", c.copyCommand)
+    c.pasteCommand = doc.str("clipboard.paste", c.pasteCommand)
+    c.undercurl = doc.boolean("theme.undercurl", c.undercurl)
+    let scheme = doc.str("theme.name", "margrave")
+    if !c.theme.use(scheme) {
+        var names = ""
+        for n in themeNames() { names += (if names.$isEmpty() { "" } else { ", " }) + n }
+        c.warnings.push("theme.name: no theme '" + scheme + "' — there are " + names)
+    }
+    match doc.get("theme") {
+        Some(t) => {
+            // `undercurl` is a switch, not a colour.
+            let colours = toml::table()
+            var i = 0
+            while i < t.keys.length() {
+                if t.keys.look(i) != "undercurl" { colours.set(t.keys.look(i), t.vals.get(i)) }
+                i += 1
+            }
+            c.theme.apply(colours, &var c.warnings)
+        },
+        None => {},
+    }
+}
+
+fn applyActions(c: Config, doc: toml::Value) {
+    match doc.get("action") {
+        Some(list) => {
+            for a in list.items {
+                let patterns = match a.get("match") { Some(m) => m.strings(), None => vector::Vector<String>() }
+                let magic = match a.get("magic") { Some(m) => m.strings(), None => vector::Vector<String>() }
+                let run = a.str("run", "")
+                if (patterns.isEmpty() && magic.isEmpty()) || run.$isEmpty() {
+                    c.warnings.push("actions.toml: every [[action]] needs `run`, and `match` or `magic`")
+                    continue
+                }
+                c.actions.push(Action { patterns: patterns, magic: magic, run: run,
+                                        confirm: a.boolean("confirm", false) })
+            }
+        },
+        None => {},
+    }
+}
+
+fn applyServers(c: Config, doc: toml::Value) {
+    var i = 0
+    while i < doc.keys.length() {
+        let name = doc.keys.look(i)
+        let s = doc.vals.get(i)
+        i += 1
+        if !s.isTable() { continue }
+        if !s.boolean("enabled", true) { continue }
+        let command = s.str("command", "")
+        if command.$isEmpty() {
+            c.warnings.push("lsp.toml: [" + name + "] needs a `command`")
+            continue
+        }
+        var langs = match s.get("languages") { Some(l) => l.strings(), None => vector::Vector<String>() }
+        if langs.isEmpty() { langs.push(name.$clone()) }
+        c.servers.push(Server { name: name.$clone(), command: command, languages: langs })
+    }
+}
+
+fn applyLanguages(c: Config, doc: toml::Value) {
+    match doc.get("language") {
+        Some(table) => {
+            var i = 0
+            while i < table.keys.length() {
+                let name = table.keys.look(i)
+                let d = table.vals.get(i)
+                i += 1
+                if !d.isTable() { continue }
+                // A definition replaces a built-in of the same name.
+                var kept = vector::Vector<Language>()
+                for l in c.languages { if l.name != name { kept.push(l.$clone()) } }
+                let l = Language(name)
+                l.extensions = listOf(d, "extensions")
+                l.fileNames = listOf(d, "file_names")
+                l.lineComment = d.str("line_comment", "")
+                match d.get("block_comment") {
+                    Some(bc) => {
+                        let pair = bc.strings()
+                        if pair.length() == 2 {
+                            l.blockStart = pair.get(0)
+                            l.blockEnd = pair.get(1)
+                        }
+                    },
+                    None => {},
+                }
+                l.keywords = listOf(d, "keywords")
+                l.controls = listOf(d, "control")
+                l.types = listOf(d, "types")
+                l.constants = listOf(d, "constants")
+                l.quotes = d.str("quotes", "\"'")
+                l.decorators = d.boolean("decorators", false)
+                l.dollar = d.boolean("dollar_names", false)
+                l.bangMacros = d.boolean("bang_macros", false)
+                l.capitalTypes = d.boolean("capitalised_types", false)
+                l.tripleQuotes = d.boolean("triple_quotes", false)
+                kept.insert(0, l)
+                c.languages = kept
+            }
+        },
+        None => {},
+    }
+}
+
+fn listOf(d: toml::Value, key: String) -> vector::Vector<String> {
+    match d.get(key) {
+        Some(v) => {
+            // `keywords = "a b c"` is as good as a list.
+            let items = v.strings()
+            if items.length() == 1 { return words(items.look(0)) }
+            items
+        },
+        None => vector::Vector<String>(),
+    }
+}
+
+fn clamp(v: i64, low: i64, high: i64) -> i64 {
+    if v < low { low } elif v > high { high } else { v }
+}
+
+/// `*` any run, `?` any one character, `[abc]` one of; everything else
+/// itself.
+pub fn glob(pattern: &String, subject: &String) -> bool {
+    globAt(pattern, 0, subject, 0)
+}
+
+fn globAt(p: &String, pi: i64, s: &String, si: i64) -> bool {
+    var i = pi
+    var j = si
+    while i < p.$length() {
+        let c = p.$byteAt(i) as i64
+        if c == 42 {
+            while i < p.$length() && (p.$byteAt(i) as i64) == 42 { i += 1 }
+            if i == p.$length() { return true }
+            var k = j
+            while k <= s.$length() {
+                if globAt(p, i, s, k) { return true }
+                k += 1
+            }
+            return false
+        }
+        if j >= s.$length() { return false }
+        if c == 63 {
+            i += 1
+            j = utf::next(s, j)
+            continue
+        }
+        if c == 91 {
+            let close = utf::findFrom(p, "]", i + 1)
+            if close > i {
+                let set = p.$substring(i + 1, close)
+                let ch = s.$byteAt(j)
+                var hit = false
+                var k = 0
+                while k < set.$length() {
+                    if set.$byteAt(k) == ch { hit = true }
+                    k += 1
+                }
+                if !hit { return false }
+                i = close + 1
+                j += 1
+                continue
+            }
+        }
+        if lowerByte(c) != lowerByte(s.$byteAt(j) as i64) { return false }
+        i += 1
+        j += 1
+    }
+    j == s.$length()
+}
+
+fn lowerByte(c: i64) -> i64 { if c >= 65 && c <= 90 { c + 32 } else { c } }
+
+//=== The files written on first run ======================================//
+
+fn lines(parts: [String]) -> String {
+    var out = ""
+    for p in parts { out += p + "\n" }
+    out
+}
+
+pub fn defaultConfig() -> String {
+    lines([
+        "# margrave — editor settings. Delete a line to get its default back.",
+        "",
+        "[editor]",
+        "tab_width = 2              # columns per indent level",
+        "indent = 'spaces'          # 'spaces' or 'tabs'",
+        "line_numbers = true",
+        "relative_numbers = false",
+        "scroll_off = 4             # lines kept visible above and below the cursor",
+        "indent_guides = true",
+        "# Click to move the cursor, drag to select, the wheel to scroll. While",
+        "# it is on, hold Shift (Option in iTerm2) for the terminal's own selection.",
+        "mouse = true",
+        "auto_pairs = true          # ( [ { \" ' ` close themselves",
+        "wrap = true                # long lines wrap; false scrolls sideways",
+        "",
+        "[keys]",
+        "# The modifier every chord starts with: 'alt' (Option on macOS), 'ctrl' or",
+        "# 'super'. Option is read through the kitty keyboard protocol where the",
+        "# terminal speaks it, and from the characters macOS types otherwise.",
+        "prefix = 'alt'",
+        "mac_option_fallback = true # read 'ç' as alt+c when the protocol is missing",
+        "",
+        "[explorer]",
+        "show_hidden = false",
+        "",
+        "[shell]",
+        "program = '/bin/sh'",
+        "output_height = 0.30       # share of the window the output takes",
+        "",
+        "[clipboard]",
+        "# Commands that put text on, and read it from, the system clipboard.",
+        "# copy = 'pbcopy'",
+        "# paste = 'pbpaste'",
+        "",
+        "[theme]",
+        "# Nothing here paints a background except the selection: the window",
+        "# stays the terminal's own. `:theme <name>` switches while running.",
+        "#   margrave  dusk: lavender and old gold (the default)",
+        "#   rose      rose, pine and gold",
+        "#   nord      arctic blues",
+        "#   gruvbox   warm retro",
+        "#   mono      greys, with colour only for problems and hits",
+        "#   paper     for a light terminal",
+        "name = 'margrave'",
+        "undercurl = true           # wavy diagnostics, where the terminal can",
+        "",
+        "# Any colour below overrides the scheme's: '#rrggbb', 0-255 or a name.",
+        "# accent = '#b8a4e3'",
+        "# selection = '#2d2a45'",
+        "# error = '#e46876'",
+        "#",
+        "# [theme.syntax]",
+        "# keyword = '#957fb8'",
+        "# string = '#98bb6c'",
+        "# comment = '#727169'",
+    ])
+}
+
+pub fn defaultActions() -> String {
+    lines([
+        "# What Enter does to a file in the explorer. The first matching [[action]]",
+        "# wins; a file nothing matches opens in the editor. `match` is by name;",
+        "# `magic` is by what the file's first bytes say it is — macho, macho-exec,",
+        "# macho-dylib, macho-universal, elf, elf-exec, elf-shared, pe, script, wasm,",
+        "# pdf, png, jpeg, gif, zip, gzip, xz, bzip2, java-class, executable — or a",
+        "# hex prefix such as '0x7f454c46'. With both, both must hold. In `run`:",
+        "#   {}      the file's path, quoted        {name}  its name, quoted",
+        "#   {dir}   its folder, quoted             {stem}  its name without extension",
+        "# Commands run in the explorer's folder; their output opens below.",
+        "",
+        "[[action]]",
+        "match = ['*.tar.gz', '*.tgz', '*.tar.xz', '*.tar.bz2', '*.tar']",
+        "run = 'tar -xvf {}'",
+        "",
+        "[[action]]",
+        "match = '*.zip'",
+        "run = 'unzip -o {}'",
+        "",
+        "[[action]]",
+        "match = '*.gz'",
+        "run = 'gunzip -k {}'",
+        "",
+        "# A program — Mach-O or ELF — runs, after asking.",
+        "[[action]]",
+        "magic = ['macho-exec', 'elf-exec']",
+        "run = '{}'",
+        "confirm = true",
+        "",
+        "# [[action]]",
+        "# magic = 'script'",
+        "# match = '*.sh'",
+        "# run = 'sh {}'",
+        "",
+        "# [[action]]",
+        "# match = ['*.png', '*.jpg', '*.pdf']",
+        "# run = 'open {}'",
+        "#",
+        "# [[action]]",
+        "# match = 'Makefile'",
+        "# run = 'make'",
+        "# confirm = true            # ask first",
+    ])
+}
+
+pub fn defaultServers() -> String {
+    lines([
+        "# Language servers, started when a file of theirs is opened. A server whose",
+        "# command is not installed is skipped quietly.",
+        "",
+        "[rune]",
+        "command = 'rune lsp'",
+        "languages = ['rune']",
+        "",
+        "[clangd]",
+        "command = 'clangd'",
+        "languages = ['c']",
+        "enabled = false",
+        "",
+        "[pyright]",
+        "command = 'pyright-langserver --stdio'",
+        "languages = ['python']",
+        "enabled = false",
+        "",
+        "[typescript]",
+        "command = 'typescript-language-server --stdio'",
+        "languages = ['javascript']",
+        "enabled = false",
+        "",
+        "[rust-analyzer]",
+        "command = 'rust-analyzer'",
+        "languages = ['rust']",
+        "enabled = false",
+        "",
+        "[gopls]",
+        "command = 'gopls'",
+        "languages = ['go']",
+        "enabled = false",
+    ])
+}
+
+pub fn defaultLanguages() -> String {
+    lines([
+        "# Syntax definitions beyond the built-in ones (rune, c, python, javascript,",
+        "# rust, go, shell, toml, json, yaml, markdown, lua, make, cmake). A",
+        "# definition with a built-in's name replaces it.",
+        "#",
+        "# [language.zig]",
+        "# extensions = ['zig']",
+        "# line_comment = '//'",
+        "# keywords = 'const var fn pub struct enum union error try comptime test'",
+        "# control = 'if else while for switch return break continue defer'",
+        "# types = 'u8 i32 i64 u64 usize f32 f64 bool void anytype type'",
+        "# constants = 'true false null undefined'",
+        "# quotes = '\"'",
+        "# capitalised_types = true",
+    ])
+}

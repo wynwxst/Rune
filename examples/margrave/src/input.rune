@@ -1,0 +1,478 @@
+// Turning the bytes a terminal sends into keys.
+//
+// Three dialects arrive here. The kitty keyboard protocol (asked for at start
+// up) reports every key, Option/Alt included, as `CSI code;mods u`. Terminals
+// without it send xterm's `CSI 1;mods A` and friends, and Alt as an ESC in
+// front of the key. And macOS terminals that treat Option as a way to type
+// `ç` send just that — which `macOption` turns back into Alt+C.
+
+import std::io
+import grve::utf
+
+pub global SHIFT: i64 = 1
+pub global ALT: i64 = 2
+pub global CTRL: i64 = 4
+pub global SUPER: i64 = 8
+
+// Keys that are not characters live above the Unicode range.
+pub global UP: i64 = 0x110001
+pub global DOWN: i64 = 0x110002
+pub global LEFT: i64 = 0x110003
+pub global RIGHT: i64 = 0x110004
+pub global HOME: i64 = 0x110005
+pub global END: i64 = 0x110006
+pub global PGUP: i64 = 0x110007
+pub global PGDN: i64 = 0x110008
+pub global INSERT: i64 = 0x110009
+pub global DELETE: i64 = 0x11000A
+pub global ENTER: i64 = 0x11000B
+pub global TAB: i64 = 0x11000C
+pub global BACKSPACE: i64 = 0x11000D
+pub global ESC: i64 = 0x11000E
+pub global PASTE: i64 = 0x11000F
+pub global F1: i64 = 0x110010      // F1..F12 follow on
+/// A mouse report: `button` (0 left, 1 middle, 2 right, 64/65 the wheel),
+/// `action` (PRESS, DRAG or RELEASE), and the cell in `row`/`col`.
+pub global MOUSE: i64 = 0x110030
+
+pub global PRESS: i64 = 0
+pub global DRAG: i64 = 1
+pub global RELEASE: i64 = 2
+
+pub struct Key {
+    /// A code point, or one of the constants above.
+    pub code: i64
+    pub mods: i64 = 0
+    /// What the key types, when it types something.
+    pub text: String = ""
+    // Mouse reports only: zero-based cell, button and action.
+    pub row: i64 = 0
+    pub col: i64 = 0
+    pub button: i64 = 0
+    pub action: i64 = 0
+}
+
+extend Key {
+    /// A key that inserts text: no Ctrl, Alt or Super held.
+    pub fn types(&self) -> bool {
+        self.code != PASTE && !self.text.$isEmpty() && (self.mods & (ALT | CTRL | SUPER)) == 0
+    }
+    pub fn has(&self, mods: i64) -> bool { (self.mods & mods) == mods }
+    pub fn shift(&self) -> bool { (self.mods & SHIFT) != 0 }
+    /// Exactly these modifiers, Shift ignored unless asked for.
+    pub fn only(&self, mods: i64) -> bool { (self.mods & (ALT | CTRL | SUPER)) == mods }
+    pub fn isArrow(&self) -> bool {
+        self.code == UP || self.code == DOWN || self.code == LEFT || self.code == RIGHT
+    }
+    /// The key as a person would write it: `alt+shift+left`.
+    pub fn describe(&self) -> String {
+        var s = ""
+        if (self.mods & CTRL) != 0 { s += "ctrl+" }
+        if (self.mods & ALT) != 0 { s += "alt+" }
+        if (self.mods & SUPER) != 0 { s += "super+" }
+        if (self.mods & SHIFT) != 0 { s += "shift+" }
+        s + keyName(self.code)
+    }
+}
+
+pub fn keyName(code: i64) -> String {
+    if code == UP { return "up" }
+    if code == DOWN { return "down" }
+    if code == LEFT { return "left" }
+    if code == RIGHT { return "right" }
+    if code == HOME { return "home" }
+    if code == END { return "end" }
+    if code == PGUP { return "pageup" }
+    if code == PGDN { return "pagedown" }
+    if code == INSERT { return "insert" }
+    if code == DELETE { return "delete" }
+    if code == ENTER { return "enter" }
+    if code == TAB { return "tab" }
+    if code == BACKSPACE { return "backspace" }
+    if code == ESC { return "esc" }
+    if code == PASTE { return "paste" }
+    if code == MOUSE { return "mouse" }
+    if code >= F1 && code < F1 + 12 { return "f" + (code - F1 + 1).$str() }
+    if code == 32 { return "space" }
+    utf::fromCode(code)
+}
+
+fn key(code: i64, mods: i64) -> Key { Key { code: code, mods: mods } }
+
+fn typed(cp: i64, mods: i64) -> Key { Key { code: cp, mods: mods, text: utf::fromCode(cp) } }
+
+/// Collects bytes and hands back keys as they become complete.
+pub class Decoder {
+    pending: String
+    /// The terminal answered the kitty protocol query, so Option arrives as
+    /// Alt and nothing needs guessing.
+    pub kitty: bool
+    /// Read macOS Option characters (`ç`, `≈`, `√`…) as Alt+key.
+    pub macOption: bool
+    pasting: bool
+    pasted: io::Bytes
+
+    fn init(self) {
+        self.pending = ""
+        self.kitty = false
+        self.macOption = true
+        self.pasting = false
+        self.pasted = io::Bytes()
+    }
+
+    pub fn feed(&self, bytes: &String) { self.pending += bytes }
+
+    /// True when bytes are waiting that do not yet make a key.
+    pub fn waiting(&self) -> bool { !self.pending.$isEmpty() }
+
+    /// The next key, or nil when what is waiting is not complete. `flush`
+    /// says no more bytes are coming soon, so a lone ESC is the Escape key.
+    pub fn next(&self, flush: bool) -> Key? {
+        loop {
+            if self.pending.$isEmpty() { return nil }
+            if self.pasting {
+                if !self.takePaste() { return nil }
+                let text = self.pasted.toString()
+                self.pasted = io::Bytes()
+                return Key { code: PASTE, text: text }
+            }
+            let (k, used) = self.decode(&self.pending, flush)
+            if used == 0 { return nil }
+            self.pending = self.pending.$substring(used, self.pending.$length())
+            match k {
+                Some(found) => {
+                    if found.code == PASTE && found.text.$isEmpty() {
+                        self.pasting = true
+                        continue
+                    }
+                    return self.translate(found)
+                },
+                None => continue,
+            }
+        }
+    }
+
+    /// Moves pasted bytes across until the closing marker; true once found.
+    fn takePaste(&self) -> bool {
+        let close = utf::findFrom(&self.pending, "\x1b[201~", 0)
+        if close < 0 {
+            // Keep a few bytes back in case the marker is split.
+            let keep = if self.pending.$length() > 6 { self.pending.$length() - 6 } else { 0 }
+            self.pasted.appendText(self.pending.$substring(0, keep))
+            self.pending = self.pending.$substring(keep, self.pending.$length())
+            return false
+        }
+        self.pasted.appendText(self.pending.$substring(0, close))
+        self.pending = self.pending.$substring(close + 6, self.pending.$length())
+        self.pasting = false
+        true
+    }
+
+    fn translate(&self, k: Key) -> Key {
+        // Even a terminal speaking the kitty protocol may hand Option over
+        // as the character it types, so this applies either way.
+        if !self.macOption { return k }
+        if k.mods != 0 || k.code > 0x10FFFF { return k }
+        match macOptionKey(k.code) {
+            Some(alt) => alt,
+            None => k,
+        }
+    }
+
+    /// One key from the front of `s`: the key (nil for bytes that mean
+    /// nothing to us) and how many bytes it took. Zero bytes taken means the
+    /// sequence is not complete yet.
+    fn decode(&self, s: &String, flush: bool) -> (Key?, i64) {
+        let b0 = s.$byteAt(0) as i64
+        if b0 == 27 {
+            if s.$length() == 1 {
+                if flush { return (key(ESC, 0), 1) }
+                return (nil, 0)
+            }
+            let b1 = s.$byteAt(1) as i64
+            if b1 == 91 {
+                let (k, used) = self.csi(s, 2)
+                if used == 0 && flush { return (typed(91, ALT), 2) }
+                return (k, used)
+            }
+            if b1 == 79 {
+                if s.$length() < 3 {
+                    if flush { return (typed(79, ALT), 2) }
+                    return (nil, 0)
+                }
+                return (ss3(s.$byteAt(2) as i64, 0), 3)
+            }
+            if b1 == 27 {
+                // ESC ESC: Alt in front of an escape sequence, or two Escapes.
+                if s.$length() >= 3 && ((s.$byteAt(2) as i64) == 91 || (s.$byteAt(2) as i64) == 79) {
+                    let rest = s.$substring(1, s.$length())
+                    let (k, used) = self.decode(&rest, flush)
+                    if used == 0 { return (nil, 0) }
+                    return match k {
+                        Some(inner) => (Key { code: inner.code, mods: inner.mods | ALT, text: "" }, used + 1),
+                        None => (nil, used + 1),
+                    }
+                }
+                return (key(ESC, 0), 1)
+            }
+            // Alt held with an ordinary key. A capital is Shift with the
+            // letter, as the kitty protocol would say it.
+            let rest = s.$substring(1, s.$length())
+            let (k, used) = plainKey(&rest)
+            if used == 0 { return (nil, 0) }
+            return match k {
+                Some(inner) => {
+                    if inner.code >= 65 && inner.code <= 90 {
+                        (Key { code: inner.code + 32, mods: inner.mods | ALT | SHIFT, text: "" }, used + 1)
+                    } else {
+                        (Key { code: inner.code, mods: inner.mods | ALT, text: "" }, used + 1)
+                    }
+                },
+                None => (nil, used + 1),
+            }
+        }
+        plainKey(s)
+    }
+
+    /// A CSI sequence whose parameters start at `from`.
+    fn csi(&self, s: &String, from: i64) -> (Key?, i64) {
+        var i = from
+        let n = s.$length()
+        while i < n {
+            let b = s.$byteAt(i) as i64
+            if b >= 0x40 && b <= 0x7E { break }
+            if b < 0x20 { return (nil, i) }      // garbage: drop what came before
+            i += 1
+        }
+        if i >= n {
+            if n - from > 64 { return (nil, n) }
+            return (nil, 0)
+        }
+        let final = s.$byteAt(i) as i64
+        let params = s.$substring(from, i)
+        let used = i + 1
+        if utf::startsWith(&params, "?") {
+            if final == 117 { self.kitty = true }  // the reply to `CSI ? u`
+            return (nil, used)
+        }
+        if utf::startsWith(&params, "<") && (final == 77 || final == 109) {
+            return (mouse(params.$substring(1, params.$length()), final == 109), used)
+        }
+        if utf::startsWith(&params, ">") || utf::startsWith(&params, "<") || utf::startsWith(&params, "=") {
+            return (nil, used)
+        }
+        let groups = splitOn(&params, 59)
+        let p0 = number(&groups, 0, 0, 1)
+        let mods = modifiers(number(&groups, 1, 0, 1))
+        if final == 117 {                         // kitty: CSI code;mods;text u
+            self.kitty = true
+            return (kittyKey(&groups, p0, mods), used)
+        }
+        if final == 126 {                         // CSI n ~
+            if p0 == 200 { return (Key { code: PASTE }, used) }
+            if p0 == 201 { return (nil, used) }
+            if p0 == 27 {                         // xterm modifyOtherKeys
+                let code = number(&groups, 2, 0, 0)
+                return (special(code, modifiers(number(&groups, 1, 0, 1))), used)
+            }
+            let code = tildeKey(p0)
+            if code < 0 { return (nil, used) }
+            return (key(code, mods), used)
+        }
+        if final == 90 { return (key(TAB, mods | SHIFT), used) }    // CSI Z
+        if final == 73 || final == 79 { return (nil, used) }        // focus
+        if final == 77 || final == 109 { return (nil, used) }       // mouse
+        if final == 82 && groups.length() >= 2 && mods == 0 { return (nil, used) }  // cursor report
+        (ss3(final, mods), used)
+    }
+}
+
+/// `CSI < b ; x ; y M` (press or drag) or `m` (release).
+fn mouse(params: &String, released: bool) -> Key? {
+    let parts = splitOn(params, 59)
+    if parts.length() < 3 { return nil }
+    let b = parts.look(0).$toInt() ?? 0
+    let x = parts.look(1).$toInt() ?? 1
+    let y = parts.look(2).$toInt() ?? 1
+    var mods = 0
+    if (b & 4) != 0 { mods |= SHIFT }
+    if (b & 8) != 0 { mods |= ALT }
+    if (b & 16) != 0 { mods |= CTRL }
+    let action = if released { RELEASE } elif (b & 32) != 0 { DRAG } else { PRESS }
+    let button = if (b & 64) != 0 { 64 + (b & 3) } else { b & 3 }
+    Key { code: MOUSE, mods: mods, row: y - 1, col: x - 1, button: button, action: action }
+}
+
+/// The key a CSI or SS3 sequence ends in, for the letter-final kinds.
+fn ss3(final: i64, mods: i64) -> Key? {
+    if final == 65 { return key(UP, mods) }
+    if final == 66 { return key(DOWN, mods) }
+    if final == 67 { return key(RIGHT, mods) }
+    if final == 68 { return key(LEFT, mods) }
+    if final == 72 { return key(HOME, mods) }
+    if final == 70 { return key(END, mods) }
+    if final == 80 { return key(F1, mods) }
+    if final == 81 { return key(F1 + 1, mods) }
+    if final == 82 { return key(F1 + 2, mods) }
+    if final == 83 { return key(F1 + 3, mods) }
+    nil
+}
+
+fn tildeKey(n: i64) -> i64 {
+    match n {
+        1 => HOME, 7 => HOME,
+        4 => END, 8 => END,
+        2 => INSERT,
+        3 => DELETE,
+        5 => PGUP,
+        6 => PGDN,
+        11 => F1, 12 => F1 + 1, 13 => F1 + 2, 14 => F1 + 3, 15 => F1 + 4,
+        17 => F1 + 5, 18 => F1 + 6, 19 => F1 + 7, 20 => F1 + 8, 21 => F1 + 9,
+        23 => F1 + 10, 24 => F1 + 11,
+        _ => -1,
+    }
+}
+
+/// Kitty's modifier field is 1 + a bit set: shift 1, alt 2, ctrl 4, super 8,
+/// then hyper, meta, caps lock and num lock, which are left out.
+fn modifiers(field: i64) -> i64 {
+    if field <= 1 { return 0 }
+    (field - 1) & 15
+}
+
+/// `CSI code[:shifted[:base]] ; mods[:event] ; text u`.
+fn kittyKey(groups: &vector::Vector<String>, code: i64, mods: i64) -> Key? {
+    // Key releases are only reported when asked for; drop them if they come.
+    let fields1 = if groups.length() > 1 { splitOn(groups.look(1), 58) } else { vector::Vector<String>() }
+    if fields1.length() > 1 && number(&fields1, 1, 0, 1) == 3 { return nil }
+    if code >= 57441 && code <= 57454 { return nil }          // a modifier on its own
+    if code >= 57358 && code <= 57363 { return nil }          // the lock keys
+    var shifted = 0
+    if groups.length() > 0 {
+        let sub = splitOn(groups.look(0), 58)
+        shifted = number(&sub, 1, 0, 0)
+    }
+    var text = ""
+    if groups.length() > 2 {
+        for part in splitOn(groups.look(2), 58) {
+            match part.$toInt() {
+                Some(cp) => { if cp >= 32 { text += utf::fromCode(cp) } },
+                None => {},
+            }
+        }
+    }
+    var k = special(keypad(code), mods)?
+    if k.code < 0x110000 && k.code >= 32 && (mods & (ALT | CTRL | SUPER)) == 0 {
+        if text.$isEmpty() {
+            text = if (mods & SHIFT) != 0 && shifted > 0 { utf::fromCode(shifted) }
+                   elif (mods & SHIFT) != 0 { utf::fromCode(upperAscii(k.code)) }
+                   else { utf::fromCode(k.code) }
+        }
+        k = Key { code: k.code, mods: k.mods, text: text }
+    }
+    k
+}
+
+fn upperAscii(c: i64) -> i64 { if c >= 97 && c <= 122 { c - 32 } else { c } }
+
+/// The keypad sends codes of its own under kitty; most mean what the main
+/// keyboard's do.
+fn keypad(code: i64) -> i64 {
+    if code >= 57399 && code <= 57408 { return 48 + (code - 57399) }
+    match code {
+        57409 => 46, 57410 => 47, 57411 => 42, 57412 => 45, 57413 => 43,
+        57414 => 13, 57415 => 61,
+        57417 => -2, 57418 => -3, 57419 => -4, 57420 => -5,
+        57421 => -6, 57422 => -7, 57423 => -8, 57424 => -9, 57426 => -10,
+        _ => code,
+    }
+}
+
+/// A code as kitty and modifyOtherKeys give it: control codes for Enter, Tab,
+/// Backspace and Escape, a code point for everything else.
+fn special(code: i64, mods: i64) -> Key? {
+    if code == 13 { return key(ENTER, mods) }
+    if code == 9 { return key(TAB, mods) }
+    if code == 127 || code == 8 { return key(BACKSPACE, mods) }
+    if code == 27 { return key(ESC, mods) }
+    if code == -2 { return key(LEFT, mods) }
+    if code == -3 { return key(RIGHT, mods) }
+    if code == -4 { return key(UP, mods) }
+    if code == -5 { return key(DOWN, mods) }
+    if code == -6 { return key(PGUP, mods) }
+    if code == -7 { return key(PGDN, mods) }
+    if code == -8 { return key(HOME, mods) }
+    if code == -9 { return key(END, mods) }
+    if code == -10 { return key(DELETE, mods) }
+    if code < 0 || code > 0x10FFFF { return nil }
+    if code >= 57376 { return nil }                           // F13 and the media keys
+    key(code, mods)
+}
+
+/// A byte or a UTF-8 character with no escape in front of it.
+fn plainKey(s: &String) -> (Key?, i64) {
+    let b = s.$byteAt(0) as i64
+    if b == 13 || b == 10 { return (key(ENTER, 0), 1) }
+    if b == 9 { return (key(TAB, 0), 1) }
+    if b == 127 || b == 8 { return (key(BACKSPACE, 0), 1) }
+    if b == 0 { return (key(32, CTRL), 1) }
+    if b == 27 { return (key(ESC, 0), 1) }
+    if b < 27 { return (key(96 + b, CTRL), 1) }
+    if b < 32 { return (key(b + 64, CTRL), 1) }               // ctrl+\ ] ^ _
+    if b < 0x80 { return (typed(b, 0), 1) }
+    let n = utf::next(s, 0)
+    let need = if (b & 0xE0) == 0xC0 { 2 } elif (b & 0xF0) == 0xE0 { 3 } elif (b & 0xF8) == 0xF0 { 4 } else { 1 }
+    if s.$length() < need { return (nil, 0) }
+    (typed(utf::decode(s, 0), 0), n)
+}
+
+/// What a US-layout Mac types with Option held, back to the key underneath.
+fn macOptionKey(cp: i64) -> Key? {
+    let table: [44:(i64, i64, i64)] = [
+        (0xE5, 97, 0), (0x222B, 98, 0), (0xE7, 99, 0), (0x2202, 100, 0), (0x192, 102, 0),
+        (0xA9, 103, 0), (0x2D9, 104, 0), (0x2206, 106, 0), (0x2DA, 107, 0), (0xAC, 108, 0),
+        (0xB5, 109, 0), (0xF8, 111, 0), (0x3C0, 112, 0), (0x153, 113, 0), (0xAE, 114, 0),
+        (0xDF, 115, 0), (0x2020, 116, 0), (0x221A, 118, 0), (0x2211, 119, 0), (0x2248, 120, 0),
+        (0xA5, 121, 0), (0x3A9, 122, 0), (0x201C, 91, 0), (0x2018, 93, 0), (0xAB, 92, 0),
+        (0x2026, 59, 0), (0xE6, 39, 0), (0x2264, 44, 0), (0x2265, 46, 0), (0xF7, 47, 0),
+        (0x2013, 45, 0), (0x2260, 61, 0), (0xBA, 48, 0), (0xA1, 49, 0), (0x2122, 50, 0),
+        (0xA3, 51, 0), (0xA2, 52, 0), (0x221E, 53, 0), (0xA7, 54, 0), (0xB6, 55, 0),
+        (0x201D, 91, 1), (0x2019, 93, 1), (0xDA, 59, 1), (0xBF, 47, 1),
+    ]
+    for (from, target, shift) in table {
+        if from == cp { return key(target, ALT | (if shift == 1 { SHIFT } else { 0 })) }
+    }
+    nil
+}
+
+//=== Small parsing helpers ===============================================//
+
+import std::collections::vector
+
+/// `s` cut at every byte `sep`.
+pub fn splitOn(s: &String, sep: i64) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var start = 0
+    var i = 0
+    while i < s.$length() {
+        if (s.$byteAt(i) as i64) == sep {
+            out.push(s.$substring(start, i))
+            start = i + 1
+        }
+        i += 1
+    }
+    out.push(s.$substring(start, s.$length()))
+    out
+}
+
+/// The `index`-th piece as a number; the `sub`-th colon field of it when the
+/// piece has colons, `fallback` when missing or empty.
+fn number(parts: &vector::Vector<String>, index: i64, sub: i64, fallback: i64) -> i64 {
+    if index >= parts.length() { return fallback }
+    let piece = parts.look(index)
+    let fields = splitOn(piece, 58)
+    if sub >= fields.length() { return fallback }
+    let f = fields.look(sub)
+    if f.$isEmpty() { return fallback }
+    f.$toInt() ?? fallback
+}

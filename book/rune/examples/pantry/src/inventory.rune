@@ -1,0 +1,63 @@
+import std::collections::vector
+import pantry::unit::{Unit}
+
+/// One thing in the pantry.
+pub struct Item {
+    pub name: String
+    pub quantity: i64
+    pub unit: Unit
+    pub low: i64 = 1
+}
+
+extend Item {
+    pub fn isLow(&self) -> bool {
+        self.quantity <= self.low
+    }
+
+    /// Removes `amount`. Returns false, changing nothing, if there is not enough.
+    pub fn take(&var self, amount: i64) -> bool {
+        if amount > self.quantity { return false }
+        self.quantity -= amount
+        true
+    }
+
+    pub fn describe(&self) -> String {
+        self.name + ": " + self.quantity.$str() + " " + self.unit.suffix()
+    }
+}
+
+/// Everything in the kitchen.
+pub struct Pantry {
+    pub items: vector::Vector<Item>
+}
+
+extend Pantry {
+    pub fn new() -> Self {
+        Pantry { items: vector::Vector<Item>() }
+    }
+
+    pub fn indexOf(&self, name: &String) -> i64? {
+        var i = 0
+        while i < self.items.length() {
+            if self.items.look(i).name == *name { return i }
+            i += 1
+        }
+        nil
+    }
+
+    /// Adds to an existing item of the same name, or starts a new one.
+    pub fn add(&var self, item: Item) {
+        match self.indexOf(item.name) {
+            Some(i) => self.items.touch(i).quantity += item.quantity,
+            None => self.items.push(item),
+        }
+    }
+
+    /// Uses up `amount` of `name`. False if there is none or not enough.
+    pub fn consume(&var self, name: &String, amount: i64) -> bool {
+        match self.indexOf(name) {
+            Some(i) => self.items.touch(i).take(amount),
+            None => false,
+        }
+    }
+}

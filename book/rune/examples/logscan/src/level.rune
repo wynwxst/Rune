@@ -1,0 +1,39 @@
+import std::io
+
+/// How serious a log line is. A higher number is more serious.
+pub enum Level {
+    Debug = 0
+    Info = 1
+    Warn = 2
+    Error = 3
+}
+
+extend Level {
+    /// Reads a level name in any case: `warn`, `WARN`, `Warn`.
+    pub fn parse(word: &String) -> Level? {
+        match word.$clone() {
+            "DEBUG" | "debug" | "Debug" => Level::Debug,
+            "INFO" | "info" | "Info" => Level::Info,
+            "WARN" | "warn" | "Warn" => Level::Warn,
+            "ERROR" | "error" | "Error" => Level::Error,
+            _ => nil,
+        }
+    }
+
+    pub fn rank(&self) -> i64 {
+        *self as i64
+    }
+
+    pub fn name(&self) -> String {
+        match self {
+            .Debug => "DEBUG",
+            .Info => "INFO",
+            .Warn => "WARN",
+            .Error => "ERROR",
+        }
+    }
+}
+
+bind io::Display to Level {
+    fn display(&self) -> String { self.name() }
+}

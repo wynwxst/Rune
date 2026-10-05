@@ -1,0 +1,401 @@
+// Rune bindings for `socket.h`.
+// Written by `rune ffi` — regenerate rather than edit.
+
+import std::mem
+
+//=== Types ===
+
+pub type __uint8_t = u8
+pub type __uint16_t = u16
+pub type __uint32_t = u32
+pub type __int64_t = i64
+pub type __darwin_socklen_t = __uint32_t
+pub type u_int32_t = u32
+pub type __darwin_off_t = __int64_t
+pub type off_t = __darwin_off_t
+pub type sa_family_t = __uint8_t
+pub type socklen_t = __darwin_socklen_t
+pub type sae_associd_t = __uint32_t
+pub type sae_connid_t = __uint32_t
+pub type sa_endpoints_t = sa_endpoints
+
+//=== Structs and unions ===
+
+/// `struct iovec`: 16 bytes, aligned to 8.
+#Convention("C")
+pub struct iovec {
+    pub iov_base: *var u8 = 0 as *var u8
+    pub iov_len: usize = 0
+}
+
+/// `struct sa_endpoints`: 40 bytes, aligned to 8.
+#Convention("C")
+pub struct sa_endpoints {
+    pub sae_srcif: u32 = 0
+    pub sae_srcaddr: *sockaddr = 0 as *sockaddr
+    pub sae_srcaddrlen: socklen_t = 0
+    pub sae_dstaddr: *sockaddr = 0 as *sockaddr
+    pub sae_dstaddrlen: socklen_t = 0
+}
+
+/// `struct sockaddr`: 16 bytes, aligned to 1.
+#Convention("C")
+pub struct sockaddr {
+    pub sa_len: __uint8_t = 0
+    pub sa_family: sa_family_t = 0
+    pub sa_data: [14:i8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+}
+
+/// `struct linger`: 8 bytes, aligned to 4.
+#Convention("C")
+pub struct linger {
+    pub l_onoff: i32 = 0
+    pub l_linger: i32 = 0
+}
+
+/// `struct so_np_extensions`: 8 bytes, aligned to 4.
+#Convention("C")
+pub struct so_np_extensions {
+    pub npx_flags: u_int32_t = 0
+    pub npx_mask: u_int32_t = 0
+}
+
+/// `struct __sockaddr_header`: 2 bytes, aligned to 1.
+#Convention("C")
+pub struct __sockaddr_header {
+    pub sa_len: __uint8_t = 0
+    pub sa_family: sa_family_t = 0
+}
+
+/// `struct sockproto`: 4 bytes, aligned to 2.
+#Convention("C")
+pub struct sockproto {
+    pub sp_family: __uint16_t = 0
+    pub sp_protocol: __uint16_t = 0
+}
+
+/// `struct sockaddr_storage`: 128 bytes, aligned to 8.
+#Convention("C")
+pub struct sockaddr_storage {
+    pub ss_len: __uint8_t = 0
+    pub ss_family: sa_family_t = 0
+    pub __ss_pad1: [6:i8] = [0, 0, 0, 0, 0, 0]
+    pub __ss_align: __int64_t = 0
+    pub __ss_pad2: [112:i8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+}
+
+/// `struct msghdr`: 48 bytes, aligned to 8.
+#Convention("C")
+pub struct msghdr {
+    pub msg_name: *var u8 = 0 as *var u8
+    pub msg_namelen: socklen_t = 0
+    pub msg_iov: *var iovec = 0 as *var iovec
+    pub msg_iovlen: i32 = 0
+    pub msg_control: *var u8 = 0 as *var u8
+    pub msg_controllen: socklen_t = 0
+    pub msg_flags: i32 = 0
+}
+
+/// `struct cmsghdr`: 12 bytes, aligned to 4.
+#Convention("C")
+pub struct cmsghdr {
+    pub cmsg_len: socklen_t = 0
+    pub cmsg_level: i32 = 0
+    pub cmsg_type: i32 = 0
+}
+
+/// `struct sf_hdtr`: 32 bytes, aligned to 8.
+#Convention("C")
+pub struct sf_hdtr {
+    pub headers: *var iovec = 0 as *var iovec
+    pub hdr_cnt: i32 = 0
+    pub trailers: *var iovec = 0 as *var iovec
+    pub trl_cnt: i32 = 0
+}
+
+//=== Constants ===
+
+pub global SOCK_STREAM: i32 = 1
+pub global SOCK_DGRAM: i32 = 2
+pub global SOCK_RAW: i32 = 3
+pub global SOCK_RDM: i32 = 4
+pub global SOCK_SEQPACKET: i32 = 5
+pub global SO_DEBUG: i32 = 1
+pub global SO_ACCEPTCONN: i32 = 2
+pub global SO_REUSEADDR: i32 = 4
+pub global SO_KEEPALIVE: i32 = 8
+pub global SO_DONTROUTE: i32 = 16
+pub global SO_BROADCAST: i32 = 32
+pub global SO_USELOOPBACK: i32 = 64
+pub global SO_LINGER: i32 = 128
+pub global SO_LINGER_SEC: i32 = 4224
+pub global SO_OOBINLINE: i32 = 256
+pub global SO_REUSEPORT: i32 = 512
+pub global SO_TIMESTAMP: i32 = 1024
+pub global SO_TIMESTAMP_MONOTONIC: i32 = 2048
+pub global SO_DONTTRUNC: i32 = 8192
+pub global SO_WANTMORE: i32 = 16384
+pub global SO_WANTOOBFLAG: i32 = 32768
+pub global SO_SNDBUF: i32 = 4097
+pub global SO_RCVBUF: i32 = 4098
+pub global SO_SNDLOWAT: i32 = 4099
+pub global SO_RCVLOWAT: i32 = 4100
+pub global SO_SNDTIMEO: i32 = 4101
+pub global SO_RCVTIMEO: i32 = 4102
+pub global SO_ERROR: i32 = 4103
+pub global SO_TYPE: i32 = 4104
+pub global SO_LABEL: i32 = 4112
+pub global SO_PEERLABEL: i32 = 4113
+pub global SO_NREAD: i32 = 4128
+pub global SO_NKE: i32 = 4129
+pub global SO_NOSIGPIPE: i32 = 4130
+pub global SO_NOADDRERR: i32 = 4131
+pub global SO_NWRITE: i32 = 4132
+pub global SO_REUSESHAREUID: i32 = 4133
+pub global SO_NOTIFYCONFLICT: i32 = 4134
+pub global SO_UPCALLCLOSEWAIT: i32 = 4135
+pub global SO_RANDOMPORT: i32 = 4226
+pub global SO_NP_EXTENSIONS: i32 = 4227
+pub global SO_NUMRCVPKT: i32 = 4370
+pub global SO_NET_SERVICE_TYPE: i32 = 4374
+pub global SO_NETSVC_MARKING_LEVEL: i32 = 4377
+pub global SO_RESOLVER_SIGNATURE: i32 = 4401
+pub global SO_BINDTODEVICE: i32 = 4404
+pub global NET_SERVICE_TYPE_BE: i32 = 0
+pub global NET_SERVICE_TYPE_BK: i32 = 1
+pub global NET_SERVICE_TYPE_SIG: i32 = 2
+pub global NET_SERVICE_TYPE_VI: i32 = 3
+pub global NET_SERVICE_TYPE_VO: i32 = 4
+pub global NET_SERVICE_TYPE_RV: i32 = 5
+pub global NET_SERVICE_TYPE_AV: i32 = 6
+pub global NET_SERVICE_TYPE_OAM: i32 = 7
+pub global NET_SERVICE_TYPE_RD: i32 = 8
+pub global NETSVC_MRKNG_UNKNOWN: i32 = 0
+pub global NETSVC_MRKNG_LVL_L2: i32 = 1
+pub global NETSVC_MRKNG_LVL_L3L2_ALL: i32 = 2
+pub global NETSVC_MRKNG_LVL_L3L2_BK: i32 = 3
+pub global SAE_ASSOCID_ANY: i32 = 0
+pub global SAE_CONNID_ANY: i32 = 0
+pub global CONNECT_RESUME_ON_READ_WRITE: i32 = 1
+pub global CONNECT_DATA_IDEMPOTENT: i32 = 2
+pub global CONNECT_DATA_AUTHENTICATED: i32 = 4
+pub global SONPX_SETOPTSHUT: i32 = 1
+pub global SOL_SOCKET: i32 = 65535
+pub global AF_UNSPEC: i32 = 0
+pub global AF_UNIX: i32 = 1
+pub global AF_LOCAL: i32 = 1
+pub global AF_INET: i32 = 2
+pub global AF_IMPLINK: i32 = 3
+pub global AF_PUP: i32 = 4
+pub global AF_CHAOS: i32 = 5
+pub global AF_NS: i32 = 6
+pub global AF_ISO: i32 = 7
+pub global AF_OSI: i32 = 7
+pub global AF_ECMA: i32 = 8
+pub global AF_DATAKIT: i32 = 9
+pub global AF_CCITT: i32 = 10
+pub global AF_SNA: i32 = 11
+pub global AF_DECnet: i32 = 12
+pub global AF_DLI: i32 = 13
+pub global AF_LAT: i32 = 14
+pub global AF_HYLINK: i32 = 15
+pub global AF_APPLETALK: i32 = 16
+pub global AF_ROUTE: i32 = 17
+pub global AF_LINK: i32 = 18
+pub global pseudo_AF_XTP: i32 = 19
+pub global AF_COIP: i32 = 20
+pub global AF_CNT: i32 = 21
+pub global pseudo_AF_RTIP: i32 = 22
+pub global AF_IPX: i32 = 23
+pub global AF_SIP: i32 = 24
+pub global pseudo_AF_PIP: i32 = 25
+pub global AF_NDRV: i32 = 27
+pub global AF_ISDN: i32 = 28
+pub global AF_E164: i32 = 28
+pub global pseudo_AF_KEY: i32 = 29
+pub global AF_INET6: i32 = 30
+pub global AF_NATM: i32 = 31
+pub global AF_SYSTEM: i32 = 32
+pub global AF_NETBIOS: i32 = 33
+pub global AF_PPP: i32 = 34
+pub global pseudo_AF_HDRCMPLT: i32 = 35
+pub global AF_RESERVED_36: i32 = 36
+pub global AF_IEEE80211: i32 = 37
+pub global AF_UTUN: i32 = 38
+pub global AF_VSOCK: i32 = 40
+pub global AF_MAX: i32 = 41
+pub global SOCK_MAXADDRLEN: i32 = 255
+pub global _SS_MAXSIZE: i32 = 128
+pub global PF_UNSPEC: i32 = 0
+pub global PF_LOCAL: i32 = 1
+pub global PF_UNIX: i32 = 1
+pub global PF_INET: i32 = 2
+pub global PF_IMPLINK: i32 = 3
+pub global PF_PUP: i32 = 4
+pub global PF_CHAOS: i32 = 5
+pub global PF_NS: i32 = 6
+pub global PF_ISO: i32 = 7
+pub global PF_OSI: i32 = 7
+pub global PF_ECMA: i32 = 8
+pub global PF_DATAKIT: i32 = 9
+pub global PF_CCITT: i32 = 10
+pub global PF_SNA: i32 = 11
+pub global PF_DECnet: i32 = 12
+pub global PF_DLI: i32 = 13
+pub global PF_LAT: i32 = 14
+pub global PF_HYLINK: i32 = 15
+pub global PF_APPLETALK: i32 = 16
+pub global PF_ROUTE: i32 = 17
+pub global PF_LINK: i32 = 18
+pub global PF_XTP: i32 = 19
+pub global PF_COIP: i32 = 20
+pub global PF_CNT: i32 = 21
+pub global PF_SIP: i32 = 24
+pub global PF_IPX: i32 = 23
+pub global PF_RTIP: i32 = 22
+pub global PF_PIP: i32 = 25
+pub global PF_NDRV: i32 = 27
+pub global PF_ISDN: i32 = 28
+pub global PF_KEY: i32 = 29
+pub global PF_INET6: i32 = 30
+pub global PF_NATM: i32 = 31
+pub global PF_SYSTEM: i32 = 32
+pub global PF_NETBIOS: i32 = 33
+pub global PF_PPP: i32 = 34
+pub global PF_RESERVED_36: i32 = 36
+pub global PF_UTUN: i32 = 38
+pub global PF_VSOCK: i32 = 40
+pub global PF_MAX: i32 = 41
+pub global PF_VLAN: i32 = 1986814318
+pub global PF_BOND: i32 = 1651469924
+pub global NET_MAXID: i32 = 41
+pub global NET_RT_DUMP: i32 = 1
+pub global NET_RT_FLAGS: i32 = 2
+pub global NET_RT_IFLIST: i32 = 3
+pub global NET_RT_STAT: i32 = 4
+pub global NET_RT_TRASH: i32 = 5
+pub global NET_RT_IFLIST2: i32 = 6
+pub global NET_RT_DUMP2: i32 = 7
+pub global NET_RT_FLAGS_PRIV: i32 = 10
+pub global NET_RT_MAXID: i32 = 11
+pub global SOMAXCONN: i32 = 128
+pub global MSG_OOB: i32 = 1
+pub global MSG_PEEK: i32 = 2
+pub global MSG_DONTROUTE: i32 = 4
+pub global MSG_EOR: i32 = 8
+pub global MSG_TRUNC: i32 = 16
+pub global MSG_CTRUNC: i32 = 32
+pub global MSG_WAITALL: i32 = 64
+pub global MSG_DONTWAIT: i32 = 128
+pub global MSG_EOF: i32 = 256
+pub global MSG_WAITSTREAM: i32 = 512
+pub global MSG_FLUSH: i32 = 1024
+pub global MSG_HOLD: i32 = 2048
+pub global MSG_SEND: i32 = 4096
+pub global MSG_HAVEMORE: i32 = 8192
+pub global MSG_RCVMORE: i32 = 16384
+pub global MSG_NEEDSA: i32 = 65536
+pub global MSG_NOSIGNAL: i32 = 524288
+pub global SCM_RIGHTS: i32 = 1
+pub global SCM_TIMESTAMP: i32 = 2
+pub global SCM_CREDS: i32 = 3
+pub global SCM_TIMESTAMP_MONOTONIC: i32 = 4
+pub global SHUT_RD: i32 = 0
+pub global SHUT_WR: i32 = 1
+pub global SHUT_RDWR: i32 = 2
+
+//=== Functions and variables ===
+
+pub extern "C" {
+    fn accept(arg0: i32, arg1: *var sockaddr, arg2: *var socklen_t) -> i32
+    fn bind_(arg0: i32, arg1: *sockaddr, arg2: socklen_t) -> i32
+    fn connect(arg0: i32, arg1: *sockaddr, arg2: socklen_t) -> i32
+    fn getpeername(arg0: i32, arg1: *var sockaddr, arg2: *var socklen_t) -> i32
+    fn getsockname(arg0: i32, arg1: *var sockaddr, arg2: *var socklen_t) -> i32
+    fn getsockopt(arg0: i32, arg1: i32, arg2: i32, arg3: *var u8, arg4: *var socklen_t) -> i32
+    fn listen(arg0: i32, arg1: i32) -> i32
+    fn recv(arg0: i32, arg1: *var u8, arg2: usize, arg3: i32) -> isize
+    fn recvfrom(arg0: i32, arg1: *var u8, arg2: usize, arg3: i32, arg4: *var sockaddr, arg5: *var socklen_t) -> isize
+    fn recvmsg(arg0: i32, arg1: *var msghdr, arg2: i32) -> isize
+    fn send(arg0: i32, arg1: *u8, arg2: usize, arg3: i32) -> isize
+    fn sendmsg(arg0: i32, arg1: *msghdr, arg2: i32) -> isize
+    fn sendto(arg0: i32, arg1: *u8, arg2: usize, arg3: i32, arg4: *sockaddr, arg5: socklen_t) -> isize
+    fn setsockopt(arg0: i32, arg1: i32, arg2: i32, arg3: *u8, arg4: socklen_t) -> i32
+    fn shutdown(arg0: i32, arg1: i32) -> i32
+    fn sockatmark(arg0: i32) -> i32
+    fn socket(arg0: i32, arg1: i32, arg2: i32) -> i32
+    fn socketpair(arg0: i32, arg1: i32, arg2: i32, arg3: *var i32) -> i32
+    fn sendfile(arg0: i32, arg1: i32, arg2: off_t, arg3: *var off_t, arg4: *var sf_hdtr, arg5: i32) -> i32
+    fn pfctlinput(arg0: i32, arg1: *var sockaddr)
+    fn connectx(arg0: i32, arg1: *sa_endpoints_t, arg2: sae_associd_t, arg3: u32, arg4: *iovec, arg5: u32, arg6: *var usize, arg7: *var sae_connid_t) -> i32
+    fn disconnectx(arg0: i32, arg1: sae_associd_t, arg2: sae_connid_t) -> i32
+}
+
+//=== Layout ===
+
+/// How many of these structs differ in size, alignment or member offsets
+/// from what the C compiler gives them. Zero, on the target they were
+/// written for.
+pub fn layoutMismatches() -> i64 {
+    var bad = 0
+    if offset_of!(iovec, iov_base) != 0 { bad += 1 }
+    if offset_of!(iovec, iov_len) != 8 { bad += 1 }
+    if mem::size_of<iovec>() != 16 { bad += 1 }
+    if mem::align_of<iovec>() != 8 { bad += 1 }
+    if offset_of!(sa_endpoints, sae_srcif) != 0 { bad += 1 }
+    if offset_of!(sa_endpoints, sae_srcaddr) != 8 { bad += 1 }
+    if offset_of!(sa_endpoints, sae_srcaddrlen) != 16 { bad += 1 }
+    if offset_of!(sa_endpoints, sae_dstaddr) != 24 { bad += 1 }
+    if offset_of!(sa_endpoints, sae_dstaddrlen) != 32 { bad += 1 }
+    if mem::size_of<sa_endpoints>() != 40 { bad += 1 }
+    if mem::align_of<sa_endpoints>() != 8 { bad += 1 }
+    if offset_of!(sockaddr, sa_len) != 0 { bad += 1 }
+    if offset_of!(sockaddr, sa_family) != 1 { bad += 1 }
+    if offset_of!(sockaddr, sa_data) != 2 { bad += 1 }
+    if mem::size_of<sockaddr>() != 16 { bad += 1 }
+    if mem::align_of<sockaddr>() != 1 { bad += 1 }
+    if offset_of!(linger, l_onoff) != 0 { bad += 1 }
+    if offset_of!(linger, l_linger) != 4 { bad += 1 }
+    if mem::size_of<linger>() != 8 { bad += 1 }
+    if mem::align_of<linger>() != 4 { bad += 1 }
+    if offset_of!(so_np_extensions, npx_flags) != 0 { bad += 1 }
+    if offset_of!(so_np_extensions, npx_mask) != 4 { bad += 1 }
+    if mem::size_of<so_np_extensions>() != 8 { bad += 1 }
+    if mem::align_of<so_np_extensions>() != 4 { bad += 1 }
+    if offset_of!(__sockaddr_header, sa_len) != 0 { bad += 1 }
+    if offset_of!(__sockaddr_header, sa_family) != 1 { bad += 1 }
+    if mem::size_of<__sockaddr_header>() != 2 { bad += 1 }
+    if mem::align_of<__sockaddr_header>() != 1 { bad += 1 }
+    if offset_of!(sockproto, sp_family) != 0 { bad += 1 }
+    if offset_of!(sockproto, sp_protocol) != 2 { bad += 1 }
+    if mem::size_of<sockproto>() != 4 { bad += 1 }
+    if mem::align_of<sockproto>() != 2 { bad += 1 }
+    if offset_of!(sockaddr_storage, ss_len) != 0 { bad += 1 }
+    if offset_of!(sockaddr_storage, ss_family) != 1 { bad += 1 }
+    if offset_of!(sockaddr_storage, __ss_pad1) != 2 { bad += 1 }
+    if offset_of!(sockaddr_storage, __ss_align) != 8 { bad += 1 }
+    if offset_of!(sockaddr_storage, __ss_pad2) != 16 { bad += 1 }
+    if mem::size_of<sockaddr_storage>() != 128 { bad += 1 }
+    if mem::align_of<sockaddr_storage>() != 8 { bad += 1 }
+    if offset_of!(msghdr, msg_name) != 0 { bad += 1 }
+    if offset_of!(msghdr, msg_namelen) != 8 { bad += 1 }
+    if offset_of!(msghdr, msg_iov) != 16 { bad += 1 }
+    if offset_of!(msghdr, msg_iovlen) != 24 { bad += 1 }
+    if offset_of!(msghdr, msg_control) != 32 { bad += 1 }
+    if offset_of!(msghdr, msg_controllen) != 40 { bad += 1 }
+    if offset_of!(msghdr, msg_flags) != 44 { bad += 1 }
+    if mem::size_of<msghdr>() != 48 { bad += 1 }
+    if mem::align_of<msghdr>() != 8 { bad += 1 }
+    if offset_of!(cmsghdr, cmsg_len) != 0 { bad += 1 }
+    if offset_of!(cmsghdr, cmsg_level) != 4 { bad += 1 }
+    if offset_of!(cmsghdr, cmsg_type) != 8 { bad += 1 }
+    if mem::size_of<cmsghdr>() != 12 { bad += 1 }
+    if mem::align_of<cmsghdr>() != 4 { bad += 1 }
+    if offset_of!(sf_hdtr, headers) != 0 { bad += 1 }
+    if offset_of!(sf_hdtr, hdr_cnt) != 8 { bad += 1 }
+    if offset_of!(sf_hdtr, trailers) != 16 { bad += 1 }
+    if offset_of!(sf_hdtr, trl_cnt) != 24 { bad += 1 }
+    if mem::size_of<sf_hdtr>() != 32 { bad += 1 }
+    if mem::align_of<sf_hdtr>() != 8 { bad += 1 }
+    bad
+}

@@ -1,0 +1,21 @@
+import std::text
+import logscan::level::{Level}
+
+/// One line of a log, taken apart.
+pub struct Record {
+    pub when: String
+    pub level: Level
+    pub message: String
+}
+
+/// Reads `WHEN LEVEL message...`. Returns nothing for a line in another shape.
+pub fn parseRecord(line: &String) -> Record? {
+    let trimmed = text::trim(line)
+    let first = text::find(trimmed, " ")?
+    let when = trimmed.$substring(0, first)
+    let afterWhen = text::trimStart(trimmed.$substring(first + 1, trimmed.$length()))
+    let second = text::find(afterWhen, " ") ?? afterWhen.$length()
+    let level = Level::parse(afterWhen.$substring(0, second))?
+    let message = text::trimStart(afterWhen.$substring(second, afterWhen.$length()))
+    Record { when: when, level: level, message: message }
+}

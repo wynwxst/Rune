@@ -1,0 +1,49 @@
+import std::testing
+import pantry::command
+import pantry::command::{Command, ParseError}
+import pantry::unit::{Unit}
+
+fn main() -> i64 {
+    // A well-formed add
+    match command::parse(&"add flour 500 g") {
+        Ok(Command::Add { name, quantity, unit }) => {
+            assertEq!(name, "flour")
+            assertEq!(quantity, 500)
+            testing::isTrue("unit is grams", unit == Unit::Grams)
+        }
+        _ => testing::unreachable("add should parse"),
+    }
+
+    // The error for each way a line can be wrong
+    match command::parse(&"add flour x g") {
+        Err(ParseError::BadNumber(word)) => assertEq!(word, "x")
+        _ => testing::unreachable("x is not a number"),
+    }
+    match command::parse(&"add flour 3 kg") {
+        Err(ParseError::BadUnit(word)) => assertEq!(word, "kg")
+        _ => testing::unreachable("kg is not a unit"),
+    }
+    match command::parse(&"dance") {
+        Err(ParseError::Unknown(word)) => assertEq!(word, "dance")
+        _ => testing::unreachable("dance is not a command"),
+    }
+    match command::parse(&"") {
+        Err(ParseError::Empty) => testing::isTrue("an empty line is Empty", true)
+        _ => testing::unreachable("empty line"),
+    }
+    match command::parse(&"use flour") {
+        Err(ParseError::Usage(usage)) => assertEq!(usage, "use NAME AMOUNT")
+        _ => testing::unreachable("use needs an amount"),
+    }
+
+    // Extra spaces are ignored
+    match command::parse(&"  list  ") {
+        Ok(Command::List) => testing::isTrue("list with spaces", true)
+        _ => testing::unreachable("list should parse"),
+    }
+
+    // The sentence for the user
+    assertEq!(command::explain(&ParseError::Empty), "type a command")
+
+    testing::summary()
+}

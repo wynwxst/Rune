@@ -1,0 +1,63 @@
+import std::collections::vector
+
+/// A buffer holding at most `capacity` values. Adding to a full buffer
+/// drops the oldest value to make room.
+pub class RingBuffer<T> {
+    var items: vector::Vector<T>
+    var capacity: i64
+    var start: i64
+
+    fn init(self, capacity: i64) {
+        self.items = vector::Vector<T>()
+        self.capacity = capacity
+        self.start = 0
+    }
+}
+
+extend<T> RingBuffer<T> {
+    pub fn length(&self) -> i64 { self.items.length() }
+
+    pub fn isFull(&self) -> bool { self.items.length() == self.capacity }
+
+    /// Adds a value. When the buffer is full the oldest value is replaced, and
+    /// handed back so the caller can do something with it.
+    pub fn push(&var self, value: T) -> T? {
+        if !self.isFull() {
+            self.items.push(value)
+            return nil
+        }
+        let slot = self.start
+        self.start = (self.start + 1) % self.capacity
+        Some(self.items.replace(slot, value))
+    }
+
+    /// The `n`-th oldest value, counting from 0.
+    pub fn look(&self, n: i64) -> &T {
+        self.items.look((self.start + n) % self.capacity)
+    }
+}
+
+/// What `for` uses to walk a buffer, oldest first.
+pub struct RingIter<T> {
+    buffer: &RingBuffer<T>
+    next: i64
+}
+
+bind<T> Iterator to RingIter<T> {
+    type Item = &T
+
+    fn next(&var self) -> (&T from self.buffer)? {
+        if self.next >= self.buffer.length() { return nil }
+        let item = self.buffer.look(self.next)
+        self.next += 1
+        Some(item)
+    }
+}
+
+bind<T> Sequence to RingBuffer<T> {
+    type Iter = RingIter<T>
+
+    fn iterate(&self) -> RingIter<T> from self {
+        RingIter<T> { buffer: self, next: 0 }
+    }
+}

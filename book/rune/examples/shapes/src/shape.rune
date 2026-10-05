@@ -1,0 +1,78 @@
+import std::{io, math}
+import std::collections::vector
+import shapes::vec2::{Vec2}
+
+/// Anything with an area and a perimeter.
+pub mark Shape {
+    fn area(&self) -> f64
+    fn perimeter(&self) -> f64
+    fn name(&self) -> String
+
+    /// A one-line description, built from the requirements above.
+    fn describe(&self) -> String {
+        self.name() + ": area " + round2(self.area()).$str() +
+            ", perimeter " + round2(self.perimeter()).$str()
+    }
+}
+
+fn round2(value: f64) -> f64 {
+    math::roundTo(value, 2)
+}
+
+pub struct Circle {
+    pub center: Vec2
+    pub radius: f64
+}
+
+pub struct Rect {
+    pub corner: Vec2
+    pub size: Vec2
+}
+
+/// A polygon given by its corners in order.
+pub struct Polygon {
+    pub corners: vector::Vector<Vec2>
+}
+
+bind Shape to Circle {
+    fn area(&self) -> f64 { math::PI * self.radius * self.radius }
+    fn perimeter(&self) -> f64 { 2.0 * math::PI * self.radius }
+    fn name(&self) -> String { "circle" }
+}
+
+bind Shape to Rect {
+    fn area(&self) -> f64 { self.size.x * self.size.y }
+    fn perimeter(&self) -> f64 { 2.0 * (self.size.x + self.size.y) }
+    fn name(&self) -> String { "rectangle" }
+}
+
+bind Shape to Polygon {
+    /// The shoelace formula: half the sum of cross products of neighbouring corners.
+    fn area(&self) -> f64 {
+        var twice = 0.0
+        let n = self.corners.length()
+        var i = 0
+        while i < n {
+            let a = self.corners.look(i)
+            let b = self.corners.look((i + 1) % n)
+            twice += a.cross(b)
+            i += 1
+        }
+        math::absFloat(twice) / 2.0
+    }
+
+    fn perimeter(&self) -> f64 {
+        var total = 0.0
+        let n = self.corners.length()
+        var i = 0
+        while i < n {
+            total += self.corners.look(i).distanceTo(self.corners.look((i + 1) % n))
+            i += 1
+        }
+        total
+    }
+
+    fn name(&self) -> String {
+        self.corners.length().$str() + "-gon"
+    }
+}

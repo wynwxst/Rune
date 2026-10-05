@@ -1,0 +1,71 @@
+// Configuration: the files written on first run parse, patterns pick the
+// right action, and placeholders are filled and quoted.
+import std::testing
+import std::io
+import std::collections::vector
+import grve::config
+import grve::sys
+import grve::utf
+import grve::toml
+import grve::app
+
+fn parses(name: String, text: String) {
+    match toml::parse(text) {
+        Ok(v) => testing::isTrue(name, true),
+        Err(e) => testing::equal(name, e, "no error"),
+    }
+}
+
+fn main() -> i64 {
+    parses("config.toml", config::defaultConfig())
+    parses("actions.toml", config::defaultActions())
+    parses("lsp.toml", config::defaultServers())
+    parses("languages.toml", config::defaultLanguages())
+
+    testing::isTrue("star", config::glob("*.tar.gz", "pkg.tar.gz"))
+    testing::isFalse("star, wrong end", config::glob("*.tar.gz", "pkg.tar.xz"))
+    testing::isTrue("question", config::glob("file?.txt", "file1.txt"))
+    testing::isTrue("set", config::glob("[mM]akefile", "Makefile"))
+    testing::isTrue("case", config::glob("*.ZIP", "a.zip"))
+    testing::isFalse("whole name", config::glob("*.zip", "a.zip.part"))
+
+    let c = config::Config()
+    let actions = toml::parse(config::defaultActions()).unwrap()
+    let list = actions.get("action").unwrap()
+    testing::equal("default actions", list.items.length(), 4)
+    c.actions.push(config::Action { patterns: list.items.get(0).get("match").unwrap().strings(), run: list.items.get(0).str("run", "") })
+    let a = c.actionFor("/tmp/it's here.tgz").unwrap()
+    let ws = app::App(c, "/tmp")
+    testing::equal("placeholders", ws.actionCommand(&a, "/tmp/it's here.tgz"), "tar -xvf '/tmp/it'\\''s here.tgz'")
+    testing::isTrue("no action", c.actionFor("/tmp/readme.md").isNil())
+
+    // By what the file is, not what it is called. `/bin/sh` is a program on
+    // every system margrave runs on: Mach-O on macOS, ELF elsewhere.
+    let kinds = sys::fileMagic("/bin/sh")
+    testing::isTrue("a program is recognised",
+                    utf::findFrom(kinds, "macho-exec", 0) >= 0 || utf::findFrom(kinds, "elf-exec", 0) >= 0)
+    testing::isTrue("and is executable", utf::findFrom(kinds, "executable", 0) >= 0)
+    let byMagic = config::Config()
+    let program = list.items.get(3)
+    byMagic.actions.push(config::Action { patterns: vector::Vector<String>(),
+                                          magic: program.get("magic").unwrap().strings(),
+                                          run: program.str("run", ""), confirm: true })
+    testing::isTrue("a program runs", !byMagic.actionFor("/bin/sh").isNil())
+    let script = "/tmp/mgrve-magic-test.sh"
+    io::writeString(script, "#!/bin/sh\necho hi\n")
+    testing::equal("a script", sys::fileMagic(script), "script")
+    testing::isTrue("a script is not a program", byMagic.actionFor(script).isNil())
+    testing::isTrue("text is nothing", byMagic.actionFor("/tmp/readme.md").isNil())
+    // A hex prefix, and a name and a kind together.
+    byMagic.actions.push(config::Action { patterns: vector::from(["*.sh"]), magic: vector::from(["0x2321"]),
+                                          run: "sh {}" })
+    testing::equal("hex prefix and name", byMagic.actionFor(script).unwrap().run, "sh {}")
+    byMagic.actions.push(config::Action { patterns: vector::from(["*.txt"]), magic: vector::from(["script"]),
+                                          run: "never" })
+    testing::isTrue("both must hold", byMagic.actionFor("/tmp/mgrve-magic-test.txt").isNil())
+
+    testing::equal("language by extension", c.languageFor("src/main.rune").unwrap().name, "rune")
+    testing::equal("language by name", c.languageFor("/x/Makefile").unwrap().name, "make")
+    testing::isTrue("unknown language", c.languageFor("a.xyz").isNil())
+    testing::summary()
+}

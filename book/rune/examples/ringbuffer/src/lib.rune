@@ -1,0 +1,3 @@
+// ringbuffer — a fixed-size buffer that forgets its oldest value.
+//
+//     ringbuffer::ring    RingBuffer<T>

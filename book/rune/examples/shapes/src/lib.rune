@@ -1,0 +1,5 @@
+// shapes — a small geometry library.
+//
+//     shapes::vec2    Vec2, a point or direction, with arithmetic
+//     shapes::shape   the Shape mark and Circle, Rect and Polygon
+//     shapes::scene   a Scene that holds shapes of different kinds

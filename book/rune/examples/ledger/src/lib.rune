@@ -1,0 +1,4 @@
+// ledger — the library half of the package.
+//
+//     ledger::entry   an Entry and how money is written
+//     ledger::parse   turning text into Entries, and every way that can fail

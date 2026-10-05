@@ -1,0 +1,70 @@
+// Key decoding: the legacy xterm forms, the kitty protocol, bracketed paste,
+// and macOS Option characters read back as Alt.
+import std::testing
+import grve::input
+
+fn keys(bytes: String) -> String {
+    let d = input::Decoder()
+    d.feed(bytes)
+    var out = ""
+    loop {
+        match d.next(true) {
+            Some(k) => {
+                if !out.$isEmpty() { out += " " }
+                out += k.describe()
+                if k.types() { out += "[" + k.text + "]" }
+            },
+            None => break,
+        }
+    }
+    out
+}
+
+fn main() -> i64 {
+    testing::equal("plain", keys("ab"), "a[a] b[b]")
+    testing::equal("utf-8", keys("é"), "é[é]")
+    testing::equal("control", keys("\x01\x7f\r\t"), "ctrl+a backspace enter tab")
+    testing::equal("lone escape", keys("\x1b"), "esc")
+    testing::equal("alt by escape", keys("\x1bc"), "alt+c")
+    testing::equal("alt+delete", keys("\x1b\x7f"), "alt+backspace")
+    testing::equal("alt+capital", keys("\x1bH"), "alt+shift+h")
+    testing::equal("arrows", keys("\x1b[A\x1bOB"), "up down")
+    testing::equal("modified arrows", keys("\x1b[1;2C\x1b[1;3D\x1b[1;4A"), "shift+right alt+left alt+shift+up")
+    testing::equal("tilde keys", keys("\x1b[3~\x1b[5;5~\x1b[15~"), "delete ctrl+pageup f5")
+    testing::equal("shift tab", keys("\x1b[Z"), "shift+tab")
+    testing::equal("alt arrow, esc prefixed", keys("\x1b\x1b[D"), "alt+left")
+    testing::equal("kitty alt", keys("\x1b[99;3u"), "alt+c")
+    testing::equal("kitty text", keys("\x1b[97;2;65u"), "shift+a[A]")
+    testing::equal("kitty enter, esc", keys("\x1b[13u\x1b[27u"), "enter esc")
+    testing::equal("kitty alt+shift+arrow", keys("\x1b[1;4B"), "alt+shift+down")
+    testing::equal("kitty ctrl+space", keys("\x1b[32;5u"), "ctrl+space")
+    testing::equal("kitty lone modifier", keys("\x1b[57441;2u"), "")
+    testing::equal("kitty keypad", keys("\x1b[57399u"), "0[0]")
+    testing::equal("paste", keys("\x1b[200~one\ntwo\x1b[201~x"), "paste x[x]")
+    let d0 = input::Decoder()
+    d0.feed("\x1b[<0;12;5M\x1b[<32;14;6M\x1b[<0;14;6m\x1b[<65;3;4M\x1b[<4;1;1M")
+    let press = d0.next(true).unwrap()
+    testing::equal("click", press.describe() + " " + press.row.$str() + "," + press.col.$str() + " " + press.action.$str(), "mouse 4,11 0")
+    testing::equal("drag", d0.next(true).unwrap().action, input::DRAG)
+    testing::equal("release", d0.next(true).unwrap().action, input::RELEASE)
+    testing::equal("wheel", d0.next(true).unwrap().button, 65)
+    testing::isTrue("shift click", d0.next(true).unwrap().shift())
+    testing::equal("mac option c", keys("ç"), "alt+c")
+    testing::equal("mac option ]", keys("‘"), "alt+]")
+    testing::equal("mac option shift ;", keys("Ú"), "alt+shift+;")
+    let d = input::Decoder()
+    d.macOption = false
+    d.feed("ç")
+    testing::equal("fallback off", d.next(true).unwrap().text, "ç")
+    let k = input::Decoder()
+    k.feed("\x1b[?29u")
+    k.next(true)
+    testing::isTrue("protocol detected", k.kitty)
+    // A sequence cut in two waits for its second half.
+    let split = input::Decoder()
+    split.feed("\x1b[1;")
+    testing::isTrue("incomplete waits", split.next(false).isNil())
+    split.feed("3A")
+    testing::equal("then completes", split.next(false).unwrap().describe(), "alt+up")
+    testing::summary()
+}

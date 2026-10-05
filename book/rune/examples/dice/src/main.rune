@@ -1,0 +1,70 @@
+import std::{io, process, random, text}
+
+/// A request such as `3d6`: roll three six-sided dice.
+struct Request {
+    count: i64
+    sides: i64
+}
+
+/// Reads `NdS`. Returns nothing when the text is not in that shape.
+fn parseRequest(input: &String) -> Request? {
+    let parts = text::split(input, "d")
+    if parts.length() != 2 { return nil }
+    let count = parts[0].$toInt()?
+    let sides = parts[1].$toInt()?
+    if count < 1 || count > 100 || sides < 2 { return nil }
+    Request { count: count, sides: sides }
+}
+
+fn rollAll(request: &Request) -> i64 {
+    var total = 0
+    for _ in 0..request.count {
+        let die = random::between(1, request.sides)
+        total += die
+        print!("{} ", die)
+    }
+    println!("= {}", total)
+    total
+}
+
+fn rollText(input: &String) -> bool {
+    match parseRequest(input) {
+        Some(request) => {
+            rollAll(&request)
+            true
+        }
+        None => {
+            println!("'{}' is not a roll. Try 2d6 or 1d20.", input)
+            false
+        }
+    }
+}
+
+fn prompt() {
+    println!("Type a roll like 2d6, or quit.")
+    loop {
+        print!("roll> ")
+        io::flush()
+        match io::readLineOrEnd() {
+            None => break
+            Some(line) => {
+                let command = text::trim(&line)
+                if command == "quit" { break }
+                if !command.$isEmpty() { rollText(&command) }
+            }
+        }
+    }
+}
+
+fn main() -> i64 {
+    let requests = process::arguments()
+    if requests.isEmpty() {
+        prompt()
+        return 0
+    }
+    var failures = 0
+    for request in requests {
+        if !rollText(request) { failures += 1 }
+    }
+    failures
+}

@@ -1,0 +1,194 @@
+// Shell commands run under the editor: started with `sh -c`, their output
+// (errors included) collected a line at a time while they run, and stopped
+// — the whole process group — when asked.
+
+import std::io
+import std::time
+import std::collections::vector
+import grve::sys
+import grve::utf
+
+/// How much output is kept; older lines fall off the top.
+global KEEP: i64 = 20000
+
+pub class Job {
+    pub command: String
+    pub directory: String
+    pub pid: i64
+    output: i64
+    /// Finished lines, escape sequences and all — the view reads colours
+    /// out of them.
+    pub lines: vector::Vector<String>
+    /// The line still being written.
+    pub partial: String
+    pub running: bool
+    pub status: i64
+    pub aborted: bool
+    pub dropped: i64
+    started: time::Instant
+    pub seconds: f64
+    killAt: i64
+    termSent: time::Instant
+
+    fn init(self, command: &String, directory: &String) {
+        self.command = command.$clone()
+        self.directory = directory.$clone()
+        self.pid = -1
+        self.output = -1
+        self.lines = vector::Vector<String>()
+        self.partial = ""
+        self.running = false
+        self.status = -1
+        self.aborted = false
+        self.dropped = 0
+        self.started = time::now()
+        self.seconds = 0.0
+        self.killAt = 0
+        self.termSent = time::now()
+    }
+
+    /// Starts it. False (with a line saying why) when it could not start.
+    pub fn start(&self, shell: &String) -> bool {
+        let line = if shell == "/bin/sh" || shell.$isEmpty() { self.command.$clone() }
+                   else { "exec " + shell + " -c " + utf::shellQuote(self.command) }
+        match sys::spawn(line, self.directory, false, true) {
+            Some(child) => {
+                self.pid = child.pid
+                self.output = child.output
+                self.running = true
+                self.started = time::now()
+                true
+            },
+            None => {
+                self.lines.push("could not start the shell")
+                false
+            },
+        }
+    }
+
+    /// The descriptor to wait on, or -1.
+    pub fn descriptor(&self) -> i64 { if self.running { self.output } else { -1 } }
+
+    /// Takes in whatever has arrived, and notices when it has finished.
+    /// True when something changed.
+    pub fn pump(&self) -> bool {
+        if !self.running { return false }
+        var changed = false
+        var chunk = io::Bytes()
+        var eof = false
+        loop {
+            let n = sys::readInto(self.output, &var chunk)
+            if n == 0 { eof = true; break }
+            if n < 0 { break }
+            if chunk.length() > 1 << 20 { break }
+        }
+        if chunk.length() > 0 {
+            self.take(chunk.toString())
+            changed = true
+        }
+        if self.aborted && self.killAt == 0 && self.termSent.elapsed().asMilliseconds() > 1500 {
+            sys::kill(self.pid, sys::SIGKILL)
+            self.killAt = 1
+        }
+        if eof {
+            sys::close(self.output)
+            self.output = -1
+            // The pipe closes when the last writer goes; the shell itself
+            // may take a moment longer.
+            var tries = 0
+            loop {
+                match sys::reap(self.pid) {
+                    Some(st) => { self.status = st; break },
+                    None => {},
+                }
+                tries += 1
+                if tries > 200 {
+                    sys::kill(self.pid, sys::SIGKILL)
+                }
+                sys::waitAny([], 5)
+            }
+            self.finish()
+            changed = true
+        }
+        changed
+    }
+
+    fn finish(&self) {
+        if self.partial.$length() > 0 {
+            self.push(self.partial.$clone())
+            self.partial = ""
+        }
+        self.running = false
+        self.seconds = self.started.elapsed().asSecondsFloat()
+    }
+
+    fn take(&self, text: &String) {
+        var start = 0
+        var i = 0
+        let n = text.$length()
+        while i < n {
+            let b = text.$byteAt(i) as i64
+            if b == 10 {
+                var piece = text.$substring(start, i)
+                if utf::endsWith(piece, "\r") { piece = piece.$substring(0, piece.$length() - 1) }
+                self.push(self.partial + piece)
+                self.partial = ""
+                start = i + 1
+            } elif b == 13 && i + 1 < n && (text.$byteAt(i + 1) as i64) != 10 {
+                // A carriage return on its own redraws the line: a progress
+                // bar. Keep only what comes after it.
+                self.partial = ""
+                start = i + 1
+            }
+            i += 1
+        }
+        if start < n { self.partial += text.$substring(start, n) }
+    }
+
+    fn push(&self, line: String) {
+        self.lines.push(line)
+        if self.lines.length() > KEEP {
+            // Drop a block at a time so this stays cheap.
+            var kept = vector::Vector<String>()
+            let from = self.lines.length() - KEEP + 1000
+            for i in from..self.lines.length() { kept.push(self.lines.get(i)) }
+            self.dropped += from
+            self.lines = kept
+        }
+    }
+
+    /// Every line, the unfinished one included.
+    pub fn lineCount(&self) -> i64 {
+        self.lines.length() + (if self.partial.$isEmpty() { 0 } else { 1 })
+    }
+
+    pub fn line(&self, i: i64) -> String {
+        if i < self.lines.length() { return self.lines.get(i) }
+        self.partial.$clone()
+    }
+
+    /// Asks it to stop; it is killed outright if it has not within a
+    /// moment and a half.
+    pub fn abort(&self) {
+        if !self.running { return }
+        self.aborted = true
+        self.termSent = time::now()
+        sys::kill(self.pid, sys::SIGTERM)
+    }
+
+    pub fn elapsed(&self) -> f64 {
+        if self.running { return self.started.elapsed().asSecondsFloat() }
+        self.seconds
+    }
+}
+
+/// `1.4s`, `2m 03s`.
+pub fn duration(seconds: f64) -> String {
+    if seconds < 60.0 {
+        let tenths = (seconds * 10.0) as i64
+        return (tenths / 10).$str() + "." + (tenths % 10).$str() + "s"
+    }
+    let whole = seconds as i64
+    let s = whole % 60
+    (whole / 60).$str() + "m " + (if s < 10 { "0" } else { "" }) + s.$str() + "s"
+}

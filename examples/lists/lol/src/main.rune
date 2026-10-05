@@ -1,0 +1,53 @@
+import std::{mem,io, process}
+
+pub struct List {
+    head: Link
+}
+
+enum Link {
+    Empty,
+    More(mem::Handle<Node>)
+    
+}
+
+struct Node {
+    elem:i32,
+    next: Link,
+}
+
+extend List {
+    pub fn new() -> Self {
+        List {head: Link::Empty}
+    }
+
+    pub fn push(&var self, elem:i32){
+        let new_node = mem::Handle<Node>(Node {
+            elem: elem,
+            next: mem::replace(&var self.head, Link::Empty)
+        })
+        self.head = Link::More(new_node)
+    }
+
+    pub fn pop(&var self) -> i32? {
+        match mem::replace(&var self.head, Link::Empty){
+            Link::Empty => None,
+            Link::More(node) => {
+                self.head = Link::More(node.duplicate())
+                Some(node.elem)
+            }
+        }
+    }
+}
+
+
+fn main() -> i64 {
+    
+    var list = List::new()
+    process::assert(list.pop() == .None,"Worked")
+    list.push(1);list.push(2);list.push(7)
+    list.pop()
+    list.pop()
+    io::println("Hello from lol!")
+    println!("{} years",list.pop().unwrap())
+    0
+}

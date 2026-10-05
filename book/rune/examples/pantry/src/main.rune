@@ -1,0 +1,38 @@
+import std::io
+import pantry::command
+import pantry::command::{Command}
+import pantry::inventory::{Item, Pantry}
+
+/// Carries out one command. Returns false when the program should stop.
+fn execute(pantry: &var Pantry, command: Command) -> bool {
+    match command {
+        Command::Add { name: take name, quantity, unit } => {
+            pantry.add(Item { name: name, quantity: quantity, unit: unit })
+        }
+        Command::Use { name, amount } => {
+            if !pantry.consume(&name, amount) {
+                println!("cannot use {} of {}", amount, name)
+            }
+        }
+        Command::List => {
+            for item in pantry.items {
+                let flag = if item.isLow() { "  (low)" } else { "" }
+                println!("{}{}", item.describe(), flag)
+            }
+        }
+        Command::Quit => return false,
+    }
+    true
+}
+
+fn main() {
+    var pantry = Pantry::new()
+    while io::readLineOrEnd() is Some(line) {
+        match command::parse(&line) {
+            Ok(c) => {
+                if !execute(&var pantry, c) { break }
+            }
+            Err(error) => println!("{}", command::explain(&error)),
+        }
+    }
+}

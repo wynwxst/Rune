@@ -1,0 +1,7 @@
+2026-03-01T10:15:02 INFO server started on port 8080
+2026-03-01T10:15:03 DEBUG loading config from /etc/app.toml
+2026-03-01T10:16:40 WARN disk usage at 91%
+2026-03-01T10:17:11 ERROR could not connect to database
+this line is not in the format
+2026-03-01T10:17:12 INFO retrying database connection
+2026-03-01T10:17:15 ERROR database timeout after 3 tries

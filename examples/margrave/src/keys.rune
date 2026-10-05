@@ -1,0 +1,1187 @@
+// What keys do.
+//
+// A key goes to the first thing that wants it: an open prompt on the bottom
+// line, then a popup or a dropdown, then the prefix chords that work
+// everywhere (moving between panes, stopping a command), then whatever has
+// focus — the shell output, an explorer, or an editor.
+
+import std::io
+import std::time
+import std::collections::vector
+import grve::app
+import grve::buffer
+import grve::config
+import grve::input
+import grve::layout
+import grve::pane
+import grve::sys
+import grve::utf
+
+extend app::App {
+    /// Exactly the prefix modifier held (Shift aside).
+    pub fn isPrefix(&self, k: &input::Key) -> bool {
+        (k.mods & (input::ALT | input::CTRL | input::SUPER)) == self.cfg.prefix
+    }
+
+    fn isCtrl(&self, k: &input::Key, c: i64) -> bool {
+        k.code == c && (k.mods & (input::ALT | input::CTRL | input::SUPER)) == input::CTRL && self.cfg.prefix != input::CTRL
+    }
+
+    pub fn handleKey(&self, k: input::Key) {
+        if k.code == input::MOUSE {
+            self.mouseKey(&k)
+            return
+        }
+        if self.prompt.active() {
+            self.promptKey(&k)
+            return
+        }
+        if !self.hover.isEmpty() {
+            // A panel taller than the screen scrolls with the arrows.
+            let more = self.hover.length() > self.hoverShown && !self.hoverByMouse
+            if more && k.mods == 0 && (k.code == input::UP || k.code == input::DOWN || k.code == input::PGUP || k.code == input::PGDN) {
+                let step = if k.code == input::UP { -1 } elif k.code == input::DOWN { 1 }
+                           elif k.code == input::PGUP { 0 - self.hoverShown + 1 } else { self.hoverShown - 1 }
+                var top = self.hoverTop + step
+                let most = self.hover.length() - self.hoverShown
+                if top > most { top = most }
+                if top < 0 { top = 0 }
+                self.hoverTop = top
+                return
+            }
+            // A panel asked for is put away by the next key, and that is all
+            // the key does. One the mouse brought up lets typing carry on.
+            let byMouse = self.hoverByMouse
+            self.hover.clear()
+            self.hoverByMouse = false
+            if !byMouse || k.code == input::ESC { return }
+        }
+        if self.menu.active() {
+            if self.menuKey(&k) { return }
+        }
+        if self.isPrefix(&k) && self.prefixKey(&k) { return }
+        if self.focus == app::OUTPUT {
+            self.outputKey(&k)
+            return
+        }
+        if self.focus == app::PEEK {
+            self.peekKey(&k)
+            return
+        }
+        let p = self.current()
+        if p.mode == pane::EXPLORER { self.explorerKey(p, &k) } else { self.editorKey(p, &k) }
+    }
+
+    //=== Everywhere ======================================================//
+
+    fn prefixKey(&self, k: &input::Key) -> bool {
+        if k.isArrow() && !k.shift() {
+            let dr = if k.code == input::UP { -1 } elif k.code == input::DOWN { 1 } else { 0 }
+            let dc = if k.code == input::LEFT { -1 } elif k.code == input::RIGHT { 1 } else { 0 }
+            self.moveFocus(dr, dc)
+            return true
+        }
+        let c = k.code
+        if c == 97 && !k.shift() { self.abortJob(); return true }                    // a
+        if c == 59 || c == 58 { self.openCommand(""); return true }                   // ; :
+        if c == 63 || (c == 47 && k.shift()) { self.showCommands(); return true }     // ?
+        if c == 47 { self.startSearch(); return true }                                // /
+        if c == 113 && !k.shift() { self.closePane(self.current().id, false); return true }   // q
+        if c == 92 { self.openSplit(self.current().dir, layout::ROW); return true }   // \
+        if c == 45 && !k.shift() { self.openSplit(self.current().dir, layout::COLUMN); return true }  // -
+        if c == 61 { self.layout.equalize(); return true }                            // =
+        if c == 57 { self.history(-1); return true }                                  // 9
+        if c == 48 { self.history(1); return true }                                   // 0
+        if c == 104 && k.shift() { self.showHelp(); return true }                     // H
+        false
+    }
+
+    /// Moves focus to the pane on the other side of a line.
+    pub fn moveFocus(&self, dr: i64, dc: i64) {
+        var rects = vector::Vector<layout::Rect>()
+        var ids = vector::Vector<i64>()
+        for placed in self.layout.placed {
+            rects.push(layout::Rect { row: placed.rect.row, col: placed.rect.col, height: placed.rect.height, width: placed.rect.width })
+            ids.push(placed.pane)
+        }
+        if self.outputVisible || self.peekVisible {
+            rects.push(layout::Rect { row: self.outputRect.row, col: self.outputRect.col, height: self.outputRect.height, width: self.outputRect.width })
+            ids.push(if self.peekVisible { app::PEEK } else { app::OUTPUT })
+        }
+        let from = if self.focus == app::OUTPUT || self.focus == app::PEEK { self.outputRect } else { self.layout.rectOf(self.focus) }
+        var others = vector::Vector<layout::Rect>()
+        var otherIds = vector::Vector<i64>()
+        var i = 0
+        while i < rects.length() {
+            if ids.get(i) != self.focus {
+                others.push(rects.get(i))
+                otherIds.push(ids.get(i))
+            }
+            i += 1
+        }
+        let row = if self.screen.cursorVisible { self.screen.cursorRow } else { from.row + from.height / 2 }
+        let col = if self.screen.cursorVisible { self.screen.cursorCol } else { from.col + from.width / 2 }
+        let found = layout::neighbour(&from, &others, dr, dc, row, col)
+        if found >= 0 { self.focusPane(otherIds.get(found)) }
+    }
+
+    //=== The bottom line =================================================//
+
+    pub fn openCommand(&self, text: &String) {
+        self.prompt = app::Prompt()
+        self.prompt.kind = app::PROMPT_COMMAND
+        self.prompt.label = ":"
+        self.prompt.text = text.$clone()
+        self.menu.kind = app::MENU_NONE
+        self.refreshCompletions()
+    }
+
+    pub fn askInput(&self, label: &String, purpose: &String, initial: &String) {
+        self.prompt = app::Prompt()
+        self.prompt.kind = app::PROMPT_INPUT
+        self.prompt.label = label.$clone()
+        self.prompt.purpose = purpose.$clone()
+        self.prompt.text = initial.$clone()
+    }
+
+    pub fn confirm(&self, question: &String, purpose: &String) {
+        self.prompt = app::Prompt()
+        self.prompt.kind = app::PROMPT_CONFIRM
+        self.prompt.label = question.$clone()
+        self.prompt.purpose = purpose.$clone()
+    }
+
+    fn promptKey(&self, k: &input::Key) {
+        let kind = self.prompt.kind
+        if kind == app::PROMPT_CONFIRM {
+            let yes = k.code == 121 || k.code == 89
+            let purpose = self.prompt.purpose.$clone()
+            self.prompt.kind = app::PROMPT_NONE
+            if yes { self.confirmed(purpose) } else { self.info("cancelled") }
+            return
+        }
+        if k.code == input::ESC {
+            self.prompt.kind = app::PROMPT_NONE
+            if kind == app::PROMPT_SEARCH { self.endSearch(false) }
+            return
+        }
+        if k.code == input::ENTER {
+            let text = self.prompt.text.$clone()
+            self.prompt.kind = app::PROMPT_NONE
+            if kind == app::PROMPT_COMMAND {
+                if !utf::trim(text).$isEmpty() {
+                    self.history.push(text.$clone())
+                    self.runCommand(text)
+                }
+            } elif kind == app::PROMPT_SEARCH {
+                self.endSearch(true)
+            } elif kind == app::PROMPT_INPUT {
+                self.inputDone(self.prompt.purpose.$clone(), text)
+            }
+            return
+        }
+        if kind == app::PROMPT_SEARCH && (k.code == input::LEFT || k.code == input::RIGHT || k.code == input::UP || k.code == input::DOWN) {
+            self.nextHit(if k.code == input::RIGHT || k.code == input::DOWN { 1 } else { -1 })
+            return
+        }
+        if kind == app::PROMPT_COMMAND && (k.code == input::UP || k.code == input::DOWN) {
+            if self.prompt.items.length() > 0 {
+                let n = self.prompt.items.length()
+                self.prompt.selected = (self.prompt.selected + (if k.code == input::DOWN { 1 } else { -1 }) + n) % n
+                return
+            }
+            self.historyStep(if k.code == input::UP { -1 } else { 1 })
+            return
+        }
+        if k.code == input::TAB && kind == app::PROMPT_COMMAND {
+            self.takeCompletion()
+            return
+        }
+        var changed = false
+        if k.code == input::BACKSPACE {
+            if self.prompt.text.$isEmpty() {
+                self.prompt.kind = app::PROMPT_NONE
+                if kind == app::PROMPT_SEARCH { self.endSearch(false) }
+                return
+            }
+            if k.only(self.cfg.prefix) || self.isCtrl(k, input::BACKSPACE) {
+                self.prompt.text = dropWord(self.prompt.text)
+            } else {
+                self.prompt.text = self.prompt.text.$substring(0, utf::prev(self.prompt.text, self.prompt.text.$length()))
+            }
+            changed = true
+        } elif self.isCtrl(k, 117) {                          // ctrl+u
+            self.prompt.text = ""
+            changed = true
+        } elif self.isCtrl(k, 119) {                          // ctrl+w
+            self.prompt.text = dropWord(self.prompt.text)
+            changed = true
+        } elif k.code == input::PASTE {
+            self.prompt.text += buffer::splitLines(k.text).get(0)
+            changed = true
+        } elif k.types() {
+            self.prompt.text += k.text
+            changed = true
+        }
+        if changed {
+            if kind == app::PROMPT_COMMAND { self.refreshCompletions() }
+            elif kind == app::PROMPT_SEARCH { self.updateSearch() }
+        }
+    }
+
+    fn historyStep(&self, delta: i64) {
+        let n = self.history.length()
+        if n == 0 { return }
+        var at = if self.prompt.historyAt < 0 { n } else { self.prompt.historyAt }
+        at += delta
+        if at < 0 { at = 0 }
+        if at >= n {
+            self.prompt.historyAt = -1
+            self.prompt.text = ""
+        } else {
+            self.prompt.historyAt = at
+            self.prompt.text = self.history.get(at)
+        }
+        self.refreshCompletions()
+    }
+
+    fn confirmed(&self, purpose: String) {
+        let parts = buffer::splitLines(purpose)
+        if parts.length() >= 3 && parts.look(0) == "run" {
+            self.run(parts.look(1), parts.look(2))
+        } elif parts.look(0) == "reload" {
+            let p = self.current()
+            if p.hasDoc {
+                p.doc.read()
+                p.clampCursor()
+                self.info("reloaded " + p.doc.name())
+            }
+        }
+    }
+
+    fn inputDone(&self, purpose: String, text: String) {
+        if utf::startsWith(purpose, "mkdir\n") {
+            let name = utf::trim(text)
+            if name.$isEmpty() { return }
+            let dir = purpose.$substring(6, purpose.$length())
+            let target = self.resolve(name, dir)
+            if sys::isDirectory(target) { self.info(self.shown(target) + " is there already") }
+            else {
+                match io::makeDirectories(target) {
+                    Some(e) => { self.fail("could not make " + self.shown(target) + ": " + io::describe(e)); return },
+                    None => self.good("made " + self.shown(target)),
+                }
+            }
+            self.refreshExplorers()
+            let p = self.current()
+            if p.mode == pane::EXPLORER && utf::dirName(target) == p.dir { p.selectName(utf::baseName(target)) }
+            return
+        }
+        if purpose == "rename" {
+            if !utf::trim(text).$isEmpty() { self.requestRename(utf::trim(text)) }
+        } elif purpose == "goto" {
+            self.runCommand(text)
+        }
+    }
+
+    //=== Searching =======================================================//
+
+    pub fn startSearch(&self) {
+        let p = self.current()
+        if self.focus == app::OUTPUT { return }
+        self.prompt = app::Prompt()
+        self.prompt.kind = app::PROMPT_SEARCH
+        self.prompt.label = "/"
+        self.menu.kind = app::MENU_NONE
+        self.search = app::Search()
+        self.search.pane = p.id
+        self.search.origin = if p.mode == pane::EDITOR { buffer::pos(p.cursor.line, p.cursor.col) } else { buffer::pos(p.selected, 0) }
+        self.search.version = p.doc.version
+    }
+
+    /// Recompiles the pattern and finds every hit, moving to the first one
+    /// at or after where the search started.
+    pub fn updateSearch(&self) {
+        let p = match self.paneById(self.search.pane) { Some(x) => x, None => return }
+        self.search.pattern = self.prompt.text.$clone()
+        self.search.hits = vector::Vector<app::Hit>()
+        self.search.current = -1
+        self.search.error = ""
+        self.search.showing = true
+        if self.search.pattern.$isEmpty() {
+            self.search.regex = nil
+            self.backToOrigin(p)
+            return
+        }
+        let re = sys::Regex(self.search.pattern, !utf::hasUpper(self.search.pattern))
+        if !re.valid() {
+            self.search.error = re.error.$clone()
+            self.search.regex = nil
+            return
+        }
+        self.search.regex = re
+        self.collectHits(p, re)
+        if self.search.hits.isEmpty() {
+            self.backToOrigin(p)
+            return
+        }
+        // The first hit at or after the start.
+        var pick = 0
+        var i = 0
+        while i < self.search.hits.length() {
+            let h = self.search.hits.look(i)
+            if h.line > self.search.origin.line || (h.line == self.search.origin.line && h.start >= self.search.origin.col) {
+                pick = i
+                break
+            }
+            i += 1
+        }
+        self.search.current = pick
+        self.showHit(p)
+    }
+
+    fn collectHits(&self, p: pane::Pane, re: sys::Regex) {
+        var hits = vector::Vector<app::Hit>()
+        if p.mode == pane::EXPLORER {
+            var i = 0
+            while i < p.entries.length() {
+                let name = p.entries.look(i).name.$clone()
+                match re.find(name, 0) {
+                    Some((s, e)) => { if e > s { hits.push(app::Hit { line: i, start: s, end: e }) } },
+                    None => {},
+                }
+                i += 1
+            }
+        } else {
+            let n = p.doc.lineCount()
+            var l = 0
+            while l < n && hits.length() < 100000 {
+                let text = p.doc.line(l)
+                var from = 0
+                while from <= text.$length() {
+                    match re.find(text, from) {
+                        Some((s, e)) => {
+                            if e > s { hits.push(app::Hit { line: l, start: s, end: e }) }
+                            from = if e > s { e } else { s + 1 }
+                        },
+                        None => break,
+                    }
+                }
+                l += 1
+            }
+        }
+        self.search.hits = hits
+        self.search.version = p.doc.version
+    }
+
+    fn backToOrigin(&self, p: pane::Pane) {
+        if p.mode == pane::EXPLORER {
+            p.selected = self.search.origin.line
+        } else {
+            p.selecting = false
+            p.setCursor(&self.search.origin, self.cfg.tabWidth)
+            p.reveal(self.cfg.scrollOff, self.cfg.tabWidth)
+        }
+    }
+
+    fn showHit(&self, p: pane::Pane) {
+        if self.search.current < 0 || self.search.current >= self.search.hits.length() { return }
+        let h = self.search.hits.get(self.search.current)
+        if p.mode == pane::EXPLORER {
+            p.selected = h.line
+            return
+        }
+        p.selecting = false
+        p.setCursor(buffer::pos(h.line, h.start), self.cfg.tabWidth)
+        let rows = p.textRows
+        if h.line < p.top || h.line >= p.top + rows { p.centre() }
+        p.reveal(self.cfg.scrollOff, self.cfg.tabWidth)
+    }
+
+    /// The next (1) or previous (-1) hit, round the end.
+    pub fn nextHit(&self, delta: i64) {
+        let p = match self.paneById(self.search.pane) { Some(x) => x, None => return }
+        if p.hasDoc && p.mode == pane::EDITOR && self.search.version != p.doc.version {
+            match self.search.regex {
+                Some(re) => self.collectHits(p, re),
+                None => {},
+            }
+        }
+        let n = self.search.hits.length()
+        if n == 0 {
+            self.info(if self.search.pattern.$isEmpty() { "nothing to search for" } else { "no matches" })
+            return
+        }
+        var at = self.search.current
+        if at < 0 { at = 0 }
+        else { at = (at + delta + n) % n }
+        self.search.current = at
+        self.search.showing = true
+        self.showHit(p)
+    }
+
+    /// Leaving search: Enter keeps the hits on screen and selects the
+    /// current one; Escape clears them.
+    fn endSearch(&self, keep: bool) {
+        let p = match self.paneById(self.search.pane) { Some(x) => x, None => return }
+        if !keep {
+            self.search.showing = false
+            return
+        }
+        if self.search.hits.isEmpty() || self.search.current < 0 {
+            self.search.showing = false
+            return
+        }
+        if p.mode == pane::EDITOR {
+            let h = self.search.hits.get(self.search.current)
+            p.anchor = buffer::pos(h.line, h.start)
+            p.cursor = buffer::pos(h.line, h.end)
+            p.selecting = true
+        }
+    }
+
+    //=== Dropdowns =======================================================//
+
+    /// True when the key was the menu's.
+    fn menuKey(&self, k: &input::Key) -> bool {
+        let completion = self.menu.kind == app::MENU_COMPLETION
+        if k.code == input::ESC && k.mods == 0 { self.menu.kind = app::MENU_NONE; return true }
+        if k.code == input::UP && k.mods == 0 { self.menu.move(-1); return true }
+        if k.code == input::DOWN && k.mods == 0 { self.menu.move(1); return true }
+        if k.code == input::PGUP { self.menu.move(-8); return true }
+        if k.code == input::PGDN { self.menu.move(8); return true }
+        if (k.code == input::TAB && !k.shift()) || (k.code == input::ENTER && k.mods == 0) {
+            if completion { self.acceptCompletion(); return true }
+            self.chooseMenu()
+            return true
+        }
+        if completion { return false }
+        // Anything else closes a list and is handled as usual.
+        self.menu.kind = app::MENU_NONE
+        false
+    }
+
+    fn chooseMenu(&self) {
+        let it = match self.menu.current() { Some(x) => x, None => { self.menu.kind = app::MENU_NONE; return } }
+        let kind = self.menu.kind
+        self.menu.kind = app::MENU_NONE
+        if kind == app::MENU_LOCATIONS {
+            self.peekNext = self.menu.peek
+            self.jumpTo(it.path, it.line, it.col)
+        } elif kind == app::MENU_ACTIONS {
+            self.runCodeAction(it.data)
+        } elif kind == app::MENU_LSP {
+            self.lspAction(it.data)
+        }
+    }
+
+    pub fn openLspMenu(&self) {
+        let p = self.current()
+        if !p.hasDoc || p.mode != pane::EDITOR { self.info("open a file first"); return }
+        let pre = self.cfg.prefixName() + "+"
+        var items = vector::Vector<app::Item>()
+        let t = self.cfg.theme
+        items.push(app::Item { label: "Go to definition", detail: pre + "d", icon: "→", iconColor: t.accent, data: "definition" })
+        items.push(app::Item { label: "Show documentation", detail: pre + "k", icon: "?", iconColor: t.accent, data: "hover" })
+        items.push(app::Item { label: "Find references", detail: pre + "r", icon: "⇆", iconColor: t.accent, data: "references" })
+        items.push(app::Item { label: "Document symbols", detail: pre + "o", icon: "≡", iconColor: t.accent, data: "symbols" })
+        items.push(app::Item { label: "Code actions", detail: pre + ".", icon: "✦", iconColor: t.gold, data: "actions" })
+        items.push(app::Item { label: "Rename symbol", detail: pre + "n", icon: "✎", iconColor: t.gold, data: "rename" })
+        items.push(app::Item { label: "Format document", detail: pre + "f", icon: "¶", iconColor: t.gold, data: "format" })
+        items.push(app::Item { label: "Diagnostics on this line", detail: pre + "e", icon: "●", iconColor: t.error, data: "diagnostics" })
+        items.push(app::Item { label: "Complete word", detail: "tab", icon: "…", iconColor: t.muted, data: "complete" })
+        items.push(app::Item { label: "Restart language server", detail: ":lsp", icon: "↻", iconColor: t.muted, data: "restart" })
+        self.openMenu(app::MENU_LSP, "language", items)
+    }
+
+    fn lspAction(&self, what: &String) {
+        if what == "definition" { self.requestDefinition() }
+        elif what == "hover" { self.requestHover() }
+        elif what == "references" { self.requestReferences() }
+        elif what == "symbols" { self.requestSymbols() }
+        elif what == "actions" { self.requestCodeActions() }
+        elif what == "rename" { self.askInput("rename to: ", "rename", self.current().wordAt()) }
+        elif what == "format" { self.requestFormat() }
+        elif what == "diagnostics" { self.showLineDiagnostics() }
+        elif what == "complete" { self.requestCompletion() }
+        elif what == "restart" { self.restartServers() }
+    }
+
+    fn showLineDiagnostics(&self) {
+        let p = self.current()
+        var lines = vector::Vector<String>()
+        for d in p.doc.diagnostics {
+            if p.cursor.line >= d.line && p.cursor.line <= d.endLine {
+                let what = if d.severity == 1 { "error" } elif d.severity == 2 { "warning" } elif d.severity == 3 { "info" } else { "hint" }
+                let source = if d.source.$isEmpty() { "" } else { " (" + d.source + ")" }
+                for piece in buffer::splitLines(what + source + ": " + d.message) {
+                    for w in wrapText(piece, 76) { lines.push(w.$clone()) }
+                }
+            }
+        }
+        if lines.isEmpty() { self.info("no diagnostics on this line"); return }
+        self.hover = lines
+        self.hoverTitle = "diagnostics"
+    }
+
+    //=== The shell output ================================================//
+
+    fn outputKey(&self, k: &input::Key) {
+        let rows = self.outputRect.height - 1
+        let total = if self.hasJob { self.job.lineCount() } else { 0 }
+        let most = if total - rows > 0 { total - rows } else { 0 }
+        if k.code == input::ENTER || (k.code == 113 && k.mods == 0) {
+            if self.hasJob && self.job.running {
+                self.info("still running — " + self.cfg.prefixName() + "+a stops it")
+            } else {
+                self.dismissOutput()
+            }
+            return
+        }
+        if k.code == input::ESC { self.focusPane(self.lastPane); return }
+        if k.code == 58 && k.mods == 0 { self.openCommand(""); return }
+        var top = if self.outputFollow { most } else { self.outputTop }
+        if k.code == input::UP { top -= 1 }
+        elif k.code == input::DOWN { top += 1 }
+        elif k.code == input::PGUP { top -= rows - 1 }
+        elif k.code == input::PGDN { top += rows - 1 }
+        elif k.code == input::HOME { top = 0 }
+        elif k.code == input::END { top = most }
+        else { return }
+        if top < 0 { top = 0 }
+        if top > most { top = most }
+        self.outputTop = top
+        self.outputFollow = top >= most
+    }
+
+    //=== The peek panel ==================================================//
+
+    /// Read-only: move and scroll as in the editor, `/` to search from the
+    /// cursor, `n`/`N` between hits, and enter (or esc, or q) to put it away.
+    fn peekKey(&self, k: &input::Key) {
+        let p = self.peek
+        let plain = k.mods == 0 || k.mods == input::SHIFT
+        if (k.code == input::ENTER || k.code == input::ESC) && k.mods == 0 { self.closePeek(); return }
+        if plain && k.code == 113 { self.closePeek(); return }                          // q
+        if plain && k.code == 47 { self.startSearch(); return }                         // /
+        if plain && k.code == 110 { self.nextHit(if k.shift() { -1 } else { 1 }); return }   // n N
+        if plain && k.code == 78 { self.nextHit(-1); return }
+        self.editorKey(p, k)
+    }
+
+    //=== The explorer ====================================================//
+
+    fn explorerKey(&self, p: pane::Pane, k: &input::Key) {
+        let rows = if p.textRows > 0 { p.textRows } else { 10 }
+        let c = k.code
+        let plain = k.mods == 0 || k.mods == input::SHIFT
+        if c == input::UP { p.moveSelection(-1) }
+        elif c == input::DOWN { p.moveSelection(1) }
+        elif c == input::PGUP { p.moveSelection(0 - rows + 1) }
+        elif c == input::PGDN { p.moveSelection(rows - 1) }
+        elif c == input::HOME { p.selected = 0 }
+        elif c == input::END { p.selected = p.entries.length() - 1 }
+        elif c == input::ENTER { self.activate(p, true) }
+        elif c == input::RIGHT { self.activate(p, false) }
+        elif c == input::LEFT || c == input::BACKSPACE { p.up(self.cfg.showHidden) }
+        elif c == input::ESC {
+            if p.hasDoc { p.mode = pane::EDITOR }
+        }
+        elif self.isCtrl(k, 113) { self.quit(false) }
+        elif plain && c == 58 { self.openCommand("") }                              // :
+        elif plain && c == 47 { self.startSearch() }                                // /
+        elif plain && c == 33 { self.openCommand("sh ") }                           // !
+        elif plain && c == 46 {                                                     // .
+            self.cfg.showHidden = !self.cfg.showHidden
+            p.list(p.dir, self.cfg.showHidden)
+            self.info(if self.cfg.showHidden { "showing hidden files" } else { "hiding hidden files" })
+        }
+        elif plain && c == 101 { self.activate(p, false) }                          // e
+        elif plain && c == 111 { self.openSplit(p.selectedPath(), layout::ROW) }    // o
+        elif plain && c == 115 { self.openSplit(p.selectedPath(), layout::COLUMN) } // s
+        elif plain && c == 114 { p.list(p.dir, self.cfg.showHidden); self.info("refreshed") }   // r
+        elif plain && c == 110 { self.openCommand("e " + self.typedDir(p.dir)) }    // n
+        elif plain && c == 100 { self.askInput("new folder: ", "mkdir\n" + p.dir, "") }  // d
+        elif plain && c == 103 { self.openCommand("g ") }                           // g
+        elif plain && c == 126 { p.list(self.home, self.cfg.showHidden) }           // ~
+        elif plain && c == 121 {                                                    // y
+            let path = p.selectedPath()
+            self.copy(path)
+            self.lineClip = false
+            self.info("copied " + self.shown(path))
+        }
+        elif plain && c == 113 { self.closePane(p.id, false) }                      // q
+        elif plain && c == 63 { self.showHelp() }                                   // ?
+        elif plain && k.types() {
+            // Any other letter jumps to the next name starting with it.
+            self.jumpToLetter(p, k.text)
+        }
+        p.showSelection(rows)
+    }
+
+    /// A folder as it would be typed on the command line, relative to the
+    /// working directory, ending in `/` — or nothing for the working
+    /// directory itself.
+    fn typedDir(&self, dir: &String) -> String {
+        if dir == self.cwd { return "" }
+        let shown = self.shown(dir)
+        if utf::endsWith(shown, "/") { shown } else { shown + "/" }
+    }
+
+    fn jumpToLetter(&self, p: pane::Pane, letter: &String) {
+        let want = utf::lower(letter)
+        let n = p.entries.length()
+        var i = 1
+        while i <= n {
+            let at = (p.selected + i) % n
+            if utf::startsWith(utf::lower(p.entries.look(at).name), want) {
+                p.selected = at
+                return
+            }
+            i += 1
+        }
+    }
+
+    /// Enter (with actions) or Right (without) on the selection.
+    fn activate(&self, p: pane::Pane, withActions: bool) {
+        let e = match p.selectedEntry() { Some(x) => x, None => return }
+        if e.name == ".." { p.up(self.cfg.showHidden); return }
+        let path = utf::join(p.dir, e.name)
+        if e.isDir {
+            p.list(path, self.cfg.showHidden)
+            return
+        }
+        if withActions {
+            match self.cfg.actionFor(path) {
+                Some(a) => {
+                    let command = self.actionCommand(&a, path)
+                    if a.confirm {
+                        self.confirm("run `" + command + "`? [y/N]", "run\n" + command + "\n" + p.dir)
+                    } else {
+                        self.run(command, p.dir)
+                    }
+                    return
+                },
+                None => {},
+            }
+        }
+        self.openIn(p, path)
+    }
+
+    //=== The editor ======================================================//
+
+    fn editorKey(&self, p: pane::Pane, k: &input::Key) {
+        let tab = self.cfg.tabWidth
+        let c = k.code
+        let shift = k.shift()
+        let version = p.doc.version
+        let before = buffer::pos(p.cursor.line, p.cursor.col)
+        // Escape closes the signature before it leaves the editor.
+        if c == input::ESC && k.mods == 0 && self.sigPane == p.id && !self.sigLabel.$isEmpty() {
+            self.hideSignature()
+            return
+        }
+        var keepMenu = false
+
+        if self.isPrefix(k) {
+            if k.isArrow() && shift {
+                p.selecting = false
+                if c == input::LEFT { p.wordLeft(false, tab) }
+                elif c == input::RIGHT { p.wordRight(false, tab) }
+                elif c == input::UP { p.paragraph(false, false, tab) }
+                else { p.paragraph(true, false, tab) }
+            }
+            elif c == 99 { self.copySelection(p, false) }                       // c
+            elif c == 120 { self.copySelection(p, true) }                       // x
+            elif c == 118 { self.pasteInto(p) }                                 // v
+            elif c == 93 { p.shiftLines(1, self.cfg) }                          // ]
+            elif c == 91 { p.shiftLines(-1, self.cfg) }                         // [
+            elif c == input::BACKSPACE || c == input::DELETE { p.deleteLines(self.cfg) }
+            elif c == 115 { self.save(p.doc) }                                  // s
+            elif c == 122 && shift { self.redo(p) }                             // Z
+            elif c == 122 { self.undo(p) }                                      // z
+            elif c == 121 { self.redo(p) }                                      // y
+            elif c == 108 { self.openLspMenu() }                                // l
+            elif c == 100 && shift { self.peekNext = true; self.requestDefinition() }   // D: peek
+            elif c == 114 && shift { self.peekNext = true; self.requestReferences() }   // R: peek
+            elif c == 111 && shift { self.peekNext = true; self.requestSymbols() }      // O: peek
+            elif c == 100 { self.requestDefinition() }                          // d
+            elif c == 107 { self.requestHover() }                               // k
+            elif c == 114 { self.requestReferences() }                          // r
+            elif c == 111 { self.requestSymbols() }                             // o
+            elif c == 102 { self.requestFormat() }                              // f
+            elif c == 101 { self.showLineDiagnostics() }                        // e
+            elif c == 46 { self.requestCodeActions() }                          // .
+            elif c == 110 && shift { self.nextHit(-1) }                         // N
+            elif c == 110 { self.lspAction("rename") }                          // n
+            elif c == 112 { self.nextHit(-1) }                                  // p
+            elif c == 106 { self.nextHit(1) }                                   // j
+            elif c == 103 { self.askInput("go to line: ", "goto", "") }         // g
+            elif c == 47 { self.startSearch() }                                 // /
+            elif c == input::ENTER { self.splitHere(p) }
+            else { return }
+        }
+        elif self.isCtrl(k, 115) { self.save(p.doc) }                           // ctrl+s
+        elif self.isCtrl(k, 122) { self.undo(p) }                               // ctrl+z
+        elif self.isCtrl(k, 121) { self.redo(p) }                               // ctrl+y
+        elif self.isCtrl(k, 97) { p.selectAll() }                               // ctrl+a
+        elif self.isCtrl(k, 99) { self.copySelection(p, false) }                // ctrl+c
+        elif self.isCtrl(k, 120) { self.copySelection(p, true) }                // ctrl+x
+        elif self.isCtrl(k, 118) { self.pasteInto(p) }                          // ctrl+v
+        elif self.isCtrl(k, 102) { self.startSearch() }                         // ctrl+f
+        elif self.isCtrl(k, 113) { self.quit(false) }                           // ctrl+q
+        elif self.isCtrl(k, 32) { self.requestCompletion(); keepMenu = true }   // ctrl+space
+        elif c == input::LEFT && k.only(0) { p.left1(shift, tab) }
+        elif c == input::RIGHT && k.only(0) { p.right1(shift, tab) }
+        elif c == input::UP && k.only(0) { p.vertical(-1, shift, tab) }
+        elif c == input::DOWN && k.only(0) { p.vertical(1, shift, tab) }
+        elif c == input::LEFT && k.only(input::CTRL) { p.wordLeft(shift, tab) }
+        elif c == input::RIGHT && k.only(input::CTRL) { p.wordRight(shift, tab) }
+        elif c == input::HOME && k.only(input::CTRL) { p.documentEdge(false, shift, tab) }
+        elif c == input::END && k.only(input::CTRL) { p.documentEdge(true, shift, tab) }
+        elif c == input::HOME { p.home(shift, tab) }
+        elif c == input::END { p.end(shift, tab) }
+        elif c == input::PGUP { p.vertical(0 - (p.textRows - 1), shift, tab); p.top -= p.textRows - 1; if p.top < 0 { p.top = 0 } }
+        elif c == input::PGDN { p.vertical(p.textRows - 1, shift, tab); p.top += p.textRows - 1 }
+        elif c == input::ESC {
+            if self.cfg.autoSave && p.doc.dirty() && !p.doc.path.$isEmpty() { self.save(p.doc) }
+            p.selecting = false
+            p.mode = pane::EXPLORER
+            if p.dir.$isEmpty() || !sys::isDirectory(p.dir) { p.dir = self.cwd.$clone() }
+            p.list(p.dir, self.cfg.showHidden)
+            if !p.doc.path.$isEmpty() { p.selectName(utf::baseName(p.doc.path)) }
+            p.showSelection(p.textRows)
+            return
+        }
+        elif c == input::ENTER { p.newline(self.cfg) }
+        elif c == input::TAB && shift { p.shiftLines(-1, self.cfg) }
+        elif c == input::TAB { keepMenu = self.tabKey(p) }
+        elif c == input::BACKSPACE && k.only(input::CTRL) { p.wordLeft(true, tab); p.backspace(self.cfg) }
+        elif c == input::BACKSPACE { p.backspace(self.cfg); keepMenu = true }
+        elif c == input::DELETE { p.deleteForward(self.cfg) }
+        elif c == input::PASTE { p.insertBlock(normaliseNewlines(k.text), self.cfg) }
+        elif k.types() {
+            p.typeText(k.text, self.cfg)
+            keepMenu = true
+        }
+        else { return }
+
+        // Search hits drawn for an older version of the text hide themselves
+        // (view.rune checks the version); alt+j finds them again.
+        if p.doc.version != version { self.lastEdit = time::now() }
+        // An open completion list follows the word being typed.
+        if self.menu.kind == app::MENU_COMPLETION {
+            if keepMenu && self.menu.pane == p.id {
+                let (start, word) = p.wordBefore()
+                let anyStart = self.menu.all.length() > 0 && self.menu.all.look(0).from >= 0 && self.menu.all.look(0).from <= p.cursor.col
+                if word.$isEmpty() && !anyStart {
+                    self.menu.kind = app::MENU_NONE
+                } else {
+                    self.filterCompletion()
+                    if self.menu.items.isEmpty() { self.menu.kind = app::MENU_NONE }
+                }
+            } elif !keepMenu {
+                self.menu.kind = app::MENU_NONE
+            }
+        }
+        // Signature help: opened by `(` and `,`, and kept up to date while
+        // the cursor moves inside the call.
+        if k.types() && (k.text == "(" || k.text == ",") {
+            self.requestSignature()
+        } elif self.sigPane == p.id && !self.sigLabel.$isEmpty() {
+            if p.cursor.line != before.line { self.hideSignature() }
+            elif !p.cursor.equals(&before) || p.doc.version != version { self.requestSignature() }
+        }
+        p.reveal(self.cfg.scrollOff, tab)
+    }
+
+    /// Tab: indent where there is only indent before the cursor (or lines
+    /// are selected), complete otherwise. True when a list opened.
+    fn tabKey(&self, p: pane::Pane) -> bool {
+        if p.doc.readOnly { return false }
+        match p.selection() {
+            Some((a, b)) => {
+                if a.line != b.line { p.shiftLines(1, self.cfg); return false }
+            },
+            None => {},
+        }
+        let before = p.line().$substring(0, p.cursor.col)
+        if utf::isBlank(before) {
+            if p.usesTabs(self.cfg) {
+                p.typeText("\t", self.cfg)
+            } else {
+                let w = p.indentWidth(self.cfg)
+                let col = utf::columnOf(p.line(), p.cursor.col, self.cfg.tabWidth)
+                let n = w - (col % w)
+                p.doc.beginGroup(&p.cursor)
+                p.cursor = p.doc.insert(&p.cursor, utf::spaces(n))
+            }
+            return false
+        }
+        self.requestCompletion()
+        true
+    }
+
+    fn undo(&self, p: pane::Pane) {
+        match p.doc.undo() {
+            Some(at) => { p.selecting = false; p.setCursor(&at, self.cfg.tabWidth); p.reveal(self.cfg.scrollOff, self.cfg.tabWidth) },
+            None => self.info("nothing to undo"),
+        }
+        self.syncOtherPanes(p)
+    }
+
+    fn redo(&self, p: pane::Pane) {
+        match p.doc.redo() {
+            Some(at) => { p.selecting = false; p.setCursor(&at, self.cfg.tabWidth); p.reveal(self.cfg.scrollOff, self.cfg.tabWidth) },
+            None => self.info("nothing to redo"),
+        }
+        self.syncOtherPanes(p)
+    }
+
+    fn syncOtherPanes(&self, p: pane::Pane) {
+        for q in self.panes {
+            if q.id != p.id && q.hasDoc && q.doc.path == p.doc.path { q.clampCursor() }
+        }
+        self.lastEdit = time::now()
+    }
+
+    /// Copies (or cuts) the selection — or, with nothing selected, the line.
+    fn copySelection(&self, p: pane::Pane, cut: bool) {
+        match p.selection() {
+            Some((a, b)) => {
+                self.copy(p.doc.slice(&a, &b))
+                self.lineClip = false
+                if cut {
+                    p.doc.beginGroup(&p.cursor)
+                    p.deleteSelection()
+                    self.lastEdit = time::now()
+                }
+                self.info(if cut { "cut" } else { "copied" })
+            },
+            None => {
+                let line = p.line() + "\n"
+                self.copy(line)
+                self.lineClip = true
+                if cut { p.deleteLines(self.cfg); self.lastEdit = time::now() }
+                self.info(if cut { "cut line" } else { "copied line" })
+            },
+        }
+    }
+
+    fn pasteInto(&self, p: pane::Pane) {
+        let text = normaliseNewlines(self.paste())
+        if text.$isEmpty() { self.info("the clipboard is empty"); return }
+        if self.lineClip && text == self.clipboard && p.selection().isNil() {
+            // Whole lines go in above this one, the cursor staying put.
+            p.doc.beginGroup(&p.cursor)
+            p.doc.insert(buffer::pos(p.cursor.line, 0), text)
+            let added = buffer::splitLines(text).length() - 1
+            p.cursor = buffer::pos(p.cursor.line + added, p.cursor.col)
+        } else {
+            p.insertBlock(text, self.cfg)
+        }
+        self.lastEdit = time::now()
+    }
+
+    /// prefix+Enter: the same file again, in a split on the right.
+    fn splitHere(&self, p: pane::Pane) {
+        if !p.hasDoc { return }
+        let cursor = buffer::pos(p.cursor.line, p.cursor.col)
+        let q = self.splitPane(layout::ROW)
+        q.open(p.doc)
+        q.setCursor(&cursor, self.cfg.tabWidth)
+        q.top = p.top
+    }
+
+    pub fn showHelp(&self) {
+        let p = self.current()
+        let d = buffer::Document("")
+        d.title = "help"
+        d.readOnly = false
+        d.beginGroup(buffer::pos(0, 0))
+        d.insert(buffer::pos(0, 0), helpText(self.cfg))
+        d.readOnly = true
+        d.markClean()
+        d.language = self.cfg.languageFor("help.md")
+        p.open(d)
+    }
+}
+
+fn dropWord(s: &String) -> String {
+    var i = s.$length()
+    while i > 0 && (s.$byteAt(i - 1) as i64) == 32 { i -= 1 }
+    while i > 0 && (s.$byteAt(i - 1) as i64) != 32 && (s.$byteAt(i - 1) as i64) != 47 { i -= 1 }
+    s.$substring(0, i)
+}
+
+fn normaliseNewlines(s: &String) -> String {
+    if utf::findFrom(s, "\r", 0) < 0 { return s.$clone() }
+    var out = ""
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        if b == 13 {
+            if i + 1 < s.$length() && (s.$byteAt(i + 1) as i64) == 10 { i += 1; continue }
+            out += "\n"
+        } else {
+            out += s.$substring(i, i + 1)
+        }
+        i += 1
+    }
+    out
+}
+
+fn wrapText(text: &String, width: i64) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var rest = text.$clone()
+    while utf::displayWidth(rest) > width {
+        var cut = utf::byteAtColumn(rest, width, 4)
+        var k = cut
+        while k > 0 && (rest.$byteAt(k) as i64) != 32 { k -= 1 }
+        if k > width / 3 { cut = k }
+        out.push(rest.$substring(0, cut))
+        var next = cut
+        while next < rest.$length() && (rest.$byteAt(next) as i64) == 32 { next += 1 }
+        rest = rest.$substring(next, rest.$length())
+    }
+    out.push(rest)
+    out
+}
+
+fn helpText(cfg: config::Config) -> String {
+    let p = cfg.prefixName()
+    let lines: [64:String] = [
+        "# margrave",
+        "",
+        "Every chord starts with the prefix, which is **" + p + "** (`[keys] prefix` in config.toml).",
+        "",
+        "## Everywhere",
+        "- `" + p + "+arrows`        move between panes",
+        "- `" + p + "+;`             command line (`:` in the explorer)",
+        "- `" + p + "+/`             search",
+        "- `" + p + "+a`             stop the running shell command",
+        "- `" + p + "+q`             close the pane (the last one quits)",
+        "- `" + p + "+\\` / `" + p + "+-`   split right / below",
+        "- `" + p + "+=`             make every split even",
+        "- `" + p + "+9` / `" + p + "+0`   back / forward through files and jumps",
+        "",
+        "## Explorer",
+        "- `up` `down` `pgup` `pgdn`   move",
+        "- `enter`   open, or run the file's action (actions.toml)",
+        "- `right` / `e`   open without the action;  `left`   up a folder",
+        "- `o` / `s`   open in a split right / below",
+        "- `/`   search names (regex);  `:`   command;  `!`   shell command",
+        "- `.` hidden files;  `r` refresh;  `y` copy path;  `~` home;  `n` new file;  `d` new folder",
+        "- `esc`   back to the open file",
+        "",
+        "## Editor",
+        "- `shift+arrows`   select;  `" + p + "+shift+arrows`   jump by word / paragraph",
+        "- `" + p + "+c` `" + p + "+x` `" + p + "+v`   copy, cut, paste (the line, when nothing is selected)",
+        "- `" + p + "+]` `" + p + "+[`   indent, dedent;  `" + p + "+delete`   delete the line",
+        "- `( [ { \" ' ``  close themselves; type the closer to step over it; with a selection, they wrap it",
+        "- `" + p + "+s`   save;  `" + p + "+z` / `" + p + "+y`   undo / redo",
+        "- `tab`   complete (a dropdown: arrows, tab/enter to take, esc to close); indents at the start of a line",
+        "- `" + p + "+/`   search (regex, smart case): type to highlight, `left`/`right` between hits,",
+        "  `enter` selects the hit, `esc` clears;  `" + p + "+j` / `" + p + "+p` next / previous hit later",
+        "- `" + p + "+g`   go to line;  `" + p + "+enter`   this file again, split right",
+        "- `esc`   back to the explorer",
+        "- mouse: click moves the cursor (and focuses the pane), drag selects, shift+click extends,",
+        "  double click selects a word (opens, in the explorer), the wheel scrolls;",
+        "  `[editor] mouse = false` gives clicks back to the terminal",
+        "",
+        "## Language server",
+        "- `" + p + "+l`   the language menu",
+        "- rest the mouse on a name for its signature and doc comment; " + p + "+d shows them after the jump",
+        "- typing a call shows its signature, the current argument picked out; esc hides it",
+        "- `" + p + "+d` definition   `" + p + "+k` docs   `" + p + "+r` references   `" + p + "+o` symbols",
+        "- `" + p + "+shift+d/r/o`   the same, read-only in a peek panel below: / search, enter closes",
+        "- `" + p + "+f` format   `" + p + "+.` code actions   `" + p + "+n` rename   `" + p + "+e` line diagnostics",
+        "",
+        "## Commands",
+        "- `:w [path]`  `:q`  `:q!`  `:wq`  `:wa`  `:qa`  `:qa!`",
+        "- `:e <path>`   edit here;  `:o <path>`   open on the right;  `:sp <path>`   open below",
+        "- `:g <path>`   go to a folder or file (completes as you type)",
+        "- `:sh <cmd>`   run a shell command (`%` is the current file); output opens below,",
+        "  `enter` dismisses it once finished, `" + p + "+a` stops it",
+        "- `:cd <dir>`  `:set tab=4`  `:set nowrap`  `:set hidden`  `:theme nord`  `:noh`  `:reload`  `:config`  `:lsp`  `:<line>`",
+        "",
+        "## Shell output",
+        "- `up` `down` `pgup` `pgdn` scroll;  `enter` dismiss when done;  `esc` back to the pane",
+        "",
+        "## Configuration",
+        "`" + config::configDirectory() + "`",
+        "- `config.toml`      editor, keys, explorer, shell, clipboard, theme",
+        "- `actions.toml`     what enter does to files, by pattern",
+        "- `lsp.toml`         language servers",
+        "- `languages.toml`   syntax definitions",
+        "",
+    ]
+    var out = ""
+    for l in lines { out += l + "\n" }
+    utf::trim(out) + "\n"
+}
+
+//=== The mouse ===========================================================//
+
+extend app::App {
+    /// The pane under a screen cell, if any.
+    fn paneAt(&self, row: i64, col: i64) -> pane::Pane? {
+        let o = self.outputRect
+        if self.peekVisible && row >= o.row && row < o.row + o.height && col >= o.col && col < o.col + o.width {
+            return self.peek.$clone()
+        }
+        for placed in self.layout.placed {
+            let r = placed.rect
+            if row >= r.row && row < r.row + r.height && col >= r.col && col < r.col + r.width {
+                return self.paneById(placed.pane)
+            }
+        }
+        nil
+    }
+
+    fn inOutput(&self, row: i64, col: i64) -> bool {
+        let r = self.outputRect
+        self.outputVisible && !self.peekVisible && row >= r.row && row < r.row + r.height && col >= r.col && col < r.col + r.width
+    }
+
+    /// Where a screen cell falls in an editor pane's text, clamped to it.
+    fn textPosition(&self, p: pane::Pane, row: i64, col: i64) -> buffer::Pos {
+        p.positionAt(row - p.rect.row - 1, col - (p.rect.col + p.gutter), self.cfg.tabWidth)
+    }
+
+    pub fn mouseKey(&self, k: &input::Key) {
+        // The bottom line keeps the keyboard while it is being typed into.
+        if k.action == input::DRAG && k.button == 3 {
+            // Moving with no button held: hover tracking.
+            if k.row != self.mouseRow || k.col != self.mouseCol {
+                self.mouseRow = k.row
+                self.mouseCol = k.col
+                self.mouseMoved = time::now()
+                self.mouseAsked = false
+                self.mouseRequest = -1
+                // Off the word it was about, a mouse popup goes.
+                if self.hoverByMouse && !self.hover.isEmpty() &&
+                   (k.row != self.hoverRow || k.col < self.hoverCol || k.col >= self.hoverEnd) {
+                    self.hover.clear()
+                    self.hoverByMouse = false
+                }
+            }
+            return
+        }
+        if self.prompt.active() { return }
+        self.hover.clear()
+        self.hoverByMouse = false
+        let tab = self.cfg.tabWidth
+
+        if k.button == 64 || k.button == 65 {
+            let delta = if k.button == 64 { -3 } else { 3 }
+            if self.inOutput(k.row, k.col) {
+                let rows = self.outputRect.height - 1
+                let total = if self.hasJob { self.job.lineCount() } else { 0 }
+                let most = if total - rows > 0 { total - rows } else { 0 }
+                var top = (if self.outputFollow { most } else { self.outputTop }) + delta
+                if top < 0 { top = 0 }
+                if top > most { top = most }
+                self.outputTop = top
+                self.outputFollow = top >= most
+                return
+            }
+            let p = match self.paneAt(k.row, k.col) { Some(x) => x, None => return }
+            if p.mode == pane::EXPLORER {
+                p.moveSelection(delta)
+                p.showSelection(p.textRows)
+                return
+            }
+            // Scroll the view, taking the cursor along only as far as it
+            // must go to stay on screen.
+            let margin0 = if self.cfg.scrollOff * 2 < p.textRows { self.cfg.scrollOff } else { 0 }
+            if p.wrapping() {
+                var n = if delta < 0 { 0 - delta } else { delta }
+                while n > 0 { if delta > 0 { p.rowDown(tab) } else { p.rowUp(tab) }; n -= 1 }
+                let (cr, cx) = p.cursorScreen(tab)
+                let grow = p.selecting && p.selection().hasValue()
+                if cr < margin0 { p.vertical(margin0 - cr, grow, tab) }
+                elif cr > p.textRows - 1 - margin0 { p.vertical(p.textRows - 1 - margin0 - cr, grow, tab) }
+                return
+            }
+            var top = p.top + delta
+            let most = p.doc.lineCount() - 1
+            if top > most { top = most }
+            if top < 0 { top = 0 }
+            p.top = top
+            p.topRow = 0
+            let margin = if self.cfg.scrollOff * 2 < p.textRows { self.cfg.scrollOff } else { 0 }
+            var line = p.cursor.line
+            if line < top + margin { line = top + margin }
+            if line > top + p.textRows - 1 - margin { line = top + p.textRows - 1 - margin }
+            if line >= p.doc.lineCount() { line = p.doc.lineCount() - 1 }
+            if line != p.cursor.line {
+                p.vertical(line - p.cursor.line, p.selecting && p.selection().hasValue(), tab)
+            }
+            return
+        }
+        if k.button != 0 { return }
+
+        if k.action == input::RELEASE {
+            self.dragPane = -1
+            return
+        }
+        if k.action == input::DRAG {
+            let p = match self.paneById(self.dragPane) { Some(x) => x, None => return }
+            if p.mode != pane::EDITOR { return }
+            // Dragging past the top or bottom scrolls.
+            var row = k.row
+            if row <= p.rect.row && p.top > 0 { p.top -= 1; row = p.rect.row + 1 }
+            if row >= p.rect.row + p.rect.height { p.top += 1; row = p.rect.row + p.rect.height - 1 }
+            p.cursor = self.textPosition(p, row, k.col)
+            p.goal = utf::columnOf(p.line(), p.cursor.col, tab)
+            return
+        }
+
+        // A press.
+        self.menu.kind = app::MENU_NONE
+        if self.inOutput(k.row, k.col) {
+            self.focusPane(app::OUTPUT)
+            return
+        }
+        let p = match self.paneAt(k.row, k.col) { Some(x) => x, None => return }
+        if self.focus != p.id { self.focusPane(p.id) }
+        let double = self.clickAt.elapsed().asMilliseconds() < 400 && self.clickRow == k.row && self.clickCol == k.col
+        self.clickAt = time::now()
+        self.clickRow = k.row
+        self.clickCol = k.col
+        let inside = k.row - p.rect.row
+        if inside <= 0 { return }                         // the title line
+
+        if p.mode == pane::EXPLORER {
+            let index = p.listTop + inside - 1
+            if index < p.entries.length() {
+                p.selected = index
+                if double { self.activate(p, true) }
+            }
+            return
+        }
+        let at = self.textPosition(p, k.row, k.col)
+        if k.shift() {
+            p.prepare(true)
+            p.cursor = at
+        } elif double {
+            // A double click takes the word.
+            let text = p.doc.line(at.line)
+            var s = at.col
+            while s > 0 && utf::isWordByte(text.$byteAt(s - 1) as i64) { s -= 1 }
+            var e = at.col
+            while e < text.$length() && utf::isWordByte(text.$byteAt(e) as i64) { e += 1 }
+            p.anchor = buffer::pos(at.line, s)
+            p.cursor = buffer::pos(at.line, e)
+            p.selecting = true
+        } else {
+            // The anchor is set now so a drag can select from here.
+            p.cursor = at
+            p.anchor = buffer::pos(at.line, at.col)
+            p.selecting = true
+        }
+        p.goal = utf::columnOf(p.line(), p.cursor.col, tab)
+        self.dragPane = p.id
+    }
+}

@@ -1,0 +1,245 @@
+// How the window is divided: a tree of splits, kept as a flat list of
+// nodes that name each other by index, with a pane id at every leaf.
+//
+// A split puts a thin line between its halves. Moving between panes is
+// geometric — the pane on the other side of the nearest line, overlapping
+// the one you are in — so it does what the eye expects however the tree
+// happens to be shaped.
+
+import std::collections::vector
+
+pub global LEAF: i64 = 0
+/// Side by side, a vertical line between.
+pub global ROW: i64 = 1
+/// One above the other, a horizontal line between.
+pub global COLUMN: i64 = 2
+
+struct Node {
+    kind: i64
+    pane: i64
+    a: i64
+    b: i64
+    ratio: f64
+    parent: i64
+}
+
+pub struct Rect {
+    pub row: i64 = 0
+    pub col: i64 = 0
+    pub height: i64 = 0
+    pub width: i64 = 0
+}
+
+/// Where a pane ended up.
+pub struct Placed {
+    pub pane: i64
+    pub rect: Rect
+}
+
+/// A line between two halves.
+pub struct Line {
+    pub row: i64
+    pub col: i64
+    pub length: i64
+    pub vertical: bool
+}
+
+pub class Layout {
+    nodes: vector::Vector<Node>
+    pub root: i64
+    pub placed: vector::Vector<Placed>
+    pub lines: vector::Vector<Line>
+
+    fn init(self, firstPane: i64) {
+        self.nodes = vector::Vector<Node>()
+        self.nodes.push(Node { kind: LEAF, pane: firstPane, a: -1, b: -1, ratio: 0.5, parent: -1 })
+        self.root = 0
+        self.placed = vector::Vector<Placed>()
+        self.lines = vector::Vector<Line>()
+    }
+
+    fn leafOf(&self, pane: i64) -> i64 {
+        var i = 0
+        while i < self.nodes.length() {
+            let n = self.nodes.look(i)
+            if n.kind == LEAF && n.pane == pane && self.reachable(i) { return i }
+            i += 1
+        }
+        -1
+    }
+
+    fn reachable(&self, index: i64) -> bool {
+        var i = index
+        while i >= 0 {
+            if i == self.root { return true }
+            i = self.nodes.look(i).parent
+        }
+        false
+    }
+
+    /// Splits `pane`'s space with `fresh`, which goes right of it (ROW) or
+    /// below it (COLUMN).
+    pub fn split(&self, pane: i64, fresh: i64, kind: i64) {
+        let leaf = self.leafOf(pane)
+        if leaf < 0 { return }
+        let old = self.nodes.get(leaf)
+        let left = self.nodes.length()
+        self.nodes.push(Node { kind: LEAF, pane: pane, a: -1, b: -1, ratio: 0.5, parent: leaf })
+        let right = self.nodes.length()
+        self.nodes.push(Node { kind: LEAF, pane: fresh, a: -1, b: -1, ratio: 0.5, parent: leaf })
+        self.nodes.set(leaf, Node { kind: kind, pane: -1, a: left, b: right, ratio: 0.5, parent: old.parent })
+    }
+
+    /// Takes `pane` out; its sibling takes the space. False for the last one.
+    pub fn remove(&self, pane: i64) -> bool {
+        let leaf = self.leafOf(pane)
+        if leaf < 0 || leaf == self.root { return false }
+        let parent = self.nodes.look(leaf).parent
+        let p = self.nodes.get(parent)
+        let sibling = if p.a == leaf { p.b } else { p.a }
+        let s = self.nodes.get(sibling)
+        // The sibling moves up into the parent's place.
+        self.nodes.set(parent, Node { kind: s.kind, pane: s.pane, a: s.a, b: s.b, ratio: s.ratio, parent: p.parent })
+        if s.kind != LEAF {
+            self.reparent(s.a, parent)
+            self.reparent(s.b, parent)
+        }
+        true
+    }
+
+    fn reparent(&self, child: i64, parent: i64) {
+        let c = self.nodes.get(child)
+        self.nodes.set(child, Node { kind: c.kind, pane: c.pane, a: c.a, b: c.b, ratio: c.ratio, parent: parent })
+    }
+
+    /// Every pane id, left to right and top to bottom.
+    pub fn panes(&self) -> vector::Vector<i64> {
+        var out = vector::Vector<i64>()
+        self.collect(self.root, &var out)
+        out
+    }
+
+    fn collect(&self, node: i64, out: &var vector::Vector<i64>) {
+        let n = self.nodes.get(node)
+        if n.kind == LEAF { out.push(n.pane); return }
+        self.collect(n.a, out)
+        self.collect(n.b, out)
+    }
+
+    /// Lays everything out inside `area`.
+    pub fn arrange(&self, area: Rect) {
+        self.placed = vector::Vector<Placed>()
+        self.lines = vector::Vector<Line>()
+        self.place(self.root, area)
+    }
+
+    fn place(&self, node: i64, r: Rect) {
+        let n = self.nodes.get(node)
+        if n.kind == LEAF {
+            self.placed.push(Placed { pane: n.pane, rect: r })
+            return
+        }
+        if n.kind == ROW {
+            var first = ((r.width - 1) as f64 * n.ratio) as i64
+            if first < 1 { first = 1 }
+            let second = r.width - 1 - first
+            self.place(n.a, Rect { row: r.row, col: r.col, height: r.height, width: first })
+            self.lines.push(Line { row: r.row, col: r.col + first, length: r.height, vertical: true })
+            self.place(n.b, Rect { row: r.row, col: r.col + first + 1, height: r.height, width: if second < 0 { 0 } else { second } })
+        } else {
+            var first = ((r.height - 1) as f64 * n.ratio) as i64
+            if first < 1 { first = 1 }
+            let second = r.height - 1 - first
+            self.place(n.a, Rect { row: r.row, col: r.col, height: first, width: r.width })
+            self.lines.push(Line { row: r.row + first, col: r.col, length: r.width, vertical: false })
+            self.place(n.b, Rect { row: r.row + first + 1, col: r.col, height: if second < 0 { 0 } else { second }, width: r.width })
+        }
+    }
+
+    pub fn rectOf(&self, pane: i64) -> Rect {
+        for p in self.placed {
+            if p.pane == pane { return Rect { row: p.rect.row, col: p.rect.col, height: p.rect.height, width: p.rect.width } }
+        }
+        Rect {}
+    }
+
+    /// Grows (positive) or shrinks the split holding `pane` along `kind`.
+    pub fn resize(&self, pane: i64, kind: i64, delta: f64) {
+        var node = self.leafOf(pane)
+        while node >= 0 {
+            let parent = self.nodes.look(node).parent
+            if parent < 0 { return }
+            let p = self.nodes.get(parent)
+            if p.kind == kind {
+                var r = if p.a == node { p.ratio + delta } else { p.ratio - delta }
+                if r < 0.1 { r = 0.1 }
+                if r > 0.9 { r = 0.9 }
+                self.nodes.set(parent, Node { kind: p.kind, pane: p.pane, a: p.a, b: p.b, ratio: r, parent: p.parent })
+                return
+            }
+            node = parent
+        }
+    }
+
+    /// Every split back to halves.
+    pub fn equalize(&self) {
+        var i = 0
+        while i < self.nodes.length() {
+            let n = self.nodes.get(i)
+            self.nodes.set(i, Node { kind: n.kind, pane: n.pane, a: n.a, b: n.b, ratio: 0.5, parent: n.parent })
+            i += 1
+        }
+    }
+}
+
+/// The rect among `candidates` next to `from` in direction (dr, dc) — one
+/// of (-1,0), (1,0), (0,-1), (0,1) — preferring the one that overlaps most
+/// around `focusRow`/`focusCol`. -1 when there is none.
+pub fn neighbour(from: &Rect, candidates: &vector::Vector<Rect>, dr: i64, dc: i64, focusRow: i64, focusCol: i64) -> i64 {
+    var best = -1
+    var bestScore = 0 - 1000000000
+    var i = 0
+    while i < candidates.length() {
+        let c = candidates.look(i)
+        var ok = false
+        var overlap = 0
+        var distance = 0
+        if dc > 0 {
+            ok = c.col >= from.col + from.width
+            overlap = spanOverlap(from.row, from.height, c.row, c.height)
+            distance = c.col - (from.col + from.width)
+        } elif dc < 0 {
+            ok = c.col + c.width <= from.col
+            overlap = spanOverlap(from.row, from.height, c.row, c.height)
+            distance = from.col - (c.col + c.width)
+        } elif dr > 0 {
+            ok = c.row >= from.row + from.height
+            overlap = spanOverlap(from.col, from.width, c.col, c.width)
+            distance = c.row - (from.row + from.height)
+        } else {
+            ok = c.row + c.height <= from.row
+            overlap = spanOverlap(from.col, from.width, c.col, c.width)
+            distance = from.row - (c.row + c.height)
+        }
+        if ok && overlap > 0 && c.width > 0 && c.height > 0 {
+            // Closest first; among equals, the one level with the cursor.
+            var score = 0 - distance * 10000 + overlap
+            let along = if dc != 0 { focusRow } else { focusCol }
+            let start = if dc != 0 { c.row } else { c.col }
+            let size = if dc != 0 { c.height } else { c.width }
+            if along >= start && along < start + size { score += 5000 }
+            if score > bestScore {
+                bestScore = score
+                best = i
+            }
+        }
+        i += 1
+    }
+    best
+}
+
+fn spanOverlap(a: i64, alen: i64, b: i64, blen: i64) -> i64 {
+    let lo = if a > b { a } else { b }
+    let hi = if a + alen < b + blen { a + alen } else { b + blen }
+    hi - lo
+}

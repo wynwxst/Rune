@@ -1,0 +1,103 @@
+import std::{io, text, time}
+import std::collections::vector
+import ledger::entry::{Entry}
+
+/// A line that is not in the shape `date,description,amount`.
+pub enum ParseError {
+    WrongColumns { line: i64, found: i64 }
+    BadDate { line: i64, text: String }
+    BadAmount { line: i64, text: String }
+}
+
+/// Anything that can stop a ledger from loading.
+pub enum LedgerError {
+    Io(io::FileError)
+    Parse(ParseError)
+}
+
+// `bind A into B` says how to turn an `A` into a `B`. The `?` operator uses it,
+// so a function returning `Result<_, LedgerError>` can `?` either error.
+bind ParseError into LedgerError {
+    fn convert(self) -> LedgerError { LedgerError::Parse(self) }
+}
+
+bind io::FileError into LedgerError {
+    fn convert(self) -> LedgerError { LedgerError::Io(self) }
+}
+
+bind io::Display to ParseError {
+    fn display(&self) -> String {
+        match self {
+            .WrongColumns { line, found } =>
+                "line " + line.$str() + ": expected 3 columns, found " + found.$str(),
+            .BadDate { line, text } =>
+                "line " + line.$str() + ": '" + text + "' is not a date (use YYYY-MM-DD)",
+            .BadAmount { line, text } =>
+                "line " + line.$str() + ": '" + text + "' is not an amount",
+        }
+    }
+}
+
+bind io::Display to LedgerError {
+    fn display(&self) -> String {
+        match self {
+            .Io(e) => "cannot read the file: " + io::describe(e.$clone()),
+            .Parse(e) => e.display(),
+        }
+    }
+}
+
+/// Reads `12.50`, `-3.50` or `7`: a sign, then whole units and optionally two decimals.
+fn parseAmount(word: &String) -> i64? {
+    let trimmed = text::trim(word)
+    let negative = text::startsWith(trimmed, "-")
+    let digits = if negative { text::withoutPrefix(trimmed, "-") } else { trimmed }
+    let parts = text::split(digits, ".")
+    if parts.length() > 2 { return nil }
+    let whole = parts[0].$toInt()?
+    if whole < 0 { return nil }
+    var fraction = 0
+    if parts.length() == 2 {
+        if parts[1].$length() != 2 { return nil }
+        fraction = parts[1].$toInt()?
+        if fraction < 0 { return nil }
+    }
+    let cents = whole * 100 + fraction
+    if negative { 0 - cents } else { cents }
+}
+
+/// Reads one line. `number` is the line's position in the file, for messages.
+pub fn parseLine(number: i64, line: &String) -> Result<Entry, ParseError> {
+    let fields = text::split(line, ",")
+    if fields.length() != 3 {
+        return Err(ParseError::WrongColumns { line: number, found: fields.length() })
+    }
+    let date = match time::parseDate(text::trim(fields[0])) {
+        Some(d) => d,
+        None => return Err(ParseError::BadDate { line: number, text: fields[0].$clone() }),
+    }
+    let cents = match parseAmount(fields[2]) {
+        Some(c) => c,
+        None => return Err(ParseError::BadAmount { line: number, text: fields[2].$clone() }),
+    }
+    Ok(Entry { date: date, description: text::trim(fields[1]), cents: cents })
+}
+
+/// Reads every line of `contents`, skipping blank ones. Stops at the first bad line.
+pub fn parseAll(contents: &String) -> Result<vector::Vector<Entry>, ParseError> {
+    var entries = vector::Vector<Entry>()
+    var number = 0
+    for line in text::splitLines(contents) {
+        number += 1
+        if text::trim(line).$isEmpty() { continue }
+        entries.push(parseLine(number, line)?)
+    }
+    Ok(entries)
+}
+
+/// Reads and parses a file.
+pub fn load(path: &String) -> Result<vector::Vector<Entry>, LedgerError> {
+    let contents = io::readToString(path)?
+    let entries = parseAll(&contents)?
+    Ok(entries)
+}

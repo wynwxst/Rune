@@ -1,0 +1,71 @@
+import std::text
+import std::collections::vector
+import pantry::unit::{Unit}
+
+/// What the user asked for.
+pub enum Command {
+    Add { name: String, quantity: i64, unit: Unit }
+    Use { name: String, amount: i64 }
+    List
+    Quit
+}
+
+/// Every way a line can be wrong.
+pub enum ParseError {
+    Empty
+    Unknown(String)
+    BadNumber(String)
+    BadUnit(String)
+    Usage(String)
+}
+
+fn words(line: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    for w in text::split(line, " ") {
+        if !w.$isEmpty() { out.push(w.$clone()) }
+    }
+    out
+}
+
+fn number(word: &String) -> Result<i64, ParseError> {
+    match word.$toInt() {
+        Some(n) => Ok(n),
+        None => Err(ParseError::BadNumber(word.$clone())),
+    }
+}
+
+/// Turns one line of input into a command.
+pub fn parse(line: &String) -> Result<Command, ParseError> {
+    let parts = words(line)
+    let slice = parts.asSlice()
+    match slice {
+        [] => Err(ParseError::Empty),
+        ["add", name, quantity, unit] => {
+            let q = number(quantity)?
+            match Unit::parse(unit) {
+                Some(u) => Ok(Command::Add { name: name.$clone(), quantity: q, unit: u }),
+                None => Err(ParseError::BadUnit(unit.$clone())),
+            }
+        }
+        ["use", name, amount] => {
+            let a = number(amount)?
+            Ok(Command::Use { name: name.$clone(), amount: a })
+        }
+        ["add", ..] => Err(ParseError::Usage("add NAME QUANTITY UNIT")),
+        ["use", ..] => Err(ParseError::Usage("use NAME AMOUNT")),
+        ["list"] => Ok(Command::List),
+        ["quit"] => Ok(Command::Quit),
+        [other, ..] => Err(ParseError::Unknown(other.$clone())),
+    }
+}
+
+/// A sentence for the user.
+pub fn explain(error: &ParseError) -> String {
+    match error {
+        .Empty => "type a command",
+        .Unknown(word) => "unknown command '" + word + "'",
+        .BadNumber(word) => "'" + word + "' is not a number",
+        .BadUnit(word) => "'" + word + "' is not a unit (use g, ml or pcs)",
+        .Usage(usage) => "usage: " + usage,
+    }
+}

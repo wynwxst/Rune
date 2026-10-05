@@ -1,0 +1,810 @@
+// A TOML 1.0 reader — tables, arrays of tables, dotted and quoted keys,
+// inline tables, every string form, integers in four bases, floats, booleans
+// and dates (kept as their text). Enough for any configuration file, and it
+// says which line is wrong when one is.
+//
+//     match toml::parse(source) {
+//         Ok(doc) => doc.int("editor.tab_width", 2),
+//         Err(message) => ...,
+//     }
+
+import std::collections::vector
+import std::io
+import grve::utf
+
+pub enum Kind { Text, Int, Float, Bool, Date, Array, Table }
+
+/// One value. A table keeps its keys in the order they were written.
+pub class Value {
+    pub kind: Kind
+    pub text: String
+    pub int: i64
+    pub float: f64
+    pub flag: bool
+    pub items: vector::Vector<Value>
+    pub keys: vector::Vector<String>
+    pub vals: vector::Vector<Value>
+    /// A table written as `[name]` (or an inline one), which may not be
+    /// written twice.
+    sealed: bool
+    /// An array made by `[[name]]`, which more `[[name]]`s may extend.
+    ofTables: bool
+
+    fn init(self, kind: Kind) {
+        self.kind = kind
+        self.text = ""
+        self.int = 0
+        self.float = 0.0
+        self.flag = false
+        self.items = vector::Vector<Value>()
+        self.keys = vector::Vector<String>()
+        self.vals = vector::Vector<Value>()
+        self.sealed = false
+        self.ofTables = false
+    }
+
+    pub fn isTable(&self) -> bool { match self.kind { Kind::Table => true, _ => false } }
+    pub fn isArray(&self) -> bool { match self.kind { Kind::Array => true, _ => false } }
+
+    /// The member `key` of a table.
+    pub fn get(&self, key: &String) -> Value? {
+        var i = 0
+        while i < self.keys.length() {
+            if self.keys.look(i) == key { return self.vals.get(i) }
+            i += 1
+        }
+        nil
+    }
+
+    /// Follows a dotted path of plain keys: `"theme.syntax.keyword"`.
+    pub fn at(&self, path: &String) -> Value? {
+        var cur: Value? = nil
+        var first = true
+        for part in splitDots(path) {
+            if first {
+                cur = self.get(part)
+                first = false
+            } else {
+                match cur {
+                    Some(v) => cur = v.get(part),
+                    None => return nil,
+                }
+            }
+            if cur.isNil() { return nil }
+        }
+        cur
+    }
+
+    pub fn set(&self, key: &String, v: Value) {
+        var i = 0
+        while i < self.keys.length() {
+            if self.keys.look(i) == key {
+                self.vals.set(i, v)
+                return
+            }
+            i += 1
+        }
+        self.keys.push(key.$clone())
+        self.vals.push(v)
+    }
+
+    pub fn str(&self, path: &String, fallback: &String) -> String {
+        match self.at(path) {
+            Some(v) => match v.kind { Kind::Text => v.text.$clone(), Kind::Date => v.text.$clone(), _ => fallback.$clone() },
+            None => fallback.$clone(),
+        }
+    }
+
+    pub fn number(&self, path: &String, fallback: i64) -> i64 {
+        match self.at(path) {
+            Some(v) => match v.kind { Kind::Int => v.int, Kind::Float => v.float as i64, _ => fallback },
+            None => fallback,
+        }
+    }
+
+    pub fn real(&self, path: &String, fallback: f64) -> f64 {
+        match self.at(path) {
+            Some(v) => match v.kind { Kind::Float => v.float, Kind::Int => v.int as f64, _ => fallback },
+            None => fallback,
+        }
+    }
+
+    pub fn boolean(&self, path: &String, fallback: bool) -> bool {
+        match self.at(path) {
+            Some(v) => match v.kind { Kind::Bool => v.flag, _ => fallback },
+            None => fallback,
+        }
+    }
+
+    /// A string or an array of strings, as a list.
+    pub fn strings(&self) -> vector::Vector<String> {
+        var out = vector::Vector<String>()
+        match self.kind {
+            Kind::Text => out.push(self.text.$clone()),
+            Kind::Array => {
+                for item in self.items {
+                    match item.kind { Kind::Text => out.push(item.text.$clone()), _ => {} }
+                }
+            },
+            _ => {},
+        }
+        out
+    }
+
+    /// The value written back as TOML — for a message, or a test.
+    pub fn describe(&self) -> String {
+        match self.kind {
+            Kind::Text => quote(self.text),
+            Kind::Date => self.text.$clone(),
+            Kind::Int => self.int.$str(),
+            Kind::Float => self.float.$str(),
+            Kind::Bool => self.flag.$str(),
+            Kind::Array => {
+                var s = "["
+                var i = 0
+                for item in self.items {
+                    if i > 0 { s += ", " }
+                    s += item.describe()
+                    i += 1
+                }
+                s + "]"
+            },
+            Kind::Table => {
+                var s = "{"
+                var i = 0
+                while i < self.keys.length() {
+                    if i > 0 { s += ", " }
+                    s += quote(self.keys.look(i)) + " = " + self.vals.look(i).describe()
+                    i += 1
+                }
+                s + "}"
+            },
+        }
+    }
+}
+
+pub fn table() -> Value { Value(Kind::Table) }
+
+pub fn text(s: &String) -> Value {
+    let v = Value(Kind::Text)
+    v.text = s.$clone()
+    v
+}
+
+fn splitDots(path: &String) -> vector::Vector<String> {
+    var out = vector::Vector<String>()
+    var start = 0
+    var i = 0
+    while i < path.$length() {
+        if (path.$byteAt(i) as i64) == 46 {
+            out.push(path.$substring(start, i))
+            start = i + 1
+        }
+        i += 1
+    }
+    out.push(path.$substring(start, path.$length()))
+    out
+}
+
+/// A basic string, escaped.
+pub fn quote(s: &String) -> String {
+    var out = "\""
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        if b == 34 { out += "\\\"" }
+        elif b == 92 { out += "\\\\" }
+        elif b == 10 { out += "\\n" }
+        elif b == 9 { out += "\\t" }
+        elif b == 13 { out += "\\r" }
+        else { out += s.$substring(i, i + 1) }
+        i += 1
+    }
+    out + "\""
+}
+
+//=== The reader ==========================================================//
+
+pub fn parse(source: &String) -> Result<Value, String> {
+    let p = Parser(source)
+    p.document()
+}
+
+/// Reads and parses a file. Err carries "path:line: message".
+pub fn load(path: &String) -> Result<Value, String> {
+    match io::readToString(path) {
+        Ok(src) => match parse(src) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(path + ":" + e),
+        },
+        Err(e) => Err(path + ": " + io::describe(e)),
+    }
+}
+
+class Parser {
+    src: String
+    pos: i64
+    line: i64
+    root: Value
+    current: Value
+    failure: String
+
+    fn init(self, src: &String) {
+        self.src = src.$clone()
+        self.pos = 0
+        self.line = 1
+        self.root = table()
+        self.current = self.root
+        self.failure = ""
+    }
+
+    fn fail(&self, message: &String) -> bool {
+        if self.failure.$isEmpty() { self.failure = self.line.$str() + ": " + message }
+        false
+    }
+
+    fn peek(&self) -> i64 {
+        if self.pos >= self.src.$length() { return -1 }
+        self.src.$byteAt(self.pos) as i64
+    }
+
+    fn peekAt(&self, ahead: i64) -> i64 {
+        let at = self.pos + ahead
+        if at >= self.src.$length() { return -1 }
+        self.src.$byteAt(at) as i64
+    }
+
+    fn atEnd(&self) -> bool { self.pos >= self.src.$length() }
+
+    fn startsHere(&self, s: &String) -> bool {
+        if self.pos + s.$length() > self.src.$length() { return false }
+        var i = 0
+        while i < s.$length() {
+            if self.src.$byteAt(self.pos + i) != s.$byteAt(i) { return false }
+            i += 1
+        }
+        true
+    }
+
+    /// Spaces and tabs.
+    fn skipBlank(&self) {
+        while self.peek() == 32 || self.peek() == 9 { self.pos += 1 }
+    }
+
+    fn skipComment(&self) {
+        if self.peek() == 35 {
+            while !self.atEnd() && self.peek() != 10 { self.pos += 1 }
+        }
+    }
+
+    /// Blank space, comments and newlines — between values in an array.
+    fn skipAll(&self) {
+        loop {
+            self.skipBlank()
+            self.skipComment()
+            if self.peek() == 13 && self.peekAt(1) == 10 { self.pos += 1 }
+            if self.peek() == 10 {
+                self.pos += 1
+                self.line += 1
+                continue
+            }
+            break
+        }
+    }
+
+    /// The rest of the line must be empty or a comment.
+    fn endOfLine(&self) -> bool {
+        self.skipBlank()
+        self.skipComment()
+        if self.peek() == 13 { self.pos += 1 }
+        if self.atEnd() { return true }
+        if self.peek() == 10 {
+            self.pos += 1
+            self.line += 1
+            return true
+        }
+        self.fail("expected the end of the line, found " + self.describeHere())
+    }
+
+    fn describeHere(&self) -> String {
+        if self.atEnd() { return "the end of the file" }
+        let c = self.peek()
+        if c == 10 { return "the end of the line" }
+        "'" + self.src.$substring(self.pos, utf::next(self.src, self.pos)) + "'"
+    }
+
+    fn document(&self) -> Result<Value, String> {
+        loop {
+            self.skipAll()
+            if self.atEnd() { break }
+            let ok = if self.peek() == 91 { self.header() } else { self.keyValue(self.current) && self.endOfLine() }
+            if !ok { return Err(self.failure.$clone()) }
+        }
+        Ok(self.root)
+    }
+
+    //=== Headers ===//
+
+    fn header(&self) -> bool {
+        let headerLine = self.line
+        let array = self.peekAt(1) == 91
+        self.pos += if array { 2 } else { 1 }
+        self.skipBlank()
+        var path = vector::Vector<String>()
+        if !self.keyPath(&var path) { return false }
+        self.skipBlank()
+        if array {
+            if !self.startsHere("]]") { return self.fail("expected ']]' to close the table name") }
+            self.pos += 2
+        } else {
+            if self.peek() != 93 { return self.fail("expected ']' to close the table name") }
+            self.pos += 1
+        }
+        if !self.endOfLine() { return false }
+        // What goes wrong from here is the header's fault, not the next line's.
+        let after = self.line
+        self.line = headerLine
+        let ok = self.place(&path, array)
+        self.line = after
+        ok
+    }
+
+    fn place(&self, path: &vector::Vector<String>, array: bool) -> bool {
+        // Walk down to the parent, making tables as needed.
+        var t = self.root
+        var i = 0
+        while i < path.length() - 1 {
+            match self.descend(t, path.look(i)) {
+                Some(next) => t = next,
+                None => return false,
+            }
+            i += 1
+        }
+        let last = path.look(path.length() - 1)
+        if array {
+            match t.get(last) {
+                Some(existing) => {
+                    if !existing.isArray() || !existing.ofTables {
+                        return self.fail("'" + last + "' is already defined as something other than an array of tables")
+                    }
+                    let fresh = table()
+                    existing.items.push(fresh)
+                    self.current = fresh
+                },
+                None => {
+                    let arr = Value(Kind::Array)
+                    arr.ofTables = true
+                    let fresh = table()
+                    arr.items.push(fresh)
+                    t.set(last, arr)
+                    self.current = fresh
+                },
+            }
+            return true
+        }
+        match t.get(last) {
+            Some(existing) => {
+                if !existing.isTable() { return self.fail("'" + last + "' is already defined as a value") }
+                if existing.sealed { return self.fail("table '" + last + "' is defined twice") }
+                existing.sealed = true
+                self.current = existing
+            },
+            None => {
+                let fresh = table()
+                fresh.sealed = true
+                t.set(last, fresh)
+                self.current = fresh
+            },
+        }
+        true
+    }
+
+    /// The table `name` inside `t` — the last one, when it is an array of
+    /// tables — made if it is not there.
+    fn descend(&self, t: Value, name: &String) -> Value? {
+        match t.get(name) {
+            Some(v) => {
+                if v.isTable() { return v }
+                if v.isArray() && v.ofTables && v.items.length() > 0 {
+                    return v.items.get(v.items.length() - 1)
+                }
+                self.fail("'" + name + "' is already defined as a value")
+                nil
+            },
+            None => {
+                let fresh = table()
+                t.set(name, fresh)
+                fresh
+            },
+        }
+    }
+
+    //=== Keys ===//
+
+    fn keyPath(&self, path: &var vector::Vector<String>) -> bool {
+        loop {
+            self.skipBlank()
+            match self.key() {
+                Some(k) => path.push(k),
+                None => return false,
+            }
+            self.skipBlank()
+            if self.peek() == 46 {
+                self.pos += 1
+                continue
+            }
+            return true
+        }
+    }
+
+    fn key(&self) -> String? {
+        let c = self.peek()
+        if c == 34 {
+            if self.startsHere("\"\"\"") { self.fail("a key cannot be a multi-line string"); return nil }
+            return self.basicString()
+        }
+        if c == 39 {
+            if self.startsHere("'''") { self.fail("a key cannot be a multi-line string"); return nil }
+            return self.literalString()
+        }
+        let start = self.pos
+        while isBareKeyByte(self.peek()) { self.pos += 1 }
+        if self.pos == start {
+            self.fail("expected a key, found " + self.describeHere())
+            return nil
+        }
+        self.src.$substring(start, self.pos)
+    }
+
+    fn keyValue(&self, target: Value) -> bool {
+        var path = vector::Vector<String>()
+        if !self.keyPath(&var path) { return false }
+        self.skipBlank()
+        if self.peek() != 61 { return self.fail("expected '=' after the key, found " + self.describeHere()) }
+        self.pos += 1
+        self.skipBlank()
+        let v = match self.value() {
+            Some(v) => v,
+            None => return false,
+        }
+        var t = target
+        var i = 0
+        while i < path.length() - 1 {
+            let name = path.look(i)
+            match t.get(name) {
+                Some(existing) => {
+                    if !existing.isTable() {
+                        return self.fail("'" + name + "' is already defined as a value")
+                    }
+                    t = existing
+                },
+                None => {
+                    let fresh = table()
+                    t.set(name, fresh)
+                    t = fresh
+                },
+            }
+            i += 1
+        }
+        let last = path.look(path.length() - 1)
+        if t.get(last).hasValue() { return self.fail("'" + last + "' is defined twice") }
+        t.set(last, v)
+        true
+    }
+
+    //=== Values ===//
+
+    fn value(&self) -> Value? {
+        let c = self.peek()
+        if c == 34 {
+            let s = if self.startsHere("\"\"\"") { self.multiBasic() } else { self.basicString() }
+            return match s { Some(t) => text(t), None => nil }
+        }
+        if c == 39 {
+            let s = if self.startsHere("'''") { self.multiLiteral() } else { self.literalString() }
+            return match s { Some(t) => text(t), None => nil }
+        }
+        if c == 91 { return self.array() }
+        if c == 123 { return self.inlineTable() }
+        if self.startsHere("true") && !isBareKeyByte(self.peekAt(4)) {
+            self.pos += 4
+            let v = Value(Kind::Bool)
+            v.flag = true
+            return v
+        }
+        if self.startsHere("false") && !isBareKeyByte(self.peekAt(5)) {
+            self.pos += 5
+            let v = Value(Kind::Bool)
+            v.flag = false
+            return v
+        }
+        self.scalar()
+    }
+
+    fn array(&self) -> Value? {
+        self.pos += 1
+        let arr = Value(Kind::Array)
+        loop {
+            self.skipAll()
+            if self.peek() == 93 { self.pos += 1; return arr }
+            match self.value() {
+                Some(v) => arr.items.push(v),
+                None => return nil,
+            }
+            self.skipAll()
+            if self.peek() == 44 { self.pos += 1; continue }
+            if self.peek() == 93 { self.pos += 1; return arr }
+            self.fail("expected ',' or ']' in an array, found " + self.describeHere())
+            return nil
+        }
+    }
+
+    fn inlineTable(&self) -> Value? {
+        self.pos += 1
+        let t = table()
+        t.sealed = true
+        self.skipBlank()
+        if self.peek() == 125 { self.pos += 1; return t }
+        loop {
+            self.skipBlank()
+            if !self.keyValue(t) { return nil }
+            self.skipBlank()
+            if self.peek() == 44 { self.pos += 1; continue }
+            if self.peek() == 125 { self.pos += 1; return t }
+            self.fail("expected ',' or '}' in an inline table, found " + self.describeHere())
+            return nil
+        }
+    }
+
+    /// Numbers and dates: everything up to a delimiter, then read.
+    fn scalar(&self) -> Value? {
+        let start = self.pos
+        while !self.atEnd() {
+            let c = self.peek()
+            if c == 44 || c == 93 || c == 125 || c == 10 || c == 13 || c == 35 || c == 9 { break }
+            if c == 32 {
+                // A space is part of a date-time: `1979-05-27 07:32:00`.
+                let soFar = self.src.$substring(start, self.pos)
+                if soFar.$length() == 10 && isDigit(self.peekAt(1)) && (soFar.$byteAt(4) as i64) == 45 {
+                    self.pos += 1
+                    continue
+                }
+                break
+            }
+            self.pos += 1
+        }
+        let raw = self.src.$substring(start, self.pos)
+        if raw.$isEmpty() {
+            self.fail("expected a value, found " + self.describeHere())
+            return nil
+        }
+        match readNumber(raw) {
+            Some(v) => return v,
+            None => {},
+        }
+        if looksLikeDate(raw) {
+            let v = Value(Kind::Date)
+            v.text = raw
+            return v
+        }
+        self.fail("'" + raw + "' is not a value TOML knows (strings need quotes)")
+        nil
+    }
+
+    //=== Strings ===//
+
+    fn basicString(&self) -> String? {
+        self.pos += 1
+        var out = io::Bytes()
+        loop {
+            if self.atEnd() || self.peek() == 10 {
+                self.fail("unterminated string")
+                return nil
+            }
+            let c = self.peek()
+            if c == 34 { self.pos += 1; return out.toString() }
+            if c == 92 {
+                if !self.escape(&var out) { return nil }
+                continue
+            }
+            out.push(c as u8)
+            self.pos += 1
+        }
+    }
+
+    fn literalString(&self) -> String? {
+        self.pos += 1
+        let start = self.pos
+        while !self.atEnd() && self.peek() != 39 && self.peek() != 10 { self.pos += 1 }
+        if self.peek() != 39 {
+            self.fail("unterminated literal string")
+            return nil
+        }
+        let s = self.src.$substring(start, self.pos)
+        self.pos += 1
+        s
+    }
+
+    fn multiBasic(&self) -> String? {
+        self.pos += 3
+        self.skipFirstNewline()
+        var out = io::Bytes()
+        loop {
+            if self.atEnd() {
+                self.fail("unterminated multi-line string")
+                return nil
+            }
+            if self.startsHere("\"\"\"") {
+                // Up to two quotes may sit right before the closing three.
+                var extra = 0
+                while self.peekAt(3 + extra) == 34 && extra < 2 { extra += 1 }
+                for i in 0..extra { out.push(34u8) }
+                self.pos += 3 + extra
+                return out.toString()
+            }
+            let c = self.peek()
+            if c == 92 {
+                // A backslash ending a line swallows the newline and the
+                // blank space after it.
+                var j = self.pos + 1
+                while j < self.src.$length() && ((self.src.$byteAt(j) as i64) == 32 || (self.src.$byteAt(j) as i64) == 9) { j += 1 }
+                if j < self.src.$length() && ((self.src.$byteAt(j) as i64) == 10 || (self.src.$byteAt(j) as i64) == 13) {
+                    self.pos = j
+                    loop {
+                        let d = self.peek()
+                        if d == 10 { self.line += 1; self.pos += 1 }
+                        elif d == 32 || d == 9 || d == 13 { self.pos += 1 }
+                        else { break }
+                    }
+                    continue
+                }
+                if !self.escape(&var out) { return nil }
+                continue
+            }
+            if c == 10 { self.line += 1 }
+            out.push(c as u8)
+            self.pos += 1
+        }
+    }
+
+    fn multiLiteral(&self) -> String? {
+        self.pos += 3
+        self.skipFirstNewline()
+        let start = self.pos
+        loop {
+            if self.atEnd() {
+                self.fail("unterminated multi-line literal string")
+                return nil
+            }
+            if self.startsHere("'''") {
+                var extra = 0
+                while self.peekAt(3 + extra) == 39 && extra < 2 { extra += 1 }
+                let s = self.src.$substring(start, self.pos + extra)
+                self.pos += 3 + extra
+                return s
+            }
+            if self.peek() == 10 { self.line += 1 }
+            self.pos += 1
+        }
+    }
+
+    fn skipFirstNewline(&self) {
+        if self.peek() == 13 && self.peekAt(1) == 10 { self.pos += 2; self.line += 1 }
+        elif self.peek() == 10 { self.pos += 1; self.line += 1 }
+    }
+
+    fn escape(&self, out: &var io::Bytes) -> bool {
+        let e = self.peekAt(1)
+        self.pos += 2
+        if e == 110 { out.push(10u8); return true }
+        if e == 116 { out.push(9u8); return true }
+        if e == 114 { out.push(13u8); return true }
+        if e == 34 { out.push(34u8); return true }
+        if e == 92 { out.push(92u8); return true }
+        if e == 98 { out.push(8u8); return true }
+        if e == 102 { out.push(12u8); return true }
+        if e == 101 { out.push(27u8); return true }
+        if e == 117 || e == 85 {
+            let n = if e == 117 { 4 } else { 8 }
+            if self.pos + n > self.src.$length() { return self.fail("a \\u escape needs " + n.$str() + " hex digits") }
+            var cp = 0
+            for i in 0..n {
+                let d = hexDigit(self.src.$byteAt(self.pos + i) as i64)
+                if d < 0 { return self.fail("bad hex digit in a \\u escape") }
+                cp = cp * 16 + d
+            }
+            self.pos += n
+            utf::encodeInto(out, cp)
+            return true
+        }
+        self.fail("unknown escape '\\" + utf::fromCode(e) + "'")
+    }
+}
+
+fn isBareKeyByte(c: i64) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 45
+}
+
+fn isDigit(c: i64) -> bool { c >= 48 && c <= 57 }
+
+fn hexDigit(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    -1
+}
+
+fn looksLikeDate(s: &String) -> bool {
+    if s.$length() >= 10 && isDigit(s.$byteAt(0) as i64) && (s.$byteAt(4) as i64) == 45 && (s.$byteAt(7) as i64) == 45 {
+        return true
+    }
+    s.$length() >= 8 && isDigit(s.$byteAt(0) as i64) && (s.$byteAt(2) as i64) == 58
+}
+
+/// An integer or a float in any form TOML allows, or nil.
+fn readNumber(raw: &String) -> Value? {
+    var s = raw.$clone()
+    var negative = false
+    if utf::startsWith(s, "+") { s = s.$substring(1, s.$length()) }
+    elif utf::startsWith(s, "-") { negative = true; s = s.$substring(1, s.$length()) }
+    if s == "inf" || s == "nan" {
+        let v = Value(Kind::Float)
+        v.float = if s == "nan" { 0.0 / 0.0 } elif negative { -1.0 / 0.0 } else { 1.0 / 0.0 }
+        return v
+    }
+    if s.$isEmpty() || !isDigit(s.$byteAt(0) as i64) { return nil }
+    // Underscores must sit between digits.
+    var clean = io::Bytes()
+    var i = 0
+    while i < s.$length() {
+        let c = s.$byteAt(i) as i64
+        if c == 95 {
+            if i == 0 || i == s.$length() - 1 { return nil }
+            if !isHexish(s.$byteAt(i - 1) as i64) || !isHexish(s.$byteAt(i + 1) as i64) { return nil }
+        } else {
+            clean.push(c as u8)
+        }
+        i += 1
+    }
+    let body = clean.toString()
+    if body.$length() > 2 && (body.$byteAt(0) as i64) == 48 {
+        let p = body.$byteAt(1) as i64
+        let base = if p == 120 { 16 } elif p == 111 { 8 } elif p == 98 { 2 } else { 0 }
+        if base > 0 {
+            if negative { return nil }
+            var n = 0
+            var j = 2
+            while j < body.$length() {
+                let d = hexDigit(body.$byteAt(j) as i64)
+                if d < 0 || d >= base { return nil }
+                n = n * base + d
+                j += 1
+            }
+            let v = Value(Kind::Int)
+            v.int = n
+            return v
+        }
+    }
+    var isFloat = false
+    var j = 0
+    while j < body.$length() {
+        let c = body.$byteAt(j) as i64
+        if c == 46 || c == 101 || c == 69 { isFloat = true }
+        elif !isDigit(c) && c != 43 && c != 45 { return nil }
+        j += 1
+    }
+    if isFloat {
+        let f = body.$toFloat()?
+        let v = Value(Kind::Float)
+        v.float = if negative { 0.0 - f } else { f }
+        return v
+    }
+    // A leading zero is only allowed on zero itself.
+    if body.$length() > 1 && (body.$byteAt(0) as i64) == 48 { return nil }
+    let n = body.$toInt()?
+    let v = Value(Kind::Int)
+    v.int = if negative { 0 - n } else { n }
+    v
+}
+
+fn isHexish(c: i64) -> bool { hexDigit(c) >= 0 }

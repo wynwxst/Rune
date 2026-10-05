@@ -1,0 +1,29 @@
+// An end-to-end test: run the real program and look at what it does.
+// Tests are run from the package folder, and `rune test` builds the program first.
+import std::{process, testing, text}
+
+fn run(argument: String) -> process::Output {
+    var command = process::Command("target/debug/ledger")
+    command.arg(argument)
+    match command.run() {
+        Some(output) => output,
+        None => process::panic("could not start target/debug/ledger; run `rune build` first"),
+    }
+}
+
+fn main() -> i64 {
+    let good = run("sample.csv")
+    assertEq!(good.status, 0, "a good file exits with 0")
+    assert!(text::contains(good.stdout, "6 entries"), "it reports the entries")
+    assert!(text::contains(good.stdout, "balance:     3989.34"), "it reports the balance")
+
+    let bad = run("bad.csv")
+    assertEq!(bad.status, 4, "bad data exits with 4")
+    assert!(text::contains(bad.stderr, "line 2"), "the message names the line")
+    assertEq!(bad.stdout, "", "nothing goes to stdout on an error")
+
+    let missing = run("no-such-file.csv")
+    assertEq!(missing.status, 3, "a missing file exits with 3")
+
+    testing::summary()
+}

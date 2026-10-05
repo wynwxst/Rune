@@ -1,0 +1,55 @@
+// Editing a document: inserts and removals across lines, undo and redo by
+// group, and the text coming back out the way it went in.
+import std::testing
+import grve::buffer
+
+fn main() -> i64 {
+    let d = buffer::Document("")
+    d.beginGroup(buffer::pos(0, 0))
+    let e1 = d.insert(buffer::pos(0, 0), "fn main() {\n}")
+    testing::equal("two lines", d.lineCount(), 2)
+    testing::equal("end", e1.line.$str() + ":" + e1.col.$str(), "1:1")
+    d.beginGroup(e1)
+    let e2 = d.insert(buffer::pos(0, 11), "\n  body\n  more")
+    testing::equal("four lines", d.lineCount(), 4)
+    testing::equal("line 2", d.line(2), "  more")
+    testing::equal("end 2", e2.line.$str() + ":" + e2.col.$str(), "2:6")
+    testing::equal("text", d.text(), "fn main() {\n  body\n  more\n}\n")
+    testing::isTrue("dirty", d.dirty())
+
+    d.beginGroup(e2)
+    let gone = d.remove(buffer::pos(1, 2), buffer::pos(2, 4))
+    testing::equal("removed", gone, "body\n  mo")
+    testing::equal("joined", d.line(1), "  re")
+    testing::equal("three lines", d.lineCount(), 3)
+
+    let back = d.undo().unwrap()
+    testing::equal("undo restores", d.text(), "fn main() {\n  body\n  more\n}\n")
+    testing::equal("undo cursor", back.line.$str() + ":" + back.col.$str(), "2:6")
+    d.undo()
+    testing::equal("undo again", d.text(), "fn main() {\n}\n")
+    d.redo()
+    testing::equal("redo", d.line(1), "  body")
+    d.redo()
+    testing::equal("redo again", d.line(1), "  re")
+
+    // Typing joins the group it continues.
+    let t = buffer::Document("")
+    t.beginGroup(buffer::pos(0, 0))
+    var at = t.insert(buffer::pos(0, 0), "a")
+    testing::isTrue("continues", t.continuesTyping(at))
+    at = t.insert(at, "b")
+    t.undo()
+    testing::equal("one group", t.line(0), "")
+    testing::isFalse("clean after undo", t.dirty())
+
+    testing::equal("slice", d.slice(buffer::pos(0, 3), buffer::pos(1, 2)), "main() {\n  ")
+    let big = buffer::Document("")
+    var text = ""
+    for i in 0..200 { text += "line " + i.$str() + "\n" }
+    big.insert(buffer::pos(0, 0), text)
+    testing::equal("bulk insert", big.lineCount(), 201)
+    big.remove(buffer::pos(10, 0), buffer::pos(190, 0))
+    testing::equal("bulk remove", big.line(10), "line 190")
+    testing::summary()
+}

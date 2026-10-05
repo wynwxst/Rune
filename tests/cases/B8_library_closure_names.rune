@@ -1,0 +1,24 @@
+// A closure's symbol is named for the function it is written in and its
+// place there, not for a count across the whole compilation. Under the old
+// count, the library's own build and this program numbered the library's
+// closures differently, and with `-g` — which makes closures mergeable — two
+// different closures could end up under one symbol, the linker keeping
+// either body for both.
+// LIB: libclosures lib/libclosures.rune
+// FLAGS: -g
+// EXPECT: 6 50
+// EXPECT: 203 13
+// EXPECT: <42><x>
+import std::io
+import libclosures
+
+fn main() -> i64 {
+    let a = libclosures::adder(1)
+    let s = libclosures::scaler(10)
+    io::println(a(5).$str() + " " + s(5).$str())
+    let more = libclosures::applyTwice(3, ||(x: i64) -> i64 { x + 100 })
+    let less = libclosures::applyTwice(53, ||(x: i64) -> i64 { x - 20 })
+    io::println(more.$str() + " " + less.$str())
+    io::println(libclosures::label(42) + libclosures::label("x"))
+    0
+}

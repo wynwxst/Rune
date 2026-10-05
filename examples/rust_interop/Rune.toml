@@ -1,0 +1,14 @@
+[package]
+name = "rust_interop"
+version = "0.1.0"
+edition = "2025"
+description = "Calling a Rust crate from Rune: functions, structs, enums, callbacks and an opaque handle."
+
+[build]
+memory = "zombie"
+safety = "full"
+
+[dependencies]
+# A Cargo crate beside the package. `rune build` builds it with Cargo and
+# reads what it exports over the C ABI into the module `geometry`.
+geometry = { cargo = "rust/geometry" }

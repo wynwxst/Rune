@@ -1,0 +1,104 @@
+import std::{cli, env, io, process, text}
+import std::dictionary::{Map}
+import std::collections::vector
+import logscan::filter::{Filter}
+import logscan::level::{Level}
+import logscan::record
+import logscan::record::{Record}
+
+/// What `logscan` found in everything it read.
+struct Report {
+    read: i64
+    skipped: i64
+    kept: i64
+    perLevel: Map<String, i64>
+}
+
+fn readStdin() -> String {
+    var all = ""
+    while io::readLineOrEnd() is Some(line) {
+        all += line + "\n"
+    }
+    all
+}
+
+/// The text of a source: a file, or standard input for `-`.
+fn readSource(name: &String) -> Result<String, String> {
+    if *name == "-" { return Ok(readStdin()) }
+    match io::readToString(name) {
+        Ok(contents) => Ok(contents),
+        Err(e) => Err(name + ": " + io::describe(e)),
+    }
+}
+
+fn scan(contents: &String, filter: &Filter, report: &var Report, show: bool) {
+    for line in text::splitLines(contents) {
+        if text::trim(line).$isEmpty() { continue }
+        report.read += 1
+        match record::parseRecord(line) {
+            None => report.skipped += 1,
+            Some(r) => {
+                if filter.keeps(&r) {
+                    report.kept += 1
+                    let name = r.level.name()
+                    report.perLevel.put(name.$clone(), report.perLevel.atOr(&name, 0) + 1)
+                    if show { println!("{}", line) }
+                }
+            }
+        }
+    }
+}
+
+fn main() -> i64 {
+    var app = cli::Parser("logscan", "Filters log lines of the form `WHEN LEVEL message`.")
+    app.option("level", "l", "lowest level to keep: debug, info, warn or error", "")
+    app.option("contains", "c", "keep only messages containing this text", "")
+    app.flag("count", "n", "print how many lines matched instead of the lines")
+    app.flag("summary", "s", "print a count per level instead of the lines")
+    app.rest("files", "files to read; `-` or nothing reads standard input")
+    app.setVersion("0.1.0")
+    let args = app.parseOrExit()
+
+    // The level comes from --level, then LOGSCAN_LEVEL, then defaults to info.
+    let levelName = args.value("level").or(env::getOr("LOGSCAN_LEVEL", ""))
+    var minimum = Level::Info
+    if !levelName.$isEmpty() {
+        match Level::parse(&levelName) {
+            Some(level) => minimum = level,
+            None => {
+                io::eprintln("logscan: '" + levelName + "' is not a level")
+                return 2
+            }
+        }
+    }
+    let filter = Filter { minimum: minimum, contains: args.value("contains") ?? "" }
+
+    var sources = args.rest()
+    if sources.isEmpty() { sources.push("-") }
+
+    let showLines = !args.has(&"count") && !args.has(&"summary")
+    var report = Report { read: 0, skipped: 0, kept: 0, perLevel: Map<String, i64>() }
+    for source in sources {
+        match readSource(source) {
+            Ok(contents) => scan(&contents, &filter, &var report, showLines),
+            Err(message) => {
+                io::eprintln("logscan: " + message)
+                return 2
+            }
+        }
+    }
+
+    if args.has(&"count") {
+        println!("{}", report.kept)
+    }
+    if args.has(&"summary") {
+        for name in ["DEBUG", "INFO", "WARN", "ERROR"] {
+            println!("{:<6} {}", name, report.perLevel.atOr(&name, 0))
+        }
+        if report.skipped > 0 {
+            println!("({} lines were not in the log format)", report.skipped)
+        }
+    }
+    if report.kept == 0 { return 1 }
+    0
+}

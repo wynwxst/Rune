@@ -1,0 +1,146 @@
+// grve — margrave, a quiet terminal workspace.
+//
+//     grve              the current folder, in the explorer
+//     grve <folder>     that folder
+//     grve <file>       that file, in the editor
+//
+// One loop: draw, wait for something (a key, a resize, a language server, the
+// shell job), act on it, draw again.
+
+import std::io
+import std::env
+import std::process
+import grve::app
+import grve::commands
+import grve::config
+import grve::glue
+import grve::input
+import grve::keys
+import grve::pane
+import grve::sys
+import grve::term
+import grve::utf
+import grve::view
+
+fn usage() {
+    io::println("grve — margrave, a terminal workspace")
+    io::println("")
+    io::println("usage: grve [path]")
+    io::println("")
+    io::println("  path        a folder to explore or a file to edit (default: here)")
+    io::println("  --config    print where the configuration lives")
+    io::println("  --version   print the version")
+    io::println("")
+    io::println("Inside: " + "`:` commands (`:help` lists them), alt+arrows between panes,")
+    io::println("esc from the editor to the files. Configuration: " + config::configDirectory())
+}
+
+fn main() -> i64 {
+    var target = ""
+    for a in process::arguments() {
+        if a == "-h" || a == "--help" { usage(); return 0 }
+        if a == "-v" || a == "--version" { io::println("grve 0.1.0"); return 0 }
+        if a == "--config" { io::println(config::configDirectory()); return 0 }
+        if utf::startsWith(a, "-") {
+            io::eprintln("grve: unknown option " + a + " (try --help)")
+            return 2
+        }
+        target = a.$clone()
+    }
+    let cwd = env::currentDirectory() ?? "/"
+    let cfg = config::load()
+    if !sys::enterRaw() {
+        io::eprintln("grve: standard input is not a terminal")
+        return 1
+    }
+    term::begin(cfg.mouse)
+    let ws = app::App(cfg, cwd)
+
+    if !target.$isEmpty() {
+        let path = ws.resolve(target, cwd)
+        let first = ws.current()
+        if sys::isDirectory(path) {
+            first.list(path, cfg.showHidden)
+        } else {
+            first.list(utf::dirName(path), cfg.showHidden)
+            first.selectName(utf::baseName(path))
+            ws.openIn(first, path)
+        }
+    }
+    if !cfg.warnings.isEmpty() {
+        ws.warn(cfg.warnings.get(0) + (if cfg.warnings.length() > 1 { "  (+" + (cfg.warnings.length() - 1).$str() + " more)" } else { "" }))
+    }
+
+    let resize = sys::resizeDescriptor()
+    loop {
+        ws.draw()
+        if ws.quitting { break }
+
+        var fds = vector::Vector<i64>()
+        fds.push(0)
+        fds.push(resize)
+        let servers = ws.serverDescriptors()
+        for fd in servers { fds.push(fd) }
+        let jobFd = if ws.hasJob { ws.job.descriptor() } else { -1 }
+        if jobFd >= 0 { fds.push(jobFd) }
+
+        var timeout = 1000
+        if ws.hasJob && ws.job.running { timeout = 100 }
+        if ws.syncPending() { timeout = 150 }
+        if !ws.mouseAsked { timeout = 100 }
+        if ws.decoder.waiting() { timeout = 25 }
+        let mask = sys::waitAny(fds.asSlice(), timeout)
+
+        // Keys.
+        if (mask & 1) != 0 {
+            var bytes = io::Bytes()
+            let n = sys::readInto(0, &var bytes)
+            if n == 0 {
+                // The terminal went away.
+                ws.quit(true)
+                break
+            }
+            if n > 0 { ws.decoder.feed(bytes.toString()) }
+        }
+        loop {
+            // A lone ESC is the Escape key only once nothing follows it.
+            match ws.decoder.next(mask == 0) {
+                Some(k) => ws.handleKey(k),
+                None => break,
+            }
+            if ws.quitting { break }
+        }
+        if ws.quitting { break }
+
+        if (mask & 2) != 0 {
+            var drained = io::Bytes()
+            sys::readInto(resize, &var drained)
+            ws.screen.invalidate()
+        }
+
+        var i = 0
+        while i < servers.length() {
+            if (mask & (1 << (2 + i))) != 0 { ws.serviceServer(servers.get(i)) }
+            i += 1
+        }
+
+        if ws.hasJob && ws.job.running {
+            let wasRunning = true
+            ws.job.pump()
+            if wasRunning && !ws.job.running {
+                ws.refreshExplorers()
+                ws.reloadChanged()
+            }
+        }
+        ws.syncIdle()
+        ws.mouseIdle()
+    }
+
+    ws.stopServers()
+    if ws.hasJob && ws.job.running { ws.job.abort() }
+    term::end()
+    sys::leaveRaw()
+    0
+}
+
+import std::collections::vector

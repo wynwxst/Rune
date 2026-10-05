@@ -1,0 +1,64 @@
+import std::testing
+import ledger::entry
+import ledger::parse
+import ledger::parse::{ParseError}
+
+fn main() -> i64 {
+    // money formatting
+    assertEq!(entry::money(250000), "2500.00")
+    assertEq!(entry::money(-350), "-3.50")
+    assertEq!(entry::money(5), "0.05")
+    assertEq!(entry::money(0), "0.00")
+
+    // one good line
+    match parse::parseLine(1, &"2026-03-02,Coffee,-3.50") {
+        Ok(e) => {
+            assertEq!(e.description, "Coffee")
+            assertEq!(e.cents, -350)
+            assertEq!(e.date.iso(), "2026-03-02")
+        }
+        Err(_) => testing::unreachable("a good line should parse"),
+    }
+
+    // amounts in several shapes
+    match parse::parseLine(1, &"2026-03-02,Gift,20") {
+        Ok(e) => assertEq!(e.cents, 2000, "a whole number of units")
+        Err(_) => testing::unreachable("20 is an amount"),
+    }
+    match parse::parseLine(1, &"2026-03-02,Gift,.50") {
+        Ok(e) => testing::unreachable("'.50' has no whole part"),
+        Err(_) => testing::isTrue("'.50' is refused", true),
+    }
+
+    // every error carries the line number
+    match parse::parseLine(7, &"2026-03-02,Coffee") {
+        Err(ParseError::WrongColumns { line, found }) => {
+            assertEq!(line, 7)
+            assertEq!(found, 2)
+        }
+        _ => testing::unreachable("two columns"),
+    }
+    match parse::parseLine(8, &"2026-13-02,Coffee,-3.50") {
+        Err(ParseError::BadDate { line, text }) => {
+            assertEq!(line, 8)
+            assertEq!(text, "2026-13-02")
+        }
+        _ => testing::unreachable("month 13"),
+    }
+    match parse::parseLine(9, &"2026-03-02,Coffee,3.5") {
+        Err(ParseError::BadAmount { line, text }) => assertEq!(line, 9)
+        _ => testing::unreachable("one decimal"),
+    }
+
+    // a whole file: blank lines are skipped, the first bad line stops it
+    match parse::parseAll(&"2026-03-01,A,1.00\n\n2026-03-02,B,2.00\n") {
+        Ok(entries) => assertEq!(entries.length(), 2, "two entries, one blank line")
+        Err(_) => testing::unreachable("valid file"),
+    }
+    match parse::parseAll(&"2026-03-01,A,1.00\nbad\n2026-03-02,B,x\n") {
+        Err(ParseError::WrongColumns { line, found }) => assertEq!(line, 2, "stops at line 2")
+        _ => testing::unreachable("line 2 is bad"),
+    }
+
+    testing::summary()
+}

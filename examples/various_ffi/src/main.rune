@@ -1,0 +1,7 @@
+import std::io
+import various_ffi::socket
+
+fn main() -> i64 {
+    io::println("Hello from various_ffi!")
+    0
+}

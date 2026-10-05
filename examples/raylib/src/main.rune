@@ -1,0 +1,18 @@
+import raylib::bindings
+import std::io
+
+
+#unsafe
+fn main() -> i64 {
+    println!("Bad = {}",bindings::layoutMismatches())
+    bindings::InitWindow(width: 300, height: 500, title: "Hello From Rune")
+    while !bindings::WindowShouldClose() {
+        bindings::BeginDrawing()
+        bindings::EndDrawing()
+    }
+    bindings::CloseWindow()
+    //InitWindow()
+    //bindings::CUBEMAP_LAYOUT_LINE_HORIZONTAL
+    io::println("Hello from raylib!")
+    0
+}

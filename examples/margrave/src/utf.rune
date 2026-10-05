@@ -1,0 +1,363 @@
+// UTF-8 by hand. Lines are kept as `String`s and positions in them as byte
+// offsets, which makes every edit a pair of `$substring`s; these helpers are
+// what keeps such an offset on a character boundary, and turn it into the
+// column it is drawn at.
+
+import std::io
+import grve::sys
+
+/// True for a byte that continues a character rather than starting one.
+pub fn isContinuation(b: i64) -> bool { (b & 0xC0) == 0x80 }
+
+/// The byte offset just past the character at `at`.
+pub fn next(s: &String, at: i64) -> i64 {
+    let n = s.$length()
+    if at >= n { return n }
+    var i = at + 1
+    while i < n && isContinuation(s.$byteAt(i) as i64) { i += 1 }
+    i
+}
+
+/// The byte offset of the character before `at`.
+pub fn prev(s: &String, at: i64) -> i64 {
+    if at <= 0 { return 0 }
+    var i = at - 1
+    while i > 0 && isContinuation(s.$byteAt(i) as i64) { i -= 1 }
+    i
+}
+
+/// The code point that starts at byte `at`; a stray byte reads as itself.
+pub fn decode(s: &String, at: i64) -> i64 {
+    let n = s.$length()
+    if at >= n { return 0 }
+    let b0 = s.$byteAt(at) as i64
+    if b0 < 0x80 { return b0 }
+    var need = 0
+    var cp = 0
+    if (b0 & 0xE0) == 0xC0 { need = 1; cp = b0 & 0x1F }
+    elif (b0 & 0xF0) == 0xE0 { need = 2; cp = b0 & 0x0F }
+    elif (b0 & 0xF8) == 0xF0 { need = 3; cp = b0 & 0x07 }
+    else { return 0xFFFD }
+    var i = 1
+    while i <= need {
+        if at + i >= n { return 0xFFFD }
+        let b = s.$byteAt(at + i) as i64
+        if !isContinuation(b) { return 0xFFFD }
+        cp = (cp << 6) | (b & 0x3F)
+        i += 1
+    }
+    cp
+}
+
+/// Appends the UTF-8 for `cp`.
+pub fn encodeInto(sink: &var io::Bytes, cp: i64) {
+    if cp < 0x80 {
+        sink.push(cp as u8)
+    } elif cp < 0x800 {
+        sink.push((0xC0 | (cp >> 6)) as u8)
+        sink.push((0x80 | (cp & 0x3F)) as u8)
+    } elif cp < 0x10000 {
+        sink.push((0xE0 | (cp >> 12)) as u8)
+        sink.push((0x80 | ((cp >> 6) & 0x3F)) as u8)
+        sink.push((0x80 | (cp & 0x3F)) as u8)
+    } else {
+        sink.push((0xF0 | (cp >> 18)) as u8)
+        sink.push((0x80 | ((cp >> 12) & 0x3F)) as u8)
+        sink.push((0x80 | ((cp >> 6) & 0x3F)) as u8)
+        sink.push((0x80 | (cp & 0x3F)) as u8)
+    }
+}
+
+/// A one-character string.
+pub fn fromCode(cp: i64) -> String { (cp as Character).$str() }
+
+/// Columns `cp` takes on screen. Tabs are the caller's business.
+pub fn width(cp: i64) -> i64 {
+    if cp < 0x20 { return 1 }          // drawn as a visible placeholder
+    if cp < 0x7F { return 1 }
+    if cp < 0xA0 { return 1 }
+    if cp < 0x300 { return 1 }
+    let w = sys::charWidth(cp)
+    if w < 1 { return 1 }              // combining marks still get a cell
+    w
+}
+
+/// The column a byte offset is drawn at, with tabs to `tab`-wide stops.
+pub fn columnOf(s: &String, byte: i64, tab: i64) -> i64 {
+    var col = 0
+    var i = 0
+    let stop = if byte < s.$length() { byte } else { s.$length() }
+    while i < stop {
+        let b = s.$byteAt(i) as i64
+        if b == 9 {
+            col += tab - (col % tab)
+            i += 1
+        } elif b < 0x80 {
+            col += 1
+            i += 1
+        } else {
+            col += width(decode(s, i))
+            i = next(s, i)
+        }
+    }
+    col
+}
+
+/// The byte offset of the character drawn at, or covering, column `col`. Past
+/// the end of the line it is the line's length.
+pub fn byteAtColumn(s: &String, col: i64, tab: i64) -> i64 {
+    var c = 0
+    var i = 0
+    let n = s.$length()
+    while i < n {
+        let b = s.$byteAt(i) as i64
+        var w = 1
+        if b == 9 { w = tab - (c % tab) }
+        elif b >= 0x80 { w = width(decode(s, i)) }
+        if c + w > col { return i }
+        c += w
+        i = next(s, i)
+    }
+    n
+}
+
+/// Columns the whole string takes.
+pub fn displayWidth(s: &String) -> i64 { columnOf(s, s.$length(), 4) }
+
+/// The longest prefix of `s` that fits in `cols` columns.
+pub fn fit(s: &String, cols: i64) -> String {
+    if cols <= 0 { return "" }
+    let at = byteAtColumn(s, cols, 4)
+    if at >= s.$length() { return s.$clone() }
+    s.$substring(0, at)
+}
+
+/// `s` cut to `cols` columns, with an ellipsis when something was cut.
+pub fn ellipsize(s: &String, cols: i64) -> String {
+    if displayWidth(s) <= cols { return s.$clone() }
+    if cols <= 1 { return fit(s, cols) }
+    fit(s, cols - 1) + "…"
+}
+
+/// `s` cut from the left so that its end shows: `…/deep/path/file`.
+pub fn ellipsizeStart(s: &String, cols: i64) -> String {
+    let w = displayWidth(s)
+    if w <= cols { return s.$clone() }
+    if cols <= 1 { return "…" }
+    let at = byteAtColumn(s, w - cols + 1, 4)
+    "…" + s.$substring(at, s.$length())
+}
+
+/// Letters, digits, `_`, and anything outside ASCII: what a word is made of.
+pub fn isWordByte(b: i64) -> bool {
+    (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b >= 0x80
+}
+
+pub fn isSpaceByte(b: i64) -> bool { b == 32 || b == 9 }
+
+/// UTF-16 code units before byte `byte` — the column an LSP position counts.
+pub fn utf16Units(s: &String, byte: i64) -> i64 {
+    var units = 0
+    var i = 0
+    let stop = if byte < s.$length() { byte } else { s.$length() }
+    while i < stop {
+        let cp = decode(s, i)
+        units += if cp >= 0x10000 { 2 } else { 1 }
+        i = next(s, i)
+    }
+    units
+}
+
+/// The byte offset `units` UTF-16 code units into `s`.
+pub fn byteOfUtf16(s: &String, units: i64) -> i64 {
+    var u = 0
+    var i = 0
+    let n = s.$length()
+    while i < n && u < units {
+        let cp = decode(s, i)
+        u += if cp >= 0x10000 { 2 } else { 1 }
+        i = next(s, i)
+    }
+    i
+}
+
+/// The leading spaces and tabs of a line.
+pub fn indentOf(s: &String) -> String {
+    var i = 0
+    while i < s.$length() && isSpaceByte(s.$byteAt(i) as i64) { i += 1 }
+    s.$substring(0, i)
+}
+
+/// True when the line is nothing but whitespace.
+pub fn isBlank(s: &String) -> bool { indentOf(s).$length() == s.$length() }
+
+/// Where `needle` starts at or after `from`, or -1.
+pub fn findFrom(s: &String, needle: &String, from: i64) -> i64 {
+    let n = needle.$length()
+    let len = s.$length()
+    if n == 0 { return from }
+    var i = if from < 0 { 0 } else { from }
+    let first = needle.$byteAt(0)
+    while i + n <= len {
+        if s.$byteAt(i) == first {
+            var j = 1
+            while j < n && s.$byteAt(i + j) == needle.$byteAt(j) { j += 1 }
+            if j == n { return i }
+        }
+        i += 1
+    }
+    -1
+}
+
+/// The last occurrence of the byte `b`, or -1.
+pub fn lastByte(s: &String, b: i64) -> i64 {
+    var i = s.$length() - 1
+    while i >= 0 {
+        if (s.$byteAt(i) as i64) == b { return i }
+        i -= 1
+    }
+    -1
+}
+
+pub fn startsWith(s: &String, prefix: &String) -> bool {
+    if prefix.$length() > s.$length() { return false }
+    var i = 0
+    while i < prefix.$length() {
+        if s.$byteAt(i) != prefix.$byteAt(i) { return false }
+        i += 1
+    }
+    true
+}
+
+pub fn endsWith(s: &String, suffix: &String) -> bool {
+    let off = s.$length() - suffix.$length()
+    if off < 0 { return false }
+    var i = 0
+    while i < suffix.$length() {
+        if s.$byteAt(off + i) != suffix.$byteAt(i) { return false }
+        i += 1
+    }
+    true
+}
+
+/// ASCII lower case.
+pub fn lower(s: &String) -> String {
+    var b = io::Bytes()
+    var i = 0
+    while i < s.$length() {
+        var c = s.$byteAt(i) as i64
+        if c >= 65 && c <= 90 { c += 32 }
+        b.push(c as u8)
+        i += 1
+    }
+    b.toString()
+}
+
+/// True when any ASCII capital appears — smart case for searches.
+pub fn hasUpper(s: &String) -> bool {
+    var i = 0
+    while i < s.$length() {
+        let c = s.$byteAt(i) as i64
+        if c >= 65 && c <= 90 { return true }
+        i += 1
+    }
+    false
+}
+
+/// `s` without spaces, tabs, carriage returns and newlines at either end.
+pub fn trim(s: &String) -> String {
+    var a = 0
+    var b = s.$length()
+    while a < b && isTrimmable(s.$byteAt(a) as i64) { a += 1 }
+    while b > a && isTrimmable(s.$byteAt(b - 1) as i64) { b -= 1 }
+    s.$substring(a, b)
+}
+
+/// `s` without blanks at the end.
+pub fn trimEnd(s: &String) -> String {
+    var b = s.$length()
+    while b > 0 && isTrimmable(s.$byteAt(b - 1) as i64) { b -= 1 }
+    s.$substring(0, b)
+}
+
+/// `s` without blanks at the start.
+pub fn trimStart(s: &String) -> String {
+    var a = 0
+    while a < s.$length() && isTrimmable(s.$byteAt(a) as i64) { a += 1 }
+    s.$substring(a, s.$length())
+}
+
+fn isTrimmable(b: i64) -> bool { b == 32 || b == 9 || b == 13 || b == 10 }
+
+/// A whole number, decimal, written plainly.
+pub fn parseInt(s: &String) -> i64? { trim(s).$toInt() }
+
+/// A file name's extension, lower-cased, without the dot.
+pub fn extension(path: &String) -> String {
+    let slash = lastByte(path, 47)
+    let dot = lastByte(path, 46)
+    if dot <= slash + 1 { return "" }
+    lower(path.$substring(dot + 1, path.$length()))
+}
+
+/// The last component of a path.
+pub fn baseName(path: &String) -> String {
+    var p = path.$clone()
+    while p.$length() > 1 && endsWith(&p, "/") { p = p.$substring(0, p.$length() - 1) }
+    let slash = lastByte(&p, 47)
+    if slash < 0 { return p }
+    p.$substring(slash + 1, p.$length())
+}
+
+/// Everything before the last component; "/" for a top-level path.
+pub fn dirName(path: &String) -> String {
+    var p = path.$clone()
+    while p.$length() > 1 && endsWith(&p, "/") { p = p.$substring(0, p.$length() - 1) }
+    let slash = lastByte(&p, 47)
+    if slash < 0 { return "." }
+    if slash == 0 { return "/" }
+    p.$substring(0, slash)
+}
+
+/// `a/b`, with exactly one slash between.
+pub fn join(a: &String, b: &String) -> String {
+    if a.$isEmpty() { return b.$clone() }
+    if startsWith(b, "/") { return b.$clone() }
+    if endsWith(a, "/") { return a + b }
+    a + "/" + b
+}
+
+/// `s` padded with spaces to `width` columns.
+pub fn padEnd(s: &String, width: i64) -> String { s + spaces(width - displayWidth(s)) }
+
+/// A run of `n` spaces.
+pub fn spaces(n: i64) -> String {
+    if n <= 0 { return "" }
+    " ".$repeat(n)
+}
+
+/// Shell-quotes a word: `'it'\''s'`.
+pub fn shellQuote(s: &String) -> String {
+    var out = "'"
+    var i = 0
+    while i < s.$length() {
+        let b = s.$byteAt(i) as i64
+        if b == 39 { out += "'\\''" } else { out += s.$substring(i, i + 1) }
+        i += 1
+    }
+    out + "'"
+}
+
+/// A byte count for people: 512 B, 3.4 K, 12 M.
+pub fn humanSize(n: i64) -> String {
+    if n < 1024 { return n.$str() + " B" }
+    let units: [4:String] = ["K", "M", "G", "T"]
+    var v = (n as f64) / 1024.0
+    var u = 0
+    while v >= 1024.0 && u < 3 { v = v / 1024.0; u += 1 }
+    if v < 10.0 {
+        let tenths = ((v * 10.0) + 0.5) as i64
+        return (tenths / 10).$str() + "." + (tenths % 10).$str() + " " + units[u]
+    }
+    ((v + 0.5) as i64).$str() + " " + units[u]
+}

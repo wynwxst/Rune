@@ -1,0 +1,29 @@
+import ringbuffer::ring::{RingBuffer}
+
+/// The average of the readings currently in the buffer.
+fn average(readings: &RingBuffer<f64>) -> f64 {
+    var total = 0.0
+    for r in readings { total += *r }
+    total / (readings.length() as f64)
+}
+
+fn main() {
+    // A moving average over the last three temperature readings.
+    var readings = RingBuffer<f64>(3)
+    for t in [20.0, 22.0, 21.0, 25.0, 30.0] {
+        readings.push(t)
+        println!("added {:>4}  average of last {}: {:.2}", t, readings.length(), average(&readings))
+    }
+
+    // The same type holds anything: the last two log lines.
+    var log = RingBuffer<String>(2)
+    for line in ["boot", "connect", "login", "logout"] {
+        match log.push(line.$clone()) {
+            Some(old) => println!("forgot '{}'", old),
+            None => {}
+        }
+    }
+    for line in log {
+        println!("kept '{}'", line)
+    }
+}
