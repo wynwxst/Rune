@@ -92,14 +92,23 @@ fs::path stdlibDir() {
   return fs::path(rune::stdlibDirFor(gExecutableDir, RUNE_DEFAULT_STDLIB_DIR));
 }
 
+/// A program's file name on this platform.
+std::string exeName(const std::string &name) {
+#if defined(_WIN32)
+  return name + ".exe";
+#else
+  return name;
+#endif
+}
+
 std::string findCompiler() {
   if (const char *env = getenv("RUNEC"))
     return env;
   std::error_code ec;
   // Installed layout and build-tree layout both put runec beside rune.
   for (const fs::path &candidate :
-       {fs::path(gExecutableDir) / "runec",
-        fs::path(gExecutableDir) / ".." / "bin" / "runec"}) {
+       {fs::path(gExecutableDir) / exeName("runec"),
+        fs::path(gExecutableDir) / ".." / "bin" / exeName("runec")}) {
     // A regular file, not merely something by that name: run from the root
     // of this repository, `./runec` is the compiler's *source* directory.
     if (fs::is_regular_file(candidate, ec))
@@ -423,7 +432,12 @@ bool runStep(const std::string &verb, const std::string &what,
   // several compilers are running here. Left alone they would each ask for
   // the whole machine and spend the difference fighting over it, so the
   // machine is divided between them instead.
+#if defined(_WIN32)
+  // cmd.exe has no `NAME=value command` prefix.
+  full = "set \"RUNE_JOBS=" + std::to_string(pm::sharePerJob()) + "\" && " + full;
+#else
   full = "RUNE_JOBS=" + std::to_string(pm::sharePerJob()) + " " + full;
+#endif
 
   std::string output;
   int rc = pm::runCaptured(full, output);
@@ -1851,7 +1865,7 @@ void primeToolchainCache(const Options &opts) {
   refresh(stdlibDir(), home / "stdlib", true);
 
   // The generator is a Rune program, so it is compiled once and kept.
-  fs::path gen = home / "bin" / "rune-doc";
+  fs::path gen = home / "bin" / exeName("rune-doc");
   fs::path genSrc = src / "tools" / "rune-doc.rune";
   bool stale = !fs::exists(gen, ec);
   if (!stale && fs::exists(genSrc, ec)) {
@@ -2052,15 +2066,6 @@ const ToolInfo *toolNamed(const std::string &name) {
     if (name == t.Name || name == t.Command)
       return &t;
   return nullptr;
-}
-
-/// A program's file name on this platform.
-std::string exeName(const std::string &name) {
-#if defined(_WIN32)
-  return name + ".exe";
-#else
-  return name;
-#endif
 }
 
 /// Where the tools live once they are this user's: `~/.rune/bin`.
@@ -2433,7 +2438,7 @@ int commandEditorTool(const std::string &command, const std::vector<std::string>
     cmd += " --runec " + quote(findCompiler());   // it asks the compiler for types
   if (command == "lsp") {
     // The server runs the compiler itself: this one, and this `rune`.
-    fs::path self = fs::path(gExecutableDir) / "rune";
+    fs::path self = fs::path(gExecutableDir) / exeName("rune");
     cmd += " --runec " + quote(findCompiler());
     if (fs::is_regular_file(self, ec))
       cmd += " --rune " + quote(fs::absolute(self, ec).lexically_normal().string());

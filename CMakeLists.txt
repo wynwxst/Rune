@@ -61,11 +61,16 @@ llvm_map_components_to_libnames(RUNE_LLVM_LIBS
   core support irreader bitwriter analysis passes target
   ${LLVM_TARGETS_TO_BUILD})
 
+# std::thread needs libpthread explicitly where glibc predates 2.34
+# (the manylinux_2_28 release builds).
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 add_library(rune_llvm INTERFACE)
 
 target_include_directories(rune_llvm SYSTEM INTERFACE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(rune_llvm INTERFACE ${LLVM_DEFINITIONS_LIST})
-target_link_libraries(rune_llvm INTERFACE ${RUNE_LLVM_LIBS})
+target_link_libraries(rune_llvm INTERFACE ${RUNE_LLVM_LIBS} Threads::Threads)
 if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(rune_llvm INTERFACE -fno-rtti)
 endif()

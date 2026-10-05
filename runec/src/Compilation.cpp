@@ -719,10 +719,15 @@ bool linkExecutable(const std::string &objPath,
   // for `-lm` means the driver goes looking for a library that is not there.
   if (!wantsMath && !isWindows && !triple.isOSDarwin() && !opts.Freestanding)
     own("-lm");
+  // The runtime's sockets are Winsock, which MinGW keeps in its own library.
+  if (isWindows && !opts.Freestanding)
+    own("-lws2_32");
   // The runtime's threads and locks use pthreads; glibc before 2.34 (the
   // manylinux_2_28 build) keeps them in a separate library.
-  if (triple.isOSLinux() && !opts.Freestanding)
+  if (triple.isOSLinux() && !opts.Freestanding) {
     own("-lpthread");
+    own("-ldl"); // dlopen and friends, likewise in libc only from 2.34
+  }
 
   if (opts.Verbose)
     diags.status("link: " + spellCommand(argv));

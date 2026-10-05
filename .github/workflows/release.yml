@@ -14,6 +14,13 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: >-
+          Which platforms to build: "all", or a comma-separated list of
+          macos-arm64, macos-x86_64, linux-x86_64, linux-arm64, windows-x86_64
+          (a word such as "windows" or "linux" picks every match)
+        default: all
 
 permissions:
   contents: write
@@ -22,27 +29,52 @@ env:
   LLVM_VERSION: "22.1.4"
 
 jobs:
+  # Which jobs a manual run builds. A tag always builds everything.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      unix: ${{ steps.pick.outputs.unix }}
+      windows: ${{ steps.pick.outputs.windows }}
+    steps:
+      - id: pick
+        env:
+          WANT: ${{ github.event.inputs.platforms || 'all' }}
+        run: |
+          all='[
+            {"platform":"macos-arm64","runner":"macos-14"},
+            {"platform":"macos-x86_64","runner":"macos-13"},
+            {"platform":"linux-x86_64","runner":"ubuntu-24.04","container":"quay.io/pypa/manylinux_2_28_x86_64"},
+            {"platform":"linux-arm64","runner":"ubuntu-24.04-arm","container":"quay.io/pypa/manylinux_2_28_aarch64"}
+          ]'
+          want() {
+            [[ "$WANT" == all || "$GITHUB_REF" == refs/tags/v* ]] && return 0
+            local w
+            for w in ${WANT//,/ }; do [[ "$1" == *"$w"* ]] && return 0; done
+            return 1
+          }
+          picked='[]'
+          for p in $(echo "$all" | jq -r '.[].platform'); do
+            if want "$p"; then
+              picked=$(jq -c --argjson all "$all" --arg p "$p" '. + [$all[] | select(.platform == $p)]' <<<"$picked")
+            fi
+          done
+          echo "unix=$picked" >> "$GITHUB_OUTPUT"
+          if want windows-x86_64; then echo "windows=true" >> "$GITHUB_OUTPUT"; else echo "windows=false" >> "$GITHUB_OUTPUT"; fi
+
   unix:
     name: ${{ matrix.platform }}
+    needs: plan
+    if: needs.plan.outputs.unix != '[]'
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: macos-arm64
-            runner: macos-14
-          - platform: macos-x86_64
-            runner: macos-13
-          # An old glibc, so the binaries run on any distribution newer than
-          # it; everything but the C library is linked in.
-          - platform: linux-x86_64
-            runner: ubuntu-24.04
-            container: quay.io/pypa/manylinux_2_28_x86_64
-          - platform: linux-arm64
-            runner: ubuntu-24.04-arm
-            container: quay.io/pypa/manylinux_2_28_aarch64
+        # An old glibc on Linux, so the binaries run on any distribution
+        # newer than it; everything but the C library is linked in.
+        include: ${{ fromJSON(needs.plan.outputs.unix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -99,6 +131,8 @@ jobs:
 
   windows:
     name: windows-x86_64
+    needs: plan
+    if: needs.plan.outputs.windows == 'true'
     runs-on: windows-latest
     timeout-minutes: 360
     defaults:

@@ -1,0 +1,47 @@
+# Publishes a release from archives that earlier `release` runs already built,
+# without building anything again. Give it the tag and the run ids to take the
+# `rune-*` artifacts from (one run per platform set is enough).
+name: publish-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to create, e.g. 0.1.0b
+        required: true
+      runs:
+        description: Comma-separated ids of `release` runs to take artifacts from
+        required: true
+      prerelease:
+        description: Mark the release as a pre-release
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download the archives
+        run: |
+          for run in ${RUNS//,/ }; do
+            gh run download "$run" --pattern 'rune-*' --dir dist
+          done
+          find dist -type f | sort
+        env:
+          RUNS: ${{ inputs.runs }}
+
+      - name: Create the release
+        run: |
+          flags=(--target "$GITHUB_SHA" --generate-notes --title "Rune $TAG")
+          [ "$PRE" = true ] && flags+=(--prerelease)
+          gh release create "$TAG" "${flags[@]}" dist/*/*
+        env:
+          TAG: ${{ inputs.tag }}
+          PRE: ${{ inputs.prerelease }}
