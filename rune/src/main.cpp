@@ -25,6 +25,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Cargo.h"
 #include "Console.h"
 #include "rune/Install.h"
 #include "Fingerprint.h"
@@ -54,6 +55,39 @@ namespace pm = rune::pm;
 using namespace rune;
 
 namespace {
+
+/// Puts a copy of `from` at `to` so that nothing ever sees half of one: the
+/// bytes go to a name of this process's own beside `to`, which is then
+/// renamed over it. Several `rune`s run at once — an editor's, a build's, a
+/// test suite's — and copying in place let one of them start a tool another
+/// was still writing. A copy cut short in place was also newer than its
+/// source, so nothing ever replaced it.
+bool replaceWithCopy(const fs::path &from, const fs::path &to,
+                     std::error_code &ec) {
+  fs::path partial = to;
+  partial += ".partial." + std::to_string(getpid());
+  std::error_code ignored;
+  fs::copy_file(from, partial, fs::copy_options::overwrite_existing, ec);
+  if (!ec)
+    fs::rename(partial, to, ec);
+  if (ec) {
+    fs::remove(partial, ignored);
+    return false;
+  }
+  return true;
+}
+
+/// Whether the copy at `to` has to be made again from `from`: it is missing,
+/// older, or not the same size — which is what gives away one left behind
+/// half-written by a copy that was interrupted.
+bool copyIsStale(const fs::path &from, const fs::path &to) {
+  std::error_code a, b;
+  if (!fs::exists(to, a))
+    return true;
+  if (fs::file_size(from, a) != fs::file_size(to, b) || a || b)
+    return true;
+  return fs::last_write_time(from, a) > fs::last_write_time(to, b);
+}
 
 //===----------------------------------------------------------------------===//
 // Console output lives in Console.cpp, shared with the registry.
@@ -326,6 +360,8 @@ void appendBuildFlags(std::string &cmd, const Manifest &m, const Options &o,
     std::vector<std::string> names = m.ConfigFlags;
     for (const Dependency &d : m.Dependencies)
       names.push_back(d.Name);
+    for (const CargoCrate &c : m.CargoCrates)
+      names.push_back(c.Name);
     for (const std::string &n : o.ConfigFlags)
       names.push_back(n);
     std::sort(names.begin(), names.end());
@@ -589,6 +625,186 @@ bool buildNativeSources(const Manifest &m, const Options &opts,
   return true;
 }
 
+/// Builds a package's Rust crates and binds each into a Rune module.
+///
+/// Cargo builds the crate as a static library — `cargo rustc --crate-type
+/// staticlib`, so the crate needs no `crate-type` of its own — and the native
+/// libraries Rust's standard library needs are read from what rustc prints
+/// for `--print native-static-libs`. The crate's C ABI is read from its
+/// source into a Rune module named after the dependency, compiled into a
+/// `.rul` in `deps/`: `import name` is all a Rune file needs. See Cargo.h.
+///
+/// Both steps are fingerprinted over the crate's files, so a build with
+/// nothing changed starts neither Cargo nor the compiler.
+bool buildCargoCrates(const Manifest &m,
+                      const std::map<std::string, std::string> &config,
+                      const Options &opts, const fs::path &target,
+                      const fs::path &depsDir, DependencyInputs &made) {
+  if (m.CargoCrates.empty())
+    return true;
+  std::error_code ec;
+  const fs::path cargoDir = target / "cargo";
+  fs::create_directories(cargoDir, ec);
+  pm::FingerprintStore stamps(cargoDir);
+  const std::string rustTarget =
+      opts.Target.Active ? pm::rustTargetFor(opts.Target.Triple) : "";
+  const bool windows =
+      opts.Target.Active ? (opts.Target.Triple.find("windows") != std::string::npos ||
+                            opts.Target.Triple.find("mingw") != std::string::npos)
+#if defined(_WIN32)
+                         : true;
+#else
+                         : false;
+#endif
+
+  for (const CargoCrate &crate : m.CargoCrates) {
+    std::string error;
+    const std::string libName = pm::cargoLibraryName(crate.Path, error);
+    if (libName.empty()) {
+      failLine("Rust dependency '" + crate.Name + "': " + error);
+      note("`cargo = \"...\"` names a directory with a Cargo.toml, relative to "
+           "Rune.toml");
+      return false;
+    }
+
+    // The crate, as a static library.
+    std::string cmd = "cargo rustc --lib --crate-type staticlib --manifest-path " +
+                      quote((fs::path(crate.Path) / "Cargo.toml").string()) +
+                      " --target-dir " + quote(cargoDir.string());
+    if (opts.Release)
+      cmd += " --release";
+    if (!rustTarget.empty())
+      cmd += " --target " + quote(rustTarget);
+    if (!crate.DefaultFeatures)
+      cmd += " --no-default-features";
+    if (!crate.Features.empty()) {
+      std::string list;
+      for (const std::string &f : crate.Features)
+        list += (list.empty() ? "" : ",") + f;
+      cmd += " --features " + quote(list);
+    }
+    cmd += " -- --print native-static-libs";
+
+    fs::path lib = cargoDir;
+    if (!rustTarget.empty())
+      lib /= rustTarget;
+    lib /= opts.Release ? "release" : "debug";
+    lib /= "lib" + libName + ".a";
+    const fs::path nativeLibsFile = cargoDir / (libName + ".native-libs");
+
+    pm::Fingerprint fp;
+    fp.add(cmd);
+    for (const char *f : {"Cargo.toml", "Cargo.lock", "build.rs"})
+      if (fs::exists(fs::path(crate.Path) / f, ec))
+        fp.addFile(fs::path(crate.Path) / f);
+    std::vector<fs::path> sources;
+    for (auto it = fs::recursive_directory_iterator(fs::path(crate.Path) / "src", ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+      if (it->is_regular_file())
+        sources.push_back(it->path());
+    std::sort(sources.begin(), sources.end());
+    for (const fs::path &s : sources)
+      fp.addFile(s);
+
+    if (!stamps.isFresh(lib, fp) || !fs::exists(nativeLibsFile, ec)) {
+      std::string output;
+      std::string line = std::string(c("\x1b[32m")) + "○" + c("\x1b[0m") + " " +
+                         c("\x1b[1m") + "Compiling" + c("\x1b[0m") + " " +
+                         crate.Name + " (Rust crate)\n";
+      if (opts.Verbose)
+        line += std::string(c("\x1b[2m")) + "  " + cmd + c("\x1b[0m") + "\n";
+      const int rc = pm::runCaptured(cmd, output);
+      // Cargo narrates every crate it compiles; that is only worth reading
+      // when something went wrong, or when asked.
+      pm::writeSerialized(line + (rc != 0 || opts.Verbose ? output : ""));
+      if (rc != 0) {
+        failLine("Cargo could not build '" + crate.Name + "'");
+        if (rc == 127)
+          note("`cargo` is not on PATH; Rust comes from https://rustup.rs");
+        else if (!rustTarget.empty())
+          note("a cross build needs Rust's standard library for the target: "
+               "`rustup target add " + rustTarget + "`");
+        return false;
+      }
+      if (!fs::exists(lib, ec)) {
+        failLine("Cargo built '" + crate.Name + "' but left no " +
+                 lib.filename().string());
+        note("looked in " + lib.parent_path().string());
+        return false;
+      }
+      // Cargo prints the note only when rustc ran; a crate it found up to
+      // date keeps what the last build recorded.
+      std::vector<std::string> native = pm::nativeStaticLibs(output);
+
+      if (!native.empty() || !fs::exists(nativeLibsFile, ec)) {
+        std::ofstream outFile(nativeLibsFile, std::ios::trunc);
+        for (const std::string &a : native)
+          outFile << a << "\n";
+      }
+      stamps.record(lib, fp);
+    }
+    made.Objects.push_back(lib.string());
+    {
+      // What the C driver links on its own already is left out: on Apple,
+      // libSystem is the C library and libm, and naming it again only makes
+      // the linker warn.
+      const bool apple = rustTarget.empty()
+#if defined(__APPLE__)
+                             ? true
+#else
+                             ? false
+#endif
+                             : rustTarget.find("apple") != std::string::npos;
+      std::ifstream in(nativeLibsFile);
+      for (std::string a; std::getline(in, a);) {
+        if (a.empty() || (apple && (a == "-lSystem" || a == "-lc" || a == "-lm")))
+          continue;
+        made.LinkArgs.push_back(a);
+      }
+    }
+
+    // The crate's C ABI, as a Rune module.
+    pm::RustBindings bound =
+        pm::generateRustBindings(crate.Path, crate.Name, windows);
+    const fs::path source = cargoDir / (crate.Name + ".rune");
+    {
+      std::string existing;
+      std::ifstream in(source, std::ios::binary);
+      if (in) {
+        std::ostringstream text;
+        text << in.rdbuf();
+        existing = text.str();
+      }
+      if (existing != bound.Source) {
+        std::ofstream outFile(source, std::ios::binary | std::ios::trunc);
+        outFile << bound.Source;
+      }
+    }
+    const fs::path rul = depsDir / (crate.Name + outputKindSuffix(OutputKind::Library));
+    std::string bind = quote(findCompiler()) + emitFlagFor(OutputKind::Library) +
+                       " --module " + quote(crate.Name);
+    appendBuildFlags(bind, m, opts, config);
+    bind += " -o " + quote(rul.string()) + " " + quote(source.string());
+    pm::Fingerprint bindFp = stepFingerprint(bind, {source.string()});
+    if (!stamps.isFresh(rul, bindFp)) {
+      if (!runStep("Binding", crate.Name + " (" + std::to_string(bound.Functions) +
+                                  " function" + (bound.Functions == 1 ? "" : "s") +
+                                  ")",
+                   bind, opts))
+        return false;
+      if (!bound.Skipped.empty()) {
+        note(std::to_string(bound.Skipped.size()) + " item" +
+             (bound.Skipped.size() == 1 ? "" : "s") + " of '" + crate.Name +
+             "' could not be bound; the reasons are at the end of " +
+             source.string());
+      }
+      stamps.record(rul, bindFp);
+    }
+    made.Libraries.push_back(rul.string());
+  }
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // The package graph
 //===----------------------------------------------------------------------===//
@@ -802,12 +1018,8 @@ bool prepareInputs(PackageNode &node, std::vector<PackageNode> &nodes,
       }
       // Copying is skipped when the staged copy is already current, which is
       // what keeps a rebuild with no changes quiet.
-      bool needsCopy = true;
-      if (fs::exists(staged, ec))
-        needsCopy = fs::last_write_time(src, ec) > fs::last_write_time(staged, ec);
-      if (needsCopy) {
-        fs::copy_file(src, staged, fs::copy_options::overwrite_existing, ec);
-        if (ec) {
+      if (copyIsStale(src, staged)) {
+        if (!replaceWithCopy(src, staged, ec)) {
           failLine("cannot stage '" + src + "': " + ec.message());
           return false;
         }
@@ -832,9 +1044,11 @@ bool prepareInputs(PackageNode &node, std::vector<PackageNode> &nodes,
     return false;
 
   DependencyInputs own;
+  if (!buildCargoCrates(node.M, node.Config, opts, target, depsDir, own))
+    return false;
   own.LinkLibs = node.M.LinkLibraries;
   own.LinkPaths = node.M.LinkPaths;
-  own.Objects = cObjects;
+  own.Objects.insert(own.Objects.end(), cObjects.begin(), cObjects.end());
   own.NeedsCxx = !node.M.CxxSources.empty();
   for (const std::string &a : node.M.LinkArgs)
     own.LinkArgs.push_back(a);
@@ -2083,15 +2297,9 @@ std::string adoptBuiltTool(const std::string &name) {
   if (!fs::is_regular_file(here, ec))
     return "";
   fs::path home = toolHome(name);
-  bool copy = !fs::exists(home, ec);
-  if (!copy) {
-    std::error_code a, b;
-    copy = fs::last_write_time(here, a) > fs::last_write_time(home, b);
-  }
-  if (copy) {
+  if (copyIsStale(here, home)) {
     fs::create_directories(home.parent_path(), ec);
-    fs::copy_file(here, home, fs::copy_options::overwrite_existing, ec);
-    if (ec)
+    if (!replaceWithCopy(here, home, ec))
       return here.string();     // could not copy: use it where it is
   }
   return home.string();
@@ -2270,8 +2478,105 @@ void setEnvironment(const std::string &name, const std::string &value) {
 #endif
 }
 
+/// `rune ffi rust [crate] [-o file] [--target triple]`: the Rune module a
+/// Cargo crate's C ABI comes to — what `rune build` writes for a
+/// `cargo = "..."` dependency, written on demand instead, for a crate that
+/// is built some other way or for reading before depending on it. Needs no
+/// libclang and no Rust compiler: the crate's source is read directly.
+int commandFfiRust(const std::vector<std::string> &rest, const Options &opts) {
+  std::string crate, output, triple;
+  for (size_t i = 0; i < rest.size(); ++i) {
+    const std::string &a = rest[i];
+    auto value = [&](const char *flag) -> std::string {
+      if (i + 1 >= rest.size()) {
+        failLine(std::string("`") + flag + "` needs a value");
+        return "";
+      }
+      return rest[++i];
+    };
+    if (a == "-h" || a == "--help") {
+      std::cout <<
+          "rune ffi rust: write Rune bindings for a Rust crate's C ABI\n\n"
+          "USAGE\n"
+          "    rune ffi rust [<crate dir>] [-o <file.rune>] [--target <triple>]\n\n"
+          "Reads every .rs file under <crate dir>/src (default: .) for its\n"
+          "#[no_mangle] extern \"C\" functions, #[repr(C)] structs and enums and\n"
+          "literal constants, and writes the Rune module that declares them.\n"
+          "What cannot be bound is listed at the end of the module, with why.\n\n"
+          "    -o, --output <file>  write here instead of to standard output\n"
+          "    --target <triple>    the target the crate is built for: decides\n"
+          "                         how wide c_long is (32 bits on Windows)\n\n"
+          "To link it, build the crate as a static library:\n"
+          "    cargo rustc --lib --crate-type staticlib --release\n"
+          "or let `rune build` do both: [dependencies] name = { cargo = \"<dir>\" }\n";
+      return 0;
+    }
+    if (a == "-o" || a == "--output") {
+      output = value("-o");
+      if (output.empty()) return 2;
+    } else if (a == "--target") {
+      triple = value("--target");
+      if (triple.empty()) return 2;
+    } else if (!a.empty() && a[0] == '-') {
+      failLine("unknown option '" + a + "' for `rune ffi rust`");
+      note("`rune ffi rust --help` lists them");
+      return 2;
+    } else if (crate.empty()) {
+      crate = a;
+    } else {
+      failLine("`rune ffi rust` reads one crate; '" + a + "' is a second");
+      return 2;
+    }
+  }
+  fs::path dir = crate.empty() ? fs::path(".") : fs::path(crate);
+  if (!opts.PackageDir.empty() && opts.PackageDir != "." && dir.is_relative())
+    dir = fs::path(opts.PackageDir) / dir;
+  std::error_code ec;
+  dir = fs::absolute(dir, ec).lexically_normal();
+  std::string error;
+  const std::string libName = pm::cargoLibraryName(dir.string(), error);
+  if (libName.empty()) {
+    failLine(error);
+    note("`rune ffi rust` reads a Cargo crate: a directory with a Cargo.toml");
+    return 1;
+  }
+  const bool windows = triple.find("windows") != std::string::npos ||
+                       triple.find("mingw") != std::string::npos
+#if defined(_WIN32)
+                       || triple.empty()
+#endif
+      ;
+  pm::RustBindings bound = pm::generateRustBindings(dir.string(), libName, windows);
+  if (output.empty()) {
+    std::cout << bound.Source;
+  } else {
+    fs::path out(output);
+    if (out.has_parent_path())
+      fs::create_directories(out.parent_path(), ec);
+    std::ofstream file(out, std::ios::binary | std::ios::trunc);
+    if (!file) {
+      failLine("cannot write '" + output + "'");
+      return 1;
+    }
+    file << bound.Source;
+  }
+  // Said on stderr, so standard output stays the module alone.
+  std::cerr << "bound " << bound.Functions << " function"
+            << (bound.Functions == 1 ? "" : "s") << " from '" << libName << "'";
+  if (!bound.Skipped.empty())
+    std::cerr << "; " << bound.Skipped.size() << " item"
+              << (bound.Skipped.size() == 1 ? "" : "s")
+              << " left out (listed at the end of the module)";
+  std::cerr << "\n";
+  return 0;
+}
+
 /// `rune ffi [args]`: bindings for C headers. Built the first time.
 int commandFfi(const std::vector<std::string> &rest, const Options &opts) {
+  // Rust needs neither libclang nor the tool built on it.
+  if (!rest.empty() && rest[0] == "rust")
+    return commandFfiRust(std::vector<std::string>(rest.begin() + 1, rest.end()),
+                          opts);
   std::string tool = ensureFfiTool(opts);
   if (tool.empty())
     return 2;
@@ -2407,12 +2712,23 @@ std::string ensureEditorTool(const std::string &name, const Options &opts) {
     status("Preparing", name);
     // Every file after the first is a module under `runetools`, which is
     // what the tools import: `runetools::syntax`, `runetools::lint`.
+    // Built under a name of its own and renamed into place, for the reason
+    // `replaceWithCopy` gives: another `rune` may be starting this tool.
+    fs::path partial = bin;
+    partial += ".partial." + std::to_string(getpid());
     std::string cmd = quote(findCompiler()) + " --memory arc --stdlib " +
                       quote(stdlibDir().string()) +
-                      " --module runetools -O2 -o " + quote(bin.string());
+                      " --module runetools -O2 -o " + quote(partial.string());
     for (const fs::path &p : sources)
       cmd += " " + quote(p.string());
-    if (runCommand(cmd, opts.Verbose) != 0) {
+    bool built = runCommand(cmd, opts.Verbose) == 0;
+    if (built) {
+      std::error_code renamed;
+      fs::rename(partial, bin, renamed);
+      built = !renamed;
+    }
+    if (!built) {
+      fs::remove(partial, ec);
       failLine("could not build " + name + " from " + root.string());
       return "";
     }
@@ -3026,6 +3342,8 @@ COMMANDS
     lsp                  Run the language server, for an editor, over stdin and stdout
     ffi <header>...      Write Rune bindings for C headers, read with libclang;
                          built the first time it is used (`rune ffi --help`)
+    ffi rust [crate]     Write Rune bindings for a Rust crate's C ABI
+                         (`rune ffi rust --help`)
     tools                List the toolchain's tools and where each one is;
                          `tools install [name...]` puts them in ~/.rune/bin
     clean                Delete the target/ directory

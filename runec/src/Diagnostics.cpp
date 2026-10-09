@@ -263,7 +263,7 @@ void DiagnosticEngine::emit(const Diagnostic &incoming) {
       if (!LimitReported && !Json && !Short) {
         LimitReported = true;
         const Palette &P = Color ? kColored : kPlain;
-        std::cerr << P.BoldRed << "●" << P.Reset << " too many errors emitted; "
+        out() << P.BoldRed << "●" << P.Reset << " too many errors emitted; "
                   << "stopping after " << ErrorLimit << ".\n";
       }
       return;
@@ -281,16 +281,16 @@ void DiagnosticEngine::emit(const Diagnostic &incoming) {
   }
 
   if (Json) {
-    emitJson(std::cerr, d, sev);
+    emitJson(out(), d, sev);
     return;
   }
   if (Short) {
-    emitShort(std::cerr, d, sev);
+    emitShort(out(), d, sev);
     return;
   }
 
   const Palette &P = Color ? kColored : kPlain;
-  std::ostream &os = std::cerr;
+  std::ostream &os = out();
 
   std::string message = d.Message;
   if (d.Code)
@@ -472,21 +472,34 @@ void DiagnosticEngine::status(const std::string &text) {
   if (Json || Short)
     return;
   const Palette &P = Color ? kColored : kPlain;
-  std::cerr << P.Green << "○" << P.Reset << " " << text << "\n";
+  std::lock_guard<std::mutex> lock(Mutex);
+  out() << P.Green << "○" << P.Reset << " " << text << "\n";
 }
 
 void DiagnosticEngine::statusOk(const std::string &text) {
   if (Json || Short)
     return;
   const Palette &P = Color ? kColored : kPlain;
-  std::cerr << P.Green << "●" << P.Reset << " " << text << "\n";
+  std::lock_guard<std::mutex> lock(Mutex);
+  out() << P.Green << "●" << P.Reset << " " << text << "\n";
 }
 
 void DiagnosticEngine::statusFail(const std::string &text) {
   if (Json || Short)
     return;
   const Palette &P = Color ? kColored : kPlain;
-  std::cerr << P.BoldRed << "●" << P.Reset << " " << text << "\n";
+  std::lock_guard<std::mutex> lock(Mutex);
+  out() << P.BoldRed << "●" << P.Reset << " " << text << "\n";
+}
+
+void DiagnosticEngine::release() {
+  std::lock_guard<std::mutex> lock(Mutex);
+  if (!Holding)
+    return;
+  Holding = false;
+  std::cerr << Held.str();
+  std::cerr.flush();
+  Held.str(std::string());
 }
 
 } // namespace rune

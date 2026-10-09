@@ -26,7 +26,10 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <iostream>
 #include <sstream>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace rune {
@@ -70,41 +73,72 @@ struct Diagnostic {
 //===----------------------------------------------------------------------===//
 
 namespace detail {
-inline void toStream(std::ostringstream &os, const std::string &v) { os << v; }
-inline void toStream(std::ostringstream &os, const char *v) { os << v; }
-inline void toStream(std::ostringstream &os, char v) { os << v; }
-template <typename T> void toStream(std::ostringstream &os, const T &v) { os << v; }
+/// One argument, appended as text. Strings and integers are appended
+/// directly; anything else goes through a stream, which is what decides how
+/// a `double` or a pointer reads.
+inline void appendArg(std::string &out, const std::string &v) { out += v; }
+inline void appendArg(std::string &out, std::string_view v) { out += v; }
+inline void appendArg(std::string &out, const char *v) {
+  if (v)
+    out += v;
+}
+inline void appendArg(std::string &out, char *v) {
+  if (v)
+    out += v;
+}
+inline void appendArg(std::string &out, char v) { out += v; }
+template <typename T> void appendArg(std::string &out, const T &v) {
+  if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool> &&
+                !std::is_same_v<T, signed char> &&
+                !std::is_same_v<T, unsigned char>) {
+    out += std::to_string(v);
+  } else {
+    std::ostringstream os;
+    os << v;
+    out += os.str();
+  }
+}
+
+/// The pattern from `p` up to its next `{}`, with `{{` and `}}` read as the
+/// braces they stand for. Returns where the `{}` is, or null at the end.
+inline const char *appendLiteral(std::string &out, const char *p) {
+  const char *run = p;
+  for (; *p; ++p) {
+    if (p[0] == '{' && p[1] == '}') {
+      out.append(run, p);
+      return p;
+    }
+    if ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}')) {
+      out.append(run, p + 1);
+      ++p;
+      run = p + 1;
+    }
+  }
+  out.append(run, p);
+  return nullptr;
+}
 
 /// No arguments left, so every remaining brace is a literal one. `{{` and
 /// `}}` still stand for `{` and `}`: a message means the same thing whether or
 /// not it happens to have run out of arguments before reaching them.
-inline void formatInto(std::ostringstream &os, const char *pattern) {
-  for (const char *p = pattern; *p; ++p) {
-    if ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}')) {
-      os << *p;
-      ++p;
-      continue;
+inline void formatInto(std::string &out, const char *pattern) {
+  for (const char *p = pattern; p;) {
+    p = appendLiteral(out, p);
+    if (p) {
+      out += "{}";
+      p += 2;
     }
-    os << *p;
   }
 }
 
 template <typename T, typename... Rest>
-void formatInto(std::ostringstream &os, const char *pattern, const T &arg,
+void formatInto(std::string &out, const char *pattern, const T &arg,
                 const Rest &...rest) {
-  for (const char *p = pattern; *p; ++p) {
-    if (p[0] == '{' && p[1] == '}') {
-      toStream(os, arg);
-      formatInto(os, p + 2, rest...);
-      return;
-    }
-    if ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}')) {
-      os << *p;
-      ++p;
-      continue;
-    }
-    os << *p;
-  }
+  const char *p = appendLiteral(out, pattern);
+  if (!p)
+    return;
+  appendArg(out, arg);
+  formatInto(out, p + 2, rest...);
 }
 } // namespace detail
 
@@ -115,9 +149,10 @@ void formatInto(std::ostringstream &os, const char *pattern, const T &arg,
 /// ambiguous.
 template <typename... Args>
 std::string fmt(const char *pattern, const Args &...args) {
-  std::ostringstream os;
-  detail::formatInto(os, pattern, args...);
-  return os.str();
+  std::string out;
+  out.reserve(64);
+  detail::formatInto(out, pattern, args...);
+  return out;
 }
 
 class DiagnosticEngine;
@@ -189,6 +224,18 @@ public:
   /// do, since its depth belongs to the thread, not to this engine, and it
   /// discards errors without counting them.
   void setSilent(bool on) { Silent = on; }
+
+  /// Keeps everything this engine would write — diagnostics in whatever
+  /// format, status lines — until `release`, which writes it out in the
+  /// order it came. Counting goes on as usual. A compile that may be redone
+  /// another way holds its output, so that a first attempt that is thrown
+  /// away leaves nothing behind.
+  void hold() {
+    std::lock_guard<std::mutex> lock(Mutex);
+    Holding = true;
+  }
+  /// Writes what was held, and stops holding.
+  void release();
 
   template <typename... Args>
   DiagBuilder error(SourceRange r, const char *pattern, const Args &...args) {
@@ -323,6 +370,11 @@ private:
   bool Json = false;
   bool Short = false;
   bool Silent = false;
+  bool Holding = false;
+  std::ostringstream Held;
+  /// Where output goes: the terminal, or the held buffer. Call with `Mutex`
+  /// held.
+  std::ostream &out() { return Holding ? static_cast<std::ostream &>(Held) : std::cerr; }
   unsigned ErrorLimit = 0;
   std::atomic<unsigned> ErrorCount{0};
   std::atomic<unsigned> WarningCount{0};

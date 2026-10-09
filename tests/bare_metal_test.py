@@ -162,18 +162,106 @@ def tiers():
         "std::collections::vector::Vector::push": "bare",
         "std::dictionary::Map::put": "bare",
         "std::io::println": "bare",
-        "std::fmt::fixed": "bare",
+        # Floats as text are in the full freestanding runtime only.
+        "std::fmt::fixed": "full",
+        "std::any::Any::get": "full",
         "std::process::panic": "bare",
-        "std::json::write": "bare",
+        "std::json::write": "full",      # numbers are written as floats
         "std::random::seeded": "bare",
         "std::io::readLine": "hosted",
         "std::thread::spawn": "hosted",
         "std::process::exit": "hosted",
         "std::random::new": "hosted",
+        # A generic is bare when any instantiation is: `Option<TcpStream>`
+        # closing a socket is the socket's need, not `unwrap`'s.
+        "std::option::Option::unwrap": "bare",
+        "std::option::Option::expect": "bare",
+        "std::result::Result::unwrap": "bare",
+        # Templates nothing in the library instantiates are placed too.
+        "std::option::Option::map": "bare",
+        "std::dictionary::Set::add": "bare",
+        "std::thread::Mutex::get": "hosted",
+        # Intrinsics, by what the compiler writes for them.
+        "std::mem::size_of": "bare",
+        "std::reflect::describe": "bare",
+        "std::any::Any::holds": "full",  # `Any` is not in the minimal runtime
+        "std::any::Any::typeName": "hosted",
+        "std::cxx::alloc": "hosted",
     }
     wrong = [f"{k}: {tier.get(k, 'missing')}, not {v}" for k, v in expect.items()
              if tier.get(k) != v]
     check("bare metal and hosted where they are known to be", not wrong, "\n".join(wrong))
+    kinds = set(tier.values())
+    check("--tiers answers bare, full or hosted", kinds == {"bare", "full", "hosted"},
+          str(kinds))
+    # A program that chose its runtime gets that runtime's answer alone.
+    r = subprocess.run([os.path.join(BIN, "runec"), "--tiers", "--no-color",
+                        "--cfg", "freestanding_type=minimal"],
+                       capture_output=True, text=True)
+    minimal = {l.split()[1]: l.split()[0] for l in r.stdout.splitlines() if len(l.split()) >= 2}
+    check("--tiers for the minimal runtime: floats as text need more",
+          minimal.get("std::fmt::fixed") == "hosted" and minimal.get("std::io::println") == "bare",
+          str((minimal.get("std::fmt::fixed"), minimal.get("std::io::println"))))
+
+
+INTRINSICS = """#runtime(none)
+#entry(none)
+import std::mem
+import std::reflect
+import std::arch
+import std::asm
+import std::any
+
+struct P { pub a: i64 = 0 }
+
+#export("probe")
+#safe("a probe of every intrinsic said to work on bare metal")
+fn probe() -> i64 {
+    var x: i64 = 3
+    var n = mem::size_of<i64>() as i64 + mem::align_of<i64>() as i64
+    if mem::is_counted<i64>() { n += 1 }
+    n += mem::hash(&x) as i64
+    if mem::equals(&x, &x) { n += 1 }
+    n += mem::zeroed<i64>()
+    n += unsafe { mem::take(&var x as *var i64) }
+    unsafe { mem::store(&var x as *var i64, 4) }
+    n += mem::replace(&var x, 5)
+    unsafe { mem::drop_at<i64>(&var x as *var i64) }
+    mem::retain(1)
+    mem::release(1)
+    n += reflect::typeName<P>().$length() + reflect::typeId<P>() as i64
+    n += reflect::kindOf<P>() as i64 + reflect::sizeOf<P>() as i64
+    n += reflect::alignOf<P>() as i64 + reflect::strideOf<P>() as i64
+    n += reflect::fieldCount<P>() as i64 + reflect::fieldName<P>(0).$length()
+    if reflect::isSend<P>() && reflect::isSync<P>() { n += 1 }
+    n += reflect::describe(P { a: 1 }).$length()
+    n += arch::triple().$length()
+    unsafe { asm::run("nop", "") }
+    let a: Any = 5
+    if a.holds::<i64>() { n += a.get::<i64>() ?? 0 }
+    n + a.expect::<i64>()
+}
+"""
+
+
+def intrinsics(tmp):
+    """Every intrinsic `--tiers` says is bare compiles in a `#runtime(none)`
+    program, and one it says is hosted is refused there. An intrinsic has no
+    body for `--tiers` to follow, so its answer comes from a table in the
+    code generator; this is what keeps the table honest."""
+    runec = os.path.join(BIN, "runec")
+    src = os.path.join(tmp, "intrinsics.rune")
+    open(src, "w").write(INTRINSICS)
+    r = subprocess.run([runec, "-c", src, "-o", src + ".o"], capture_output=True, text=True)
+    check("every bare intrinsic builds freestanding", r.returncode == 0,
+          r.stdout + r.stderr)
+    hosted = os.path.join(tmp, "typename.rune")
+    open(hosted, "w").write(INTRINSICS.split("#export")[0].replace("import std::reflect\n", "") +
+                            '#export("probe")\n#safe("a probe")\nfn probe() -> i64 {\n'
+                            '    let a: Any = 5\n    a.typeName().$length()\n}\n')
+    r = subprocess.run([runec, "-c", hosted, "-o", hosted + ".o"], capture_output=True, text=True)
+    check("Any::typeName is refused freestanding, as --tiers says",
+          r.returncode != 0 and "E0542" in r.stdout + r.stderr, r.stdout + r.stderr)
 
 
 def toyos(tmp):
@@ -421,6 +509,7 @@ def main():
         freestanding(tmp)
         minimal(tmp)
         tiers()
+        intrinsics(tmp)
         toyos(tmp)
         gnu_toolchain(tmp)
         tetris(tmp)

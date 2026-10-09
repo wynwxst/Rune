@@ -15,6 +15,7 @@
 #include "rune/Parallel.h"
 #include "rune/Parser.h"
 #include "rune/Sema.h"
+#include "rune/SplitCodeGen.h"
 #include "rune/Zombie.h"
 #include "rune/Source.h"
 #include "rune/Type.h"
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <functional>
 #include <iomanip>
 #include <map>
 #include <optional>
@@ -359,6 +361,74 @@ bool writeMachineCode(llvm::Module &m, const std::string &path,
     return false;
   }
   return true;
+}
+
+/// How many pieces the back end cuts `m` into: what `--codegen-units`
+/// says, or else one per `UnitSize` instructions, at most `MaxUnits`.
+///
+/// Decided by the module and the command line and nothing else — not by how
+/// many cores this machine has, nor by `RUNE_JOBS` — so one program builds
+/// into the same executable everywhere. How many of the pieces are built at
+/// once is what the machine decides.
+unsigned codegenUnitsFor(const llvm::Module &m, const CompilerOptions &opts) {
+  if (opts.CodegenUnits)
+    return opts.CodegenUnits;
+  constexpr size_t UnitSize = 10000;
+  constexpr unsigned MaxUnits = 16;
+  size_t instructions = 0;
+  for (const llvm::Function &f : m)
+    instructions += f.getInstructionCount();
+  return static_cast<unsigned>(
+      std::clamp<size_t>(instructions / UnitSize, 1, MaxUnits));
+}
+
+/// Lowers `m` to native code in up to `units` pieces at once, written to
+/// `paths` (`paths[0]` is `path`). See SplitCodeGen.h for how the module is
+/// cut. Returns false with `paths` empty when it could not be cut, and the
+/// caller builds it whole.
+///
+/// The cut comes after the IR optimiser has run over the whole module, so
+/// nothing it would have inlined across the pieces is lost. What the back end
+/// has to say is captured per piece and reported in piece order, so the
+/// output does not depend on which thread finished first.
+bool writeMachineCodeSplit(llvm::Module &m, const std::string &path,
+                           unsigned units, const CompilerOptions &opts,
+                           DiagnosticEngine &diags,
+                           std::vector<std::string> &paths) {
+  paths.clear();
+  CodegenSplit split;
+  if (!splitModule(m, units, split))
+    return false;
+
+  const std::filesystem::path base(path);
+  for (unsigned i = 0; i < split.Units; ++i) {
+    if (i == 0) {
+      paths.push_back(path);
+      continue;
+    }
+    std::filesystem::path piece = base;
+    piece.replace_extension("." + std::to_string(i) + base.extension().string());
+    paths.push_back(piece.string());
+  }
+
+  std::vector<std::vector<Diagnostic>> said(split.Units);
+  std::vector<char> ok(split.Units, 0);
+  parallelFor(split.Units, [&](size_t i) {
+    diags.beginCapture(&said[i]);
+    llvm::LLVMContext ctx;
+    std::string err;
+    std::unique_ptr<llvm::Module> piece =
+        loadPiece(split, static_cast<unsigned>(i), ctx, err);
+    if (!piece)
+      diags.fatal("internal error: a codegen unit could not be read back")
+          .note(err.c_str());
+    else
+      ok[i] = writeMachineCode(*piece, paths[i], opts, diags, false);
+    diags.endCapture();
+  });
+  for (const auto &bucket : said)
+    diags.replay(bucket);
+  return std::all_of(ok.begin(), ok.end(), [](char c) { return c != 0; });
 }
 
 /// Links the object file into an executable using the system C toolchain,
@@ -736,6 +806,22 @@ bool linkExecutable(const std::string &objPath,
     diags.fatal("linking failed (exit status {})", rc)
         .note("the command was: {}", spellCommand(argv));
     return false;
+  }
+  // On Apple platforms the linker leaves the debug information in the object
+  // files and records only where they were — and the compiler removes those
+  // once the link is done. `dsymutil` gathers it into a `.dSYM` beside the
+  // program first, which is where a debugger and a crash report look; it is
+  // what clang does for a `-g` build linked in one step.
+  if (opts.DebugInfo && triple.isOSDarwin() && !opts.NoDefaultLinkArgs) {
+    std::vector<std::string> dsym{"dsymutil", outPath};
+    if (opts.Verbose)
+      diags.status("debug info: " + spellCommand(dsym));
+    if (int drc = runProgram(dsym); drc != 0)
+      diags.warn(SourceRange(), "could not gather the debug information "
+                                "into '{}.dSYM' (dsymutil exit status {})",
+                 outPath, drc)
+          .note("a debugger will not find the source for this program; "
+                "`dsymutil` ships with Xcode's command line tools");
   }
   return true;
 }
@@ -1558,7 +1644,217 @@ static std::string programDirective(const std::string &text,
   }
 }
 
+namespace {
+bool gExitWithoutTeardown = false;
+
+/// Every standard-library module `toks` names: the `std::a::b` paths it
+/// spells out, and what `std::{a, b}` and `std::a::*` stand for. Written
+/// paths are all there is to go on — an import names a module the same way
+/// a qualified use does — and this reads them before anything is parsed.
+void stdlibMentions(const std::vector<Token> &toks,
+                    const std::vector<std::string> &modules,
+                    std::set<std::string> &out) {
+  auto glob = [&](const std::string &prefix) {
+    for (const std::string &m : modules)
+      if (m.rfind(prefix + "::", 0) == 0)
+        out.insert(m);
+  };
+  for (size_t i = 0; i + 1 < toks.size(); ++i) {
+    if (toks[i].Kind != Tok::Identifier || toks[i].Text != "std" ||
+        toks[i + 1].Kind != Tok::ColonColon)
+      continue;
+    std::string path = "std";
+    size_t j = i + 1;
+    while (j + 1 < toks.size() && toks[j].Kind == Tok::ColonColon) {
+      const Token &next = toks[j + 1];
+      if (next.Kind == Tok::Identifier) {
+        path += "::" + next.Text;
+        out.insert(path);
+        j += 2;
+        continue;
+      }
+      if (next.Kind == Tok::Star) {
+        glob(path);
+      } else if (next.Kind == Tok::LBrace) {
+        for (size_t k = j + 2; k < toks.size() && toks[k].Kind != Tok::RBrace;
+             ++k)
+          if (toks[k].Kind == Tok::Identifier) {
+            out.insert(path + "::" + toks[k].Text);
+            glob(path + "::" + toks[k].Text);
+          }
+      }
+      break;
+    }
+    i = j;
+  }
+}
+
+/// Which of the standard library's modules this compile can reach: the
+/// ones the language itself leans on, the ones the program's own files and
+/// its libraries name, and everything those name in turn.
+///
+/// The rest of the library is lexed — a macro declared anywhere in it is in
+/// scope everywhere — but never parsed or checked: a program that imports
+/// `std::io` has no use for the parsers in `std::json` or the sockets in
+/// `std::net`, and checking them was most of what a small compile cost.
+std::vector<char> stdlibReach(const std::vector<std::string> &names,
+                              const std::vector<bool> &isStdlib,
+                              const std::vector<std::vector<Token>> &tokens) {
+  std::vector<std::string> modules;
+  std::map<std::string, size_t> unitOf;
+  for (size_t i = 0; i < names.size(); ++i)
+    if (isStdlib[i]) {
+      modules.push_back(names[i]);
+      unitOf[names[i]] = i;
+    }
+  // What the compiler reaches for on its own: `T?` and `?`, `into`, `for`,
+  // `Send` and `Sync`, `[K: V]`, printing, `format!`, the methods `Any`
+  // carries, and the memory primitives everything else stands on.
+  std::set<std::string> wanted = {
+      "std::option", "std::result", "std::convert",    "std::iter",
+      "std::thread", "std::dictionary", "std::io",     "std::fmt",
+      "std::any",    "std::mem"};
+  for (size_t i = 0; i < names.size(); ++i) {
+    if (isStdlib[i])
+      continue;
+    stdlibMentions(tokens[i], modules, wanted);
+    // `async fn` and `.await` are rewritten into calls on `std::task`.
+    for (const Token &t : tokens[i])
+      if (t.Kind == Tok::KwAsync || t.Kind == Tok::KwAwait) {
+        wanted.insert("std::task");
+        break;
+      }
+  }
+  std::vector<char> reached(names.size(), 0);
+  std::vector<std::string> work(wanted.begin(), wanted.end());
+  while (!work.empty()) {
+    std::string m = std::move(work.back());
+    work.pop_back();
+    auto it = unitOf.find(m);
+    if (it == unitOf.end() || reached[it->second])
+      continue;
+    reached[it->second] = 1;
+    std::set<std::string> more;
+    stdlibMentions(tokens[it->second], modules, more);
+    for (const std::string &n : more)
+      if (auto u = unitOf.find(n); u != unitOf.end() && !reached[u->second])
+        work.push_back(n);
+  }
+  return reached;
+}
+
+/// One attempt at a compile against only the standard library it reaches.
+/// Its output is held until checking has passed; `Released` says it was let
+/// go, after which the attempt is the compile, whatever happens next.
+struct NarrowAttempt {
+  bool Released = false;
+};
+
+/// Owns what a compile builds, and frees it in reverse order of creation —
+/// unless the process has said it is about to exit, in which case freeing a
+/// few hundred thousand nodes one at a time is work the operating system
+/// does all at once for nothing. That was a tenth of a small compile.
+class KeepAlive {
+public:
+  KeepAlive() = default;
+  KeepAlive(const KeepAlive &) = delete;
+  KeepAlive &operator=(const KeepAlive &) = delete;
+  template <typename T, typename... Args> T &make(Args &&...args) {
+    T *made = new T(std::forward<Args>(args)...);
+    Owned.push_back([made] { delete made; });
+    return *made;
+  }
+  ~KeepAlive() {
+    if (exitWithoutTeardown())
+      return;
+    for (auto it = Owned.rbegin(); it != Owned.rend(); ++it)
+      (*it)();
+  }
+
+private:
+  std::vector<std::function<void()>> Owned;
+};
+} // namespace
+
+void setExitWithoutTeardown(bool on) { gExitWithoutTeardown = on; }
+
+bool exitWithoutTeardown() {
+#if defined(__SANITIZE_ADDRESS__)
+  return false; // a leak checker should see a compile clean up after itself
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+  return false;
+#endif
+#endif
+  return gExitWithoutTeardown;
+}
+
+namespace {
+int compileOnce(const CompilerOptions &given, NarrowAttempt *attempt);
+
+/// Every standard library function's tier, by `module|owner|name`: "bare"
+/// when a `#runtime(none)` program has it on either freestanding runtime,
+/// "full <needs>" when only the full one has it — `freestanding_type =
+/// "minimal"` leaves out what it needs — and "<needs>" when it needs the
+/// hosted runtime. Two builds of the library, one per freestanding runtime.
+/// `fullBuild`, when given, is the full runtime's answer already worked out.
+std::map<std::string, std::string>
+standardLibraryTiers(const CompilerOptions &like,
+                     const std::map<std::string, std::string> *fullBuild = nullptr) {
+  auto build = [&](bool minimal) {
+    std::map<std::string, std::string> tiers;
+    CompilerOptions t;
+    t.TierReport = true;
+    t.TierOut = &tiers;
+    t.StdlibDir = like.StdlibDir;
+    t.RunetimeDir = like.RunetimeDir;
+    t.TargetTriple = like.TargetTriple;
+    t.NoColor = true;
+    if (minimal)
+      t.ConfigValues.push_back({"freestanding_type", "minimal"});
+    compileWithOptions(t);
+    return tiers;
+  };
+  std::map<std::string, std::string> full = fullBuild ? *fullBuild : build(false);
+  const std::map<std::string, std::string> minimal = build(true);
+  for (auto &[key, need] : full) {
+    if (need != "bare")
+      continue;
+    auto m = minimal.find(key);
+    if (m != minimal.end() && m->second != "bare")
+      need = "full " + m->second;
+  }
+  return full;
+}
+
+/// Whether a compile may try the standard library it reaches first. What
+/// describes or reports on the library as a whole needs all of it.
+bool narrowable(const CompilerOptions &opts) {
+  return !opts.WholeStdlib && !opts.NoStdlib && !opts.StdlibDir.empty() &&
+         opts.Output != OutputKind::Docs && opts.Dump == DumpKind::Nothing &&
+         opts.QueryFile.empty() && !opts.TierReport && !opts.ZombieWholeStdlib;
+}
+} // namespace
+
+/// A compile is tried first against the part of the standard library it
+/// reaches, which is the whole answer for nearly every program. If that
+/// attempt fails before it gets past checking, it is thrown away — nothing
+/// it said has been shown — and the compile is done again against all of
+/// the library, so a program that leant on something nothing it imports
+/// declares still builds, and a program with a mistake in it is told about
+/// it exactly as it always was.
 int compileWithOptions(const CompilerOptions &given) {
+  if (!narrowable(given))
+    return compileOnce(given, nullptr);
+  NarrowAttempt attempt;
+  const int rc = compileOnce(given, &attempt);
+  if (rc == 0 || attempt.Released)
+    return rc;
+  return compileOnce(given, nullptr);
+}
+
+namespace {
+int compileOnce(const CompilerOptions &given, NarrowAttempt *attempt) {
   CompilerOptions opts = given;
   // `--tiers` builds the standard library as a freestanding program would
   // see it — the `runtime == "none"` definitions, the freestanding runtime
@@ -1571,8 +1867,12 @@ int compileWithOptions(const CompilerOptions &given) {
       opts.ModuleName = "tiers";
   }
   PhaseTimer timer(opts.TimeReport);
-  SourceManager sm;
-  DiagnosticEngine diags(sm);
+  // Everything big a compile builds — the syntax trees, the type tables, the
+  // LLVM module — lives here, so a process about to exit can leave it to the
+  // operating system. See `exitWithoutTeardown`.
+  KeepAlive keep;
+  SourceManager &sm = keep.make<SourceManager>();
+  DiagnosticEngine &diags = keep.make<DiagnosticEngine>(sm);
   diags.detectColor();
   if (opts.ForceColor) diags.setColorEnabled(true);
   if (opts.NoColor) diags.setColorEnabled(false);
@@ -1581,6 +1881,8 @@ int compileWithOptions(const CompilerOptions &given) {
   diags.setWarningsAsErrors(opts.WarningsAsErrors);
   diags.setQuietWarnings(opts.NoWarnings);
   diags.setErrorLimit(opts.ErrorLimit);
+  if (attempt)
+    diags.hold();
 
   std::vector<unsigned> fileIDs;
   for (const std::string &path : opts.Inputs) {
@@ -1669,7 +1971,7 @@ int compileWithOptions(const CompilerOptions &given) {
     return diags.hadError() ? 1 : 0;
   }
 
-  std::vector<std::unique_ptr<Module>> modules;
+  auto &modules = keep.make<std::vector<std::unique_ptr<Module>>>();
   // Object files extracted from imported libraries; handed to the linker and
   // removed afterwards.
   std::vector<std::string> libraryObjects;
@@ -1688,6 +1990,8 @@ int compileWithOptions(const CompilerOptions &given) {
   /// code was made, or the interface would describe code that is not in it.
   std::vector<ConfigSet> libraryConfigs;
   bool libraryError = false;
+  /// Whether any Rune library is imported, extracted or not.
+  bool linksLibraries = false;
   timer.phase("read", [&] {
   for (const std::string &dir : opts.ImportPaths) {
     std::error_code ec;
@@ -1759,6 +2063,15 @@ int compileWithOptions(const CompilerOptions &given) {
         libraryUnits.push_back({id, unit.first});
         libraryConfigs.push_back(libCfg);
       }
+      linksLibraries = true;
+      if (opts.Verbose)
+        diags.status(fmt("using library {}", libPath.string()));
+      // Only what is linked needs the object code out of the library: a
+      // check — which is what an editor runs on every keystroke — or an
+      // object, a library or IR of its own never reads it.
+      if (opts.Output != OutputKind::Executable &&
+          opts.Output != OutputKind::Shared)
+        continue;
       // A name no other compile can be using. Builds run several compilers
       // at once, and more than one of them may import this same library; a
       // fixed name in the temp directory means one deleting its extracted
@@ -1767,13 +2080,19 @@ int compileWithOptions(const CompilerOptions &given) {
           std::filesystem::temp_directory_path(ec) /
           (libPath.stem().string() + "." + std::to_string(getpid()) + "." +
            std::to_string(libraryObjects.size()) + ".rul.o");
-      if (!extractLibraryObject(libPath.string(), objOut.string(), diags)) {
-        libraryError = true;
-        return;
+      // Written from what was read above, rather than reading the library
+      // a second time to get at it.
+      {
+        std::ofstream obj(objOut, std::ios::binary | std::ios::trunc);
+        obj.write(lib.ObjectCode.data(),
+                  static_cast<std::streamsize>(lib.ObjectCode.size()));
+        if (!obj.good()) {
+          diags.fatal("cannot write '{}'", objOut.string());
+          libraryError = true;
+          return;
+        }
       }
       libraryObjects.push_back(objOut.string());
-      if (opts.Verbose)
-        diags.status(fmt("using library {}", libPath.string()));
     }
   }
   });
@@ -2008,6 +2327,36 @@ int compileWithOptions(const CompilerOptions &given) {
                     units[i].ModuleName);
   });
 
+  // Only what the program reaches of the standard library goes on to be
+  // parsed and checked; see `stdlibReach`. The libraries come first in
+  // `units` and the standard library after them, so taking some of it out
+  // moves only where this package's own files start.
+  if (attempt) {
+    timer.phase("reach", [&] {
+      std::vector<std::string> names;
+      std::vector<bool> isStdlib;
+      for (const Unit &u : units) {
+        names.push_back(u.ModuleName);
+        isStdlib.push_back(u.IsStdlib);
+      }
+      const std::vector<char> reached = stdlibReach(names, isStdlib, tokens);
+      size_t kept = 0;
+      for (size_t i = 0; i < units.size(); ++i) {
+        if (units[i].IsStdlib && !reached[i]) {
+          --firstUserModule;
+          continue;
+        }
+        if (kept != i) {
+          units[kept] = std::move(units[i]);
+          tokens[kept] = std::move(tokens[i]);
+        }
+        ++kept;
+      }
+      units.resize(kept);
+      tokens.resize(kept);
+    });
+  }
+
   // Parsing one file needs nothing from any other — names are resolved later,
   // by Sema, over the finished modules — so the files go out to the pool and
   // come back in the order they were listed.
@@ -2054,19 +2403,29 @@ int compileWithOptions(const CompilerOptions &given) {
   if (opts.Verbose)
     diags.status(fmt("checking {} module(s)", modules.size()));
 
-  TypeContext typeCtx(targetPointerBits(opts));
-  Sema sema(sm, diags, typeCtx, opts.Safety, opts.Memory, opts.Dump,
+  TypeContext &typeCtx = keep.make<TypeContext>(targetPointerBits(opts));
+  Sema &sema = keep.make<Sema>(sm, diags, typeCtx, opts.Safety, opts.Memory, opts.Dump,
             opts.ZombieStdlib);
   // `extern "C++"` declarations are mangled and sized for the machine being
   // built for: `long` is 32 bits on Windows, `int64_t` is `long` on Linux.
   sema.setCxxTarget(
       cxxTargetFor(targetTripleOf(opts).str(), typeCtx.pointerBits()));
   sema.CStringLiterals = opts.Freestanding || opts.NoStdlib;
+  sema.setZombieWholeStdlib(opts.ZombieWholeStdlib);
   for (const auto &m : modules)
     sema.addModule(m.get());
   timer.phase("check", [&] { sema.check(); });
+  // Checked cleanly against the part of the standard library it reaches:
+  // this attempt is the compile now, and what it held back is shown.
+  if (attempt && !diags.hadError()) {
+    diags.release();
+    attempt->Released = true;
+  }
   if (sema.usesCxx())
     const_cast<CompilerOptions &>(opts).LinkCxx = true;
+  for (const auto &pass : sema.passMillis())
+    if (pass.first != "zombie")
+      timer.within(pass.first.c_str(), pass.second);
   if (opts.Memory == MemoryMode::Zombie) {
     timer.within("zombie", sema.zombieMillis());
     const zombie::Stats &zs = zombie::lastStats();
@@ -2166,8 +2525,8 @@ int compileWithOptions(const CompilerOptions &given) {
   if (opts.Verbose)
     diags.status("generating code");
 
-  opts.LinksRuneLibraries = !libraryObjects.empty();
-  CodeGen cg(sm, diags, typeCtx, sema.result(), opts);
+  opts.LinksRuneLibraries = linksLibraries;
+  CodeGen &cg = keep.make<CodeGen>(sm, diags, typeCtx, sema.result(), opts);
   bool generated = false;
   if (opts.TierReport)
     for (auto &m : modules)
@@ -2181,21 +2540,33 @@ int compileWithOptions(const CompilerOptions &given) {
     if (opts.TierOut) {
       *opts.TierOut = cg.Tiers;
     } else {
-      for (const auto &[key, need] : cg.Tiers) {
+      // Three answers rather than two when the program has not chosen a
+      // freestanding runtime: what works on either, what only the full one
+      // has, and what needs a hosted build.
+      bool chosen = false;
+      for (const auto &kv : opts.ConfigValues)
+        chosen = chosen || kv.first == "freestanding_type";
+      const std::map<std::string, std::string> tiers =
+          chosen ? cg.Tiers : standardLibraryTiers(opts, &cg.Tiers);
+      for (const auto &[key, need] : tiers) {
         size_t a = key.find('|'), b = key.find('|', a + 1);
         std::string owner = key.substr(a + 1, b - a - 1);
         std::string name = key.substr(0, a) + "::" +
                            (owner.empty() ? "" : owner + "::") +
                            key.substr(b + 1);
-        std::cout << (need == "bare" ? "bare    " : "hosted  ") << name;
-        if (need != "bare")
-          std::cout << "  (" << need << ")";
-        std::cout << "\n";
+        if (need == "bare") {
+          std::cout << "bare    " << name << "\n";
+        } else if (need.rfind("full ", 0) == 0) {
+          std::cout << "full    " << name << "  (" << need.substr(5) << ")\n";
+        } else {
+          std::cout << "hosted  " << name << "  (" << need << ")\n";
+        }
       }
     }
     return 0;
   }
-  std::unique_ptr<llvm::Module> llvmModule = cg.takeModule();
+  std::unique_ptr<llvm::Module> &llvmModule =
+      keep.make<std::unique_ptr<llvm::Module>>(cg.takeModule());
 
   std::string outPath = defaultOutputName(opts);
 
@@ -2327,15 +2698,8 @@ int compileWithOptions(const CompilerOptions &given) {
     // The standard library's functions, each with whether a bare-metal
     // program has it — worked out by building the library as one would.
     std::map<std::string, std::string> tiers;
-    if (opts.DocsStdlib) {
-      CompilerOptions t;
-      t.TierReport = true;
-      t.TierOut = &tiers;
-      t.StdlibDir = opts.StdlibDir;
-      t.RunetimeDir = opts.RunetimeDir;
-      t.NoColor = true;
-      compileWithOptions(t);
-    }
+    if (opts.DocsStdlib)
+      tiers = standardLibraryTiers(opts);
 
     auto record = [&](const char *kind, const Decl *d, const std::string &mod,
                       const std::string &owner, const std::string &sig,
@@ -2347,8 +2711,10 @@ int compileWithOptions(const CompilerOptions &given) {
       if (!sig.empty()) out << "sig " << text(sig) << "\n";
       auto tier = tiers.find(mod + "|" + owner + "|" + d->Name);
       if (tier != tiers.end())
-        out << "tier " << (tier->second == "bare" ? std::string("bare")
-                                                   : "hosted " + tier->second)
+        out << "tier "
+            << (tier->second == "bare" || tier->second.rfind("full ", 0) == 0
+                    ? tier->second
+                    : "hosted " + tier->second)
             << "\n";
       if (!base.empty()) out << "base " << base << "\n";
       out << "public " << (d->IsPublic ? 1 : 0) << "\n";
@@ -2622,10 +2988,34 @@ int compileWithOptions(const CompilerOptions &given) {
     objPath = std::filesystem::path(outPath).replace_extension(".rul.o");
   if (opts.Output == OutputKind::Shared)
     objPath = std::filesystem::path(outPath).string() + ".o";
-  if (!emitMachineCode(objPath.string(), false)) {
+  // An executable or a shared library is linked from as many objects as
+  // there are, so the back end may build it in pieces. A `.rul` carries one.
+  std::vector<std::string> objectPieces;
+  bool built = false;
+  const unsigned codegenUnits = opts.Output == OutputKind::Library
+                                    ? 1
+                                    : codegenUnitsFor(*llvmModule, opts);
+  if (codegenUnits > 1)
+    timer.phase("machine code", [&] {
+      built = writeMachineCodeSplit(*llvmModule, objPath.string(), codegenUnits,
+                                    opts, diags, objectPieces);
+    });
+  if (objectPieces.empty())
+    built = emitMachineCode(objPath.string(), false);
+  auto removePieces = [&] {
+    std::error_code ec;
+    for (size_t i = 1; i < objectPieces.size(); ++i)
+      std::filesystem::remove(objectPieces[i], ec);
+  };
+  if (!built) {
+    removePieces();
     diags.statusFail("Build failed.");
     return 1;
   }
+  // The pieces after the first go to the linker beside it.
+  for (size_t i = 1; i < objectPieces.size(); ++i)
+    libraryObjects.insert(libraryObjects.begin() + static_cast<long>(i - 1),
+                          objectPieces[i]);
 
   if (opts.Output == OutputKind::Library) {
     // A .rul bundles the object code with the module's own source, which is
@@ -2668,5 +3058,7 @@ int compileWithOptions(const CompilerOptions &given) {
   timer.report(std::cerr);
   return 0;
 }
+
+} // namespace
 
 } // namespace rune

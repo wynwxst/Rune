@@ -1,12 +1,15 @@
 # The test suite
 
 ```sh
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --output-on-failure -j8
 ```
 
-One CTest test, `rune_end_to_end`, which is a CMake script
-(`tests/RunCases.cmake`) that compiles, links and runs every `tests/cases/*.rune`
-and compares what it printed against the expectations in its own header.
+The end-to-end cases run under a CMake script (`tests/RunCases.cmake`) that
+compiles, links and runs every `tests/cases/*.rune` and compares what it
+printed against the expectations in its own header. The cases are dealt into
+eight CTest tests, `rune_end_to_end_0` to `rune_end_to_end_7`, each taking every
+eighth case, so `-j` runs them side by side; `-R rune_end_to_end` selects all
+of them. `-DRUNE_TEST_SHARDS=<n>` at configure time changes the count.
 
 ## Writing a case
 

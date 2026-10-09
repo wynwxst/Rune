@@ -47,7 +47,8 @@
     "concurrency.md",
     "cross_compilation.md",
     "bare_metal.md",
-    "build_scripts.md"
+    "build_scripts.md",
+    "rust_crates.md"
   ],
   "Performance": [
     "index.md",

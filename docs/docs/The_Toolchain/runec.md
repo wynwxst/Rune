@@ -11,6 +11,7 @@
 | `--check` | type-check only, produce nothing |
 | `-O0` … `-O3` | optimisation level, default `-O2` |
 | `-g` | emit debug information |
+| `--codegen-units <n>` | build an executable's machine code in *n* pieces at once (default: by the program's size, up to 16) |
 | `--target <triple>` | cross-compile; see **Cross compilation** |
 | `--cc <program>` | the toolchain driver used to link |
 | `--sysroot <dir>` | the target's headers and libraries |
@@ -24,12 +25,14 @@
 | `--safety <level>` | `none`, `minimal` or `full` (default) |
 | `--memory <mode>` | `zombie` (default) or `arc`; see **Single ownership without a count** |
 | `--no-zombie-stdlib` | silence Zombie findings inside the standard library (reported by default) |
+| `--zombie-whole-stdlib` | borrow-check every standard library body, not only the ones the program reaches |
 | `-I <dir>` | add a module search path |
 | `-L <dir>` / `-l <name>` | native library path / library |
 | `--module <name>` | set the module name |
 | `--cfg <name>` | set *name* for `#Config(...)` |
 | `--stdlib <dir>` | where the standard library lives |
 | `--no-stdlib` | do not import it implicitly |
+| `--whole-stdlib` | parse and check every standard library module, not only the ones the program reaches |
 | `-Werror` / `-w` | warnings as errors / silence warnings |
 | `--error-limit <n>` | stop after *n* errors, `0` for unlimited |
 | `--color` / `--no-color` | force colour on or off |
@@ -39,7 +42,7 @@
 | `--dump-types` | print the type of every expression |
 | `--dump-zombie` | print the borrow checker's view of every body |
 | `--entry <kind>` / `--no-main` | `main` (default) or `none`: generate no `main`, an `#export`ed function is the entry |
-| `--tiers` | say which standard library functions work on bare metal and what the rest need |
+| `--tiers` | say which standard library functions work on bare metal — with either freestanding runtime, or the full one only — and what the rest need |
 | `--emit-docs` / `--docs-stdlib` | write the documentation sidecar `rune doc` reads; with the second, for the standard library's modules too |
 | `--diagnostic-format <f>` | `human` (default), `json` — one object per line, for tools — or `short`, gcc-style `file:line:col: error: message` |
 | `-v` | report each pipeline stage |

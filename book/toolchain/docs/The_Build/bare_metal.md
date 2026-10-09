@@ -95,8 +95,9 @@ the round-trip interval are chosen from it, and the hosted runtime's `%g` /
 `%.Nf` presentation rules are reproduced — checked against the C runtime on
 400,000 random doubles. Parsing divides out the exact fraction for a
 correctly rounded result. The scratch space is global, so it is not
-reentrant. Freestanding, a `String` literal is emitted as an immortal object
-in the image (`.rune.strconst`) instead of a `rune_string_literal` call, and
+reentrant. A `String` literal is an immortal object in the image
+(`.rune.strconst`) rather than something made at run time — hosted, its
+header names `rune_string_typeinfo`; freestanding, no descriptor at all — and
 in `+` a string literal checks after the other side so it can become a
 `String`.
 
@@ -105,11 +106,24 @@ in `+` a string literal checks after the other side so it can become a
 build's own complaints stay quiet) and `CodeGen::reportTiers` walks the IR:
 a function is `bare` when nothing it reaches through calls, vtables,
 descriptors or function pointers is left only declared, and otherwise names
-the first such symbol. A generic template uses an instantiation the library
-made, or its own calls resolved by name. `--emit-docs --docs-stdlib` runs the
-same analysis in-process and writes a `tier` line per function, which
-`rune-doc` shows as a **bare metal** / **hosted** badge; `bare_metal_test.py`
-checks that every module builds and that known answers hold.
+the first such symbol. It does this twice, once per freestanding runtime
+(`standardLibraryTiers` in `Compilation.cpp`). A function bare on the full
+runtime but not the minimal one is `full`, with the symbol the minimal one
+lacks. A `--cfg freestanding_type=...` on the command line gets that
+runtime's answer alone.
+
+Four rules keep the answers honest:
+
+- **Instantiations: bare wins.** An instantiation answers for its template, and if any instantiation is bare, so is the template. `Option<TcpStream>::unwrap` drops a socket, which needs the network, but that is the socket's need, and `TcpStream`'s own entry says so. With "any hosted wins", `Option::unwrap` was badged hosted. Plain overloads keep "any hosted wins".
+- **Templates the library never instantiates** are read from their source. Their own calls are resolved by name, and the walk takes in methods of types, marks and `extend` blocks, keyed by the type's name as the docs look it up. A mark's requirement with no body gets no entry: it is as bare as its implementer.
+- **Intrinsics have no body to follow.** A table beside `noteTemplate` lists the few whose lowering calls a runtime (`Any::typeName`, `cxx::alloc`/`free`, `Any`'s tests), and each is checked against what the freestanding runtime in the build defines. Every other intrinsic is plain code. `bare_metal_test.py` builds every intrinsic the table calls bare in a `#runtime(none)` program, so a new runtime call cannot hide there.
+- **Freestanding means single ownership.** Code generation must not emit a counting call, `rune_retain_shared` or `rune_release_shared`, outside `emitRetain`/`emitRelease`, which pick the memory model's own operation. `reflect::describe` once did, and was refused on bare metal for it.
+
+`--emit-docs --docs-stdlib` runs the same analysis in-process and writes a
+`tier` line per function (`bare`, `full <needs>` or `hosted <needs>`), which
+`rune-doc` shows as a **bare metal**, **bare metal · full runtime** or
+**hosted** badge. `bare_metal_test.py` checks that every module builds, that
+the answers are three, and that known answers hold.
 
 ## In `runetime/freestanding.rune`
 

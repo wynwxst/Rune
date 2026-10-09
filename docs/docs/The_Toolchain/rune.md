@@ -16,6 +16,7 @@
 | `rune lsp` | the language server, for an editor, over stdin and stdout |
 | `rune doc lint` / `lsp` / `fmt` / `ffi` | the book about that tool |
 | `rune ffi <header>…` | Rune bindings for C headers, read with libclang; built the first time it runs — see **Calling C** |
+| `rune ffi rust [crate]` | Rune bindings for a Rust crate's C ABI, `-o` to a file — see **Calling Rust** |
 | `rune tools` | the toolchain's tools and where each one is; `rune tools install [name…]` puts them in `~/.rune/bin` |
 | `rune targets` | the cross targets this package configures |
 | `rune clean` | delete `target/` |

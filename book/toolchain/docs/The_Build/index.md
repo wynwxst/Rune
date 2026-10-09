@@ -17,3 +17,4 @@ processes.
 - [Cross compilation](cross_compilation.md)
 - [Bare metal](bare_metal.md)
 - [Build scripts](build_scripts.md)
+- [Rust crates](rust_crates.md)

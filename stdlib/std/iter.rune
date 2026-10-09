@@ -47,10 +47,10 @@
 //
 //     for (i, name) in iter::counting(0).zip(names.iterate()) { ... }
 //
-// `0..n` is loop syntax rather than a value, so `counting` is what numbers
-// something; it never ends, which is safe because `zip` stops with the shorter
-// side. `vector::collect(it)` is the other end of a chain: the adaptors are
-// lazy, and it is what runs them.
+// `0..n` is loop syntax rather than a value; `range((0, n))` is the same
+// numbers as one, and `counting` is the same without an end, which is safe
+// because `zip` stops with the shorter side. `vector::collect(it)` is the
+// other end of a chain: the adaptors are lazy, and it is what runs them.
 //
 // What the loop advances
 // ----------------------
@@ -473,6 +473,24 @@ bind Iterator to Counter {
     fn next(&var self) -> Self::Item? {
         let value = self.at
         self.at += self.step
+        value
+    }
+}
+
+/// The integers from `start` up to, but not including, `end`. Built by `range`.
+pub struct Range { at: i64, end: i64 }
+
+/// Counts from `r.0` up to, but not including, `r.1` — `0..n` as a value.
+///
+///     for (i, name) in iter::range((0, 3)).zip(names.iterate()) { ... }
+pub fn range(r: (i64, i64)) -> Range { Range { at: r.0, end: r.1 } }
+
+bind Iterator to Range {
+    type Item = i64
+    fn next(&var self) -> Self::Item? {
+        if self.at >= self.end { return nil }
+        let value = self.at
+        self.at += 1
         value
     }
 }

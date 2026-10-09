@@ -198,6 +198,8 @@ private:
   llvm::DISubprogram *debugSubprogramFor(FunctionDecl *fn, llvm::Function *f);
   /// Points the builder at `r`, so instructions emitted next carry it.
   void setDebugLocation(SourceRange r);
+  void setPrologueDebugLocation();
+  struct DebugLocationGuard;
   void declareDebugVariable(VarDecl *v, llvm::Value *slot, unsigned argIndex);
 
   void applyTargetLayout();
@@ -389,6 +391,9 @@ private:
   llvm::Function *BorrowedGlobalsInit = nullptr;
   std::vector<GlobalVarDecl *> DeferredGlobals;
   std::set<FunctionDecl *> OfferedBodies;
+  /// Library bodies the borrow checker deferred that have been prepared
+  /// for emission (see `SemaResult::ZombieDeferred`).
+  std::unordered_set<const FunctionDecl *> PreparedDeferred;
   bool isZeroInitialiser(Expr *e, Type *t);
   llvm::Constant *constantValueOf(Expr *e, Type *t);
   std::map<GlobalVarDecl *, llvm::Constant *> FoldedGlobals;
@@ -398,6 +403,7 @@ private:
   /// Drops every definition nothing in the module reaches. What "reaches"
   /// means is decided by linkage: see `setDiscardableLinkage`.
   void pruneUnreachable();
+  void annotateFunctions();
   void releaseUnusedRuntime();
   void reportTiers();
   void exportCAdapters();

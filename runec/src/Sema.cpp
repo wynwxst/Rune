@@ -430,6 +430,48 @@ void Sema::rejectMarkByValue(Type *t, SourceRange where, const char *role) {
   d.code(219);
 }
 
+/// `mangled` — the `_R` symbol of a function in `modulePath` — with the
+/// name in its `F` section replaced by `name`, everything around it kept.
+/// Nothing when it is not one: a foreign or exported function's symbol is
+/// whatever was asked for.
+///
+/// The module comes first and is skipped by its known spelling rather than
+/// read: a module whose name starts with a digit — `92_async_tasks` — runs
+/// into its own length, and there is no telling where one ends and the
+/// other begins. The sections after it are named by identifiers, which
+/// never do.
+std::optional<std::string> renameMangledFunction(const std::string &mangled,
+                                                 const std::string &modulePath,
+                                                 const std::string &name) {
+  std::string prefix = "_R";
+  if (!modulePath.empty()) {
+    std::string mod = modulePath;
+    for (char &c : mod)
+      if (c == ':' || c == '/' || c == '.' || c == '-')
+        c = '_';
+    prefix += std::to_string(mod.size()) + mod;
+  }
+  if (mangled.compare(0, prefix.size(), prefix) != 0)
+    return std::nullopt;
+  size_t p = prefix.size();
+  while (p < mangled.size()) {
+    const char section = mangled[p++];
+    if (section < 'A' || section > 'Z')
+      return std::nullopt;
+    const size_t start = p;
+    size_t len = 0;
+    while (p < mangled.size() && mangled[p] >= '0' && mangled[p] <= '9')
+      len = len * 10 + static_cast<size_t>(mangled[p++] - '0');
+    if (p == start || len == 0 || p + len > mangled.size())
+      return std::nullopt;
+    if (section == 'F')
+      return mangled.substr(0, start) + std::to_string(name.size()) + name +
+             mangled.substr(p + len);
+    p += len;
+  }
+  return std::nullopt;
+}
+
 std::string Sema::mangleFunction(const FunctionDecl *fn,
                                  const std::vector<Type *> &typeArgs) {
   // A foreign function links against the name C exports. `#as` changed the
@@ -520,6 +562,14 @@ std::string Sema::mangleFunction(const FunctionDecl *fn,
 //===----------------------------------------------------------------------===//
 
 bool Sema::check() {
+  // Each pass's wall time, for `--time`. Cheap enough to take always.
+  auto lap = [this, last = std::chrono::steady_clock::now()](
+                 const char *name) mutable {
+    const auto now = std::chrono::steady_clock::now();
+    PassMillis.push_back(
+        {name, std::chrono::duration<double, std::milli>(now - last).count()});
+    last = now;
+  };
   ModuleScope = pushScope(ScopeKind::Module);
 
   // Each module gets its own scope, all sharing the root so builtins resolve.
@@ -535,6 +585,7 @@ bool Sema::check() {
   findLangItems();
   for (Module *m : Modules)
     resolveImports(m);
+  lap("collect");
   // An `extend` on a generic type is folded into the type before any module's
   // shapes are resolved. Resolving a module's shapes instantiates types, and
   // an instance made before its template had the extend's methods never gets
@@ -551,6 +602,7 @@ bool Sema::check() {
   for (Module *m : Modules)
     resolveShapes(m);
   ShapesDone = true;
+  lap("shapes");
   // A conditional bind turned down while the binds its `where` asks about
   // were still being registered gets its answer now. Applying one may
   // instantiate more, which queue behind it.
@@ -570,6 +622,7 @@ bool Sema::check() {
   DeferredBounds.clear();
   for (Module *m : Modules)
     resolveSignatures(m);
+  lap("signatures");
   // Two bindings that both claimed one name are rivals only if they take the
   // same things; otherwise they are two ways to call it. Parameter types are
   // known now, so the question can finally be answered.
@@ -585,6 +638,7 @@ bool Sema::check() {
   // this question. A body checked before the answer is known would emit the
   // destructor without the move, and destroy what it had already given away.
   resolveDeinitialisers();
+  lap("conventions");
   InBodyPass = true;
   drainPendingInstantiations();
   drainPendingMethods();
@@ -592,6 +646,7 @@ bool Sema::check() {
   for (Module *m : Modules)
     checkBodies(m);
   drainStructuralBodies();
+  lap("bodies");
   // Instantiations asked for while bodies were checked bring their own
   // `deinit` with them.
   resolveDeinitialisers();
@@ -602,7 +657,9 @@ bool Sema::check() {
 
   // Last, and all together: every body has been checked, so each of these has
   // everything it needs and none of them needs anything from another.
+  lap("deinit, clashes");
   checkOwnershipOfQueued();
+  lap(Memory == MemoryMode::Zombie ? "zombie" : "ownership");
 
   // Hand the resolved tables to CodeGen, which needs them for `dyn` dispatch.
   // Both of them: a mark bound twice to one type has one version answering
@@ -634,7 +691,16 @@ void Sema::checkOwnershipOfQueued() {
   // parallelises the bodies itself: a body needs its callees' summaries.
   if (Memory == MemoryMode::Zombie) {
     const auto start = std::chrono::steady_clock::now();
-    zombie::checkProgram(OwnershipQueue, {}, Diags, Dump, ZombieStdlib);
+    std::function<bool(const FunctionDecl *)> deferrable;
+    if (!ZombieWholeStdlib)
+      deferrable = [this](const FunctionDecl *fn) {
+        return Result.isAncillary(fn->ModulePath);
+      };
+    for (FunctionDecl *fn : zombie::checkProgram(OwnershipQueue, {}, Diags,
+                                                 Dump, ZombieStdlib,
+                                                 deferrable))
+      Result.ZombieDeferred.insert(fn);
+    Result.ZombieReportDeferred = ZombieStdlib;
     ZombieMillis += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - start)
                         .count();

@@ -58,7 +58,8 @@ message(STATUS "Rune: using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
 llvm_map_components_to_libnames(RUNE_LLVM_LIBS
-  core support irreader bitwriter analysis passes target
+  core support irreader bitreader bitwriter analysis passes target
+  transformutils
   ${LLVM_TARGETS_TO_BUILD})
 
 # std::thread needs libpthread explicitly where glibc predates 2.34

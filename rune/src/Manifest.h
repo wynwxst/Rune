@@ -24,6 +24,19 @@ struct Dependency {
   std::map<std::string, std::string> Config;
 };
 
+/// A Rust crate in `[dependencies]`: `name = { cargo = "rust/name" }`.
+///
+/// Cargo builds it as a static library, and the build reads its
+/// `#[no_mangle] pub extern "C"` functions, `#[repr(C)]` structs and enums
+/// and its constants into a Rune module of the dependency's name — so
+/// `import name` is all a Rune file needs to call it. See Cargo.h.
+struct CargoCrate {
+  std::string Name;                  ///< the module Rune code imports
+  std::string Path;                  ///< the crate's directory, absolute
+  std::vector<std::string> Features; ///< `features = ["simd"]`
+  bool DefaultFeatures = true;       ///< `default-features = false`
+};
+
 /// A cross-compilation target named in `[target.<name>]`.
 ///
 /// It needs a `triple`, or a foreign target to start from (see Targets.h).
@@ -177,6 +190,9 @@ struct Manifest {
 
   // [dependencies]
   std::vector<Dependency> Dependencies;
+  /// `[dependencies]` entries with `cargo = "..."`: Rust crates, built by
+  /// Cargo and bound into Rune modules.
+  std::vector<CargoCrate> CargoCrates;
 
   // [target.<name>]
   std::vector<TargetSpec> Targets;

@@ -24,7 +24,9 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -197,6 +199,13 @@ struct SemaResult {
   /// their code only where something here actually reaches it.
   std::set<std::string> AncillaryModules;
 
+  /// Bodies the Zombie checker left alone because nothing in the program
+  /// calls them (see `zombie::checkProgram`). The code generator prepares
+  /// any of these it emits, reporting what that finds when
+  /// `ZombieReportDeferred` says to.
+  std::unordered_set<const FunctionDecl *> ZombieDeferred;
+  bool ZombieReportDeferred = true;
+
   /// True when `modulePath` names one of those.
   bool isAncillary(const std::string &modulePath) const {
     return AncillaryModules.count(modulePath) != 0;
@@ -216,6 +225,13 @@ struct SemaResult {
 /// Introduces `generics` as symbolic parameter types in `out`.
 void bindGenerics(const std::vector<GenericParam> &generics, TypeContext &types,
                   std::map<std::string, Type *> &out);
+
+/// A function's `_R` symbol with the name in it replaced, the rest — its
+/// module, owner, mark, parameters, type arguments — kept. Nothing when the
+/// symbol is not one of the compiler's own.
+std::optional<std::string> renameMangledFunction(const std::string &mangled,
+                                                 const std::string &modulePath,
+                                                 const std::string &name);
 
 class Sema {
 public:
@@ -238,6 +254,8 @@ public:
   bool check();
 
   const SemaResult &result() const { return Result; }
+  /// `--zombie-whole-stdlib`: check every library body, reached or not.
+  void setZombieWholeStdlib(bool on) { ZombieWholeStdlib = on; }
   TypeContext &types() { return Types; }
 
   /// Prints the resolved module scope (`--dump-symbols`).
@@ -245,6 +263,10 @@ public:
 
   /// How long the Zombie checker took, for `--time`.
   double zombieMillis() const { return ZombieMillis; }
+  /// How long each of `check`'s own passes took, in order, for `--time`.
+  const std::vector<std::pair<std::string, double>> &passMillis() const {
+    return PassMillis;
+  }
 
   /// A type's own `clone(&self) -> Self`, or null. Static so the code
   /// generator can call it directly.
@@ -270,6 +292,7 @@ private:
   MemoryMode Memory;
   DumpKind Dump;
   bool ZombieStdlib;
+  bool ZombieWholeStdlib = false;
   SemaResult Result;
   CxxTarget Cxx = cxxTargetFor("");
   bool UsesCxx = false;
@@ -285,7 +308,12 @@ private:
   std::vector<std::unique_ptr<Decl>> Synthesised;
   /// Names the next lifted closure; one number per closure, whatever else
   /// was collected in between.
-  unsigned ClosureCounter = 0;
+  /// How many closures each function body has lifted so far, so the next
+  /// is named for its place in that body: see `checkClosure`.
+  std::unordered_map<const FunctionDecl *, unsigned> ClosuresIn;
+  /// The same, per module, for a closure outside any function — in a
+  /// global's initialiser.
+  std::map<std::string, unsigned> ClosuresAtTopLevel;
 
   //=== Scopes ===========================================================//
   std::vector<std::unique_ptr<Scope>> ScopeStorage;
@@ -360,6 +388,7 @@ private:
   /// Runs the queue, on as many threads as there are.
   void checkOwnershipOfQueued();
   double ZombieMillis = 0;
+  std::vector<std::pair<std::string, double>> PassMillis;
 
   //=== Origins and views (`from` clauses, `{ fields }`) =================//
   // Written annotations the Zombie borrow checker reads. They are resolved

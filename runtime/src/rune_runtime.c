@@ -467,9 +467,12 @@ static void string_deinit(void *self) {
 
 static void *string_clone(const void *s);
 
-static const RuneTypeInfo kStringTypeInfo = {
+/* Exported: a string literal is an object the compiler lays out in the
+ * program's image, and its header names this descriptor. */
+const RuneTypeInfo rune_string_typeinfo = {
     "std::String", sizeof(RuneString), string_deinit, NULL, NULL, 0,
     string_clone};
+#define kStringTypeInfo rune_string_typeinfo
 
 static RuneString *string_alloc(int64_t capacity) {
   RuneString *s = (RuneString *)rune_alloc(sizeof(RuneString), &kStringTypeInfo);

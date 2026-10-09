@@ -312,6 +312,17 @@ bool loadManifest(const std::string &dir, Manifest &out, std::string &error,
 
   if (const TomlValue *deps = doc.get("dependencies")) {
     for (const auto &entry : deps->Tbl) {
+      if (entry.second.isTable())
+        if (const TomlValue *crate = entry.second.find("cargo")) {
+          CargoCrate c;
+          c.Name = entry.first;
+          c.Path = fs::absolute(root / crate->stringOr(".")).lexically_normal().string();
+          c.Features = stringList(entry.second.find("features"));
+          if (const TomlValue *df = entry.second.find("default-features"))
+            c.DefaultFeatures = df->boolOr(true);
+          out.CargoCrates.push_back(std::move(c));
+          continue;
+        }
       Dependency d;
       d.Name = entry.first;
       if (entry.second.isString()) {

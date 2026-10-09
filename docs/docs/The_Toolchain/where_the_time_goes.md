@@ -14,4 +14,4 @@ $ runec --time --check src/main.rune
     total        60.2 ms  100.0 %
 ```
 
-`check` is usually the largest, because a compilation reads the whole standard library in order to understand its own code. It is read, not emitted: what ends up in the artefact is only what the artefact reaches.
+`check` is usually the largest. A compilation reads the part of the standard library it can reach — what it imports and names, what the language itself leans on, and what those import in turn — in order to understand its own code; a compile that fails against that part is checked again against all of it, so the diagnostics are the same either way, and `--whole-stdlib` asks for all of it from the start. It is read, not emitted: what ends up in the artefact is only what the artefact reaches.

@@ -31,6 +31,7 @@
   "Decorators",
   "Calling_C",
   "Calling_C_Plus_Plus",
+  "Calling_Rust",
   "The_Standard_Library",
   "Testing",
   "Documentation",
@@ -351,6 +352,12 @@
   "renaming_and_operators.md",
   "linking.md",
   "what_does_not_cross.md"
+ ],
+ "Calling_Rust": [
+  "a_crate_as_a_dependency.md",
+  "what_is_bound.md",
+  "bindings_on_their_own_rune_ffi_rust.md",
+  "ownership_across_the_line.md"
  ],
  "The_Standard_Library": [
   "std_thread.md",

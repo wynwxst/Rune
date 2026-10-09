@@ -1,6 +1,7 @@
 #include "Toml.h"
 
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <sstream>
 
@@ -78,26 +79,120 @@ struct Parser {
     return s;
   }
 
-  std::string parseQuoted() {
-    char quote = advance(); // " or '
+  /// One escape after a `\` in a basic string, appended to `s`.
+  void parseEscape(std::string &s) {
+    char e = advance();
+    switch (e) {
+    case 'n': s.push_back('\n'); return;
+    case 't': s.push_back('\t'); return;
+    case 'r': s.push_back('\r'); return;
+    case 'b': s.push_back('\b'); return;
+    case 'f': s.push_back('\f'); return;
+    case 'e': s.push_back('\x1b'); return;
+    case '\\': s.push_back('\\'); return;
+    case '"': s.push_back('"'); return;
+    case 'u':
+    case 'U': {
+      // `é`, `\U0001F600`: a code point, written as UTF-8.
+      const int digits = e == 'u' ? 4 : 8;
+      uint32_t cp = 0;
+      for (int i = 0; i < digits; ++i) {
+        char h = eof() ? '\0' : advance();
+        if (!std::isxdigit(static_cast<unsigned char>(h))) {
+          fail("a \\u escape takes hex digits");
+          return;
+        }
+        cp = cp * 16 +
+             static_cast<uint32_t>(
+                 std::isdigit(static_cast<unsigned char>(h))
+                     ? h - '0'
+                     : std::tolower(static_cast<unsigned char>(h)) - 'a' + 10);
+      }
+      if (cp < 0x80) {
+        s.push_back(static_cast<char>(cp));
+      } else if (cp < 0x800) {
+        s.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      } else if (cp < 0x10000) {
+        s.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        s.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      } else {
+        s.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        s.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      }
+      return;
+    }
+    default: s.push_back(e); return;
+    }
+  }
+
+  /// A multi-line string, `"""..."""` or its literal form with single
+  /// quotes, the three opening quotes already read. The newline straight
+  /// after the opening is not part of the text; in the basic form a `\` at
+  /// the end of a line joins it to the next, dropping the whitespace
+  /// between. Up to two quotes may stand just before the closing three.
+  std::string parseMultiline(char quote) {
     std::string s;
-    while (!eof() && peek() != quote) {
+    if (peek() == '\r')
+      advance();
+    if (peek() == '\n')
+      advance();
+    const std::string close(3, quote);
+    for (;;) {
+      if (eof()) {
+        fail("unterminated multi-line string");
+        return s;
+      }
+      if (Text.compare(Pos, 3, close) == 0) {
+        size_t run = 0;
+        while (Pos + run < Text.size() && Text[Pos + run] == quote)
+          ++run;
+        if (run > 5)
+          run = 5;
+        for (size_t i = 3; i < run; ++i)
+          s.push_back(quote);
+        for (size_t i = 0; i < run; ++i)
+          advance();
+        return s;
+      }
       char c = advance();
       if (c == '\\' && quote == '"' && !eof()) {
-        char e = advance();
-        switch (e) {
-        case 'n': s.push_back('\n'); break;
-        case 't': s.push_back('\t'); break;
-        case 'r': s.push_back('\r'); break;
-        case '\\': s.push_back('\\'); break;
-        case '"': s.push_back('"'); break;
-        default: s.push_back(e); break;
+        // A line-ending backslash: everything up to the next text goes.
+        size_t look = Pos;
+        while (look < Text.size() && (Text[look] == ' ' || Text[look] == '\t'))
+          ++look;
+        if (look < Text.size() && (Text[look] == '\n' || Text[look] == '\r')) {
+          while (!eof() && std::isspace(static_cast<unsigned char>(peek())))
+            advance();
+          continue;
         }
+        parseEscape(s);
         continue;
       }
       s.push_back(c);
     }
-    if (eof())
+  }
+
+  std::string parseQuoted() {
+    char quote = advance(); // " or '
+    if (peek() == quote && Pos + 1 < Text.size() && Text[Pos + 1] == quote) {
+      advance();
+      advance();
+      return parseMultiline(quote);
+    }
+    std::string s;
+    while (!eof() && peek() != quote && peek() != '\n') {
+      char c = advance();
+      if (c == '\\' && quote == '"' && !eof()) {
+        parseEscape(s);
+        continue;
+      }
+      s.push_back(c);
+    }
+    if (eof() || peek() == '\n')
       fail("unterminated string");
     else
       advance(); // closing quote

@@ -39,6 +39,7 @@
 #include "rune/Diagnostics.h"
 #include "rune/Driver.h"
 
+#include <functional>
 #include <ostream>
 #include <vector>
 
@@ -83,9 +84,26 @@ const Stats &lastStats();
 /// Findings are always errors: the code generator relies on them. Findings
 /// inside the standard library are kept only with `reportStdlib` — its
 /// bodies are still read for their summaries.
-void checkProgram(const std::vector<FunctionDecl *> &queue,
-                  const std::vector<FunctionDecl *> &imported,
-                  DiagnosticEngine &diags, DumpKind dump, bool reportStdlib);
+///
+/// A body `deferrable` answers true for — the standard library's, an
+/// imported library's — is analysed only when the program's own bodies reach
+/// it through calls: nothing else consults its summary, and what it would
+/// find is the library's business, checked when the library is (see
+/// `--zombie-whole-stdlib`). Those left out are returned. Their lowering
+/// still records what the code generator reads, so whatever of them it
+/// emits goes through `prepareDeferred` first.
+std::vector<FunctionDecl *>
+checkProgram(const std::vector<FunctionDecl *> &queue,
+             const std::vector<FunctionDecl *> &imported,
+             DiagnosticEngine &diags, DumpKind dump, bool reportStdlib,
+             const std::function<bool(const FunctionDecl *)> &deferrable = {});
+
+/// Lowers a body `checkProgram` deferred and runs the move pass over it —
+/// the two parts of the checker that leave answers on the AST for the code
+/// generator. Neither consults another function's summary, so the result is
+/// what a whole-program check would have left. Findings are reported when
+/// `report` is set, and dropped otherwise.
+void prepareDeferred(FunctionDecl *fn, DiagnosticEngine &diags, bool report);
 
 } // namespace zombie
 } // namespace rune

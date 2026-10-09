@@ -1,5 +1,7 @@
 #include "rune/Source.h"
 
+#include <cstdio>
+
 #include <fstream>
 #include <sstream>
 
@@ -19,12 +21,31 @@ static std::string basenameOf(const std::string &path) {
 }
 
 std::optional<unsigned> SourceManager::loadFile(const std::string &path) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in)
+  // In one read, sized up front: a stream copying the file through its
+  // buffer a character at a time was a noticeable part of reading the
+  // standard library on every compile.
+  std::FILE *f = std::fopen(path.c_str(), "rb");
+  if (!f)
     return std::nullopt;
-  std::ostringstream ss;
-  ss << in.rdbuf();
-  unsigned id = addBuffer(path, ss.str());
+  std::string text;
+  if (std::fseek(f, 0, SEEK_END) == 0) {
+    long size = std::ftell(f);
+    if (size > 0)
+      text.resize(static_cast<size_t>(size));
+    std::rewind(f);
+  }
+  size_t got = text.empty() ? 0 : std::fread(text.data(), 1, text.size(), f);
+  text.resize(got);
+  // Whatever is left — a file that grew, or one that cannot seek — is read
+  // to the end.
+  char chunk[16384];
+  for (size_t n; (n = std::fread(chunk, 1, sizeof chunk, f)) > 0;)
+    text.append(chunk, n);
+  const bool failed = std::ferror(f) != 0;
+  std::fclose(f);
+  if (failed)
+    return std::nullopt;
+  unsigned id = addBuffer(path, std::move(text));
   Files[id].Name = basenameOf(path);
   return id;
 }

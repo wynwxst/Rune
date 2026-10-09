@@ -18,3 +18,14 @@ target_compile_options(runec_core PRIVATE
 
 add_executable(runec tools/runec_main.cpp)
 target_link_libraries(runec PRIVATE runec_core)
+
+# Every LLVM target is linked in so one binary can cross-compile anywhere, but
+# much of what LLVM's archives bring along is never reached — and on macOS the
+# unused parts were enough to load a whole SMT solver's dylib at every start.
+# Dropping them shrinks the binary and takes a quarter off start-up, which a
+# compiler started once per file pays every time.
+if(APPLE)
+  target_link_options(runec PRIVATE LINKER:-dead_strip LINKER:-dead_strip_dylibs)
+elseif(UNIX)
+  target_link_options(runec PRIVATE LINKER:--gc-sections LINKER:--as-needed)
+endif()

@@ -37,6 +37,8 @@ OUTPUT
 CODE GENERATION
     -O0 -O1 -O2 -O3      Optimisation level (default -O2)
     -g                   Emit debug information
+    --codegen-units <n>  Build machine code in at most <n> pieces at once
+                         (default: by program size, up to 16; 1 for one piece)
     --target <triple>    Cross-compile for <triple>
     --safety <level>     none | minimal | full   (default full)
     --overflow-checks    Trap when integer arithmetic overflows (the default,
@@ -47,6 +49,9 @@ CODE GENERATION
                          counting
     --no-zombie-stdlib   Silence Zombie findings inside the standard library
                          (they are reported by default)
+    --zombie-whole-stdlib
+                         Borrow-check every standard library body, not only
+                         those the program reaches
 
 MODULES AND LINKING
     -I <dir>             Add <dir> to the module search path
@@ -57,6 +62,8 @@ MODULES AND LINKING
     --cfg <key>=<value>  Give <key> a value, compared with `#Config(k == v)`
     --no-stdlib          Do not implicitly import the standard library
     --stdlib <dir>       Override the standard library location
+    --whole-stdlib       Check every standard library module, not only the
+                         ones the program reaches
 
 CROSS COMPILATION
     --cc <program>       C toolchain driver used to link (default: cc)
@@ -202,6 +209,17 @@ int runCompilerMain(int argc, char **argv) {
       continue;
     }
     if (a == "--target") { opts.TargetTriple = needsValue(i, "--target"); continue; }
+    if (a == "--codegen-units") {
+      const char *v = needsValue(i, "--codegen-units");
+      int n = atoi(v);
+      if (n < 1) {
+        std::cerr << "runec: '--codegen-units' takes a positive count, not '"
+                  << v << "'\n";
+        return 2;
+      }
+      opts.CodegenUnits = static_cast<unsigned>(n);
+      continue;
+    }
     if (a == "--cc") { opts.LinkDriver = needsValue(i, "--cc"); continue; }
     if (a == "--sysroot") { opts.Sysroot = needsValue(i, "--sysroot"); continue; }
     if (a == "--link-arg") {
@@ -251,6 +269,8 @@ int runCompilerMain(int argc, char **argv) {
     }
     if (a == "--zombie-stdlib") { opts.ZombieStdlib = true; continue; }
     if (a == "--no-zombie-stdlib") { opts.ZombieStdlib = false; continue; }
+    if (a == "--zombie-whole-stdlib") { opts.ZombieWholeStdlib = true; continue; }
+    if (a == "--whole-stdlib") { opts.WholeStdlib = true; continue; }
     if (a == "--overflow-checks") { opts.Overflow = OverflowChecks::On; continue; }
     if (a == "--no-overflow-checks") { opts.Overflow = OverflowChecks::Off; continue; }
     if (a == "-I") { opts.ImportPaths.push_back(needsValue(i, "-I")); continue; }

@@ -3908,13 +3908,27 @@ Type *Sema::checkClosure(ClosureExpr *c, Type *expected) {
   // parameter holding the captures.
   Synthesised.push_back(std::make_unique<FunctionDecl>());
   auto *lifted = static_cast<FunctionDecl *>(Synthesised.back().get());
-  // Numbered by a counter of its own rather than by how many functions have
-  // been collected so far: a closure nested directly inside another is
-  // checked before the outer one is added, and the two would share a name.
-  lifted->Name = fmt("closure#{}", ClosureCounter++);
+  // Named for where it is: the function it is written in, and how many
+  // closures that function has lifted before it. Both are the same in every
+  // compilation that checks that body — the library's own build and every
+  // program that imports it — so a closure's symbol means one closure
+  // wherever it appears. A count across the whole compilation did not: a
+  // library numbered its closures after the standard library's, an importer
+  // numbered them from wherever it had got to, and two different closures
+  // could leave two objects under one mergeable name. A closure nested in
+  // another is named inside that one, which is itself unique.
+  FunctionDecl *enclosing = fn() ? fn()->Fn : nullptr;
+  if (enclosing) {
+    const unsigned index = ClosuresIn[enclosing]++;
+    lifted->Name = enclosing->Name + "#closure" + std::to_string(index);
+  } else {
+    const std::string module = CurModule ? CurModule->Name : "";
+    lifted->Name = "closure#" + std::to_string(ClosuresAtTopLevel[module]++);
+  }
   // The body of an `async fn` is named after the function, so a traceback
   // through a task reads `fetch#task` rather than `closure#12`. A generic
   // one keeps the number: its instantiations would otherwise share a name.
+  bool namedForTask = false;
   if (c->IsAsyncBody) {
     FunctionContext *outer = fn();
     if (outer && outer->Fn && outer->Fn->IsAsync && !outer->Closure &&
@@ -3922,6 +3936,7 @@ Type *Sema::checkClosure(ClosureExpr *c, Type *expected) {
       std::string owner =
           outer->Fn->OwnerType ? outer->Fn->OwnerType->toString() + "::" : "";
       lifted->Name = owner + outer->Fn->Name + "#task";
+      namedForTask = true;
     }
   }
   lifted->Range = c->Range;
@@ -3930,6 +3945,15 @@ Type *Sema::checkClosure(ClosureExpr *c, Type *expected) {
   lifted->SourceClosure = c;
   lifted->ModulePath = CurModule ? CurModule->Name : "";
   lifted->MangledName = mangleFunction(lifted, {});
+  // The enclosing function's own symbol carries what keeps two functions of
+  // one name apart — the type it belongs to, the mark, its parameters, an
+  // instantiation's type arguments — so the closure's is that one with the
+  // closure's name standing in for the function's.
+  if (enclosing && !namedForTask)
+    if (std::optional<std::string> nested =
+            renameMangledFunction(enclosing->MangledName,
+                                  enclosing->ModulePath, lifted->Name))
+      lifted->MangledName = *nested;
   c->Lifted = lifted;
 
   FunctionContext ctx;

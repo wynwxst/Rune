@@ -7,6 +7,7 @@ A dependency is a path, or a version from a registry. `rune build` builds each o
 geometry = { path = "../geometry" }    # a package on this disk
 shapes = "1.0"                         # from a registry: ^1.0, the newest 1.x
 report = { version = "=0.3.2" }        # exactly that version
+fastmath = { cargo = "rust/fastmath" } # a Rust crate; see Calling Rust
 ```
 
 | Requirement | Accepts |

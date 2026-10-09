@@ -119,8 +119,22 @@ struct CompilerOptions {
   /// so a regression there is caught; `--no-zombie-stdlib` silences it (the
   /// bodies are still read for their summaries either way).
   bool ZombieStdlib = true;
+  /// `--zombie-whole-stdlib`: borrow-check every body of the standard
+  /// library and of imported libraries, not only those the program's own
+  /// code reaches through calls. What a library maintainer runs; an
+  /// ordinary compile checks only what it can reach, and prepares anything
+  /// else the code generator turns out to need when it gets there.
+  bool ZombieWholeStdlib = false;
+  /// `--whole-stdlib`: parse and check every module of the standard library,
+  /// not only those the program reaches through what it names. Slower, and
+  /// only ever needed to see how a program that does not build would fare
+  /// against all of it.
+  bool WholeStdlib = false;
 
   unsigned OptLevel = 2;
+  /// `--codegen-units`: the most pieces the back end may cut an executable
+  /// into to build them in parallel. 0 lets the size of the program decide.
+  unsigned CodegenUnits = 0;
   unsigned ErrorLimit = 20;
   bool DebugInfo = false;
   /// True when `-c`, `--emit-lib` and friends set `Output`; a file's own
@@ -207,6 +221,12 @@ std::string hostRuntimeLibDir();
 
 /// Runs the whole pipeline for `opts`. Returns a process exit code.
 int compileWithOptions(const CompilerOptions &opts);
+
+/// Says the process exits as soon as the compile returns, so what it built
+/// need not be freed: the operating system reclaims it all at once. Only a
+/// program that really does exit next — `runec`'s own `main` — sets this.
+void setExitWithoutTeardown(bool on);
+bool exitWithoutTeardown();
 
 /// Parses argv, then calls compileWithOptions.
 int runCompilerMain(int argc, char **argv);

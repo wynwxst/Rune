@@ -17,6 +17,8 @@ fn report(x: f64) -> String { "x = " + x.$str() }
      ─  note: `freestanding_type = "full"` (the default) has it
 ```
 
+Function by function, the line is in the standard library's reference: what the minimal runtime cannot run carries the badge **bare metal · full runtime**, and `runec --tiers` lists it as `full`, with the runtime function it needs.
+
 > [!NOTE]
 > **What it saves**
 >

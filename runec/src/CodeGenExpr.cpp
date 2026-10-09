@@ -18,7 +18,6 @@ using namespace llvm;
 //===----------------------------------------------------------------------===//
 
 Value *CodeGen::emitStringLiteral(const std::string &text, bool asCString) {
-  std::string key = (asCString ? "c:" : "s:") + text;
   GlobalVariable *gv = nullptr;
   auto it = StringLiterals.find("bytes:" + text);
   if (it != StringLiterals.end()) {
@@ -32,47 +31,37 @@ Value *CodeGen::emitStringLiteral(const std::string &text, bool asCString) {
   }
   if (asCString)
     return gv;
-  // Freestanding, the object itself is in the image: a header marked
-  // immortal (so nothing ever counts, drops or frees it), no descriptor, and
-  // the text where the literal's bytes already are. Making it at run time
-  // would take it from the program's heap and never give it back.
-  if (Opts.Freestanding) {
-    auto cached = StringLiterals.find("object:" + text);
-    if (cached != StringLiterals.end())
-      return cached->second;
-    auto *objTy = StructType::get(
-        *Ctx, {B->getInt64Ty(), PtrTy, B->getInt64Ty(), B->getInt64Ty(), PtrTy});
-    const int64_t immortal = int64_t(1) << 62;
-    auto *obj = new GlobalVariable(
-        *M, objTy, /*isConstant=*/false, GlobalValue::PrivateLinkage,
-        ConstantStruct::get(
-            objTy, {ConstantInt::get(B->getInt64Ty(), immortal | 1),
-                    ConstantPointerNull::get(PtrTy),
-                    ConstantInt::get(B->getInt64Ty(), text.size()),
-                    ConstantInt::get(B->getInt64Ty(), text.size()), gv}),
-        ".rune.strconst");
-    obj->setAlignment(llvm::Align(8));
-    StringLiterals["object:" + text] = obj;
-    return obj;
+  // The object itself is in the image: a header marked immortal (so nothing
+  // ever counts, drops or frees it), the descriptor every String carries,
+  // and the text where the literal's bytes already are. A String is
+  // immutable — every operation returns a new one — so one object serves
+  // every evaluation of the literal, and none of them costs a call, a lock
+  // or an allocation. Freestanding there is no descriptor to name.
+  auto cached = StringLiterals.find("object:" + text);
+  if (cached != StringLiterals.end())
+    return cached->second;
+  auto *objTy = StructType::get(
+      *Ctx, {B->getInt64Ty(), PtrTy, B->getInt64Ty(), B->getInt64Ty(), PtrTy});
+  const int64_t immortal = int64_t(1) << 62;
+  Constant *descriptor = ConstantPointerNull::get(PtrTy);
+  if (!Opts.Freestanding) {
+    GlobalVariable *ti = M->getGlobalVariable("rune_string_typeinfo");
+    if (!ti)
+      ti = new GlobalVariable(*M, B->getInt8Ty(), /*isConstant=*/true,
+                              GlobalValue::ExternalLinkage, nullptr,
+                              "rune_string_typeinfo");
+    descriptor = ti;
   }
-  // One String object per literal, built on first use and shared from then
-  // on. A String is immutable — every operation returns a new one — so there
-  // is nothing to observe in the sharing, and the object is marked immortal:
-  // never freed, never counted, and retain/release on it do nothing. That is
-  // why the result is not tracked as a temporary.
-  GlobalVariable *slot = nullptr;
-  auto cached = StringLiterals.find(key);
-  if (cached != StringLiterals.end()) {
-    slot = cached->second;
-  } else {
-    slot = new GlobalVariable(*M, PtrTy, /*isConstant=*/false,
-                              GlobalValue::PrivateLinkage,
-                              Constant::getNullValue(PtrTy), ".rune.strobj");
-    StringLiterals[key] = slot;
-  }
-  return B->CreateCall(
-      runtimeFn("rune_string_literal", PtrTy, {PtrTy, B->getInt64Ty(), PtrTy}),
-      {gv, ConstantInt::get(B->getInt64Ty(), text.size()), slot});
+  auto *obj = new GlobalVariable(
+      *M, objTy, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+      ConstantStruct::get(
+          objTy, {ConstantInt::get(B->getInt64Ty(), immortal | 1), descriptor,
+                  ConstantInt::get(B->getInt64Ty(), text.size()),
+                  ConstantInt::get(B->getInt64Ty(), text.size()), gv}),
+      ".rune.strconst");
+  obj->setAlignment(llvm::Align(8));
+  StringLiterals["object:" + text] = obj;
+  return obj;
 }
 
 //===----------------------------------------------------------------------===//

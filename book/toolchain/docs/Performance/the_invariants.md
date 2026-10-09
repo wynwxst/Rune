@@ -1,6 +1,6 @@
 # The invariants
 
-Five properties the toolchain currently has. Each is worth about an order of
+Nine properties the toolchain currently has. Each is worth about an order of
 magnitude somewhere, each is easy to break by accident, and none of them
 announces itself when broken — the tests still pass, things just get slower.
 
@@ -80,6 +80,68 @@ Any pass parallelised later should do the same. Deterministic output is what
 makes build logs diffable and `EXPECT-ERROR` tests meaningful; a pass that
 reports in completion order is a flaky test generator.
 
+## 6. Only the standard library a program reaches is checked
+
+`stdlibReach` in `Compilation.cpp` reads the token streams before anything is
+parsed and finds every `std::…` path, including `std::{a, b}` and `std::a::*`
+imports. It adds the modules the compiler leans on by itself: `option`,
+`result`, `convert`, `iter`, `thread`, `dictionary`, `io`, `fmt`, `any` and
+`mem`, plus `task` when `async` or `await` appears. Then it closes over what
+those name. Every stdlib file is still *lexed*, because a macro declared
+anywhere is in scope everywhere.
+
+A `bind` or `extend` in a module nothing reaches would be lost, and `std::json`
+binds `As<Value>` to builtins. So the narrowed attempt holds its diagnostics
+(`DiagnosticEngine::hold`) until checking passes. If it fails, it is thrown
+away and the compile runs again against the whole library. A program that
+leant on such a bind still builds, and every error reads exactly as it did.
+`--whole-stdlib` skips the attempt.
+
+Tested by comparing the narrowed and whole builds of every case: identical
+exit codes, diagnostics and set of emitted functions.
+
+## 7. The borrow checker analyses only reached library bodies
+
+`zombie::checkProgram` lowers the program's own bodies, then follows call
+edges into the standard library and imported libraries, wave by wave.
+Nothing else consults an unreached body's summary.
+
+> **Lowering is load-bearing for code generation.** It writes `ZombieAlias`,
+> `ZombieInPlace`, `SubjectHold` and `ZombieSubjectInPlace` onto the AST, and
+> the move pass writes `ZombieMoved`. A deferred body that CodeGen emits
+> anyway — through a vtable, a `deinit`, a function value — goes through
+> `zombie::prepareDeferred` in `emitFunctionBody` first. Skip that and the
+> generated code frees what it should not, or leaks.
+
+`--zombie-whole-stdlib` analyses everything, and the end-to-end case
+`B8_zombie_whole_stdlib` runs it, so a finding introduced anywhere in the
+library still fails the suite.
+
+## 8. Codegen units depend on the module, never the machine
+
+`codegenUnitsFor` picks one piece per 10,000 instructions, up to 16, or what
+`--codegen-units` says. `RUNE_JOBS` and the core count only decide how many
+pieces are built at once. Tie the count to the machine and the same program
+builds into a different executable on every computer.
+
+The cut is made after the optimiser, and the module is written as bitcode
+**once**: each piece loads it lazily and materialises only its own bodies.
+`llvm::SplitModule` cloned and wrote the module once per piece, on one
+thread, which ate most of the gain. Locals named across a cut become hidden
+externals. Pure-data private constants such as string bytes are copied to
+each piece instead, so no string becomes a global symbol.
+
+## 9. Symbols do not depend on what else is in the compilation
+
+A closure is named for the function it is written in and its position
+there (`main#closure1`, `Box::map#closure0<i64>`). The name is spliced into
+the enclosing function's own symbol. It used to come from a counter across the
+whole compilation, so a library's build and its importer's numbered the same
+closures differently. With `-g`, which makes closures mergeable, two
+different closures could share one symbol and the linker would keep either
+body for both. Any new generated name has to be a function of its source
+position, not of how many things came before it.
+
 ## What is not parallel, and why
 
 Type checking itself is sequential. Its passes share a `TypeContext` that
@@ -92,4 +154,5 @@ walk context and restoring a deterministic order afterwards.
 
 The ownership pass is parallel precisely because it is the one part that shares
 none of that: it takes a function, reads only that function's tree, and
-resolves nothing.
+resolves nothing. Lexing, parsing, the borrow checker and the back end
+(codegen units) are parallel for the same reason.

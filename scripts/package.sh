@@ -52,7 +52,7 @@ cmake --build "$build"
 
 if [ "$tests" = 1 ]; then
   # The end-to-end cases are what say the compiler works on this platform.
-  (cd "$build" && ctest --output-on-failure -R rune_end_to_end)
+  (cd "$build" && ctest --output-on-failure -j4 -R rune_end_to_end)
 fi
 
 rm -rf "$stage"

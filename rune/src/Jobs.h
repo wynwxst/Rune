@@ -29,8 +29,10 @@ unsigned jobLimit();
 void setJobLimit(unsigned n);
 
 /// How many threads one step may use for itself, so that all of them together
-/// come to about one machine's worth. Never zero: a step always gets at least
-/// the thread it is running on.
+/// come to about one machine's worth: the machine divided by the steps
+/// running at the moment it asks. A step that runs alone — the last link of
+/// a dependency chain, a package with nothing beside it — gets all of it.
+/// Never zero: a step always gets at least the thread it is running on.
 unsigned sharePerJob();
 
 /// Runs `cmd`, returning its exit code and collecting everything it wrote to

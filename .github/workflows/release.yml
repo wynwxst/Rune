@@ -190,7 +190,7 @@ jobs:
 
       - name: Tests (informational)
         continue-on-error: true
-        run: cd build-release-windows-x86_64 && ctest --output-on-failure -R rune_end_to_end
+        run: cd build-release-windows-x86_64 && ctest --output-on-failure -j4 -R rune_end_to_end
 
       - uses: actions/upload-artifact@v4
         with:

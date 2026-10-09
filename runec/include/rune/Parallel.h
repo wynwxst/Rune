@@ -4,16 +4,18 @@
 // another: lexing a file, parsing a file. This is the whole of what it takes
 // to spread those over the cores that are there.
 //
-// Nothing here schedules or steals. Each worker walks the index space in
-// strides, so the work divides itself without a queue, and a pass whose items
-// take wildly different times still finishes in roughly the time of the
-// slowest core's share rather than the slowest item.
+// Nothing here schedules or steals. Each worker takes the next index nobody
+// has taken yet, so a pass whose items take wildly different times — one
+// large file among small ones, a codegen unit on an efficiency core — keeps
+// every core busy until the work runs out, rather than leaving the ones that
+// drew short strides idle.
 //
 //===----------------------------------------------------------------------===//
 #ifndef RUNE_PARALLEL_H
 #define RUNE_PARALLEL_H
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <exception>
 #include <mutex>
@@ -44,25 +46,31 @@ template <typename Body> void parallelFor(size_t count, Body body) {
 
   std::mutex errorMutex;
   std::exception_ptr failure;
+  std::atomic<size_t> next{0};
+  std::atomic<bool> stop{false};
   std::vector<std::thread> workers;
   workers.reserve(threads - 1);
 
-  auto stride = [&](unsigned first) {
-    for (size_t i = first; i < count; i += threads) {
+  auto drain = [&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+      if (i >= count)
+        return;
       try {
         body(i);
       } catch (...) {
         std::lock_guard<std::mutex> lock(errorMutex);
         if (!failure)
           failure = std::current_exception();
+        stop = true;
         return;
       }
     }
   };
 
   for (unsigned t = 1; t < threads; ++t)
-    workers.emplace_back(stride, t);
-  stride(0);
+    workers.emplace_back(drain);
+  drain();
   for (std::thread &w : workers)
     w.join();
 

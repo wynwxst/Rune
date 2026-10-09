@@ -728,12 +728,19 @@ fn endSection() {
 /// A member with nothing written about it is one line — its signature already
 /// names it, and a heading above that would say the same word twice. One with
 /// prose gets the heading, because that is what a reader scans for.
-/// Where a standard library function runs: on bare metal too, or only with
-/// the hosted runtime — and if so, what of it the function needs.
+/// Where a standard library function runs: on bare metal with either
+/// freestanding runtime, on bare metal with the full one only, or only with
+/// the hosted runtime — and if not everywhere, what it needs.
 fn tierBadge(tier: &String) -> String {
     if tier.$isEmpty() { return "" }
     if *tier == "bare" {
         return "<span class=\"tier bare\" title=\"works in a #runtime(none) program\">bare metal</span>"
+    }
+    if tier.$length() > 5 && tier.$substring(0, 5) == "full " {
+        let what = tier.$substring(5, tier.$length())
+        return "<span class=\"tier full\" title=\"works in a #runtime(none) program " +
+            "with the full freestanding runtime; freestanding_type = minimal leaves out " +
+            attr(what) + "\">bare metal · full runtime</span>"
     }
     let needs = if tier.$length() > 7 { tier.$substring(7, tier.$length()) } else { "" }
     "<span class=\"tier hosted\" title=\"needs the hosted runtime: " + attr(needs) +

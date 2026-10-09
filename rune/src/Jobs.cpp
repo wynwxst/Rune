@@ -1,5 +1,6 @@
 #include "Jobs.h"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -13,6 +14,8 @@ namespace {
 
 unsigned gJobLimit = 0;
 std::mutex gOutputMutex;
+/// Steps `runGraph` has started and not yet seen finish.
+std::atomic<unsigned> gRunning{0};
 
 } // namespace
 
@@ -29,7 +32,10 @@ unsigned sharePerJob() {
   unsigned hw = std::thread::hardware_concurrency();
   if (!hw)
     return 1;
-  unsigned share = hw / jobLimit();
+  // Dividing by the job limit instead gave every compile one thread even
+  // when it was the only one running, which is most builds most of the time.
+  const unsigned running = std::max(1u, gRunning.load());
+  const unsigned share = hw / std::min(running, jobLimit());
   return share ? share : 1u;
 }
 
@@ -106,7 +112,9 @@ bool runGraph(std::vector<Job> &jobs) {
         queue.pop_back();
       }
 
+      ++gRunning;
       const bool ok = jobs[index].Run();
+      --gRunning;
 
       {
         std::lock_guard<std::mutex> lock(mutex);

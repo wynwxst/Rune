@@ -605,6 +605,9 @@ Token Lexer::lexPunctuation() {
 
 std::vector<Token> Lexer::tokenize() {
   std::vector<Token> tokens;
+  // Rune source runs at about one token per five bytes; reserving for that
+  // spares the copies a growing vector of tokens would otherwise make.
+  tokens.reserve(Len / 5 + 16);
   bool atLineStart = true;
 
   for (;;) {
@@ -614,7 +617,7 @@ std::vector<Token> Lexer::tokenize() {
       Token nl;
       nl.Kind = Tok::Newline;
       nl.Range = SourceRange(locAt(nlStart), locAt(nlStart + 1));
-      tokens.push_back(nl);
+      tokens.push_back(std::move(nl));
       atLineStart = true;
       continue;
     }
@@ -672,7 +675,7 @@ std::vector<Token> Lexer::tokenize() {
   eofTok.Kind = Tok::EndOfFile;
   eofTok.Range = SourceRange(locAt(Len), locAt(Len));
   eofTok.AtLineStart = atLineStart;
-  tokens.push_back(eofTok);
+  tokens.push_back(std::move(eofTok));
   return tokens;
 }
 

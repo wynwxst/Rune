@@ -33,4 +33,4 @@ Every rule Zombie enforces has a code and a message that says what to do about i
 > [!NOTE]
 > **Standard library**
 >
-> Findings inside the standard library are reported too, so a change that made a library body unsound is caught where it is written rather than miscompiling in silence. `--no-zombie-stdlib` silences them if you ever need it; the bodies are read for their summaries either way.
+> Findings inside the standard library are reported too, so a change that made a library body unsound is caught where it is written rather than miscompiling in silence. An ordinary compile reads only the library bodies its own code reaches through calls; `--zombie-whole-stdlib` checks every one of them, which is what the test suite does. `--no-zombie-stdlib` silences the findings if you ever need it; the bodies are read for their summaries either way.

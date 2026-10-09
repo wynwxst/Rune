@@ -12,7 +12,9 @@ safety = "full"
 # checker with no counting at all, or reference counting.
 memory = "zombie"
 optimize = 0
-debug = true
+release = true
+# make it pay attention
+debug = false
 warnings-as-errors = false
 # make this macos specific in the file using #Config
 link-args=["-framework","Cocoa","-framework","AppKit","-framework","OpenGL","-framework","IOKit","-framework","CoreFoundation"]

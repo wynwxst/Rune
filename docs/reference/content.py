@@ -8224,8 +8224,11 @@ fn main() -> i64 { 0 }''', mode="diag", memory="zombie",
           caption="The Zombie guards"),
         N("Findings inside the standard library are reported too, so a change "
           "that made a library body unsound is caught where it is written rather "
-          "than miscompiling in silence. `--no-zombie-stdlib` silences them if "
-          "you ever need it; the bodies are read for their summaries either way.",
+          "than miscompiling in silence. An ordinary compile reads only the "
+          "library bodies its own code reaches through calls; "
+          "`--zombie-whole-stdlib` checks every one of them, which is what the "
+          "test suite does. `--no-zombie-stdlib` silences the findings if you "
+          "ever need it; the bodies are read for their summaries either way.",
           label="Standard library"),
     ],
     keywords=["zombie", "single ownership", "borrow checker", "move", "moved",
@@ -8234,7 +8237,7 @@ fn main() -> i64 { 0 }''', mode="diag", memory="zombie",
               "two-phase borrow", "dangling", "use after move",
               "checked", "refcell", "arena", "generational handle", "slot",
               "thread scope", "scoped threads", "send", "sync", "guards",
-              "no-zombie-stdlib"]))
+              "no-zombie-stdlib", "zombie-whole-stdlib"]))
 
 
 
@@ -9527,6 +9530,115 @@ $ rune test --target mingw        # built for Windows, run under wine'''),
     keywords=["c++", "cxx", "extern c++", "interop", "itanium", "mangling",
               "namespace", "class", "constructor", "destructor", "template",
               "llvm", "operator new", "cxx-sources", "link-cxx"]))
+
+
+SECTIONS.append(Sec(
+    "rust", "interop", "Calling Rust",
+    "A Rust crate is a dependency like any other: name it with `cargo = "
+    "\"...\"` in `[dependencies]`, and `import` it. Cargo builds it; `rune` "
+    "reads what it exports over the C ABI into a Rune module.",
+    [
+        H("A crate as a dependency"),
+        S('''[dependencies]
+geometry = { cargo = "rust/geometry" }                  # a Cargo crate on this disk
+fast = { cargo = "../fast", features = ["simd"] }       # with features
+lean = { cargo = "../lean", default-features = false }''',
+          mode="frag", title="Rune.toml"),
+        P("`rune build` runs `cargo rustc --lib --crate-type staticlib` on "
+          "the crate, so it needs no `crate-type` of its own and can stay an "
+          "ordinary library for its Rust users. The static library is linked "
+          "into every program that depends on the package, together with the "
+          "native libraries Rust's standard library needs, which rustc reports. "
+          "A cross build passes the matching `--target` to Cargo — "
+          "`aarch64-apple-darwin`, `x86_64-pc-windows-gnu` — whose standard "
+          "library has to be installed with `rustup target add`."),
+        P("Both steps are fingerprinted over the crate's `Cargo.toml`, "
+          "`Cargo.lock`, `build.rs` and everything under `src/`, so a build "
+          "with nothing changed starts neither Cargo nor the compiler."),
+
+        H("What is bound"),
+        P("The crate's source is read for what it exports over the C ABI, and "
+          "written as a Rune module named after the dependency — in "
+          "`target/<profile>/cargo/<name>.rune`, worth reading once. Its "
+          "`///` docs come across with it."),
+        T(["Rust", "Rune"],
+          [["`#[no_mangle] pub extern \"C\" fn`", "a function; "
+            "`#[unsafe(no_mangle)]` and `#[export_name = \"...\"]` too"],
+           ["`#[repr(C)] struct`", "a `#Convention(\"C\")` struct, fields "
+            "and order kept"],
+           ["`#[repr(u8)]` … `#[repr(C)]` fieldless `enum`", "a type of that "
+            "width, and a global `Name_Variant` per variant"],
+           ["`pub const` with a literal value", "a `pub global`"],
+           ["`struct Name { _private: [u8; 0] }`, or a type only ever "
+            "behind a pointer", "`pub type Name = u8`: an opaque handle"],
+           ["`i8`…`u64`, `isize`, `usize`, `f32`, `f64`, `bool`", "the same"],
+           ["`c_int`, `c_long`, `size_t` and the rest", "their width on the "
+            "target"],
+           ["`*const T`, `*mut T`, `&T`, `&mut T`, `NonNull<T>`, `Box<T>`, "
+            "`Option<&T>`", "`*T` or `*var T`"],
+           ["`*const c_char`, `*mut c_char`", "`CString`"],
+           ["`*mut c_void`", "`*var u8`"],
+           ["`extern \"C\" fn(A) -> R`, and its `Option`", "`@cfunction(A) -> R`"],
+           ["`-> !`", "`-> Never`"]]),
+        P("A function the crate marks safe and that takes no address — no "
+          "pointer, no reference, no C string — is safe in Rune too, and is "
+          "called like one of Rune's own. Everything else is declared as a C "
+          "function is, and called from `unsafe`: the Rust author's "
+          "`# Safety` section, carried over as its doc comment, says what the "
+          "caller has to promise."),
+        S('''import std::io
+import geometry
+
+fn main() -> i64 {
+    io::println(geometry::add(40, 2).$str())             // safe: plain call
+    let p = geometry::Point { x: 3.0, y: 4.0 }
+    io::println(geometry::distance(p, p).$str())
+    let raw = geometry::greeting(2)                       // a string Rust made
+    io::println(raw.$str())
+    unsafe { geometry::free_text(raw) }                   // given back to Rust
+    0
+}''', mode="frag", title="src/main.rune"),
+        P("What cannot be said in Rune is left out, with the reason at the "
+          "end of the generated file and a note in the build's output: a "
+          "generic, an `enum` with data, a `union`, a tuple struct, `String`, "
+          "`Vec` or a slice by value, a Rust-ABI `fn` pointer, a method taking "
+          "`self`. The answer is the usual one for a C boundary — a pointer "
+          "and a length, or a small `extern \"C\"` wrapper in the crate."),
+
+        H("Bindings on their own: `rune ffi rust`"),
+        P("`rune ffi rust <crate>` writes the same module to standard output, "
+          "or with `-o` to a file — to read before depending on a crate, or "
+          "for one built some other way. `--target` says how wide `c_long` "
+          "is. `rune doc ffi` has the details, and the way into a crates.io "
+          "library that has no C ABI of its own: a small wrapper crate, with "
+          "the library's types as opaque handles."),
+        SH("""$ rune ffi rust rust/geometry -o src/geometry.rune
+bound 13 functions from 'geometry'"""),
+
+        H("Ownership across the line"),
+        P("Memory Rust allocates is Rust's to free, and the crate has to "
+          "export the function that does it — `free_text`, `polygon_free`. "
+          "A Rune struct with a `deinit` holding the handle makes that "
+          "automatic: the Rust object goes when the Rune value does."),
+        S('''struct Shape {
+    handle: *var geometry::Polygon
+
+    fn deinit(&self) {
+        unsafe { geometry::polygon_free(self.handle) }
+    }
+}''', mode="frag"),
+        P("A Rust panic does not cross the boundary: an `extern \"C\"` "
+          "function that panics aborts, which is what a Rune panic does too. "
+          "`examples/rust_interop` puts all of this together and builds for "
+          "Windows with `rune build --target windows` as well."),
+        N("Each Rust static library carries a copy of Rust's standard "
+          "library. Two crates link side by side on Apple's linker; a linker "
+          "that reports duplicate Rust symbols wants them behind one crate "
+          "instead — a small wrapper that depends on both and re-exports "
+          "their C functions.", label="Several crates"),
+    ],
+    keywords=["rust", "cargo", "crate", "interop", "no_mangle", "repr c",
+              "extern c", "staticlib", "cbindgen", "ffi", "rustup"]))
 
 
 # ===========================================================================
@@ -12648,6 +12760,8 @@ SECTIONS.append(Sec(
            ["`--check`", "type-check only, produce nothing"],
            ["`-O0` … `-O3`", "optimisation level, default `-O2`"],
            ["`-g`", "emit debug information"],
+           ["`--codegen-units <n>`", "build an executable's machine code in "
+            "*n* pieces at once (default: by the program's size, up to 16)"],
            ["`--target <triple>`", "cross-compile; see **Cross compilation**"],
            ["`--cc <program>`", "the toolchain driver used to link"],
            ["`--sysroot <dir>`", "the target's headers and libraries"],
@@ -12663,12 +12777,16 @@ SECTIONS.append(Sec(
             "ownership without a count**"],
            ["`--no-zombie-stdlib`", "silence Zombie findings inside the standard "
             "library (reported by default)"],
+           ["`--zombie-whole-stdlib`", "borrow-check every standard library "
+            "body, not only the ones the program reaches"],
            ["`-I <dir>`", "add a module search path"],
            ["`-L <dir>` / `-l <name>`", "native library path / library"],
            ["`--module <name>`", "set the module name"],
            ["`--cfg <name>`", "set *name* for `#Config(...)`"],
            ["`--stdlib <dir>`", "where the standard library lives"],
            ["`--no-stdlib`", "do not import it implicitly"],
+           ["`--whole-stdlib`", "parse and check every standard library "
+            "module, not only the ones the program reaches"],
            ["`-Werror` / `-w`", "warnings as errors / silence warnings"],
            ["`--error-limit <n>`", "stop after *n* errors, `0` for unlimited"],
            ["`--color` / `--no-color`", "force colour on or off"],
@@ -12680,7 +12798,8 @@ SECTIONS.append(Sec(
            ["`--entry <kind>` / `--no-main`", "`main` (default) or `none`: "
             "generate no `main`, an `#export`ed function is the entry"],
            ["`--tiers`", "say which standard library functions work on bare "
-            "metal and what the rest need"],
+            "metal — with either freestanding runtime, or the full one only — "
+            "and what the rest need"],
            ["`--emit-docs` / `--docs-stdlib`", "write the documentation "
             "sidecar `rune doc` reads; with the second, for the standard "
             "library's modules too"],
@@ -12725,10 +12844,14 @@ $ runec --time -o hello hello.rune               # where the time went"""),
     check        42.0 ms   77.0 %
     ----------------------------
     total        60.2 ms  100.0 %"""),
-        P("`check` is usually the largest, because a compilation reads the "
-          "whole standard library in order to understand its own code. It is "
-          "read, not emitted: what ends up in the artefact is only what the "
-          "artefact reaches."),
+        P("`check` is usually the largest. A compilation reads the part of the "
+          "standard library it can reach — what it imports and names, what "
+          "the language itself leans on, and what those import in turn — in "
+          "order to understand its own code; a compile that fails against "
+          "that part is checked again against all of it, so the diagnostics "
+          "are the same either way, and `--whole-stdlib` asks for all of it "
+          "from the start. It is read, not emitted: what ends up in the "
+          "artefact is only what the artefact reaches."),
 
         H("What ends up in the artefact"),
         P("Code the artefact owns — everything in the files named on the "
@@ -12800,6 +12923,8 @@ fn main() -> i64 {
            ["`rune doc lint` / `lsp` / `fmt` / `ffi`", "the book about that tool"],
            ["`rune ffi <header>…`", "Rune bindings for C headers, read with libclang; "
             "built the first time it runs — see **Calling C**"],
+           ["`rune ffi rust [crate]`", "Rune bindings for a Rust crate's C ABI, "
+            "`-o` to a file — see **Calling Rust**"],
            ["`rune tools`", "the toolchain's tools and where each one is; "
             "`rune tools install [name…]` puts them in `~/.rune/bin`"],
            ["`rune targets`", "the cross targets this package configures"],
@@ -13038,7 +13163,8 @@ src = "tests"                   # where `rune test` looks""",
         SH("""[dependencies]
 geometry = { path = "../geometry" }    # a package on this disk
 shapes = "1.0"                         # from a registry: ^1.0, the newest 1.x
-report = { version = "=0.3.2" }        # exactly that version"""),
+report = { version = "=0.3.2" }        # exactly that version
+fastmath = { cargo = "rust/fastmath" } # a Rust crate; see Calling Rust"""),
         T(["Requirement", "Accepts"],
           [["`\"1.2.3\"`, `\"^1.2.3\"`", ">=1.2.3 and <2.0.0 — the same leading non-zero part"],
            ["`\"0.2\"`", ">=0.2.0 and <0.3.0"],
@@ -15028,16 +15154,40 @@ fn kernelMain(magic: u32, info: u32) -> Never {
 4 ║ fn greet() { let name = io::readLine() }
        ^^^^^ ERROR: 'greet' needs the hosted runtime, and this program is built without one [E0542]
     ─  note: it uses standard input, which needs an operating system to read from"""),
-        P("Which is which is not left to finding out: every function in the "
-          "standard library's reference carries a badge — **bare metal** or "
-          "**hosted**, with what a hosted one needs — and `runec --tiers` "
-          "prints the same list, worked out by building the whole library "
-          "as a `#runtime(none)` program would see it."),
-        SH("""$ runec --tiers | grep std::io::
+        P("Most of the rest of the library is plain Rune too, and comes along: "
+          "`std::iter`, `std::time`'s arithmetic and calendar, `std::json`, "
+          "`std::hash`, `std::reflect` and `std::cli`'s parsing among it. "
+          "What else needs a hosted build is less obvious from a module's "
+          "name: about half of `std::math` — the trigonometry, logarithms "
+          "and powers — calls the C maths library; `process::exit`, all of "
+          "`std::env` and `random`'s entropy need an operating system; "
+          "`Any::typeName` needs the hosted runtime though the rest of `Any` "
+          "does not; and `std::cxx`'s `alloc` and `free` need a C++ runtime."),
+        P("Which is which is not left to finding out: every public function "
+          "in the standard library's reference carries a badge, and "
+          "`runec --tiers` prints the same list, worked out by building the "
+          "whole library as a `#runtime(none)` program would see it — once "
+          "with each freestanding runtime."),
+        T(["Badge", "`--tiers` says", "Means"],
+          [["**bare metal**", "`bare`", "works in a `#runtime(none)` program, "
+            "with either freestanding runtime"],
+           ["**bare metal · full runtime**", "`full`", "works in one with the "
+            "full freestanding runtime, the default; `freestanding_type = "
+            "\"minimal\"` leaves out what it needs"],
+           ["**hosted**", "`hosted`", "needs the hosted runtime; the badge's "
+            "title and `--tiers` name what of it"]]),
+        SH("""$ runec --tiers | grep -E "std::(io|fmt)::"
 bare    std::io::print
 bare    std::io::println
 hosted  std::io::readLine  (rune_read_line)
+full    std::fmt::fixed  (rune_string_from_f64_fixed)
 ..."""),
+        P("A generic is placed by what it does itself: `Option::unwrap` is "
+          "bare metal, though unwrapping an `Option<TcpStream>` drops a "
+          "socket — that need is the socket's, and its own badge says so. A "
+          "mark's requirement, such as `Display::display`, has no badge: it "
+          "is as bare as the type that answers it. `--tiers --cfg "
+          "freestanding_type=minimal` answers for the minimal runtime alone."),
         H("Strings"),
         P("A string literal nothing asks to be a `String` is a `CString`: it "
           "can be named, stored in a table and handed to a function without "
@@ -15170,6 +15320,10 @@ freestanding_type = "minimal"     # or "full", the default"""),
           `freestanding_type = "minimal"` keeps [E0542]
      ─  note: it uses floats as text, which the minimal freestanding runtime leaves out
      ─  note: `freestanding_type = "full"` (the default) has it"""),
+        P("Function by function, the line is in the standard library's "
+          "reference: what the minimal runtime cannot run carries the badge "
+          "**bare metal · full runtime**, and `runec --tiers` lists it as "
+          "`full`, with the runtime function it needs."),
         N("A small program that builds strings and prints numbers came to "
           "an object of 7.8 KB with the minimal runtime against 27 KB with "
           "the full one. Any other value of `freestanding_type` is E0545.",

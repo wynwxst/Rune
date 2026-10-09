@@ -249,8 +249,12 @@ typedef struct RuneString {
 RuneString *rune_string_new(void);
 RuneString *rune_string_from_cstr(const char *s);
 RuneString *rune_string_from_bytes(const char *p, int64_t n);
-/* Interned literal: one immortal object per literal, cached in *slot. */
+/* Interned literal: one immortal object per literal, cached in *slot. The
+ * compiler now lays literals out in the image instead (see
+ * `rune_string_typeinfo`); this stays for objects built before it did. */
 RuneString *rune_string_literal(const char *p, int64_t n, RuneString **slot);
+/* The descriptor every String's header names, a literal's included. */
+extern const RuneTypeInfo rune_string_typeinfo;
 void rune_make_immortal(void *obj);
 RuneString *rune_string_copy(const RuneString *s);
 RuneString *rune_string_concat(const RuneString *a, const RuneString *b);

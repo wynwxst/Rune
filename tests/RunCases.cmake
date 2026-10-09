@@ -27,6 +27,10 @@
 # handed to the case as `-I`. Several may be given, and are built in order, so
 # one library may import another.
 #
+# With SHARD and SHARDS, runs only every SHARDS-th case starting at SHARD, so
+# CTest can run the shards side by side; every case writes only files named
+# after itself, so they do not collide.
+#
 # Invoked by CTest with RUNEC, RUNTIME_LIB, STDLIB_DIR, CASE_DIR and WORK_DIR,
 # and optionally CXX_COMPILER, LLVM_LIBDIR, LLVM_INCLUDE_DIR, LLVM_LINK and LLVM_MAJOR.
 
@@ -34,6 +38,18 @@ cmake_minimum_required(VERSION 3.20)
 
 file(GLOB CASES "${CASE_DIR}/*.rune")
 list(SORT CASES)
+if(DEFINED SHARDS AND SHARDS GREATER 1)
+  set(MINE "")
+  set(INDEX 0)
+  foreach(CASE ${CASES})
+    math(EXPR WHICH "${INDEX} % ${SHARDS}")
+    if(WHICH EQUAL SHARD)
+      list(APPEND MINE "${CASE}")
+    endif()
+    math(EXPR INDEX "${INDEX}+1")
+  endforeach()
+  set(CASES ${MINE})
+endif()
 file(MAKE_DIRECTORY "${WORK_DIR}")
 
 set(FAILED 0)

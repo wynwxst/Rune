@@ -48,10 +48,15 @@ a terminal, so `runStep` passes `--color` explicitly when it is.
 
 ## Dividing the machine
 
-`runec` threads its own front end. Left alone, eight compilers on an
-eight-core machine would each ask for eight threads and spend the difference
-fighting over them. `runStep` sets `RUNE_JOBS=sharePerJob()` — cores divided by
-the job limit, never below one — so the total comes to about one machine.
+`runec` threads its front end and its back end. Left alone, eight compilers
+on an eight-core machine would each ask for eight threads and spend the
+difference fighting over them. `runStep` sets `RUNE_JOBS=sharePerJob()`: the
+cores divided by the number of steps **running when the step starts**, never
+below one.
+
+It used to divide by the job limit, which defaults to the core count. That gave
+every compile one thread, even a package building alone, which is most builds
+and every last link of a dependency chain.
 
 ## Shared state
 

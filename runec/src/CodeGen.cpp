@@ -3,8 +3,11 @@
 #include "rune/CodeGen.h"
 #include "rune/ASTWalk.h"
 #include "rune/CxxInterop.h"
+#include "rune/Zombie.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/InstIterator.h"
 #include <filesystem>
 #include <functional>
 
@@ -76,8 +79,53 @@ void CodeGen::initDebugInfo() {
 }
 
 void CodeGen::finishDebugInfo() {
-  if (DI)
-    DI->finalize();
+  if (!DI)
+    return;
+  // Every location has to sit in the function it describes. Code made for a
+  // function with no subprogram of its own — the C entry point, a closure
+  // environment's destructor — can pick up the location the builder was
+  // left holding by whatever was emitted last, and a location from another
+  // function's scope is something the back end and the inliner are entitled
+  // to trip over. Such a function carries no debug information at all; a
+  // stray location in one that does is made compiler-generated (line 0)
+  // there.
+  for (llvm::Function &f : *M) {
+    if (f.isDeclaration())
+      continue;
+    llvm::DISubprogram *sp = f.getSubprogram();
+    if (!sp) {
+      llvm::stripDebugInfo(f);
+      continue;
+    }
+    for (llvm::Instruction &inst : llvm::instructions(f)) {
+      const llvm::DebugLoc &dl = inst.getDebugLoc();
+      if (dl && dl->getInlinedAtScope()->getSubprogram() != sp)
+        inst.setDebugLoc(llvm::DILocation::get(*Ctx, 0, 0, sp));
+    }
+  }
+  DI->finalize();
+}
+
+/// Saves the builder's debug location and puts it back when the function
+/// being emitted is done, so the one that was interrupted to emit it carries
+/// on with its own.
+struct CodeGen::DebugLocationGuard {
+  llvm::IRBuilder<> &B;
+  llvm::DebugLoc Saved;
+  explicit DebugLocationGuard(llvm::IRBuilder<> &b)
+      : B(b), Saved(b.getCurrentDebugLocation()) {}
+  ~DebugLocationGuard() { B.SetCurrentDebugLocation(Saved); }
+};
+
+/// Where a function's own set-up goes — the parameters being stored, their
+/// retains — at line 0, compiler-generated: a debugger's breakpoint on the
+/// function then lands after it, where the parameters can be read.
+void CodeGen::setPrologueDebugLocation() {
+  if (!DI || DIScopes.empty() || !DIScopes.back()) {
+    B->SetCurrentDebugLocation(llvm::DebugLoc());
+    return;
+  }
+  B->SetCurrentDebugLocation(llvm::DILocation::get(*Ctx, 0, 0, DIScopes.back()));
 }
 
 llvm::DIFile *CodeGen::debugFileFor(SourceRange r) {
@@ -955,14 +1003,16 @@ std::string CodeGen::shortNameOf(Type *t) {
 Value *CodeGen::emitDescribe(Value *v, Type *t) {
   auto text = [&](const std::string &s) { return emitStringLiteral(s, false); };
   // Each concatenation makes a fresh string and finishes with its operands.
-  // Releasing them here keeps a rendering from leaking every piece it was
-  // built out of; a literal is immortal, so releasing one does nothing.
+  // Letting them go here keeps a rendering from leaking every piece it was
+  // built out of; a literal is immortal, so letting one go does nothing. It
+  // is the memory model's own release — a drop under single ownership — so
+  // a rendering is something a bare-metal program, which counts nothing,
+  // can ask for.
   auto cat = [&](Value *a, Value *b) {
     Value *joined = B->CreateCall(
         runtimeFn("rune_string_concat", PtrTy, {PtrTy, PtrTy}), {a, b});
-    auto release = runtimeFn("rune_release_shared", B->getVoidTy(), {PtrTy});
-    B->CreateCall(release, {a});
-    B->CreateCall(release, {b});
+    emitRelease(a, Types.stringType());
+    emitRelease(b, Types.stringType());
     return joined;
   };
   auto join = [&](std::initializer_list<Value *> parts) {
@@ -1013,11 +1063,16 @@ Value *CodeGen::emitDescribe(Value *v, Type *t) {
     return B->CreateCall(
         runtimeFn("rune_string_from_char", PtrTy, {B->getInt32Ty()}),
         {B->CreateZExtOrTrunc(v, B->getInt32Ty())});
-  case TypeKind::String:
-    // Quoted, so an empty string and a missing one look different.
-    return join({text("\""), B->CreateCall(runtimeFn("rune_retain_shared",
-                                                     PtrTy, {PtrTy}), {v}),
-                 text("\"")});
+  case TypeKind::String: {
+    // Quoted, so an empty string and a missing one look different. `cat`
+    // lets its operands go, and this one is the caller's: under counting it
+    // is shared for the join, and under single ownership — where sharing is
+    // not a thing — the join is handed a copy of its own.
+    Value *piece =
+        zombie() ? B->CreateCall(runtimeFn("rune_string_copy", PtrTy, {PtrTy}), {v})
+                 : B->CreateCall(runtimeFn("rune_retain_shared", PtrTy, {PtrTy}), {v});
+    return join({text("\""), piece, text("\"")});
+  }
   case TypeKind::CString:
     return B->CreateCall(runtimeFn("rune_string_from_cstr", PtrTy, {PtrTy}),
                          {v});
@@ -3707,6 +3762,11 @@ void CodeGen::emitFunctionBody(FunctionDecl *fn) {
   Function *f = declareFunction(fn);
   if (!f->empty())
     return;
+  // A library body no call in the program reached was not borrow-checked;
+  // what the checker leaves on the AST for this function is made now.
+  if (zombie() && Sema.ZombieDeferred.count(fn) &&
+      PreparedDeferred.insert(fn).second)
+    zombie::prepareDeferred(fn, Diags, Sema.ZombieReportDeferred);
 
   FunctionState st;
   st.Decl = fn;
@@ -3714,11 +3774,12 @@ void CodeGen::emitFunctionBody(FunctionDecl *fn) {
   st.ReturnType = fn->Ty ? fn->Ty->result() : Types.voidType();
   FnStack.push_back(st);
 
+  DebugLocationGuard keepLocation(*B);
   auto *entry = BasicBlock::Create(*Ctx, "entry", f);
   B->SetInsertPoint(entry);
   // Everything emitted from here carries a location inside this subprogram.
   DIScopes.push_back(debugSubprogramFor(fn, f));
-  setDebugLocation(fn->Range);
+  setPrologueDebugLocation();
 
   bool isInit = fn->Flavour == FunctionFlavour::Initialiser;
   Type *ret = fs().ReturnType;
@@ -3776,6 +3837,7 @@ void CodeGen::emitFunctionBody(FunctionDecl *fn) {
     }
     declareDebugVariable(p.Binding, slot, argIndex);
   }
+  setDebugLocation(fn->Body->Range);
 
   emitBlock(fn->Body.get(), isInit ? nullptr : fs().ReturnSlot,
             isInit ? nullptr : ret);
@@ -3815,7 +3877,13 @@ void CodeGen::emitClosureBody(FunctionDecl *lifted) {
   st.ReturnType = lifted->Ty ? lifted->Ty->result() : Types.voidType();
   FnStack.push_back(st);
 
+  // A closure is a function of its own to a debugger too: its own
+  // subprogram, its own parameters, and none of the enclosing function's
+  // locations.
+  DebugLocationGuard keepLocation(*B);
+  DIScopes.push_back(debugSubprogramFor(lifted, f));
   B->SetInsertPoint(BasicBlock::Create(*Ctx, "entry", f));
+  setPrologueDebugLocation();
   fs().EnvValue = f->getArg(0);
   fs().EnvValue->setName("env");
 
@@ -3852,7 +3920,9 @@ void CodeGen::emitClosureBody(FunctionDecl *lifted) {
       fs().LiveFlags[p.Binding] = liveFlag;
     }
     fs().Scopes.back().Locals.push_back({slot, p.Ty, liveFlag});
+    declareDebugVariable(p.Binding, slot, argIndex);
   }
+  setDebugLocation(c->Body->Range);
 
   emitBlock(c->Body.get(), fs().ReturnSlot, ret);
   if (!blockIsTerminated()) {
@@ -3868,6 +3938,7 @@ void CodeGen::emitClosureBody(FunctionDecl *lifted) {
   else
     B->CreateRetVoid();
 
+  DIScopes.pop_back();
   FnStack.pop_back();
 }
 
@@ -3894,6 +3965,8 @@ void CodeGen::emitBlock(BlockExpr *b, Value *resultSlot, Type *resultType) {
 
   if (!blockIsTerminated()) {
     if (b->Tail) {
+      // The value a block ends with is a line of its own to step to.
+      setDebugLocation(b->Tail->Range);
       if (resultSlot && resultType && !resultType->isVoid()) {
         emitInto(b->Tail.get(), resultSlot, resultType);
       } else {
@@ -4568,6 +4641,7 @@ bool CodeGen::run() {
   // back end is the one worth checking, and there is a great deal more of it
   // before the prune than after.
   pruneUnreachable();
+  annotateFunctions();
 
   std::string err;
   raw_string_ostream os(err);
@@ -4581,6 +4655,60 @@ bool CodeGen::run() {
   if (Opts.OptLevel)
     optimizeModule(*M, Opts.OptLevel);
   return true;
+}
+
+/// What the optimiser may assume about the functions in the module.
+///
+/// Nothing in Rune unwinds: a panic aborts, and C++ called from Rune must
+/// not throw across the boundary. Saying so lets every call be treated as
+/// one that returns or ends the program, which is most of what the optimiser
+/// needs to move code around it. The unwind tables stay — a debugger or a
+/// profiler walks a release build with them — but no function needs a
+/// landing pad.
+///
+/// The runtime's entry points are declared with what they really do: a
+/// panic never returns and is the cold path wherever it is called from, and
+/// the string readers read and write nothing else. Only declarations are
+/// annotated; a freestanding program compiles its runtime in, and the
+/// optimiser works out the same things from the bodies.
+void CodeGen::annotateFunctions() {
+  const bool tables = !llvm::Triple(M->getTargetTriple()).isWasm();
+  for (llvm::Function &f : *M) {
+    if (f.isIntrinsic())
+      continue;
+    if (!f.isDeclaration()) {
+      f.addFnAttr(llvm::Attribute::NoUnwind);
+      if (tables)
+        f.setUWTableKind(llvm::UWTableKind::Async);
+      continue;
+    }
+    llvm::StringRef name = f.getName();
+    if (!name.starts_with("rune_"))
+      continue;
+    f.addFnAttr(llvm::Attribute::NoUnwind);
+    if (name == "rune_panic" || name.starts_with("rune_panic_")) {
+      f.addFnAttr(llvm::Attribute::NoReturn);
+      f.addFnAttr(llvm::Attribute::Cold);
+      continue;
+    }
+    auto pure = [&](llvm::MemoryEffects effects) {
+      f.setMemoryEffects(effects);
+      f.addFnAttr(llvm::Attribute::WillReturn);
+      f.addFnAttr(llvm::Attribute::NoFree);
+      f.addFnAttr(llvm::Attribute::NoSync);
+    };
+    // `s ? s->length : 0`: one field, through the argument.
+    if (name == "rune_string_length")
+      pure(llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref));
+    // These follow the string to its bytes, so they read beyond it.
+    else if (name == "rune_string_equal" || name == "rune_string_compare" ||
+             name == "rune_string_char_count")
+      pure(llvm::MemoryEffects::readOnly());
+    // Whatever it is handed, it hands back.
+    else if ((name == "rune_retain" || name == "rune_retain_shared") &&
+             f.arg_size() == 1 && f.getReturnType() == f.getArg(0)->getType())
+      f.addParamAttr(0, llvm::Attribute::Returned);
+  }
 }
 
 /// Throws away what this artefact does not reach.
@@ -4728,15 +4856,51 @@ void CodeGen::reportTiers() {
     }
     return fn->ModulePath + "|" + owner + "|" + fn->Name;
   };
-  auto note = [&](const FunctionDecl *fn, const std::string &need) {
-    std::string &slot = Tiers[key(fn)];
-    // One instantiation that needs a hosted build is enough to say so.
-    if (slot.empty() || slot == "bare")
-      slot = need.empty() ? "bare" : need;
+  // An instantiation answers for its template the other way round. What a
+  // generic needs depends on what it is instantiated with: `Option::unwrap`
+  // for an `Option<TcpStream>` drops a socket, which needs the network, but
+  // that need is the socket's, and its own entry says so. A generic works
+  // on bare metal if any instantiation of it does; it needs a hosted build
+  // only when every one of them does.
+  struct Seen {
+    std::string PlainNeed;    ///< a non-generic version's, first one found
+    bool Plain = false;
+    std::string InstanceNeed; ///< an instantiation's, when none was bare
+    bool InstanceBare = false;
   };
-  for (auto &[decl, f] : Functions)
-    if (decl && f && !f->isDeclaration() && isAncillary(decl))
-      note(decl, needs(f));
+  std::map<std::string, Seen> seen;
+  auto isInstance = [](const FunctionDecl *fn) {
+    if (fn->GenericTemplate)
+      return true;
+    const NominalDecl *owner = nullptr;
+    if (fn->OwnerType && fn->OwnerType->nominal())
+      owner = fn->OwnerType->nominal();
+    else if (fn->Parent && isa<NominalDecl>(fn->Parent))
+      owner = cast<NominalDecl>(fn->Parent);
+    return owner && owner->GenericTemplate;
+  };
+  for (auto &[decl, f] : Functions) {
+    if (!decl || !f || f->isDeclaration() || !isAncillary(decl))
+      continue;
+    const std::string need = needs(f);
+    Seen &s = seen[key(decl)];
+    if (isInstance(decl)) {
+      if (need.empty())
+        s.InstanceBare = true;
+      else if (s.InstanceNeed.empty())
+        s.InstanceNeed = need;
+    } else {
+      s.Plain = true;
+      if (!need.empty() && s.PlainNeed.empty())
+        s.PlainNeed = need;
+    }
+  }
+  for (const auto &[k, s] : seen) {
+    std::string need = s.PlainNeed;
+    if (need.empty() && !s.InstanceBare)
+      need = s.InstanceNeed;
+    Tiers[k] = need.empty() ? "bare" : need;
+  }
 
   // Generic templates. An instantiation the library made says it best;
   // otherwise the template's own calls are followed by name, as written —
@@ -4813,14 +4977,93 @@ void CodeGen::reportTiers() {
       walk(fn->Body.get());
     return templ[fn] = found;
   };
+  // A template's methods are keyed as the documentation names them: the
+  // type's own name, whatever block they were written in. Every method of a
+  // type is its API — `init` is how one is made — so `pub` is not asked;
+  // a mark's requirement with no body is the implementing type's to answer.
+  // An intrinsic has no body to follow: the compiler writes its code at
+  // each call. Most of what it writes is plain code — a size, a load, a
+  // field's name as a constant — and works anywhere. These few call into a
+  // runtime, and are bare only where the freestanding runtime compiled into
+  // this build defines what they call. Kept beside `emitIntrinsic`'s cases;
+  // `tests/bare_metal_test.py` builds every intrinsic said to be bare in a
+  // `#runtime(none)` program, so a new runtime call cannot hide here.
+  static const std::map<std::string, std::vector<std::string>> intrinsicCalls = {
+      {"any_type_name", {"rune_any_type_cstr", "rune_string_from_cstr"}},
+      {"any_holds", {"rune_any_is"}},
+      {"any_get", {"rune_any_is"}},
+      {"any_expect", {"rune_any_is", "rune_panic_any"}},
+      {"cxx_alloc", {"_Znwm"}},
+      {"cxx_free", {"_ZdlPv"}},
+  };
+  auto intrinsicNeeds = [&](const FunctionDecl *fn) -> std::string {
+    const Attribute *a = fn->findAttr("intrinsic");
+    std::string which;
+    if (a && !a->Args.empty())
+      if (const auto *str = dyn_cast<StringLitExpr>(a->Args[0].get()))
+        which = str->Value;
+    auto it = intrinsicCalls.find(which);
+    if (it == intrinsicCalls.end())
+      return "";
+    for (const std::string &sym : it->second) {
+      llvm::Function *def = M->getFunction(sym);
+      if (!def || def->isDeclaration())
+        return sym == "_Znwm"   ? "the C++ runtime's operator new"
+               : sym == "_ZdlPv" ? "the C++ runtime's operator delete"
+                                 : sym;
+    }
+    return "";
+  };
+  auto noteTemplate = [&](const FunctionDecl *fn, const std::string &module,
+                          const std::string &owner) {
+    if (fn->hasAttr("intrinsic")) {
+      const std::string k = module + "|" + owner + "|" + fn->Name;
+      if (!Tiers.count(k)) {
+        const std::string need = intrinsicNeeds(fn);
+        Tiers[k] = need.empty() ? "bare" : need;
+      }
+      return;
+    }
+    if (!fn->Body)
+      return;
+    const std::string k = module + "|" + owner + "|" + fn->Name;
+    if (Tiers.count(k))
+      return;
+    const std::string need = templateNeeds(fn, module);
+    Tiers[k] = need.empty() ? "bare" : need;
+  };
   std::function<void(const Node *, const std::string &)> collect =
       [&](const Node *n, const std::string &module) {
     if (!n)
       return;
     if (auto *fn = dyn_cast<FunctionDecl>(n)) {
-      if (fn->Body && fn->IsPublic && !Tiers.count(key(fn)) &&
-          !fn->hasAttr("intrinsic"))
-        note(fn, templateNeeds(fn, module));
+      if (fn->IsPublic)
+        noteTemplate(fn, module, "");
+      return;
+    }
+    if (auto *e = dyn_cast<ExtendDecl>(n)) {
+      Type *target = e->ResolvedTarget;
+      while (target && target->is(TypeKind::Pointer))
+        target = target->pointee();
+      std::string owner;
+      if (target && target->isNominal() && target->nominal()) {
+        const NominalDecl *nd = target->nominal();
+        if (nd->GenericTemplate)
+          nd = nd->GenericTemplate;
+        owner = static_cast<const Decl *>(nd)->Name;
+      } else if (target) {
+        owner = target->toString(); // `extend Any`: a builtin, by its spelling
+      }
+      if (!owner.empty())
+        for (const auto &m : e->Methods)
+          noteTemplate(m.get(), module, owner);
+      return;
+    }
+    if (isa<StructDecl>(n) || isa<EnumDecl>(n) || isa<ClassDecl>(n) ||
+        isa<MarkDecl>(n)) {
+      auto *nd = static_cast<const NominalDecl *>(static_cast<const Decl *>(n));
+      for (const auto &m : nd->Methods)
+        noteTemplate(m.get(), module, static_cast<const Decl *>(n)->Name);
       return;
     }
     forEachChild(n, [&](const Node *c) { collect(c, module); });

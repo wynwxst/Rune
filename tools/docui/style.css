@@ -493,6 +493,7 @@ blockquote p:last-child { margin-bottom: 0; }
   border: 1px solid currentColor;
 }
 .tier.bare { color: #2f8a4f; }
+.tier.full { color: #9a6b14; }
 .tier.hosted { color: var(--ink-faint); }
 
 .group {

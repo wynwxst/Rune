@@ -3,8 +3,12 @@
 ## The emission policy
 
 A compilation reads far more than it produces. The whole standard library is
-lexed, parsed and checked — that is what makes a `bind` written anywhere apply
-everywhere — but only some of it is emitted.
+lexed, so a macro declared anywhere in it is in scope everywhere. The part a
+program can reach — the modules it names, the ones the language leans on, and
+everything those name — is parsed and checked, and a compile that fails
+against that part is done again against all of it, so a `bind` written in a
+module nothing imports still answers for a program that relied on it. Only
+some of what is checked is emitted.
 
 The rule is about **ownership**, not reachability alone:
 

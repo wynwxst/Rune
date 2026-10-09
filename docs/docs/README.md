@@ -401,6 +401,15 @@ An `extern "C++"` block declares what a C++ library exports. The compiler then d
 - [Linking](Calling_C_Plus_Plus/linking.md)
 - [What does not cross](Calling_C_Plus_Plus/what_does_not_cross.md)
 
+## Calling Rust
+
+A Rust crate is a dependency like any other: name it with `cargo = "..."` in `[dependencies]`, and `import` it. Cargo builds it; `rune` reads what it exports over the C ABI into a Rune module.
+
+- [A crate as a dependency](Calling_Rust/a_crate_as_a_dependency.md)
+- [What is bound](Calling_Rust/what_is_bound.md)
+- [Bindings on their own: `rune ffi rust`](Calling_Rust/bindings_on_their_own_rune_ffi_rust.md)
+- [Ownership across the line](Calling_Rust/ownership_across_the_line.md)
+
 ## The standard library
 
 Small on purpose, and written in Rune over a C runtime you can read in an afternoon. `io`, `option`, `result`, `math` and `process` are what most programs touch; `mem` and `collections` are there for code that has to manage its own storage, `iter` is what `for` dispatches through, `any` is what a value of unknown type is asked about, `reflect` is what the compiler is asked about a type, `thread` is how a program does more than one thing at once and `task` how one thread keeps several things in progress, `net` is TCP in the shape `io`'s stream marks already describe, `fmt` is what a format string expands into, and `testing` is what a file under `tests/` reports through. `env`, `random`, `hash`, `json` and `cli` are the everyday things a program wants from outside itself — its environment, a number nobody can predict, a checksum, a document, its command line — and `time` keeps a calendar as well as a clock.

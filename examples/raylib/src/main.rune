@@ -1,13 +1,32 @@
 import raylib::bindings
+import raylib::bindings::*
 import std::io
 
+global BACKGROUND = unsafe {bindings::GetColor(0x181818FF)}
+global RED = bindings::Color {
+    r: 0xFF, g: 0x18, b: 0x18, a: 0xFF
+}
+
+bind operator::"+" to Vector2 {
+    fn add(&self, rhs: Vector2) -> Vector2 {
+        Vector2 {x: self.x + rhs.x, y: self.y + rhs.y}
+    }
+}
 
 #unsafe
 fn main() -> i64 {
     println!("Bad = {}",bindings::layoutMismatches())
-    bindings::InitWindow(width: 300, height: 500, title: "Hello From Rune")
+    bindings::InitWindow(width: 800, height: 600, title: "Hello From Rune")
+    var position: bindings::Vector2 = bindings::Vector2 {
+        x: 0,
+        y: 0
+    }
+    position += Vector2{x: 10 , y:10}
     while !bindings::WindowShouldClose() {
         bindings::BeginDrawing()
+        bindings::ClearBackground(color: BACKGROUND)
+        DrawRectangleV(position,Vector2{x: 100, y: 100},RED)
+        //bindings::DrawRectangle(0,0,100,100,RED)
         bindings::EndDrawing()
     }
     bindings::CloseWindow()
@@ -16,3 +35,4 @@ fn main() -> i64 {
     io::println("Hello from raylib!")
     0
 }
+

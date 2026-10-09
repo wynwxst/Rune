@@ -50,19 +50,28 @@ endif()
 # A case may bring a C++ half (`// CXX: <path>`), compiled with the compiler
 # this build uses; the LLVM the compiler was built against is what the C++
 # interop cases call into, so its directories are passed along too.
-add_test(NAME rune_end_to_end
-  COMMAND ${CMAKE_COMMAND}
-    -DRUNEC=$<TARGET_FILE:runec>
-    -DRUNTIME_LIB=$<TARGET_FILE:runeruntime>
-    -DSTDLIB_DIR=${RUNE_STDLIB_DIR}
-    -DCASE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/cases
-    -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/work
-    "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
-    "-DLLVM_LIBDIR=${RUNE_LLVM_ONE_LIBDIR}"
-    "-DLLVM_INCLUDE_DIR=${RUNE_LLVM_ONE_INCLUDE}"
-    "-DLLVM_LINK=${RUNE_LLVM_CASE_LINK}"
-    "-DLLVM_MAJOR=${LLVM_VERSION_MAJOR}"
-    -P ${CMAKE_CURRENT_SOURCE_DIR}/RunCases.cmake)
+#
+# The cases are dealt into RUNE_TEST_SHARDS tests, each taking every n-th
+# one, so `ctest -j` runs them side by side.
+set(RUNE_TEST_SHARDS 8 CACHE STRING "How many tests the end-to-end cases are split into")
+math(EXPR RUNE_LAST_SHARD "${RUNE_TEST_SHARDS} - 1")
+foreach(SHARD RANGE ${RUNE_LAST_SHARD})
+  add_test(NAME rune_end_to_end_${SHARD}
+    COMMAND ${CMAKE_COMMAND}
+      -DRUNEC=$<TARGET_FILE:runec>
+      -DRUNTIME_LIB=$<TARGET_FILE:runeruntime>
+      -DSTDLIB_DIR=${RUNE_STDLIB_DIR}
+      -DCASE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/cases
+      -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/work
+      "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
+      "-DLLVM_LIBDIR=${RUNE_LLVM_ONE_LIBDIR}"
+      "-DLLVM_INCLUDE_DIR=${RUNE_LLVM_ONE_INCLUDE}"
+      "-DLLVM_LINK=${RUNE_LLVM_CASE_LINK}"
+      "-DLLVM_MAJOR=${LLVM_VERSION_MAJOR}"
+      -DSHARD=${SHARD}
+      -DSHARDS=${RUNE_TEST_SHARDS}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/RunCases.cmake)
+endforeach()
 
 # The package registry, end to end: a registry made and served from files, a
 # project that adds, builds against, updates and removes packages from it.
@@ -105,6 +114,14 @@ endif()
 if(RUNE_PYTHON3)
   add_test(NAME rune_workspace
     COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/workspace_test.py
+            ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# Rust crates as dependencies: Cargo builds them, `rune` binds their C ABI.
+# Needs `cargo` on PATH; the test skips itself without it.
+if(RUNE_PYTHON3)
+  add_test(NAME rune_cargo
+    COMMAND ${RUNE_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/cargo_test.py
             ${CMAKE_BINARY_DIR}/bin)
 endif()
 

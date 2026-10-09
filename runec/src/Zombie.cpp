@@ -351,43 +351,85 @@ struct Tarjan {
 
 const Stats &lastStats() { return gStats; }
 
-void checkProgram(const std::vector<FunctionDecl *> &queue,
-                  const std::vector<FunctionDecl *> &imported,
-                  DiagnosticEngine &diags, DumpKind dump, bool reportStdlib) {
-  std::vector<Unit> units;
-  std::unordered_map<const FunctionDecl *, size_t> unitOf;
+std::vector<FunctionDecl *>
+checkProgram(const std::vector<FunctionDecl *> &queue,
+             const std::vector<FunctionDecl *> &imported,
+             DiagnosticEngine &diags, DumpKind dump, bool reportStdlib,
+             const std::function<bool(const FunctionDecl *)> &deferrable) {
+  std::vector<Unit> all;
+  std::unordered_map<const FunctionDecl *, size_t> indexOf;
   for (size_t i = 0; i < queue.size(); ++i) {
-    if (!queue[i] || !queue[i]->Body || unitOf.count(queue[i]))
+    if (!queue[i] || !queue[i]->Body || indexOf.count(queue[i]))
       continue;
     Unit u;
     u.Fn = queue[i];
     u.QueueIndex = i;
-    unitOf[u.Fn] = units.size();
-    units.push_back(std::move(u));
+    indexOf[u.Fn] = all.size();
+    all.push_back(std::move(u));
   }
   for (FunctionDecl *fn : imported) {
-    if (!fn || !fn->Body || unitOf.count(fn))
+    if (!fn || !fn->Body || indexOf.count(fn))
       continue;
     Unit u;
     u.Fn = fn;
     u.Imported = true;
-    u.QueueIndex = queue.size() + units.size();
-    unitOf[fn] = units.size();
-    units.push_back(std::move(u));
+    u.QueueIndex = queue.size() + all.size();
+    indexOf[fn] = all.size();
+    all.push_back(std::move(u));
   }
-  if (units.empty())
-    return;
-
   gStats = Stats{};
-  // 1. Lower every body, in parallel; lowering reports nothing.
-  parallelFor(units.size(), [&](size_t i) {
-    Stopwatch watch;
-    units[i].Graph = lowerBody(units[i].Fn, diags);
-    collectCallees(*units[i].Graph, units[i].Callees);
-    double ms = watch.lap();
-    std::lock_guard<std::mutex> lock(gStatsMutex);
-    gStats.LowerMs += ms;
-  });
+  if (all.empty())
+    return {};
+
+  // 1. Lower what the program reaches, in parallel; lowering reports
+  //    nothing. The program's own bodies come first, then — a wave at a
+  //    time — every deferrable body one of them calls, until nothing new
+  //    turns up. A hello world reaches a few dozen of the standard
+  //    library's thousands of bodies, and none of the rest has anything to
+  //    say about it.
+  std::vector<char> reached(all.size(), 0);
+  std::vector<size_t> wave;
+  for (size_t i = 0; i < all.size(); ++i)
+    if (!deferrable || !deferrable(all[i].Fn)) {
+      reached[i] = 1;
+      wave.push_back(i);
+    }
+  while (!wave.empty()) {
+    parallelFor(wave.size(), [&](size_t k) {
+      Unit &u = all[wave[k]];
+      Stopwatch watch;
+      u.Graph = lowerBody(u.Fn, diags);
+      collectCallees(*u.Graph, u.Callees);
+      double ms = watch.lap();
+      std::lock_guard<std::mutex> lock(gStatsMutex);
+      gStats.LowerMs += ms;
+    });
+    std::vector<size_t> next;
+    for (size_t i : wave)
+      for (const FunctionDecl *c : all[i].Callees) {
+        auto it = indexOf.find(c);
+        if (it != indexOf.end() && !reached[it->second]) {
+          reached[it->second] = 1;
+          next.push_back(it->second);
+        }
+      }
+    wave = std::move(next);
+  }
+
+  // What was not reached is handed back, in queue order, for the code
+  // generator to prepare if it emits any of it.
+  std::vector<FunctionDecl *> deferred;
+  std::vector<Unit> units;
+  std::unordered_map<const FunctionDecl *, size_t> unitOf;
+  for (size_t i = 0; i < all.size(); ++i) {
+    if (!reached[i]) {
+      deferred.push_back(all[i].Fn);
+      continue;
+    }
+    unitOf[all[i].Fn] = units.size();
+    units.push_back(std::move(all[i]));
+  }
+  all.clear();
 
   // 2. Who needs whom: an edge to every callee that is in the program.
   //    (A callee with everything written down could be skipped — that is
@@ -535,6 +577,26 @@ void checkProgram(const std::vector<FunctionDecl *> &queue,
         once.push_back(d);
     diags.replay(once);
   }
+  return deferred;
+}
+
+void prepareDeferred(FunctionDecl *fn, DiagnosticEngine &diags, bool report) {
+  if (!fn || !fn->Body)
+    return;
+  std::vector<Diagnostic> findings;
+  diags.beginCapture(&findings);
+  std::unique_ptr<Body> body = lowerBody(fn, diags);
+  // Closures first, as `analyseUnit` takes them: each is its own body.
+  std::function<void(Body &)> moves = [&](Body &b) {
+    for (auto &c : b.Closures)
+      moves(*c);
+    MoveResults out;
+    analyseMoves(b, diags, out);
+  };
+  moves(*body);
+  diags.endCapture();
+  if (report)
+    diags.replay(findings);
 }
 
 } // namespace zombie

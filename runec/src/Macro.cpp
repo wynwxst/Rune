@@ -1161,7 +1161,7 @@ void collectMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
                          /*isPublic=*/false);
       continue;
     }
-    kept.push_back(toks[i++]);
+    kept.push_back(std::move(toks[i++]));
   }
   toks.swap(kept);
 }
@@ -1171,17 +1171,28 @@ bool expandMacros(std::vector<Token> &toks, DiagnosticEngine &diags,
                   unsigned depthLimit, const MacroPackage *procs) {
   // Pass two: expand, repeatedly, so a macro may expand into another.
   bool ok = true;
+  auto isCallAt = [&](size_t i) {
+    return toks[i].Kind == Tok::Identifier && i + 2 < toks.size() &&
+           toks[i + 1].Kind == Tok::Bang && isOpen(toks[i + 2].Kind);
+  };
   for (unsigned round = 0; round < depthLimit; ++round) {
+    // Most files call no macro at all, and a round that finds none would
+    // only copy the stream to give back the same one.
+    size_t firstCall = 0;
+    while (firstCall < toks.size() && !isCallAt(firstCall))
+      ++firstCall;
+    if (firstCall == toks.size())
+      break;
     bool expandedAny = false;
     std::vector<Token> out;
     out.reserve(toks.size());
+    for (size_t i = 0; i < firstCall; ++i)
+      out.push_back(std::move(toks[i]));
 
-    for (size_t i = 0; i < toks.size();) {
-      const bool isCall = toks[i].Kind == Tok::Identifier &&
-                          i + 2 < toks.size() && toks[i + 1].Kind == Tok::Bang &&
-                          isOpen(toks[i + 2].Kind);
+    for (size_t i = firstCall; i < toks.size();) {
+      const bool isCall = isCallAt(i);
       if (!isCall) {
-        out.push_back(toks[i++]);
+        out.push_back(std::move(toks[i++]));
         continue;
       }
 
